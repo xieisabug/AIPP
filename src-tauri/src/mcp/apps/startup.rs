@@ -54,6 +54,13 @@ async fn recheck(app: &tauri::AppHandle, id: i64) -> Result<(), String> {
         Ok(check)
     }).await.map_err(|e| e.to_string())??;
     let Some(check) = check else { return Ok(()); };
+    let app_id: String = db(app)?.conn.query_row("SELECT app_id FROM app_connection WHERE server_id=?1",
+        [id], |r|r.get(0)).map_err(|e|e.to_string())?;
+    if !app_id.starts_with("agent-plugin:") {
+        if let Err(error)=super::directory::detail(app,&app_id,None).await {
+            tracing::warn!(server_id=id,%error,"Could not refresh published tool summaries");
+        }
+    }
     if let Err(error) = super::super::registry_api::refresh_mcp_server_capabilities(app.clone(), id).await {
         // Authentication rejection is recorded by the transport. Missing credentials are device-local.
         if error.contains(credentials::MISSING_ON_DEVICE) { return Ok(()); }

@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod directory;
 mod startup;
 pub use startup::recheck_available_connections;
 pub mod credentials;
@@ -23,6 +24,7 @@ static SESSION: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_stri
 pub fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS app_catalog_cache (
         id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, fetched_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS app_directory_detail (id TEXT PRIMARY KEY, payload TEXT NOT NULL, version TEXT NOT NULL, etag TEXT NOT NULL, checked INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_plugin_catalog_cache (
         repo TEXT NOT NULL, git_ref TEXT NOT NULL, payload TEXT NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY(repo,git_ref));
         CREATE TABLE IF NOT EXISTS app_connection (
@@ -146,7 +148,9 @@ pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<Ap
             status = "auth_required".into();
             error = Some("上次连接未完成，请重新连接".into());
         }
-        result.push(AppConnection { server_id, app_id, definition: serde_json::from_str(&raw).map_err(|e| format!("连接 {server_id} 的应用描述损坏：{e}"))?, label,
+        let mut definition:AppDefinition=serde_json::from_str(&raw).map_err(|e| format!("连接 {server_id} 的应用描述损坏：{e}"))?;
+        definition.tool_summaries.clear();
+        result.push(AppConnection { server_id, app_id, definition, label,
             config: serde_json::from_str(&config).map_err(|e| format!("连接 {server_id} 的配置损坏：{e}"))?, status, error, credential_status: Some(credential_status.clone()),
             credential_on_device: reference.map(|r| stored.contains(&r)), credential_sync: credential_sync.to_string() });
     }
@@ -229,6 +233,10 @@ fn definition(conn: &Connection, request: &ConnectRequest) -> Result<AppDefiniti
         let definition: AppDefinition = serde_json::from_str(&raw).map_err(|e| format!("插件连接定义无效：{e}"))?;
         AppCatalog { schema_version: 1, version: "1".into(), apps: vec![definition.clone()] }.validate()?;
         return Ok(definition);
+    }
+    if let Some(raw) = conn.query_row("SELECT payload FROM app_directory_detail WHERE id=?1", [&request.app_id],
+        |r| r.get::<_,String>(0)).optional().map_err(|e|e.to_string())? {
+        return serde_json::from_str(&raw).map_err(|e|format!("应用详情缓存无效：{e}"));
     }
     let raw: String = conn.query_row("SELECT payload FROM app_catalog_cache WHERE id=1", [], |r| r.get(0)).map_err(|_| "请先加载应用目录")?;
     let catalog: AppCatalog = serde_json::from_str(&raw).map_err(|_| "应用目录缓存无效")?;

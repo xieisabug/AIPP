@@ -1337,6 +1337,8 @@ pub fn run() {
             crate::mcp::apps::get_cached_app_catalog,
             crate::mcp::apps::bundles::get_cached_agent_plugin_catalog,
             crate::mcp::apps::fetch_app_catalog,
+            crate::mcp::apps::directory::fetch_app_directory,
+            crate::mcp::apps::directory::get_app_directory_detail,
             crate::mcp::apps::bundles::fetch_agent_plugin_catalog,
             crate::mcp::apps::bundles::inspect_agent_plugin,
             crate::mcp::apps::bundles::list_agent_plugins,

@@ -80,6 +80,8 @@ Windows Credential Manager / macOS Keychain / Linux Secret Service 使用 keyrin
 - 此次发布集合为固定提交的 62 个包。helper 未发布的来源返回 404，旧预览版本返回 409；不自动回退直连 GitHub。已安装记录仍可离线管理。
 - 新客户端依赖 helper 同步发布这些路由与静态资源；线上未更新时显示明确加载错误，不能宣称上线完成。
 
-### 目录语言和工具摘要
+### 目录首页、分类分页和应用详情
 
-`/api/apps` 及应用详情支持 `?lang=zh-CN`（默认）和 `?lang=en`。每个应用可携带 `tool_summaries`，键为 MCP 工具的原始名称，值为当前语言的摘要。工具权限、参数和实际能力由连接返回。插件目录与预览通过 `?lang=zh-CN` 获取中文介绍，默认返回原文。技能文件和安装归档沿用原内容。
+- `GET /api/apps?lang=zh-CN` 返回版本和分类。每类含稳定标识、名称、总数及最多 6 张卡片。默认中文；支持英文。首页支持 ETag 和 304，客户端先显示本地缓存，5 分钟后后台验证。
+- `GET /api/apps/page?category=development&cursor=0&version=…` 每页最多 18 张卡片。使用返回的 `next_cursor` 继续；为空表示结束。可传 `q` 跨全目录搜索，或传 `scope=native` 只浏览可连接应用。版本变化返回 409，客户端刷新后从第一页加载。
+- `GET /api/apps/:id?lang=zh-CN` 返回单个应用的连接定义和 `tool_summaries`。摘要按应用和语言存为静态资源，首页及分页无需读取。工具权限和实际能力仍由连接返回。旧桌面客户端请求裸路径时保留有界的兼容清单。

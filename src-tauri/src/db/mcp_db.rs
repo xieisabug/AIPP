@@ -1668,9 +1668,12 @@ impl MCPDatabase {
             if managed {
                 // Prefer the refreshed catalog, including for connections created before summaries shipped.
                 let raw: Option<String> = self.conn.query_row(
-                    "SELECT COALESCE(json_extract(app.value, '$.tool_summaries'),
+                    "SELECT COALESCE(CASE WHEN detail.id IS NOT NULL THEN COALESCE(json_extract(detail.payload, '$.tool_summaries'),'{}') END,
+                                     json_extract(app.value, '$.tool_summaries'),
                                      json_extract(c.definition, '$.tool_summaries'))
-                     FROM app_connection c LEFT JOIN app_catalog_cache cache ON cache.id=1
+                     FROM app_connection c LEFT JOIN app_directory_detail detail ON detail.id=c.app_id
+                       AND json_extract(detail.payload, '$.connection.url')=json_extract(c.definition, '$.connection.url')
+                     LEFT JOIN app_catalog_cache cache ON cache.id=1 AND detail.id IS NULL
                      LEFT JOIN json_each(cache.payload, '$.apps') app
                        ON json_extract(app.value, '$.id')=c.app_id
                       AND json_extract(app.value, '$.connection.url')=json_extract(c.definition, '$.connection.url')

@@ -30,7 +30,9 @@ fn test_summary_catalog_uses_only_discovered_tools_and_skips_custom_servers() {
     db.rebuild_dynamic_mcp_catalog_force().unwrap();
     assert!(db.pending_app_tool_summaries(11).unwrap().is_empty());
     assert!(db.list_tool_catalog(Some(11)).unwrap().iter().any(|t| t.summary == "新工具摘要"));
-    db.conn.execute("UPDATE app_catalog_cache SET payload=json_set(payload,'$.apps[0].tool_summaries.new','官方摘要')", []).unwrap();
+    db.conn.execute("INSERT INTO app_directory_detail(id,payload,version,etag,checked)
+        SELECT 'runway', json_set(json_extract(payload,'$.apps[0]'),'$.tool_summaries.new','官方摘要'),'2','v2',0
+        FROM app_catalog_cache WHERE id=1", []).unwrap();
     db.rebuild_dynamic_mcp_catalog_force().unwrap();
     assert_eq!(db.save_missing_app_tool_summary(missing.tool_id, hash, "迟到的摘要").unwrap(), 0);
     assert!(db.list_tool_catalog(Some(11)).unwrap().iter().any(|t| t.summary == "官方摘要"));

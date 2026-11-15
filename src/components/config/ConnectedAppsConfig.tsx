@@ -1,8 +1,8 @@
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ChevronRight, CloudOff, Plus, RefreshCw, Search } from 'lucide-react';
+import { ArrowLeft, ChevronRight, CloudOff, Plus, RefreshCw, Search } from 'lucide-react';
 import { toast } from 'sonner';
-import { AppConnection, AppDefinition, CatalogResponse } from '@/data/ConnectedApp';
+import { AppConnection, AppDefinition } from '@/data/ConnectedApp';
 import { MCPServer, MCPServerRequest, MCPServerTool } from '@/data/MCP';
 import { useDataRefresh } from '@/hooks/useDataRefresh';
 import { useIsMobilePlatform } from '@/hooks/use-platform';
@@ -21,28 +21,13 @@ import AppDetailSheet, { Selection, sourceMatches } from './apps/AppDetailSheet'
 import AppIcon, { OfficialIcon } from './apps/AppIcon';
 import AppStatusBadge from './apps/AppStatusBadge';
 import { aggregateStatus, DisplayStatus, displayStatus, toolSummary } from './apps/appStatus';
+import { DirectoryCard, useAppDirectory } from './apps/useAppDirectory';
 import { getQuickStartTemplates } from '@/data/MCPTemplates';
 
 interface Builtin { id: string; name: string; description: string; command: string }
 
 const ALL = '全部';
 const BUILTIN = '内置工具';
-const CATALOG_FRESH_MS = 5 * 60_000;
-
-function fresh(fetchedAt?: string | null) {
-    const age = Date.now() - Date.parse(fetchedAt ?? '');
-    return age >= 0 && age < CATALOG_FRESH_MS;
-}
-
-// Remounting the settings page can attach to a refresh already updating its disk cache.
-function shareRefresh<T>(fetch: () => Promise<T>) {
-    let pending: Promise<T> | undefined;
-    return () => pending ??= fetch().finally(() => { pending = undefined; });
-}
-const fetchApps = shareRefresh(() => invoke<CatalogResponse>('fetch_app_catalog'));
-const pluginSourceArgs = { repo: 'openai/plugins', gitRef: 'main' };
-const fetchPlugins = shareRefresh(() => invoke<PluginCatalog>('fetch_agent_plugin_catalog', pluginSourceArgs));
-
 function AppCard({ name, meta, description, badge, status, idle, action, icon, onClick }: {
     name: string; meta?: string; description: string; badge?: string; status?: DisplayStatus; idle?: string; action: string; icon: ReactNode; onClick: () => void;
 }) {
@@ -66,9 +51,9 @@ function AppCard({ name, meta, description, badge, status, idle, action, icon, o
     </button>;
 }
 
-function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
+function Section({ title, count, more, children }: { title: string; count?: number; more?: () => void; children: ReactNode }) {
     return <section className="space-y-3">
-        <h3 className="text-sm font-medium">{title}{count !== undefined && <span className="ml-1.5 font-normal text-muted-foreground">{count}</span>}</h3>
+        <div className="flex items-center justify-between"><h3 className="text-sm font-medium">{title}{count !== undefined && <span className="ml-1.5 font-normal text-muted-foreground">{count}</span>}</h3>{more && <Button variant="ghost" size="sm" onClick={more} aria-label={title+"更多"}>更多<ChevronRight /></Button>}</div>
         {children}
     </section>;
 }
@@ -78,8 +63,11 @@ export default function ConnectedAppsConfig() {
     const [page, setPage] = useState('catalog');
     const [query, setQuery] = useState('');
     const [category, setCategory] = useState(ALL);
-    const [catalog, setCatalog] = useState<CatalogResponse>();
-    const [catalogBusy, setCatalogBusy] = useState(true);
+    const [builtinLimit,setBuiltinLimit]=useState(18);
+    const builtinAnchor=useRef<HTMLDivElement>(null);
+    const [apps, setApps] = useState<AppDefinition[]>([]);
+    const detailRequest = useRef(0);
+    const scroll = useRef<HTMLDivElement>(null);
     const [refreshCount, setRefreshCount] = useState(0);
     const [servers, setServers] = useState<MCPServer[]>([]);
     const [connections, setConnections] = useState<AppConnection[]>([]);
@@ -93,78 +81,67 @@ export default function ConnectedAppsConfig() {
     const [initialConfig, setInitialConfig] = useState<Partial<MCPServerRequest>>();
     const [builtinId, setBuiltinId] = useState<string>();
     const [pluginsOpen, setPluginsOpen] = useState(false);
-    const [pluginCatalog, setPluginCatalog] = useState<PluginCatalog>();
-    const [pluginCatalogError, setPluginCatalogError] = useState('');
     const [pluginSource, setPluginSource] = useState<PluginSource>();
 
     const refresh = useCallback(async (isCurrent: () => boolean = () => true) => {
         const [nextServers, nextConnections, nextBuiltins] = await Promise.all([
             invoke<MCPServer[]>('get_mcp_servers'), invoke<AppConnection[]>('list_app_connections'), invoke<Builtin[]>('list_aipp_builtin_templates'),
         ]);
-        const entries = await Promise.all(nextServers.map(async server => [server.id,
-            visibleSearchTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId: server.id }), server.command, mobile)] as const));
         if (!isCurrent()) return;
-        setServers(nextServers); setConnections(nextConnections); setBuiltins(nextBuiltins); setTools(new Map(entries));
+        setServers(nextServers); setConnections(nextConnections); setBuiltins(nextBuiltins);
         setError(''); setLoading(false);
-    }, [mobile]);
+    }, []);
     useDataRefresh({ events: ['mcp_state_changed'], initial: true, refresh,
         onError: e => { setLoading(false); setError(String(e)); } });
     const reload = useCallback(() => refresh().catch(e => setError(String(e))), [refresh]);
 
+    const directory = useAppDirectory(mobile, category === ALL || category === BUILTIN ? '' : category, query,
+        page === 'catalog' && category !== BUILTIN, refreshCount);
+    const groups = directory.home?.categories ?? [];
+    const featured = groups.flatMap(g => g.items);
+    const cards = [...featured,...directory.items];
+    const pluginCatalog:PluginCatalog = {revision: directory.home?.version ?? '', entries: cards.flatMap(c => c.source ?
+        [{...c, category: groups.find(g=>g.id===c.group)?.name ?? '', source:c.source}] : [])};
+    const catalogBusy = directory.homeBusy;
     useEffect(() => {
-        let active = true;
-        const force = refreshCount > 0;
-        async function loadApps() {
-            const cached = await invoke<CatalogResponse | null>('get_cached_app_catalog').catch(() => null);
-            if (!active) return;
-            if (cached?.catalog) {
-                setCatalog(cached);
-                if (!force && fresh(cached.fetched_at)) return;
-            }
-            try {
-                const result = await fetchApps();
-                if (active) setCatalog(result);
-            } catch (e) {
-                if (active) setCatalog(old => ({ ...old, catalog: old?.catalog ?? null, fetched_at: old?.fetched_at ?? null, warning: String(e) }));
-            }
-        }
-        async function loadPlugins() {
-            if (mobile) return;
-            let cacheError = '';
-            const cached = await invoke<{ catalog: PluginCatalog; fetched_at: string } | null>('get_cached_agent_plugin_catalog', pluginSourceArgs)
-                .catch(e => { cacheError = String(e); return null; });
-            if (!active) return;
-            if (Array.isArray(cached?.catalog?.entries)) {
-                setPluginCatalog(cached.catalog);
-                setPluginCatalogError('');
-                if (!force && fresh(cached.fetched_at)) return;
-            }
-            try {
-                const next = await fetchPlugins();
-                if (!Array.isArray(next?.entries)) throw new Error('应用详情目录格式无效');
-                if (active) { setPluginCatalog(next); setPluginCatalogError(''); }
-            } catch (e) {
-                if (active) setPluginCatalogError(cacheError ? `${e}；读取本地缓存失败：${cacheError}` : String(e));
-            }
-        }
-        setCatalogBusy(true);
-        void Promise.all([loadApps(), loadPlugins()]).finally(() => { if (active) setCatalogBusy(false); });
-        return () => { active = false; };
-    }, [mobile, refreshCount]);
-
-    const apps = useMemo(() => catalog?.catalog?.apps ?? [], [catalog]);
+        if (page !== 'installed' && !selection) return;
+        let active=true;
+        const targets=page==='installed' ? servers : servers.filter(server=>selection?.kind==='server' ? selection.serverId===server.id :
+            connections.some(c=>c.server_id===server.id && (selection?.kind==='app' ? c.app_id===selection.appId : selection?.kind==='plugin' && sourceMatches(c.definition.plugin_source,selection.source))));
+        void Promise.all(targets.map(async server=>[server.id,visibleSearchTools(await invoke<MCPServerTool[]>('get_mcp_server_tools',{serverId:server.id}),server.command,mobile)] as const))
+          .then(entries=>{if(active)setTools(new Map(entries));}).catch(e=>{if(active)setError(String(e));});
+        return ()=>{active=false;};
+    },[servers,connections,page,selection,mobile]);
+    useEffect(()=>{if(scroll.current)scroll.current.scrollTop=0;},[category,page]);
+    const openCard = async (card:DirectoryCard) => {
+        const request=++detailRequest.current;
+        if(card.kind==='plugin' && card.source) { setSelection({kind:'plugin',source:card.source,name:card.name});return; }
+        try {
+            const app=await invoke<AppDefinition>('get_app_directory_detail',{id:card.id,version:directory.home?.version??null});
+            if(request!==detailRequest.current)return;
+            setApps(old=>[...old.filter(item=>item.id!==app.id),app]);setSelection({kind:'app',appId:app.id});
+        } catch(e) {if(request===detailRequest.current)toast.error(String(e));}
+    };
     const connectionOf = useMemo(() => new Map(connections.map(c => [c.server_id, c])), [connections]);
     const official = (source?: PluginSource | null): OfficialIcon | undefined => pluginCatalog?.entries.find(entry => sourceMatches(entry.source, source));
     const matches = (text: string) => text.toLowerCase().includes(query.trim().toLowerCase());
     const serverStatus = (server: MCPServer) => displayStatus(server, connectionOf.get(server.id), !mobile || isMobileExecutableMcpServer(server));
-    const appStatus = (app: AppDefinition) => aggregateStatus(connections
-        .filter(c => c.app_id === app.id || sourceMatches(c.definition.plugin_source, app.plugin_source))
+    const appStatus = (app: DirectoryCard) => aggregateStatus(connections
+        .filter(c => c.app_id === app.id || sourceMatches(c.definition.plugin_source, app.source))
         .map(c => displayStatus(servers.find(s => s.id === c.server_id), c)));
 
     const filteredBuiltins = builtins.filter(b => (category === ALL || category === BUILTIN) && matches(`${b.name} ${b.description}`));
-    const filteredApps = apps.filter(app => (category === ALL || category === app.category) && matches(`${app.name} ${app.description} ${app.publisher}`));
-    const filteredPlugins = mobile ? [] : (pluginCatalog?.entries ?? []).filter(entry => !apps.some(a => sourceMatches(a.plugin_source, entry.source))
-        && (category === ALL || category === entry.category) && matches(`${entry.name} ${entry.description}`));
+    useEffect(()=>{
+        setBuiltinLimit(18);
+    },[category,query]);
+    useEffect(()=>{
+        if(category!==BUILTIN || !builtinAnchor.current || !('IntersectionObserver' in window)) return;
+        const observer=new IntersectionObserver(entries=>{
+            if(entries.some(e=>e.isIntersecting)) setBuiltinLimit(n=>n+18);
+        },{rootMargin:'240px'});
+        observer.observe(builtinAnchor.current);
+        return ()=>observer.disconnect();
+    },[category,builtinLimit,filteredBuiltins.length]);
     const serverKind = (server: MCPServer) => server.is_builtin ? BUILTIN : connectionOf.has(server.id) ? '外部服务' : '自定义 MCP';
     // Problems first, otherwise keep the backend order.
     const filteredServers = servers
@@ -172,10 +149,7 @@ export default function ConnectedAppsConfig() {
         .map((server, index) => ({ server, status: serverStatus(server), index }))
         .sort((a, b) => Number(b.status.attention) - Number(a.status.attention) || a.index - b.index);
     const attentionCount = servers.filter(server => serverStatus(server).attention).length;
-    const categories = page === 'catalog'
-        ? [ALL, BUILTIN, ...new Set([...apps.map(app => app.category), ...(mobile ? [] : pluginCatalog?.entries ?? []).map(entry => entry.category)].filter(Boolean))]
-        : [ALL, BUILTIN, '外部服务', '自定义 MCP'];
-
+    const categories = [ALL, BUILTIN, '外部服务', '自定义 MCP'];
     const importConfigs = async (configs: MCPServerRequest[]) => {
         setImportOpen(false);
         if (configs.length === 1) { setInitialConfig(configs[0]); setConfigOpen(true); return; }
@@ -185,43 +159,34 @@ export default function ConnectedAppsConfig() {
             toast.success('已导入配置，保持停用；请检查后启用并测试连接。');
         } catch (e) { toast.error(`导入未全部完成：${String(e)}`); await reload(); }
     };
-    const catalogEmpty = !filteredBuiltins.length && !filteredApps.length && !filteredPlugins.length;
-
+    const listing = category !== ALL || !!query.trim();
+    const renderCards = (items: DirectoryCard[]) => <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{items.map(card => {
+        const status = appStatus(card);
+        return <AppCard key={card.id} name={card.name} description={card.description} meta={card.publisher}
+            icon={<AppIcon icon={card.icon ?? undefined} official={card}/>} status={status}
+            idle={card.kind==='app'?'未连接':'GitHub 插件'} action={status?'管理':card.kind==='app'?'连接':'查看'} onClick={()=>void openCard(card)} />;
+    })}</div>;
     const catalogPage = <div className="space-y-8">
-        {catalog?.warning && <div role="status" className="flex gap-3 rounded-lg border bg-muted/40 px-4 py-3 text-sm">
-            <CloudOff className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            <div className="min-w-0 space-y-1">
-                <p>{catalog.catalog ? `外部应用目录刷新失败，正在显示 ${catalog.fetched_at ? new Date(catalog.fetched_at).toLocaleString() : ''} 的缓存。` : '外部应用目录暂不可用。'}内置工具和现有连接仍可管理。</p>
-                <p className="break-words text-xs text-muted-foreground">{catalog.warning}</p>
-            </div>
-        </div>}
-        {filteredBuiltins.length > 0 && <Section title="AIPP 内置工具" count={filteredBuiltins.length}>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{filteredBuiltins.map(builtin => {
+        {category!==ALL && <Button variant="ghost" onClick={()=>setCategory(ALL)}><ArrowLeft/>返回应用目录</Button>}
+        {directory.homeError && <p role="status" className="flex gap-2 text-sm"><CloudOff/>{directory.home?'正在显示缓存。':''}{directory.homeError}</p>}
+        {filteredBuiltins.length > 0 && <Section title="AIPP 内置工具" count={filteredBuiltins.length} more={!listing && filteredBuiltins.length>6?()=>setCategory(BUILTIN):undefined}>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{filteredBuiltins.slice(0,listing ? builtinLimit : 6).map(builtin => {
                 const server = servers.find(s => s.is_builtin && s.command === builtin.command);
                 return <AppCard key={builtin.id} name={builtin.name} badge="内置" description={builtin.description} icon={<AppIcon builtin />}
                     status={server ? serverStatus(server) : undefined} idle="未添加" action={server ? '管理' : '添加'}
                     onClick={() => server ? setSelection({ kind: 'server', serverId: server.id }) : setBuiltinId(builtin.id)} />;
             })}</div>
+            {listing && filteredBuiltins.length>builtinLimit && <div ref={builtinAnchor}><Button variant="ghost" onClick={()=>setBuiltinLimit(n=>n+18)}>加载更多内置工具</Button></div>}
         </Section>}
-        {(filteredApps.length > 0 || filteredPlugins.length > 0) && <Section title="应用与技能" count={filteredApps.length + filteredPlugins.length}>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {filteredApps.map(app => {
-                    const status = appStatus(app);
-                    return <AppCard key={app.id} name={app.name} meta={`${app.publisher} · ${app.category}`} description={app.description}
-                        icon={<AppIcon icon={app.icon} official={official(app.plugin_source)} />} status={status} idle="未连接" action={status ? '管理' : '连接'}
-                        onClick={() => setSelection({ kind: 'app', appId: app.id })} />;
-                })}
-                {filteredPlugins.map(entry => <AppCard key={`${entry.source.repo}/${entry.source.path}`} name={entry.name} meta={entry.category} description={entry.description}
-                    icon={<AppIcon official={entry} />} idle="GitHub 插件" action="查看" onClick={() => setSelection({ kind: 'plugin', source: entry.source, name: entry.name })} />)}
-            </div>
-        </Section>}
-        {pluginCatalogError && <p className="text-xs text-muted-foreground">{pluginCatalog ? '插件目录刷新失败，正在显示缓存' : '插件目录暂不可用'}：{pluginCatalogError}</p>}
-        {!!catalog?.skipped?.length && <details className="text-xs text-muted-foreground">
-            <summary className="cursor-pointer">{catalog.skipped.length} 个应用需要更新 AIPP 后才能使用</summary>
-            <ul className="mt-2 space-y-1 pl-4">{catalog.skipped.map(item => <li key={item} className="list-disc break-words">{item}</li>)}</ul>
-        </details>}
-        {(loading || catalogBusy) && catalogEmpty && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{[0, 1, 2, 3].map(i => <div key={i} className="h-40 animate-pulse rounded-xl bg-muted" />)}</div>}
-        {!loading && !catalogBusy && catalogEmpty && <p className="py-12 text-center text-sm text-muted-foreground">没有匹配的应用。</p>}
+        {category!==BUILTIN && (!listing ? groups.map(group=><Section key={group.id} title={group.name} count={group.total}
+            more={group.total>group.items.length?()=>setCategory(group.id):undefined}>{renderCards(group.items)}</Section>) :
+            <Section title={groups.find(g=>g.id===category)?.name ?? '搜索结果'}>
+                {renderCards(directory.items)}
+                {directory.pageError && <p role="alert">{directory.pageError} <Button variant="link" onClick={directory.more}>重试</Button></p>}
+                {directory.next!==null && <div ref={directory.anchor}><Button variant="ghost" disabled={directory.pageBusy} onClick={directory.more}>加载更多</Button></div>}
+                {directory.pageBusy && <p role="status">正在加载…</p>}
+                {!directory.pageBusy && !directory.items.length && !directory.pageError && <p>没有匹配的应用。</p>}
+            </Section>)}
     </div>;
 
     const installedPage = <div className="space-y-3">
@@ -249,7 +214,7 @@ export default function ConnectedAppsConfig() {
                 </div>}
     </div>;
 
-    return <div className="h-full overflow-y-auto bg-background">
+    return <div ref={scroll} className="h-full overflow-y-auto bg-background">
         <div className="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-8 sm:py-8">
             <header className="flex flex-wrap items-start justify-between gap-4">
                 <div>
@@ -289,9 +254,9 @@ export default function ConnectedAppsConfig() {
                     <Input className="pl-9" aria-label="搜索应用与工具" placeholder="搜索应用、工具或用途…" value={query} onChange={e => setQuery(e.target.value)} />
                 </div>
             </div>
-            <div className="-mt-2 flex gap-1.5 overflow-x-auto pb-1">{categories.map(item =>
+            {page === 'installed' && <div className="-mt-2 flex gap-1.5 overflow-x-auto pb-1">{categories.map(item =>
                 <Button key={item} size="sm" variant={category === item ? 'secondary' : 'ghost'} className={cn('h-7 shrink-0 rounded-full px-3 text-xs', category !== item && 'text-muted-foreground')} onClick={() => setCategory(item)}>{item}</Button>)}
-            </div>
+            </div>}
             {error && <p role="alert" className="rounded-lg border border-destructive/30 px-4 py-3 text-sm text-destructive">{error}</p>}
             {page === 'catalog' ? catalogPage : installedPage}
         </div>

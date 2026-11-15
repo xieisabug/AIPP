@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -18,61 +18,62 @@ const builtin = { id: 7, name: '搜索工具', description: '搜索网页', comm
 const legacy = { id: 8, name: '公司知识库', description: '已有配置', command: null, is_builtin: false, is_enabled: true, transport_type: 'http' };
 const definition = { id: 'notes', name: '笔记服务', version: '1', publisher: 'Example', category: '效率', description: '笔记', notice: '', platforms: ['windows'], fields: [], connection: { transport: 'http', url: 'https://example.com/mcp', auth: 'none' } };
 
+function response(app=definition, icons={}) {
+    const items=[{...app,kind:'app',group:'productivity',source:(app as typeof definition & {plugin_source?:unknown}).plugin_source,...icons}];
+    return {data:{version:'1',categories:[{id:'productivity',name:'效率',total:1,items}]}};
+}
 describe('ConnectedAppsConfig', () => {
     beforeEach(() => {
-        vi.clearAllMocks();
+        vi.clearAllMocks(); vi.unstubAllGlobals();
+        const storage=new Map<string,string>();
+        vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});
         vi.mocked(invoke).mockImplementation(async command => {
             if (command === 'get_mcp_servers') return [builtin, legacy];
             if (command === 'list_app_connections') return [];
             if (command === 'fetch_agent_plugin_catalog') return {revision:'test',entries:[]};
             if (command === 'list_aipp_builtin_templates') return [{ id: 'search', name: '搜索工具', description: '搜索网页', command: 'aipp:search' }];
             if (command === 'get_mcp_server_tools') return [];
-            if (command === 'fetch_app_catalog') return { catalog: null, warning: '服务端目录暂不可用', fetched_at: null };
+            if (command === 'fetch_app_directory') throw new Error('服务端目录暂不可用');
             throw new Error(`Unexpected command: ${command}`);
         });
     });
     it('should show fresh local catalogs without network requests until manually refreshed', async () => {
-        const defaults = vi.mocked(invoke).getMockImplementation()!;
-        const fetched_at = new Date().toISOString();
-        vi.mocked(invoke).mockImplementation(async (command, args) => {
-            if (command === 'get_cached_app_catalog') return { catalog: { apps: [definition] }, fetched_at };
-            if (command === 'get_cached_agent_plugin_catalog') return { catalog: { revision: 'cached', entries: [
-                { name: '缓存插件', category: '开发', description: '', source: { repo: 'openai/plugins', git_ref: 'main', path: 'plugins/example' } },
-            ] }, fetched_at };
-            return defaults(command, args);
-        });
-        const user = userEvent.setup();
+        localStorage.setItem('aipp.directory.v2.false', JSON.stringify({...response(),time:Date.now(),etag:'cached'}));
         render(<ConnectedAppsConfig />);
         expect(await screen.findByText('笔记服务')).toBeInTheDocument();
-        expect(await screen.findByText('缓存插件')).toBeInTheDocument();
-        const commands = () => vi.mocked(invoke).mock.calls.map(([command]) => command);
-        expect(commands()).not.toContain('fetch_app_catalog');
-        expect(commands()).not.toContain('fetch_agent_plugin_catalog');
-        await user.click(screen.getByRole('button', { name: '刷新应用目录和连接' }));
-        await waitFor(() => expect(commands()).toContain('fetch_agent_plugin_catalog'));
-        expect(commands()).toContain('fetch_app_catalog');
+        expect(vi.mocked(invoke).mock.calls.some(([cmd])=>cmd==='fetch_app_directory')).toBe(false);
+        await userEvent.click(screen.getByRole('button',{name:'刷新应用目录和连接'}));
+        await waitFor(()=>expect(invoke).toHaveBeenCalledWith('fetch_app_directory',expect.objectContaining({etag:'cached'})));
     });
-
-    it('should render stale catalogs while refreshing and retain plugin entries on failure', async () => {
-        const defaults = vi.mocked(invoke).getMockImplementation()!;
-        let finish!: (value: unknown) => void;
-        const remote = new Promise(resolve => { finish = resolve; });
-        vi.mocked(invoke).mockImplementation(async (command, args) => {
-            if (command === 'get_cached_app_catalog') return { catalog: { apps: [definition] }, fetched_at: '2020-01-01' };
-            if (command === 'fetch_app_catalog') return remote;
-            if (command === 'get_cached_agent_plugin_catalog') return { catalog: { revision: 'cached', entries: [
-                { name: '离线插件', category: '开发', description: '', source: { repo: 'openai/plugins', git_ref: 'main', path: 'plugins/example' } },
-            ] }, fetched_at: '2020-01-01' };
-            if (command === 'fetch_agent_plugin_catalog') throw new Error('网络不可用');
-            return defaults(command, args);
-        });
+    it('should retain cached categories when background refresh fails', async () => {
+        localStorage.setItem('aipp.directory.v2.false',JSON.stringify({...response(),time:0}));
         render(<ConnectedAppsConfig />);
         expect(await screen.findByText('笔记服务')).toBeInTheDocument();
-        expect(await screen.findByText(/插件目录刷新失败.*网络不可用/)).toBeInTheDocument();
-        finish({ catalog: { apps: [{ ...definition, name: '新版笔记' }] }, warning: null });
-        expect(await screen.findByText('新版笔记')).toBeInTheDocument();
-        expect(screen.queryByText('笔记服务')).not.toBeInTheDocument();
-        expect(screen.getByText('离线插件')).toBeInTheDocument();
+        expect(await screen.findByRole('status')).toHaveTextContent('正在显示缓存');
+    });
+    it('should page through a category on scroll and return to the bounded preview', async () => {
+        let intersect: (()=>void) | undefined;
+        vi.stubGlobal('IntersectionObserver', class {
+            constructor(callback:(entries:{isIntersecting:boolean}[])=>void){intersect=()=>callback([{isIntersecting:true}]);}
+            observe() {} disconnect() {}
+        });
+        const defaults=vi.mocked(invoke).getMockImplementation()!;
+        const entries=Array.from({length:20},(_,i)=>({...definition,id:String(i),name:'应用'+i,kind:'app',group:'g'}));
+        vi.mocked(invoke).mockImplementation(async(cmd,args)=>{
+            if(cmd!=='fetch_app_directory')return defaults(cmd,args);
+            const params=args as {paged:boolean;cursor?:number};
+            return params.paged ? {data:{version:'1',items:entries.slice(params.cursor,(params.cursor??0)+18),next_cursor:params.cursor?null:18}} :
+                {data:{version:'1',categories:[{id:'g',name:'示例',total:20,items:entries.slice(0,6)}]}};
+        });
+        render(<ConnectedAppsConfig />);
+        await userEvent.click(await screen.findByRole('button',{name:'示例更多'}));
+        expect(await screen.findByText('应用17')).toBeInTheDocument();
+        await waitFor(()=>expect(intersect).toBeDefined());
+        await act(async()=>{intersect!();intersect!();});
+        expect(vi.mocked(invoke).mock.calls.filter(([name,args])=>name==='fetch_app_directory' && (args as {cursor?:number})?.cursor===18)).toHaveLength(1);
+        expect(await screen.findByText('应用19')).toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button',{name:'返回应用目录'}));
+        expect(screen.queryByText('应用19')).toBeNull();
     });
 
     it('should retain builtins and existing MCP connections when the remote catalog is unavailable', async () => {
@@ -90,7 +91,8 @@ describe('ConnectedAppsConfig', () => {
         vi.mocked(invoke).mockImplementation(async command => {
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, name: '笔记 · 1234' }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null, credential_status: '连接凭据仅在本机加密保存' }];
-            if (command === 'fetch_app_catalog') return { catalog: { schema_version: 1, version: '1', apps: [definition] }, warning: null };
+            if (command === 'fetch_app_directory') return response();
+            if (command === 'get_app_directory_detail') return definition;
             return [];
         });
         const user = userEvent.setup();
@@ -189,7 +191,8 @@ describe('ConnectedAppsConfig', () => {
         const source = {repo:'openai/plugins',git_ref:'main',path:'plugins/notion'};
         const app = {...definition,id:'notion',name:'Notion',plugin_source:source};
         vi.mocked(invoke).mockImplementation(async command => {
-            if (command === 'fetch_app_catalog') return {catalog:{schema_version:1,version:'1',apps:[app]}};
+            if (command === 'fetch_app_directory') return response(app,{icon:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/light.png',icon_dark:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/dark.png'});
+            if (command === 'get_app_directory_detail') return app;
             if (command === 'fetch_agent_plugin_catalog') return {revision:'test',entries:[]};
             if (command === 'inspect_agent_plugin') return {key:'abc',source,revision:'a'.repeat(40),digest:'x',name:'Notion',version:'1',publisher:'Notion',description:'Write documents',servers:[{name:'notion',config:{url:definition.connection.url}}],skills:[{id:'capture',name:'Knowledge capture',description:'Save team knowledge',content:'Instructions',files:[]}],files:[],notices:[],locally_modified:false};
             return [];
@@ -210,7 +213,8 @@ describe('ConnectedAppsConfig', () => {
         const source = {repo:'openai/plugins',git_ref:'main',path:'plugins/notion'};
         const app = {...definition, id:'notion', name:'Notion', plugin_source:source};
         vi.mocked(invoke).mockImplementation(async command => {
-            if (command === 'fetch_app_catalog') return {catalog:{schema_version:1,version:'1',apps:[app]}};
+            if (command === 'fetch_app_directory') return response(app,{icon:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/light.png',icon_dark:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/dark.png'});
+            if (command === 'get_app_directory_detail') return app;
             if (command === 'fetch_agent_plugin_catalog') return {revision:'a',entries:[{name:'Notion',description:'Notes',category:'效率',source,icon:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/light.png',icon_dark:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/dark.png'}]};
             if (command === 'inspect_agent_plugin') return {key:'abc',source,revision:'a'.repeat(40),digest:'x',name:'Notion',version:'1',publisher:'Notion',description:'Notes',servers:[],skills:[],files:[],notices:[],locally_modified:false};
             if (command === 'get_mcp_servers') return [{...legacy,id:21}];
@@ -285,7 +289,8 @@ describe('ConnectedAppsConfig', () => {
         vi.mocked(invoke).mockImplementation(async command => {
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null }];
-            if (command === 'fetch_app_catalog') return { catalog: { schema_version: 1, version: '1', apps: [definition] }, warning: null };
+            if (command === 'fetch_app_directory') return response();
+            if (command === 'get_app_directory_detail') return definition;
             return [];
         });
         render(<ConnectedAppsConfig />);
