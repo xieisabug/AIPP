@@ -1,5 +1,5 @@
 import AssistantItemContextMenu, { type AssistantItemAction } from "@/components/config/assistant/AssistantItemContextMenu";
-import { Search, UsersRound } from "lucide-react";
+import { Search, Settings, UsersRound } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
 import type { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
@@ -30,6 +30,8 @@ interface Props {
     onSelect: (assistant?: AssistantListItem) => void;
     /** 打开管家消息搜索（与 ChatUI 搜索一致，范围限定为管家模式产生的消息） */
     onSearch: () => void;
+    /** 打开总管家设置。入口在联系人列表左上角。 */
+    onOpenSettings: () => void;
     onAssistantAction: (assistant: AssistantListItem, action: AssistantItemAction) => void;
     /** 群聊与联系人在同一个列表里，选中群聊时 selected 联系人为空。 */
     groups: ButlerGroupSummary[];
@@ -48,7 +50,7 @@ function groupUnread(group: ButlerGroupSummary, selected: boolean) {
     return last.seq > Number(localStorage.getItem(groupReadKey(group.id)) ?? 0);
 }
 
-export default function ButlerContactList({chief, contacts, selected, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onAssistantAction,
+export default function ButlerContactList({chief, contacts, selected, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
     const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
@@ -57,13 +59,17 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
     const state = (id: number) => visuals.get(id)?.state ?? "idle";
     const {assistantTypes} = useAssistantTypePlugin(plugins);
     return <>
-        <div className="flex h-12 shrink-0 items-center justify-end gap-1.5 px-3">
-            <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="搜索管家消息" title="搜索管家消息"
-                disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
-            <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="发起群聊" title="发起群聊"
-                disabled={!ready} onClick={onCreateGroup} data-aipp-slot="butler-create-group"><UsersRound/></Button>
-            <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh}
-                triggerButtonProps={{variant:"outline",size:"icon",className:"size-8 rounded-full",title:"添加助手","aria-label":"添加助手"}}/>
+        <div className="flex h-12 shrink-0 items-center justify-between gap-1.5 px-3">
+            <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="总管家设置" title="总管家设置"
+                onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
+            <div className="flex items-center gap-1.5">
+                <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="搜索管家消息" title="搜索管家消息"
+                    disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
+                <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="发起群聊" title="发起群聊"
+                    disabled={!ready} onClick={onCreateGroup} data-aipp-slot="butler-create-group"><UsersRound/></Button>
+                <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh}
+                    triggerButtonProps={{variant:"outline",size:"icon",className:"size-8 rounded-full",title:"添加助手","aria-label":"添加助手"}}/>
+            </div>
         </div>
         <div className="mb-4 flex shrink-0 justify-center">
             <button onClick={() => { acknowledge?.(0); onSelect(); }} aria-pressed={selected === undefined && selectedGroup === undefined}

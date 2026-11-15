@@ -33,7 +33,6 @@ import {
     Pencil,
     RefreshCw,
     ScrollText,
-    Settings,
     X,
 } from "lucide-react";
 
@@ -1122,7 +1121,8 @@ function ButlerExperimentWindow() {
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
                         ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
-                        onSearch={() => setSearchOpen(true)} onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}
+                        onSearch={() => setSearchOpen(true)} onOpenSettings={handleOpenSettings}
+                        onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}
                         groups={groups} selectedGroup={groupId ?? undefined} onSelectGroup={selectGroup}
                         onCreateGroup={() => setCreateGroupOpen(true)} onDeleteGroup={setDeleteGroupTarget}/>
                     {scheduledTasks.length > 0 && (
@@ -1277,13 +1277,6 @@ function ButlerExperimentWindow() {
                                         conversationId={activeConversationId}
                                         externalOpen={isStatsDialogOpen}
                                         onExternalOpenChange={setIsStatsDialogOpen}
-                                    />
-                                    <IconButton
-                                        icon={<Settings className="h-4 w-4 text-icon" />}
-                                        onClick={handleOpenSettings}
-                                        border
-                                        title="总管家设置"
-                                        dataAippSlot="butler-main-open-settings"
                                     />
                                     <IconButton
                                         icon={
