@@ -1229,11 +1229,14 @@ pub fn build_tools_with_mapping(
                     })
                 });
 
-            tools.push(
-                Tool::new(sanitized_name)
-                    .with_description(tool.description.clone())
-                    .with_schema(schema),
-            );
+            let mut function = Tool::new(sanitized_name).with_description(tool.description.clone());
+            let mut schema = schema;
+            if server.command.as_deref().is_some_and(crate::mcp::builtin_mcp::is_builtin_command) {
+                crate::mcp::builtin_mcp::templates::prepare_model_schema(&mut schema);
+                // Builtins accept omitted fields and arbitrary keys in forwarded parameter objects.
+                function = function.with_strict(false);
+            }
+            tools.push(function.with_schema(schema));
         }
     }
 

@@ -48,7 +48,8 @@
 -   MCP servers are managed through `mcp/registry_api.rs` and stored in SQLite
 -   Tool detection happens automatically via `mcp/detection.rs::detect_and_process_mcp_calls`
 -   Tool call creation/execution/state sync is handled in `mcp/execution_api.rs`
--   Built-in MCP command suites: `aipp:agent`, `aipp:ui_interaction`, `aipp:search`, `aipp:operation`, `aipp:artifact`
+-   内置工具集在 `builtin_templates()` 注册。新增工具时，函数参数根节点用 object，字段与数组元素显式声明类型，字符串枚举填写 `type: "string"`。保留执行入口的参数校验。
+-   `build_tools_with_mapping` 为内置工具生成模型侧声明，保留必填项、可选项、字段及数组结构，把范围、默认值和字典值类型等提示放进字段描述。运行 `cargo test --manifest-path src-tauri/Cargo.toml --lib test_builtin_tool_schemas` 可检查实际注册的全部内置工具。
 -   MCP auto-run should respect assistant/server/tool config (`is_auto_run` + overrides)
 
 ## 角色动画扩展

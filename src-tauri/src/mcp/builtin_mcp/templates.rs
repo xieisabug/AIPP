@@ -41,6 +41,33 @@ pub struct BuiltinToolInfo {
     pub input_schema: serde_json::Value,
 }
 
+/// Keep the full local MCP schema. Gateways translating OpenAI tools into Gemini's
+/// FunctionDeclaration accept fewer keywords, so send validation hints as text.
+pub(crate) fn prepare_model_schema(schema: &mut serde_json::Value) {
+    let Some(node) = schema.as_object_mut() else { return };
+    node.remove("$schema");
+    let mut hints = Vec::new();
+    for key in ["minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems",
+        "pattern", "default", "additionalProperties", "propertyNames"] {
+        if let Some(value) = node.remove(key) {
+            hints.push(format!("{key}={value}"));
+        }
+    }
+    if !hints.is_empty() {
+        let description = node.get("description").and_then(|s| s.as_str()).unwrap_or("");
+        let text = format!("{} ({})", description, hints.join(", "));
+        node.insert("description".into(), text.trim_start().into());
+    }
+    if let Some(properties) = node.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for field in properties.values_mut() { prepare_model_schema(field); }
+    }
+    if let Some(items) = node.get_mut("items") { prepare_model_schema(items); }
+}
+
+#[cfg(test)]
+#[path = "templates_schema_tests.rs"]
+mod schema_tests;
+
 /// Returns true if the entire builtin command (server) is butler-only.
 pub fn is_butler_only_builtin_command(command: &str) -> bool {
     matches!(super::builtin_command_id(command).as_deref(), Some("superadmin"))
@@ -792,7 +819,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "name": { "type": "string", "description": "Short task name shown to the user. Required for create." },
                         "schedule": { "type": "string", "description": "Required for create. One string, see tool description. Examples: '2026-11-13T16:00+08:00', 'in 2h', 'every 1d at 08:30', '0 21 * * 2,6'." },
                         "prompt": { "type": "string", "description": "Required for create. Self-contained instructions for each unattended run (the run cannot see this conversation)." },
-                        "assistant": { "type": ["string", "integer"], "description": "Executing assistant name or id. Omit to run it yourself." },
+                        "assistant": { "type": "string", "description": "Executing assistant name or ID as a string, e.g. \"42\". Omit to run it yourself." },
                         "deliver": {
                             "type": "string",
                             "enum": ["always", "if_needed", "never"],
@@ -1320,7 +1347,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "risk_level": {
                             "type": "integer",
-                            "enum": [0, 1, 2, 3],
+                            "minimum": 0,
+                            "maximum": 3,
                             "description": "按风险等级筛选：0=safe, 1=low, 2=medium, 3=high"
                         },
                         "limit": {

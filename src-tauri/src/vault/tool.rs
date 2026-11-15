@@ -58,8 +58,8 @@ pub fn definitions() -> Vec<BuiltinToolInfo> {
                     "url": {"type": "string", "description": "完整的 http/https 地址"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "请求头，例如 {\"Authorization\": \"Bearer <vault:github_token>\"}"},
                     "query": {"type": "object", "description": "查询参数，替换后由工具编码"},
-                    "body": {"type": "string", "description": "原始请求体（与 json 二选一）"},
-                    "json": {"description": "JSON 请求体（与 body 二选一）"},
+                    "body": {"type": "string", "description": "原始请求体（与 json 二选一）。发送 JSON 数组或标量时，传序列化的 JSON 文本并在 headers 设置 Content-Type 为 application/json。"},
+                    "json": {"type": "object", "description": "JSON 对象请求体（与 body 二选一），自动设置 JSON Content-Type。"},
                     "basic_auth": {
                         "type": "object", "required": ["username"],
                         "properties": {"username": {"type": "string"}, "password": {"type": "string"}},
