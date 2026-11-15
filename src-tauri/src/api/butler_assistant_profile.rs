@@ -3,9 +3,8 @@ use super::{is_butler_system_assistant, Assistant, AssistantDatabase, ButlerMode
 use rusqlite::{params, Result, Transaction, TransactionBehavior};
 
 // 总管家不在助手配置页展示，工具审核模式固定为模型自动审核（未配置审核模型时会转为人工确认）。
-const CONFIG: [(&str, &str, &str); 6] = [
-    ("max_tokens", "16000", "number"), ("temperature", "0.8", "float"),
-    ("top_p", "1.0", "float"), ("stream", "true", "boolean"),
+const CONFIG: [(&str, &str, &str); 4] = [
+    ("max_tokens", "16000", "number"), ("stream", "true", "boolean"),
     ("use_native_toolcall", "true", "boolean"), ("tool_review_mode", "auto_model", "string"),
 ];
 

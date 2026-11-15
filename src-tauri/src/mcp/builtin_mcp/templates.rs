@@ -808,20 +808,10 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "missed": { "type": "string", "enum": ["run_once", "skip"], "description": "When the app was not running at the planned time: run_once (default) runs the latest missed time once with a lateness note; skip only records it." },
                         "scope": { "type": "string", "enum": ["mine", "all"], "description": "list only. mine (default): tasks you execute or created here." },
                         "limit": { "type": "integer", "description": "runs only. Default 10." },
-                        "request_id": { "type": "string", "description": "decide only. From <scheduled_task_approval request_id=...>." },
-                        "decision": { "type": "string", "enum": ["allow", "deny"], "description": "decide only." },
+                        "request_id": { "type": "string", "description": "Required for decide. From <scheduled_task_approval request_id=...>." },
+                        "decision": { "type": "string", "enum": ["allow", "deny"], "description": "Required for decide." },
                         "reason": { "type": "string", "description": "decide only. One sentence why." }
                     },
-                    "allOf": [
-                        {
-                            "if": { "properties": { "action": { "const": "create" } } },
-                            "then": { "required": ["name", "schedule", "prompt"] }
-                        },
-                        {
-                            "if": { "properties": { "action": { "const": "decide" } } },
-                            "then": { "required": ["request_id", "decision"] }
-                        }
-                    ],
                     "required": ["action"]
                 }),
             },
@@ -1820,6 +1810,11 @@ mod tests {
     fn test_schedule_task_schema_uses_single_schedule_string() {
         let tools = get_builtin_tools_for_command("aipp:agent");
         let tool = tools.iter().find(|t| t.name == "schedule_task").unwrap();
+        assert_eq!(tool.input_schema["type"], "object");
+        assert_eq!(tool.input_schema["required"], serde_json::json!(["action"]));
+        for keyword in ["oneOf", "anyOf", "allOf", "enum", "const", "not"] {
+            assert!(tool.input_schema.get(keyword).is_none(), "OpenAI rejects top-level {keyword}");
+        }
         let props = &tool.input_schema["properties"];
         for field in ["schedule", "prompt", "assistant", "deliver", "deliver_to", "request_id", "decision"] {
             assert!(props[field].is_object(), "missing {field}");

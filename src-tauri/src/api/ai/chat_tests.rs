@@ -1,6 +1,34 @@
 use super::{prepare_empty_model_reply, EMPTY_MODEL_REPLY_NOTICE, REASONING_ONLY_MODEL_REPLY_NOTICE};
 
 #[test]
+fn test_http_diagnostics_reject_header_urls_and_surface_bad_request() {
+    let message = "Unsupported parameter: 'temperature' is not supported with this model.";
+    let body = serde_json::json!({"error": {"message": message, "param": "temperature"}});
+    let error = format!("Stream processing failed: HTTP error.\nStatus: 400 Bad Request\nBody: {body}; transport: Internal(...) headers: {{\"server\": \"cloudflare\", \"report-to\": \"https://telemetry.example/report/503\"}}");
+    let details = super::extract_http_details_from_anyhow(&anyhow::anyhow!(error.clone()));
+    assert_eq!(details.status_code, Some(400));
+    assert_eq!(details.endpoint, None);
+    let friendly = super::friendly_http_error(&details, &error);
+    assert!(friendly.contains(message));
+    let payload = super::build_rich_error_payload_with_http_details(
+        friendly, None, None, "stream", Some(1), error, Some(details),
+    );
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["suggestions"], serde_json::json!(["检查 Base URL / 模型配置与请求参数格式"]));
+}
+
+#[test]
+fn test_http_diagnostics_show_request_url_without_credentials() {
+    let mut details = super::HttpErrorDetails::default();
+    super::parse_status_from_string(
+        "Cause: error sending request for url (http://user:secret@localhost:4000/v1/responses?key=secret)",
+        &mut details,
+    );
+    assert_eq!(details.endpoint.as_deref(), Some("http://localhost:4000/v1/responses"));
+    assert_eq!(details.status_code, None);
+}
+
+#[test]
 fn test_empty_reply_classifies_bodyless_success_and_preserves_metadata() {
     for (reasoning, expected, kind) in [
         ("", EMPTY_MODEL_REPLY_NOTICE, "empty_model_reply"),

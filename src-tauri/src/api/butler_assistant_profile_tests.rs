@@ -59,6 +59,22 @@ fn test_butler_profile_repairs_partial_old_initialization_without_duplicates() {
 }
 
 #[test]
+fn test_butler_profile_omits_sampling_defaults_on_creation_and_upgrade() {
+    let db = database();
+    let selection = model("configured");
+    let assistant = sync(&db, &selection, "prompt").unwrap();
+    let model_id = db.get_assistant_model(assistant.id).unwrap()[0].id;
+    let sampling_is_absent = || db.get_assistant_model_configs(assistant.id).unwrap()
+        .iter().all(|c| c.name != "temperature" && c.name != "top_p");
+    assert!(sampling_is_absent());
+
+    db.add_assistant_model_config(assistant.id, model_id, "temperature", "0.8", "float").unwrap();
+    db.add_assistant_model_config(assistant.id, model_id, "top_p", "1.0", "float").unwrap();
+    assert_eq!(sync(&db, &selection, "prompt").unwrap().id, assistant.id);
+    assert!(sampling_is_absent());
+}
+
+#[test]
 fn test_butler_profile_uses_model_auto_review_for_tools() {
     let db = database();
     let assistant = sync(&db,&model("configured"),"prompt").unwrap();

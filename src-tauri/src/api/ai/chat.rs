@@ -325,17 +325,11 @@ fn extract_http_error_details(error: &genai::Error) -> HttpErrorDetails {
             details.response_body = Some(body.clone());
         }
         // WebModelCall 和 WebAdapterCall 包含 webc_error
-        genai::Error::WebModelCall { model_iden, webc_error } => {
-            details.endpoint = Some(format!("{:?}", model_iden));
-            extract_webc_error_details(webc_error, &mut details);
-        }
-        genai::Error::WebAdapterCall { adapter_kind, webc_error } => {
-            details.endpoint = Some(format!("{:?}", adapter_kind));
+        genai::Error::WebModelCall { webc_error, .. } | genai::Error::WebAdapterCall { webc_error, .. } => {
             extract_webc_error_details(webc_error, &mut details);
         }
         // ChatResponse 包含 body (JSON Value)
-        genai::Error::ChatResponse { model_iden, body } => {
-            details.endpoint = Some(format!("{:?}", model_iden));
+        genai::Error::ChatResponse { body, .. } => {
             details.response_body =
                 Some(serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string()));
             // 尝试从 body 中提取状态码和请求ID
@@ -358,8 +352,7 @@ fn extract_http_error_details(error: &genai::Error) -> HttpErrorDetails {
             }
         }
         // WebStream 错误
-        genai::Error::WebStream { model_iden, cause, .. } => {
-            details.endpoint = Some(format!("{:?}", model_iden));
+        genai::Error::WebStream { cause, .. } => {
             // 尝试从 cause 字符串中解析状态码
             parse_status_from_string(cause, &mut details);
         }
@@ -395,7 +388,7 @@ fn extract_webc_error_details(webc_error: &genai::webc::Error, details: &mut Htt
                 details.status_code = Some(status.as_u16());
             }
             if let Some(url) = reqwest_error.url() {
-                details.endpoint = Some(url.to_string());
+                details.endpoint = Some(display_endpoint(url));
             }
         }
         _ => {}
@@ -404,50 +397,42 @@ fn extract_webc_error_details(webc_error: &genai::webc::Error, details: &mut Htt
 
 /// 从错误字符串中解析状态码
 fn parse_status_from_string(error_str: &str, details: &mut HttpErrorDetails) {
-    // 尝试匹配常见的状态码模式
-    let status_patterns = [
-        ("400", 400u16),
-        ("401", 401),
-        ("403", 403),
-        ("404", 404),
-        ("429", 429),
-        ("500", 500),
-        ("502", 502),
-        ("503", 503),
-    ];
-
-    for (pattern, code) in status_patterns {
-        if error_str.contains(pattern) && details.status_code.is_none() {
-            details.status_code = Some(code);
-            break;
-        }
-    }
-
-    // 尝试提取 URL
-    if details.endpoint.is_none() {
-        if let Some(start) = error_str.find("https://") {
-            let remaining = &error_str[start..];
-            let end = remaining
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '>')
-                .unwrap_or(remaining.len());
-            details.endpoint = Some(remaining[..end].to_string());
-        }
-    }
-
-    // 尝试提取 JSON 响应体
-    if details.response_body.is_none() {
-        if let Some(start) = error_str.find('{') {
-            if let Some(end) = error_str.rfind('}') {
-                if end > start {
-                    let json_str = &error_str[start..=end];
-                    // 验证是否为有效 JSON
-                    if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
-                        details.response_body = Some(json_str.to_string());
-                    }
-                }
+    // Only inspect transport diagnostics before the response body or debug headers.
+    let (diagnostic, body) = error_str.split_once("Body:").unwrap_or((error_str, ""));
+    let diagnostic = diagnostic.split("headers:").next().unwrap_or(diagnostic);
+    if details.status_code.is_none() {
+        for marker in ["Status: ", "status code '"] {
+            if let Some((_, rest)) = diagnostic.split_once(marker) {
+                details.status_code = rest.split(|c: char| !c.is_ascii_digit()).next()
+                    .and_then(|code| code.parse().ok()).filter(|code| (100..=599).contains(code));
+                if details.status_code.is_some() { break; }
             }
         }
     }
+    if details.endpoint.is_none() {
+        if let Some((_, rest)) = diagnostic.split_once("error sending request for url (") {
+            if let Some((url, _)) = rest.split_once(')') {
+                details.endpoint = reqwest::Url::parse(url).ok()
+                    .filter(|url| matches!(url.scheme(), "http" | "https"))
+                    .map(|url| display_endpoint(&url));
+            }
+        }
+    }
+    if details.response_body.is_none() {
+        let mut values = serde_json::Deserializer::from_str(body.trim_start()).into_iter::<serde_json::Value>();
+        if let Some(Ok(value)) = values.next() {
+            details.response_body = Some(value.to_string());
+        }
+    }
+}
+
+fn display_endpoint(url: &reqwest::Url) -> String {
+    let mut endpoint = url.clone();
+    let _ = endpoint.set_username("");
+    let _ = endpoint.set_password(None);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    endpoint.to_string()
 }
 
 /// 从 anyhow::Error 链中尝试提取 HTTP 错误详情
@@ -2126,230 +2111,6 @@ impl Default for ParseOptions {
     }
 }
 
-// 尝试获取HTTP错误的响应体（改进版，支持POST请求）
-async fn try_fetch_error_body_advanced(
-    url: &str,
-    status: reqwest::StatusCode,
-    is_chat_api: bool,
-) -> Option<String> {
-    if !status.is_client_error() && !status.is_server_error() {
-        return None;
-    }
-
-    debug!(url, "attempting to fetch error body from url");
-
-    // 创建一个简单的客户端来获取错误信息
-    let client = reqwest::Client::new();
-
-    if is_chat_api && url.contains("/chat/completions") {
-        // 方法1: 发送一个故意错误的请求来获取错误响应
-        let invalid_payload = serde_json::json!({
-            "model": "invalid-model-name-that-does-not-exist",
-            "messages": []
-        });
-
-        debug!("trying invalid payload method for error body fetch");
-        match client.post(url).json(&invalid_payload).send().await {
-            Ok(response) => {
-                debug!(status = ?response.status(), "received error response status");
-                if response.status().is_client_error() || response.status().is_server_error() {
-                    match response.text().await {
-                        Ok(body) => {
-                            debug!(body = %body, "received error response body");
-                            return Some(body);
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "failed to read error body");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "invalid payload request failed");
-            }
-        }
-
-        // 方法2: 发送空的POST请求
-        debug!("trying empty post method for error body fetch");
-        match client.post(url).header("Content-Type", "application/json").body("{}").send().await {
-            Ok(response) => {
-                debug!(status = ?response.status(), "empty post response status");
-                if response.status().is_client_error() || response.status().is_server_error() {
-                    match response.text().await {
-                        Ok(body) => {
-                            debug!(body = %body, "empty post error body");
-                            return Some(body);
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "failed to read empty post body");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "empty post request failed");
-            }
-        }
-
-        // 方法3: 尝试用HEAD请求来获取一些信息
-        debug!("trying head request method for error body fetch");
-        match client.head(url).send().await {
-            Ok(response) => {
-                debug!(status = ?response.status(), headers = ?response.headers(), "head response info");
-                // HEAD请求通常不会有响应体，但可能有有用的头信息
-            }
-            Err(e) => {
-                warn!(error = %e, "head request failed");
-
-                // 尝试从错误消息中提取有用信息
-                let error_msg = e.to_string();
-                if error_msg.contains("{") && error_msg.contains("}") {
-                    // 尝试从错误消息中提取JSON
-                    if let Some(start) = error_msg.find("{") {
-                        if let Some(end) = error_msg.rfind("}") {
-                            let json_part = &error_msg[start..=end];
-                            debug!(json_part = %json_part, "extracted json from head error");
-                            return Some(json_part.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // 对于其他API，使用GET请求
-        debug!("trying get request method for error body fetch");
-        match client.get(url).send().await {
-            Ok(response) => {
-                if response.status().is_client_error() || response.status().is_server_error() {
-                    match response.text().await {
-                        Ok(body) => {
-                            debug!(body = %body, "get error response body");
-                            return Some(body);
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "failed to read get error body");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "get request failed");
-            }
-        }
-    }
-
-    None
-}
-
-// 增强的错误处理函数（简化版，避免Send问题）
-async fn enhanced_error_logging_v2<E: std::error::Error + 'static>(
-    error: &E,
-    context: &str,
-) -> String {
-    error!(context, error_type = ?error, error_display = %error, error_debug = ?error, "stream error encountered");
-
-    // 收集错误链信息，不进行异步操作
-    let mut current_error: Option<&dyn std::error::Error> = Some(error);
-    let mut i = 0;
-    let mut error_urls = Vec::new(); // 收集URL用于后续处理
-
-    while let Some(err) = current_error {
-        debug!(index = i, err = %err, err_type = std::any::type_name_of_val(err), "error chain element");
-
-        // 检查错误字符串中是否包含有用信息
-        let error_string = err.to_string();
-        debug!(error_string = %error_string, "error string");
-
-        // 尝试从错误字符串中提取URL和状态码
-        if error_string.contains("400") && error_string.contains("https://") {
-            if let Some(start) = error_string.find("https://") {
-                if let Some(end) = error_string[start..].find("\"") {
-                    let url = &error_string[start..start + end];
-                    debug!(url = %url, "extracted url from error string");
-                    error_urls.push((url.to_string(), reqwest::StatusCode::from_u16(400).unwrap()));
-                }
-            }
-        }
-
-        // 特别检查是否是 reqwest 错误并提取详细信息
-        if let Some(reqwest_error) = err.downcast_ref::<reqwest::Error>() {
-            debug!("reqwest error details");
-
-            if let Some(status) = reqwest_error.status() {
-                debug!(status = %status, is_client_error = status.is_client_error(), is_server_error = status.is_server_error(), "reqwest status details");
-
-                if let Some(url) = reqwest_error.url() {
-                    let url_str = url.to_string();
-                    debug!(request_url = %url_str, "reqwest request url");
-
-                    // 对于错误状态码，收集URL信息但不在这里执行异步操作
-                    if status.is_client_error() || status.is_server_error() {
-                        error_urls.push((url_str, status));
-                    }
-                }
-            }
-
-            debug!(
-                is_timeout = reqwest_error.is_timeout(),
-                is_connect = reqwest_error.is_connect(),
-                is_request = reqwest_error.is_request(),
-                is_body = reqwest_error.is_body(),
-                is_decode = reqwest_error.is_decode(),
-                "reqwest error flags"
-            );
-        } else {
-            // 如果不是reqwest错误，尝试其他方式解析
-            debug!("not reqwest error: attempting string parsing");
-
-            // 检查是否是EventSource相关的错误
-            if error_string.contains("EventSource") || error_string.contains("Invalid status code")
-            {
-                debug!("event source error detected");
-
-                // 尝试从字符串中提取状态码
-                if error_string.contains("400") {
-                    debug!(detected_status_code = 400, "detected status code in error string");
-                }
-
-                // 尝试提取URL
-                if let Some(start) = error_string.find("url: \"") {
-                    let start = start + 6; // 跳过 'url: "'
-                    if let Some(end) = error_string[start..].find("\"") {
-                        let url = &error_string[start..start + end];
-                        debug!(url = %url, "extracted url from string");
-                        if !error_urls.iter().any(|(u, _)| u == url) {
-                            error_urls.push((
-                                url.to_string(),
-                                reqwest::StatusCode::from_u16(400).unwrap(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        current_error = err.source();
-        i += 1;
-    }
-
-    // 现在在循环外处理URL（如果有的话）
-    for (url_str, status) in error_urls {
-        debug!(url = %url_str, %status, "processing extracted url");
-        let is_chat_api = url_str.contains("/chat/completions");
-        if let Some(error_body) = try_fetch_error_body_advanced(&url_str, status, is_chat_api).await
-        {
-            debug!(error_body = %error_body, "extracted error body");
-            // 返回结构化错误信息
-            return create_structured_error_message(error, Some(error_body));
-        }
-    }
-
-    debug!(context, "end error details");
-
-    // 如果没有提取到错误体，返回用户友好的错误信息
-    create_structured_error_message(error, None)
-}
-
 /// 构建统一的、可被前端解析的富错误负载（JSON字符串）
 /// 保留此函数以向后兼容，内部调用带 HTTP 详情的版本
 #[allow(dead_code)]
@@ -2387,8 +2148,9 @@ fn build_rich_error_payload_with_http_details(
     let lower = main_message.to_lowercase();
     let original_lower = original_error.to_lowercase();
 
-    // 综合检查主消息和原始错误
-    let check_str = format!("{} {}", lower, original_lower);
+    // For a rejected request, response headers and request IDs are not diagnostic text.
+    let bad_request = http_details.as_ref().and_then(|details| details.status_code) == Some(400);
+    let check_str = if bad_request { lower } else { format!("{} {}", lower, original_lower) };
 
     if check_str.contains("网络")
         || check_str.contains("network")
@@ -2424,7 +2186,7 @@ fn build_rich_error_payload_with_http_details(
     {
         suggestions.push("服务端异常，稍后重试");
     }
-    if check_str.contains("格式") || check_str.contains("json") || check_str.contains("parse") {
+    if bad_request || check_str.contains("格式") || check_str.contains("json") || check_str.contains("parse") {
         suggestions.push("检查 Base URL / 模型配置与请求参数格式");
     }
     if check_str.contains("model")
@@ -2472,22 +2234,6 @@ fn build_rich_error_payload_with_http_details(
     payload.to_string()
 }
 
-// 创建结构化错误消息
-fn create_structured_error_message<E: std::fmt::Display>(
-    error: &E,
-    request_body: Option<String>,
-) -> String {
-    let user_friendly_message = get_user_friendly_error_message(error);
-
-    if let Some(body) = request_body {
-        // 使用特殊分隔符将主要信息和详情分开存储在content中
-        format!("{}|||ERROR_DETAILS|||{}", user_friendly_message, body)
-    } else {
-        // 如果没有请求体信息，只返回主要消息
-        user_friendly_message
-    }
-}
-
 /// 401/403 等认证、权限错误：重试不会改变结果，不应重复请求
 pub(crate) fn is_non_retryable_auth_error<E: std::fmt::Display + ?Sized>(error: &E) -> bool {
     let error_str = error.to_string().to_lowercase();
@@ -2495,6 +2241,19 @@ pub(crate) fn is_non_retryable_auth_error<E: std::fmt::Display + ?Sized>(error: 
         || error_str.contains("403 forbidden")
         || error_str.contains("status: 401")
         || error_str.contains("status: 403")
+}
+
+fn friendly_http_error(details: &HttpErrorDetails, error: &impl std::fmt::Display) -> String {
+    if details.status_code == Some(400) {
+        if let Some(message) = details.response_body.as_deref()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+            .and_then(|body| body.pointer("/error/message")?.as_str().map(str::to_owned))
+        {
+            return format!("请求参数无效（HTTP 400）：{message}");
+        }
+        return "请求无效（HTTP 400），请检查模型配置与请求参数".into();
+    }
+    get_user_friendly_error_message(error)
 }
 
 // 将错误信息转换为用户友好的中文提示
@@ -2855,10 +2614,10 @@ pub async fn handle_stream_chat(
                 warn!(attempt = main_attempts, error = %e, "stream chat failed attempt");
 
                 // 认证/权限错误重试不会成功，直接按最终失败处理
-                if main_attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) || e.is::<StreamMessageWrite>() {
+                let http_details = extract_http_details_from_anyhow(&e);
+                if main_attempts >= max_retry_attempts || http_details.status_code == Some(400) || is_non_retryable_auth_error(&e) || e.is::<StreamMessageWrite>() {
                     // 最终失败，提取 HTTP 错误详情并构建结构化错误
-                    let http_details = extract_http_details_from_anyhow(&e);
-                    let user_friendly = get_user_friendly_error_message(&e);
+                    let user_friendly = friendly_http_error(&http_details, &e);
 
                     // 使用更友好的主消息
                     let final_main = format!("AI请求失败: {}", user_friendly);
@@ -3041,8 +2800,8 @@ async fn attempt_stream_chat(
             response
         }
         Err(e) => {
-            let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Connection").await;
-            return Err(anyhow::anyhow!("Failed to establish stream connection: {}", e));
+            let context = format!("Failed to establish stream connection: {e}");
+            return Err(anyhow::Error::new(e).context(context));
         }
     };
 
@@ -3962,7 +3721,6 @@ async fn attempt_stream_chat(
                 }
             }
             Some(Err(e)) => {
-                let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Processing").await;
                 // genai's Display omits the transport source (for example a revoked
                 // TLS certificate). Preserve it in the persisted/UI error details.
                 let err = if let genai::Error::WebStream { error, .. } = &e {
@@ -4224,13 +3982,8 @@ pub async fn handle_non_stream_chat(
                     break Ok(response);
                 }
                 Err(e) => {
-                    let _ = enhanced_error_logging_v2(
-                        &e,
-                        &format!("Non-Stream Chat (attempt {}/{})", attempts, max_retry_attempts),
-                    )
-                    .await;
-                    if attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) {
-                        let http_details = extract_http_error_details(&e);
+                    let http_details = extract_http_error_details(&e);
+                    if attempts >= max_retry_attempts || http_details.status_code == Some(400) || is_non_retryable_auth_error(&e) {
                         let raw_error = e.to_string();
                         let final_error =
                             http_details.response_body.clone().unwrap_or_else(|| raw_error.clone());
@@ -4251,7 +4004,7 @@ pub async fn handle_non_stream_chat(
                             activity_manager.clear_focus(app_handle, conversation_id).await;
                         }
 
-                        break Err(anyhow::anyhow!("{}", final_error));
+                        break Err(anyhow::Error::new(e));
                     }
 
                     let delay = calculate_retry_delay(attempts);
@@ -4600,7 +4353,7 @@ pub async fn handle_non_stream_chat(
         Err(e) => {
             // 提取 HTTP 错误详情
             let http_details = extract_http_details_from_anyhow(&e);
-            let user_friendly_error = get_user_friendly_error_message(&e);
+            let user_friendly_error = friendly_http_error(&http_details, &e);
 
             let err_msg = build_rich_error_payload_with_http_details(
                 format!("AI请求失败: {}", user_friendly_error),
