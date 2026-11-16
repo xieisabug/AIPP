@@ -36,18 +36,27 @@ describe("McpToolCallRenderer review controls", () => {
         expect(screen.getByText("专用工具卡片")).toBeInTheDocument();
     });
 
-    it("should never mount preview or custom tool renderers when compact even before status is available", () => {
-        const draw = (status?: React.ComponentProps<typeof McpToolCallRenderer>["status"], streaming = false) =>
-            <ButlerResultsOnlyContext.Provider value={true}>
-                <McpToolCallRenderer callId={95} conversationId={8} toolName="preview_code" status={status} isStreaming={streaming}/>
-            </ButlerResultsOnlyContext.Provider>;
-        const view = render(draw());
-        for (const status of [undefined,"unknown","pending","executing","success","failed"] as const) {
-            view.rerender(draw(status, true));
-            expect(view.container).toBeEmptyDOMElement();
-            view.rerender(draw(status));
-            expect(view.container).toBeEmptyDOMElement();
-        }
+    it.each(["preview_file", "ask_user_question", "preview_code"])("should show only the result for %s in compact chat", (name) => {
+        mockInvokeHandler("get_mcp_tool_call", () => ({ id: 95, status: "executing", tool_name: name, conversation_id: 8 }));
+        render(<ButlerResultsOnlyContext.Provider value={true}>
+            <McpToolCallRenderer callId={95} conversationId={8} toolName={name} status="executing" />
+        </ButlerResultsOnlyContext.Provider>);
+        expect(screen.queryByText("专用工具卡片")).toBeNull();
+        expect(screen.queryByText("完整审核操作卡片")).toBeNull();
+    });
+
+    it("should restore the file content without a tool invocation frame", async () => {
+        const files = [{ title: "周报.txt", type: "text", content: "本周交付了文件预览" }];
+        mockInvokeHandler("get_mcp_tool_call", () => ({ id: 105, conversation_id: 8, status: "success",
+            tool_name: "preview_file", parameters: JSON.stringify({ files }) }));
+        mockInvokeHandler("prepare_preview_file_request_for_ui", args => args?.request);
+        render(<ButlerResultsOnlyContext.Provider value={true}>
+            <McpToolCallRenderer callId={105} conversationId={8} toolName="preview_file" status="success" />
+        </ButlerResultsOnlyContext.Provider>);
+        expect(await screen.findByText("周报.txt")).toBeInTheDocument();
+        expect(screen.getByText("本周交付了文件预览")).toBeInTheDocument();
+        expect(screen.queryByText("完整审核操作卡片")).toBeNull();
+        expect(screen.queryByText("专用工具卡片")).toBeNull();
     });
 
     it("should keep the preview_message card in compact Butler mode because it is the delivered result", () => {

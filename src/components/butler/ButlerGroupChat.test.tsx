@@ -34,8 +34,9 @@ vi.mock("@/services/butlerMemoryService", () => ({
     getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn().mockResolvedValue(() => {}),
 }));
 const askUser = vi.hoisted(() => vi.fn((_: { conversationId: number }) => ({ isDialogOpen: false } as Record<string, unknown>)));
-vi.mock("@/hooks/useInlineInteraction", () => ({ useAskUserQuestion: askUser }));
-vi.mock("@/components/InlineInteractionCards", () => ({
+vi.mock("@/hooks/useInlineInteraction", async importOriginal => ({ ...await importOriginal<typeof import("@/hooks/useInlineInteraction")>(), useAskUserQuestion: askUser }));
+vi.mock("@/components/InlineInteractionCards", async importOriginal => ({
+    ...await importOriginal<typeof import("@/components/InlineInteractionCards")>(),
     AskUserQuestionCard: ({ request }: { request: { questions: { question: string }[] } }) => <div>{request.questions[0].question}</div>,
 }));
 const elicitation = vi.hoisted(() => vi.fn((_: { conversationId: number }) => ({ questionRequest: null, decisionError: null })));
@@ -85,6 +86,7 @@ beforeEach(() => {
     vi.clearAllMocks();
     clearAllMockHandlers();
     // 通用输入框加载的 ! / # / 斜杠 / 全部助手 补全源；群聊的 @ 只用本群成员，不能出现全部助手里的人。
+    mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
     mockInvokeHandler("get_bang_list", () => []);
     mockInvokeHandler("vault_list_use_requests", () => []);
     mockInvokeHandler("vault_list_input_requests", () => []);
@@ -275,6 +277,18 @@ describe("ButlerGroupChat", () => {
         api.getButlerGroup.mockResolvedValue(detail({ turns: [{ member_id: 2, state: "queued", round: 2, rounds: 3 }] }));
         renderChat();
         expect(await screen.findByText("讨论中 · 第 2/3 轮")).toBeInTheDocument();
+    });
+
+    it("should display a group member's file result next to their reply", async () => {
+        const call = { id: 121, conversation_id: 102, message_id: 9000, status: "success", tool_name: "preview_file",
+            parameters: JSON.stringify({ files: [{ type: "text", title: "初稿.txt", content: "群里的文件内容" }] }) };
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", args => args?.conversationId === 102 ? [call] : []);
+        mockInvokeHandler("get_mcp_tool_call", () => call);
+        mockInvokeHandler("prepare_preview_file_request_for_ui", args => args?.request);
+        renderChat();
+        const draft = await screen.findByText("群里的文件内容");
+        expect(draft.closest('[data-message-type="ui_interaction_preview_file"]')).toBeTruthy();
+        expect(screen.queryByText("preview_file")).toBeNull();
     });
 
     it("should show a member question while other members keep replying after @everyone", async () => {

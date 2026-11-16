@@ -87,6 +87,7 @@ import {
     ButlerTaskListItem,
     ButlerTaskResultAvailableEvent,
 } from "@/data/Butler";
+import { ButlerLiveCardsContext } from "@/components/butler/ButlerPresentationContext";
 import { useAskUserQuestion, usePreviewFile } from "@/hooks/useInlineInteraction";
 import { useVaultUseRequests } from "../hooks/useVaultUseRequests";
 import { useVaultInputRequests } from "../hooks/useVaultInputRequests";
@@ -537,6 +538,7 @@ function ButlerExperimentWindow() {
         pendingRequest: pendingPreviewFileRequest,
         isDialogOpen: isPreviewFileDialogOpen,
         callId: previewFileCallId,
+        managedCallId: managedPreviewFileCallId,
         messageId: previewFileMessageId,
         handleOpenChange: handlePreviewFileOpenChange,
         reopenPersistedPreview: reopenPersistedPreviewFile,
@@ -1298,6 +1300,7 @@ function ButlerExperimentWindow() {
                             </div>
                             )}
                             <div className="min-h-0 flex-1">
+                                <ButlerLiveCardsContext.Provider value={historyView ? {} : { file: managedPreviewFileCallId, question: askUserCallId }}>
                                 <ButlerQuoteContext.Provider value={historyView ? null : quoteState}>
                                 <ConversationUI
                                     key={activeConversationId}
@@ -1320,6 +1323,7 @@ function ButlerExperimentWindow() {
                                     onPreviewFileContextClick={handlePreviewFileContextSelection}
                                 />
                                 </ButlerQuoteContext.Provider>
+                                </ButlerLiveCardsContext.Provider>
                             </div>
                         </>
                     ) : (

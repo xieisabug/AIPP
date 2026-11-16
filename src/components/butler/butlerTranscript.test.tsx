@@ -96,10 +96,11 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([history[0],partial],new Set([6]))).toEqual([history[0]]);
     });
 
-    it("should hide preview tool cards too while preserving the final answer", () => {
-        const preview = '<!-- MCP_TOOL_CALL:{"tool_name":"preview_code","call_id":8} -->';
+    it.each(["preview_file", "preview_code", "ask_user_question"])("should show %s during execution and after reload", (name) => {
+        const preview = `<!-- MCP_TOOL_CALL:{"tool_name":"${name}","call_id":8,"parameters":"<!-- example -->"} -->`;
         const delivered = message(3, "response", step.content + preview);
-        expect(butlerTranscript([delivered, history[4]])).toEqual([history[4]]);
+        expect(butlerTranscript([delivered], new Set([3]))[0].content).toBe(preview);
+        expect(butlerTranscript([delivered, history[4]]).map(m => m.content)).toEqual([preview, history[4].content]);
     });
 
     it("should keep a preview_message card as a result but drop the narration around it", () => {

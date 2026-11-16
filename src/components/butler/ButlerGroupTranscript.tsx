@@ -1,3 +1,8 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { MCPToolCall } from "@/data/MCPToolCall";
+import { isButlerInteractionTool } from "./ButlerPresentationContext";
+import ButlerInteractionResult from "./ButlerInteractionResult";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AskUserQuestionCard } from "@/components/InlineInteractionCards";
 import type { InlineInteractionItem } from "@/components/ConversationUI";
@@ -53,7 +58,9 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
     const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
     const vault = useVaultUseRequests(member.conversation_id);
     const vaultInput = useVaultInputRequests(member.conversation_id);
-    const shown = question.isDialogOpen || !!elicitation.questionRequest || !!elicitation.decisionError
+    // 已提交的问答由持久化结果卡接管，其余实时问题继续在这里回答。
+    const showQuestion = question.isDialogOpen && question.viewMode !== "summary";
+    const shown = showQuestion || !!elicitation.questionRequest || !!elicitation.decisionError
         || vault.requests.length > 0 || vaultInput.requests.length > 0;
     useEffect(() => {
         if (shown) onShown();
@@ -62,7 +69,7 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
     return <div data-aipp-slot="butler-group-question">
         <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={`${member.name} 想问你`} />
         <div className="min-w-0 max-w-[min(65%,48rem)]">
-            {question.isDialogOpen && <AskUserQuestionCard request={question.pendingRequest} isOpen={question.isDialogOpen}
+            {showQuestion && <AskUserQuestionCard request={question.pendingRequest} isOpen={question.isDialogOpen}
                 viewMode={question.viewMode} completedAnswers={question.completedAnswers} readOnly={question.readOnly}
                 onSubmit={question.handleSubmit} onCancel={question.handleCancel} />}
             {elicitation.questionRequest && <AskUserQuestionCard request={elicitation.questionRequest} isOpen viewMode="questionnaire"
@@ -85,6 +92,52 @@ function GroupLiveTail({ members, running, onGrow }: { members: ButlerGroupMembe
         {running.map(member => <TypingRow key={`typing-${member.id}`} member={member} />)}
         {members.map(member => <MemberQuestion key={`question-${member.id}`} member={member} onShown={onGrow} />)}
     </>;
+}
+
+/** 群消息和成员执行会话分别存储。按源消息 ID 把预览放回该成员的回复旁，尚在执行的放在群聊末尾。 */
+function useGroupResults(members: ButlerGroupMember[]) {
+    const [calls, setCalls] = useState<Map<number, MCPToolCall[]>>(new Map());
+    const memberConversations = members.map(member => member.conversation_id).join(",");
+    useEffect(() => {
+        let active = true;
+        setCalls(new Map());
+        const subscriptions = memberConversations.split(",").filter(Boolean).map(async id => {
+            const conversationId = Number(id);
+            let revision = 0;
+            async function refresh() {
+                const current = ++revision;
+                try {
+                    const rows = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", { conversationId });
+                    if (!active || current !== revision) return;
+                    const previews = rows.filter(call => call.conversation_id === conversationId
+                        && isButlerInteractionTool(call.tool_name)
+                        && (call.status === "success" || call.tool_name === "preview_code" && call.status === "executing"))
+                        .sort((a, b) => a.id - b.id);
+                    setCalls(previous => new Map(previous).set(conversationId, previews));
+                } catch (error) {
+                    console.error("读取群成员预览失败", conversationId, error);
+                }
+            }
+            const off = await listen<{ type: string; data?: { tool_name?: string } }>(
+                `conversation_event_${conversationId}`, ({ payload }) => {
+                    if (payload.type === "mcp_tool_call_update" && (!payload.data?.tool_name || isButlerInteractionTool(payload.data.tool_name))) void refresh();
+                });
+            if (active) void refresh();
+            return off;
+        }).map(subscription => subscription.catch(error => {
+            console.error("监听群成员交互结果失败", error);
+        }));
+        return () => {
+            active = false;
+            subscriptions.forEach(subscription => { void subscription.then(off => off?.()); });
+        };
+    }, [memberConversations]);
+    return calls;
+}
+
+function groupPreview(call: MCPToolCall, live = false) {
+    return <ButlerInteractionResult key={call.id} toolName={call.tool_name} callId={call.id} status={call.status}
+        conversationId={call.conversation_id} messageId={call.message_id} parameters={call.parameters} isLastMessage={live} />;
 }
 
 interface Props {
@@ -126,6 +179,27 @@ export default function ButlerGroupTranscript({ groupId, messages, members, runn
         [messages],
     );
 
+    const previewCalls = useGroupResults(members);
+    const { previewsBySeq, pendingPreviews } = useMemo(() => {
+        const previewsBySeq = new Map<number, MCPToolCall[]>();
+        const pendingPreviews: MCPToolCall[] = [];
+        for (const member of members) {
+            const calls = previewCalls.get(member.conversation_id) ?? [];
+            const replies = messages.filter(message => message.source_conversation_id === member.conversation_id && message.source_message_id);
+            for (const call of calls) {
+                const reply = replies.find(row => call.message_id && row.source_message_id! >= call.message_id);
+                if (reply) {
+                    const previews = previewsBySeq.get(reply.seq) ?? [];
+                    previews.push(call);
+                    previewsBySeq.set(reply.seq, previews);
+                } else {
+                    pendingPreviews.push(call);
+                }
+            }
+        }
+        return { previewsBySeq, pendingPreviews };
+    }, [previewCalls, members, messages]);
+
     const renderMessageRow = useCallback((chat: Message) => {
         const message = groupMessageByChatId.get(chat.id);
         if (!message) return null;
@@ -148,8 +222,9 @@ export default function ButlerGroupTranscript({ groupId, messages, members, runn
                 quoted={message.reply_to ? bySeq.get(message.reply_to) : undefined}
                 sender={message.sender_member ? membersById.get(message.sender_member) : undefined}
                 highlighted={shiningMessageIds.has(chat.id)} />
+            {previewsBySeq.get(message.seq)?.map(call => groupPreview(call))}
         </div>;
-    }, [bySeq, dividerSeqs, groupId, groupMessageByChatId, membersById, shiningMessageIds]);
+    }, [bySeq, dividerSeqs, groupId, groupMessageByChatId, membersById, shiningMessageIds, previewsBySeq]);
 
     // 停在底部时跟到底部（与私聊收到新消息一致），上翻阅读时 smartScroll 不打扰。
     const follow = useCallback(() => {
@@ -169,8 +244,17 @@ export default function ButlerGroupTranscript({ groupId, messages, members, runn
 
     const liveTail = useMemo<InlineInteractionItem[]>(() => [{
         key: "butler-group-live-tail",
-        content: <GroupLiveTail members={members} running={running} onGrow={follow} />,
-    }], [follow, members, running]);
+        content: <>
+            {pendingPreviews.map(call => {
+                const member = members.find(item => item.conversation_id === call.conversation_id)!;
+                return <div key={call.id}>
+                    <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name} />
+                    {groupPreview(call, true)}
+                </div>;
+            })}
+            <GroupLiveTail members={members} running={running} onGrow={follow} />
+        </>,
+    }], [follow, members, running, pendingPreviews]);
 
     const turns = useMemo<TurnRailItem[]>(
         () => chatMessages.filter(message => message.message_type === "user")

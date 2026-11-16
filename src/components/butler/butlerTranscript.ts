@@ -1,5 +1,6 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
 import { readScheduledTaskMetadata, type Message } from "@/data/Conversation";
+import { isButlerInteractionTool } from "./ButlerPresentationContext";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
 import { visibleText } from "@/utils/turnContext";
@@ -47,29 +48,32 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
             continue;
         }
         if (message.content.trim() === BUTLER_SILENT_REPLY) continue;
-        if ((!scheduledResult && unpublished.has(message.id)) || message.finish_time === null || parseStreamRetryMeta(message)?.status === "interrupted") continue;
-        // preview_message 展示的是另一条回复，本身就是交给用户的结果，不是执行过程：简洁聊天里保留这张卡片。
+        if (parseStreamRetryMeta(message)?.status === "interrupted") continue;
+        const pending = (!scheduledResult && unpublished.has(message.id)) || message.finish_time === null;
+        // 交互卡可以在当前轮结束前显示，正文仍等到正式交付。
         const shownPreviews: string[] = [];
         const content = /MCP_TOOL_CALL/i.test(message.content) ? message.content.replace(
-            /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:[\s\S]*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,
+            /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:(?:"(?:\\.|[^"\\])*(?:"|\\?$)|[^"])*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,
             (segment, backticks, tildes) => {
                 if (backticks || tildes) return segment;
-                if (isCompletePreviewMessageCall(segment)) {
-                    if (scheduledResult) return segment;
+                const name = completeToolName(segment);
+                if (isButlerInteractionTool(name) || (!pending && name === "preview_message" && !segment.startsWith("<!-- MCP_TOOL_CALL_STREAMING"))) {
+                    if (scheduledResult && !pending) return segment;
                     shownPreviews.push(segment);
                 }
                 return "";
             },
         ) : message.content;
+        if (pending && !shownPreviews.length) continue;
         const hasTool = content !== message.content
             || (!!message.tool_calls_json && !["[]", "null"].includes(message.tool_calls_json.trim()))
             || message.large_message_preview?.reason === "mcp_payload";
         if (!content.trim() && !message.attachment_list?.length && !shownPreviews.length) continue;
-        if (scheduledResult && hasTool) {
+        if (scheduledResult && !pending && hasTool) {
             result.push(withReplyQuote({ ...message, content: content.trim(), tool_calls_json: null, large_message_preview: null }, result));
         } else if (hasTool) {
             if (shownPreviews.length) {
-                // 只留引用卡片：同一条里的过程说明与其他工具调用仍不显示。
+                // 只留面向用户的卡片：同一条里的过程说明与其他工具调用仍不显示。
                 result.push({ ...message, content: shownPreviews.join("\n\n"), large_message_preview: null });
             } else if (message.attachment_list?.length) {
                 result.push({ ...message, content: "", tool_calls_json: null, large_message_preview: null });
@@ -81,11 +85,18 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
     return result;
 }
 
-const PREVIEW_MESSAGE_TOOL = /"tool_name"\s*:\s*"preview_message"/;
-
-/** 已完整写出的 preview_message 调用标记（流式中的半截标记不算）。 */
-function isCompletePreviewMessageCall(segment: string): boolean {
-    return /^<!--\s*MCP_TOOL_CALL\s*:/i.test(segment) && segment.endsWith("-->") && PREVIEW_MESSAGE_TOOL.test(segment);
+function completeToolName(segment: string): string | undefined {
+    const comment = segment.match(/^<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:([\s\S]*)-->$/i);
+    if (comment) {
+        try {
+            return JSON.parse(comment[1])?.tool_name;
+        } catch {
+            return undefined;
+        }
+    }
+    if (segment.endsWith("</mcp_tool_call>")) {
+        return segment.match(/<tool_name>\s*([^<]+?)\s*<\/tool_name>/i)?.[1];
+    }
 }
 
 /** 回复开头的 `[[QUOTE:原话]]` 显示成引用标签（指向已显示的那条消息），正文里不再出现标记。 */

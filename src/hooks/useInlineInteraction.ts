@@ -210,7 +210,7 @@ function normalizePreviewFiles(raw: unknown): PreviewFileRequest["files"] {
     return files;
 }
 
-function parsePreviewFileRequest(
+export function parsePreviewFileRequest(
     parameters: string,
     conversationId: number | undefined,
     requestId: string
@@ -311,7 +311,7 @@ function buildPreviewFileSignature(request: PreviewFileRequest | null): string |
     });
 }
 
-function toAskUserPersistedState(
+export function toAskUserPersistedState(
     call: MCPToolCall,
     conversationId: number | undefined
 ): AskUserQuestionPersistedState | null {
@@ -1015,6 +1015,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         isDialogOpen: previewFileView.isOpen,
         callId: previewFileView.callId,
         messageId: previewFileView.messageId,
+        managedCallId: previewFileView.callId ?? persistedState?.callId,
         handleOpenChange,
         reopenPersistedPreview,
     };
