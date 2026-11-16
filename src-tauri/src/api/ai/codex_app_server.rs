@@ -38,6 +38,9 @@ use tracing::{debug, error, info, warn};
 
 pub const CODEX_APP_SERVER_API_TYPE: &str = "codex_app_server";
 
+#[path = "codex_app_server_elicitation.rs"]
+mod elicitation;
+
 #[derive(Debug, Clone)]
 pub struct CodexAppServerConfig {
     /// Provider-row identity captured when this native runtime is prepared.
@@ -553,6 +556,14 @@ fn rpc_id_key(id: &Value) -> String {
 }
 
 fn codex_permission_options(method: &str, params: &Value) -> Vec<AcpPermissionOptionPayload> {
+    if method == elicitation::METHOD {
+        // MCP approval is per call. Never infer persistent approval from a form.
+        let mut options = codex_permission_options("item/commandExecution/requestApproval",
+            &json!({"availableDecisions": ["accept", "decline", "cancel"]}));
+        options[2].name = "取消本次调用".into();
+        options[2].kind = "reject_once".into();
+        return options;
+    }
     let available = params.get("availableDecisions").and_then(Value::as_array);
     let mut decisions = available
         .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
@@ -588,6 +599,9 @@ fn codex_permission_options(method: &str, params: &Value) -> Vec<AcpPermissionOp
 }
 
 fn codex_approval_response(method: &str, params: &Value, decision: AcpPermissionDecision) -> Value {
+    if method == elicitation::METHOD {
+        return elicitation::approval_response(decision);
+    }
     let selected = match decision {
         AcpPermissionDecision::Selected(value) => value,
         AcpPermissionDecision::Cancelled => "cancel".to_string(),
@@ -693,7 +707,7 @@ async fn handle_approval_request(
         "item/commandExecution/requestApproval"
             | "item/fileChange/requestApproval"
             | "item/permissions/requestApproval"
-    ) {
+    ) && !elicitation::is_tool_approval(frame)? {
         return Ok(false);
     }
     let rpc_id = frame.get("id").cloned().ok_or("Codex approval request missing id")?;
@@ -712,6 +726,7 @@ async fn handle_approval_request(
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| params.get("reason").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| params.get("message").and_then(Value::as_str).map(str::to_string))
         .or_else(|| {
             Some(match method {
                 "item/fileChange/requestApproval" => "允许 Codex 修改文件",
@@ -1326,6 +1341,9 @@ async fn handle_server_request(
     cancellation: Option<&CodexRequestCancellation>,
 ) -> Result<bool, String> {
     if handle_approval_request(app_handle, conversation_id, stdin, frame, cancellation).await? {
+        return Ok(true);
+    }
+    if elicitation::handle_form(app_handle, conversation_id, stdin, frame, cancellation).await? {
         return Ok(true);
     }
     if frame.get("method").and_then(Value::as_str) != Some("item/tool/requestUserInput") {
