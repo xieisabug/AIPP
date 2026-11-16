@@ -74,9 +74,9 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
         <div className="mb-4 flex shrink-0 justify-center">
             <button onClick={() => { acknowledge?.(0); onSelect(); }} aria-pressed={selected === undefined && selectedGroup === undefined}
                 className="flex max-w-full flex-col items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-medium hover:bg-muted aria-pressed:bg-muted">
-                <ButlerAvatar id={0} chief size={44} figure animated={state(0) !== "idle"} state={state(0)}/>
+                <ButlerAvatar id={0} chief size={66} compact figure animated={state(0) !== "idle"} state={state(0)}/>
                 <span className="inline-flex max-w-full items-center gap-1.5">{chief}{approvals.has(0) ? <ApprovalDot/> : null}</span>
-                {visuals.get(0)?.label && <span className="max-w-40 truncate text-xs text-muted-foreground">{visuals.get(0)?.label}</span>}
+                {visuals.get(0)?.label && <span className="max-w-full truncate text-xs text-muted-foreground">{visuals.get(0)?.label}</span>}
             </button>
         </div>
         <nav aria-label="助手联系人" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
@@ -87,7 +87,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                 return <ContextMenu key={`group-${group.id}`}>
                     <ContextMenuTrigger asChild><div className="w-full">
                         <button onClick={() => onSelectGroup(group)} disabled={!ready} aria-pressed={active} className="butler-contact" data-aipp-slot="butler-group-contact">
-                            <ButlerGroupAvatar members={group.members} size={32} />
+                            <ButlerGroupAvatar members={group.members} size={48} />
                             <span className="min-w-0 flex-1">
                                 <span className="block truncate text-sm font-medium">{group.name}</span>
                                 <span className="block truncate text-xs text-muted-foreground">
@@ -109,7 +109,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                     preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
                 return <AssistantItemContextMenu key={assistant.id} assistant={assistant} onAction={onAssistantAction} canReset><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
                     aria-pressed={selected === assistant.id} className="butler-contact">
-                    <ButlerAvatar id={assistant.id} figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
+                    <ButlerAvatar id={assistant.id} size={48} compact figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
                     <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium">{assistant.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>

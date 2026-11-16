@@ -14,6 +14,8 @@ import { ConfettiOverlay, MorphParts } from "./AvatarEffects";
 export interface AnimatedAvatarProps {
     appearance: ButlerAppearance;
     size?: number;
+    /** 紧凑模式：保留紧凑裁切与小幅度动作，即使尺寸放大到 48px 以上也不切换成全幅预览模式。 */
+    compact?: boolean;
     animated?: boolean;
     state?: AvatarState;
     actionRequest?: AvatarActionRequest;
@@ -25,12 +27,12 @@ const smoothstep = (a: number, b: number, x: number) => { const t = Math.max(0, 
 /** 圆核与装饰的颜色：黑白（品牌默认）形象跟随前景色，保证深浅主题下都看得见；彩色形象沿用外圈色。 */
 export const coreColorOf = (appearance: ButlerAppearance) => /^#(000000|ffffff)$/i.test(appearance.colors.secondary) ? "currentColor" : appearance.colors.secondary;
 
-export default function AnimatedAvatar({ appearance, size = 32, animated = false, state = "idle", actionRequest }: AnimatedAvatarProps) {
+export default function AnimatedAvatar({ appearance, size = 32, compact, animated = false, state = "idle", actionRequest }: AnimatedAvatarProps) {
     const definition = avatarDefinitions[appearance.shape];
     const id = useId().replace(/:/g, "");
     const ref = useRef<HTMLSpanElement>(null);
     const { active, action, sequence } = useAvatarMotion(ref, animated && appearance.motion, state, actionRequest, `${appearance.accessories.eyes}-${appearance.accessories.head}`, appearance.shape);
-    const full = size >= 48;
+    const full = !(compact ?? size < 48);
     const performance = useAvatarPerformance(action ? "idle" : state, active, !full, id);
     const v = performance.values;
     const m = performance.morph;

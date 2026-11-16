@@ -32,4 +32,47 @@ describe("ButlerContactList", () => {
         fireEvent.click(settings);
         expect(onOpenSettings).toHaveBeenCalledOnce();
     });
+
+    it("should render chief, group, and contact avatars 50% larger in compact mode", () => {
+        const { container } = render(<ButlerContactList
+            chief="总管家"
+            contacts={[{ id: 8, name: "写作助手", assistant_type: 0 }]}
+            ready
+            previews={[]}
+            plugins={[]}
+            error=""
+            onRefresh={() => {}}
+            onSelect={() => {}}
+            onSearch={() => {}}
+            onOpenSettings={() => {}}
+            onAssistantAction={() => {}}
+            groups={[{
+                id: 3,
+                name: "协作群",
+                members: [
+                    { id: 1, assistant_id: 0, name: "总管家", conversation_id: 10, is_chief: true },
+                    { id: 2, assistant_id: 8, name: "写作助手", conversation_id: 11, is_chief: false },
+                ],
+                last_message: null,
+                updated_at: "2026-11-16T00:00:00Z",
+                typing: [],
+            }]}
+            onSelectGroup={() => {}}
+            onCreateGroup={() => {}}
+            onDeleteGroup={() => {}}
+            activity={{ visuals: new Map(), approvals: new Set(), error: "", acknowledge: undefined }}
+        />);
+
+        const chiefAvatar = container.querySelector('[data-avatar-shape="aipp"]') as HTMLElement;
+        expect(chiefAvatar).toHaveStyle({ width: "66px", height: "66px" });
+        expect(chiefAvatar.querySelector("svg")).toHaveAttribute("viewBox", "-12 -12 534 534");
+
+        const groupAvatar = container.querySelector('[data-aipp-slot="butler-group-avatar"]') as HTMLElement;
+        expect(groupAvatar).toHaveStyle({ width: "48px", height: "48px" });
+
+        const contactButton = screen.getByRole("button", { name: /写作助手/ });
+        const contactAvatar = contactButton.querySelector('[data-avatar-shape="pebble"]') as HTMLElement;
+        expect(contactAvatar).toHaveStyle({ width: "48px", height: "48px" });
+        expect(contactAvatar.querySelector("svg")).toHaveAttribute("viewBox", "-12 -12 534 534");
+    });
 });

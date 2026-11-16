@@ -9,6 +9,8 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
+import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
+import { cn } from "@/utils/utils";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1087,6 +1089,7 @@ function ButlerExperimentWindow() {
     const contactActivity = useContactAvatarActivity(mainConversationId, previews, groupId === null ? contact?.assistantId : -1);
     const headerAssistantId = contact?.assistantId ?? 0;
     const headerState = contactActivity.visuals.get(headerAssistantId)?.state ?? "idle";
+    const contactRail = useContactRailWidth();
 
     useAppShortcuts("butler", {
         new: () => {
@@ -1112,12 +1115,13 @@ function ButlerExperimentWindow() {
         <ButlerAppearanceContext.Provider value={featureConfig.get("butler_appearance") ?? new Map()}>
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div
-                className="flex h-screen bg-background text-foreground"
+                className={cn("flex h-screen bg-background text-foreground", contactRail.isResizing && "select-none")}
                 data-aipp-window="butler_experiment"
                 data-aipp-slot="window-root"
             >
                 <div
-                    className="flex-none w-[clamp(200px,23vw,260px)] flex flex-col border-r border-border bg-muted/30 overflow-hidden"
+                    className="relative flex-none flex flex-col border-r border-border bg-muted/30 overflow-hidden"
+                    style={{ width: contactRail.width }}
                     data-aipp-slot="butler-task-rail"
                 >
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
@@ -1184,6 +1188,27 @@ function ButlerExperimentWindow() {
                             )}
                         </div>
                     )}
+                </div>
+                <div className="relative z-20 w-0 flex-none">
+                    <div
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label="调整联系人列表宽度"
+                        aria-valuemin={contactRail.minWidth}
+                        aria-valuemax={contactRail.maxWidth}
+                        aria-valuenow={contactRail.width}
+                        tabIndex={0}
+                        title="左右拖动调整联系人列表宽度，双击恢复默认"
+                        onPointerDown={contactRail.handleResizeStart}
+                        onDoubleClick={contactRail.resetWidth}
+                        onKeyDown={contactRail.handleResizeKeyDown}
+                        data-aipp-slot="butler-task-rail-resize-handle"
+                        className={cn(
+                            "absolute right-0 top-0 bottom-0 z-20 w-1.5 cursor-ew-resize touch-none transition-colors focus-visible:outline-none focus-visible:bg-primary/60",
+                            "hover:bg-primary/50",
+                            contactRail.isResizing && "bg-primary/60"
+                        )}
+                    />
                 </div>
 
                 <div

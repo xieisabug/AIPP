@@ -59,4 +59,14 @@ describe("avatar rendering", () => {
         expect(container.querySelectorAll('[data-avatar-accessory="beret"]')).toHaveLength(1);
         expect(container.querySelectorAll('[data-avatar-active="false"]')).toHaveLength(2);
     });
+
+    it("should keep compact viewBox at 48px when compact is set", () => {
+        const { container } = render(<>
+            <AnimatedAvatar size={48} appearance={defaultAppearance} />
+            <AnimatedAvatar size={48} compact appearance={defaultAppearance} />
+        </>);
+        const svgs = container.querySelectorAll("svg");
+        expect(svgs[0]).toHaveAttribute("viewBox", "-55 -100 620 620");
+        expect(svgs[1]).toHaveAttribute("viewBox", "-12 -12 534 534");
+    });
 });
