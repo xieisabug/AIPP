@@ -50,6 +50,13 @@ impl NativeMcpScope {
         Ok(Self(inner))
     }
     pub fn token(&self) -> &str { &self.0.token }
+    pub(crate) fn current_prompt(&self) -> Result<Option<CapturedNativeMcpPrompt>, String> {
+        let identity = self.0.active.lock().map_err(|_| "Native MCP prompt state is poisoned")?.clone();
+        let Some(identity) = identity else { return Ok(None); };
+        let prompt = CapturedNativeMcpPrompt { conversation_id: self.0.conversation_id, identity };
+        prompt.ensure_active()?;
+        Ok(Some(prompt))
+    }
     pub fn begin_prompt(&self, message_id: i64) -> Result<NativeMcpPrompt, String> {
         if message_id <= 0 { return Err("Native MCP prompt requires a persisted message identity".into()); }
         let mut active = self.0.active.lock().map_err(|_| "Native MCP prompt state is poisoned")?;
@@ -136,11 +143,7 @@ pub fn capture(token: &str, conversation_id: i64) -> Result<CapturedNativeMcpPro
     let scope = scopes().lock().map_err(|_| "Native MCP scope registry is poisoned")?
         .get(token).and_then(Weak::upgrade).ok_or("Native MCP runtime token is unknown or expired")?;
     if scope.conversation_id != conversation_id { return Err("Native MCP runtime conversation mismatch".into()); }
-    let identity = scope.active.lock().map_err(|_| "Native MCP prompt state is poisoned")?
-        .clone().ok_or("Native MCP runtime has no active prompt")?;
-    let captured = CapturedNativeMcpPrompt { conversation_id, identity };
-    captured.ensure_active()?;
-    Ok(captured)
+    NativeMcpScope(scope).current_prompt()?.ok_or_else(|| "Native MCP runtime has no active prompt".into())
 }
 
 #[cfg(test)]

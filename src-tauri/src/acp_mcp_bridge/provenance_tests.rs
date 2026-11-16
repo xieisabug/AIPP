@@ -127,3 +127,17 @@ async fn test_native_mcp_run_preserves_source_across_await_and_revokes_result() 
     assert!(result.is_err());
     assert!(crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).is_err());
 }
+
+#[test]
+fn test_agent_permission_review_prompt_distinguishes_idle_and_cancelled() {
+    let scope = NativeMcpScope::new(42).unwrap();
+    assert!(scope.current_prompt().unwrap().is_none());
+    let active = scope.begin_prompt(13).unwrap();
+    let captured = scope.current_prompt().unwrap().unwrap();
+    assert_eq!(captured.source_message_id(), 13);
+    scope.cancel_prompt();
+    assert!(captured.cancellation().is_cancelled());
+    assert!(scope.current_prompt().is_err());
+    drop(active);
+    assert!(scope.current_prompt().unwrap().is_none());
+}

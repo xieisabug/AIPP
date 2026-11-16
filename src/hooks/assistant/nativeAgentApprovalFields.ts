@@ -8,8 +8,7 @@ const REVIEW_TOOLTIP =
     "智能体请求执行操作时：人工审批会弹出确认；AIPP 模型自动审核先由「设置 → 辅助AI」中的审核模型判断，安全的直接按「本次允许」执行（不会替你选「始终允许」），有风险或审核失败才弹出确认并说明原因。";
 
 /**
- * Approval settings for Pi / OpenCode / Kiro / Antigravity / Cursor agent assistants.
- * Each agent's native control plus AIPP's model review for agents without their own reviewer.
+ * Native permission controls and AIPP review settings for agent assistants.
  * Empty stored values mean the safe default (every action asks).
  */
 export function buildNativeAgentApprovalFields(
@@ -29,7 +28,7 @@ export function buildNativeAgentApprovalFields(
             },
         }];
     }
-    if (!["pi", "opencode", "kiro", "antigravity"].includes(apiType)) return [];
+    if (!["pi", "opencode", "kiro", "antigravity", "acp", "claude_sdk", "anthropic"].includes(apiType)) return [];
 
     const select = (key: string, label: string, options: { value: string; label: string }[], tooltip: string): AssistantFormConfig => ({
         key,

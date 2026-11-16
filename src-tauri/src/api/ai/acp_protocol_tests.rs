@@ -61,22 +61,7 @@ impl ProtocolFixture {
                                 // controls are outside this fixture. Production state
                                 // validates options and cancels waiters; production
                                 // dispatch and response encoding handle every reply.
-                                state.store_request(AcpPermissionRequestEvent {
-                                    request_id: request_id.clone(),
-                                    conversation_id: Some(conversation_id),
-                                    agent_kind: Some("acp".into()),
-                                    tool_call_id: request_id.clone(),
-                                    title: request.tool_call.fields.title.clone(),
-                                    kind: None,
-                                    parameters: None,
-                                    options: request.options.iter().map(|option| {
-                                        AcpPermissionOptionPayload {
-                                            option_id: option.option_id.0.to_string(),
-                                            name: option.name.clone(),
-                                            kind: permission_option_kind_to_string(&option.kind),
-                                        }
-                                    }).collect(),
-                                }, tx).await;
+                                state.store_request(acp_permission_event(&request, conversation_id, request_id.clone()), tx).await;
                                 pending_tx.send(request_id).unwrap();
                                 Ok(wait_for_acp_permission_decision(rx).await)
                             })
@@ -269,5 +254,24 @@ async fn test_protocol_removed_permission_waiter_returns_cancelled() {
     state.remove_request("removed").await;
     assert_eq!(wire.reply("removed").await, serde_json::json!({ "outcome": { "outcome": "cancelled" } }));
     assert!(state.get_request("removed").await.is_none());
+    wire.close().await;
+}
+
+#[tokio::test]
+async fn test_agent_permission_review_acp_replies_with_advertised_vendor_option() {
+    use super::super::agent_driver::native_agents::{review_outcome, ReviewOutcome};
+    let state = Arc::new(AcpPermissionState::new());
+    let mut wire = ProtocolFixture::new(state.clone(), 42);
+    wire.permission("reviewed").await;
+    let event = state.get_request("reviewed").await.unwrap().event;
+    let params: serde_json::Value = serde_json::from_str(event.parameters.as_deref().unwrap()).unwrap();
+    assert_eq!(params["kind"], "execute");
+    for verdict in ["risky", "error"] {
+        assert!(matches!(review_outcome(&event.options, verdict, "人工确认"), ReviewOutcome::Ask(_)));
+        assert!(matches!(wire.replies.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    }
+    let ReviewOutcome::Allow(option) = review_outcome(&event.options, "safe", "查询") else { panic!("expected one-time approval") };
+    state.resolve_request("reviewed", AcpPermissionDecision::Selected(option)).await.unwrap();
+    assert_eq!(wire.reply("reviewed").await["outcome"]["optionId"], "vendor:allow-once");
     wire.close().await;
 }

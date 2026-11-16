@@ -12,6 +12,15 @@ describe("buildNativeAgentApprovalFields", () => {
         expect(keys(buildNativeAgentApprovalFields("opencode", getter({}), vi.fn(), true))).toEqual(["opencode_approval_notice", "tool_review_mode"]);
     });
 
+    it.each(["claude_sdk", "anthropic", "acp"])("should persist AIPP approval mode for %s", (apiType) => {
+        const set = vi.fn();
+        const [field] = buildNativeAgentApprovalFields(apiType, getter({}), set, true);
+        expect(field.key).toBe("tool_review_mode");
+        expect(field.config.value).toBe("off");
+        field.config.onChange?.("auto_model");
+        expect(set).toHaveBeenCalledWith("tool_review_mode", "auto_model", "string");
+    });
+
     it("should only explain Cursor's built-in review and leave other agents untouched", () => {
         expect(keys(buildNativeAgentApprovalFields("cursor", getter({}), vi.fn(), true))).toEqual(["cursor_approval_notice"]);
         expect(buildNativeAgentApprovalFields("codex_app_server", getter({}), vi.fn(), true)).toEqual([]);

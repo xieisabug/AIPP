@@ -16,7 +16,6 @@ use crate::acp_mcp_bridge::{
     ACP_MCP_DB_PATH_ENV, ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV,
     ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV,
 };
-use crate::api::operation_api::{emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT};
 use crate::mcp::builtin_mcp::interaction::{
     request_ask_user_question_scoped, AskUserQuestionItem, AskUserQuestionMetadata,
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
@@ -623,6 +622,8 @@ async fn handle_permission(
     app: &tauri::AppHandle,
     conversation_id: i64,
     frame: &Value,
+    turn: i64,
+    cwd: &std::path::Path,
     run_id: &str,
     instance_id: Option<i64>,
     stdin: &mut tokio::process::ChildStdin,
@@ -632,7 +633,10 @@ async fn handle_permission(
     let request_id =
         frame.get("request_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
     let request = frame.get("request").cloned().unwrap_or(Value::Null);
-    let tool_name = request.get("tool_name").and_then(Value::as_str).unwrap_or("Claude Code tool");
+    if request["subtype"] != "can_use_tool" {
+        return Err(format!("不支持的 Claude Code control_request 子类型：{}", request["subtype"]));
+    }
+    let tool_name = request["tool_name"].as_str().ok_or("Claude Code can_use_tool 缺少 tool_name")?;
     if tool_name == "AskUserQuestion" {
         return handle_ask_user_question(
             app, conversation_id, &request, &request_id, instance_id, run_id, stdin, cancellation, cancel_generation,
@@ -668,17 +672,12 @@ async fn handle_permission(
     let (tx, rx) = oneshot::channel();
     let state = app.state::<AcpPermissionState>();
     let butler_guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(
-        app, conversation_id, crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
+        app, conversation_id, Some(turn),
         "claude.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
     )?;
-    state.store_request_guarded(event.clone(), tx,
-        crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id), butler_guard.clone()).await?;
-    emit_permission_request_event(
-        app,
-        ACP_PERMISSION_REQUEST_EVENT,
-        Some(conversation_id),
-        &event,
-    )?;
+    let scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id);
+    super::agent_driver::native_agents::register_session_permission(app, &event, tx, scope,
+        butler_guard.clone(), Some(turn), "Claude Code", cwd).await?;
     let (decision, cancelled_resolution) = wait_claude_permission_decision(
         &state, &event.request_id, rx, cancellation, cancel_generation,
     ).await;
@@ -705,16 +704,20 @@ async fn handle_permission(
             AcpPermissionDecision::Cancelled
         }}
     } else { decision };
+    let response = claude_permission_response(&request_id, &request, decision);
+    stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+    stdin.flush().await.map_err(|e| e.to_string())
+}
+
+fn claude_permission_response(request_id: &str, request: &Value, decision: AcpPermissionDecision) -> Value {
     let (behavior, message) = match decision {
         AcpPermissionDecision::Selected(value) if value == "allow" => ("allow", Value::Null),
         _ => ("deny", json!({"message":"Permission denied by user"})),
     };
-    let response = json!({
+    json!({
         "type": "control_response",
         "response": {"subtype":"success", "request_id": request_id, "response": {"behavior":behavior, "updatedInput": request.get("input").cloned().unwrap_or(Value::Null), "message":message}}
-    });
-    stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|e| e.to_string())?;
-    stdin.flush().await.map_err(|e| e.to_string())
+    })
 }
 
 fn emit_update(identity: &AgentEventIdentity, window: &tauri::Window, conversation_id: i64, id: i64, content: &str, done: bool) {
@@ -1507,7 +1510,7 @@ pub fn spawn_claude_session_task(
                             "control_request" => {
                                 if let Err(error) =
                                     crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message_id), handle_permission(
-                                        &app, _conversation_id, &frame, &task_run_id, config.instance_id, &mut stdin,
+                                        &app, _conversation_id, &frame, message_id, &config.working_directory, &task_run_id, config.instance_id, &mut stdin,
                                         &mut cancellation, cancel_generation,
                                     )).await
                                 {

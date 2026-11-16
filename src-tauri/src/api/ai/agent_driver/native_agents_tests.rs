@@ -169,3 +169,14 @@ fn test_native_agents_permission_parameters_unwrap_json_text() {
     assert_eq!(permission_parameters(&json!({"path":"a.txt"})), "{\"path\":\"a.txt\"}");
     assert_eq!(permission_parameters(&json!("plain text")), "plain text");
 }
+
+#[test]
+fn test_agent_permission_review_requires_unambiguous_one_time_choice() {
+    for options in [
+        vec![permission_option("yes", "allow_once"), permission_option("yes", "allow_always")],
+        vec![permission_option("", "allow_once")],
+        vec![permission_option("always", "allow_always")],
+    ] {
+        assert!(matches!(review_outcome(&options, "safe", "读取文件"), ReviewOutcome::Ask(_)));
+    }
+}

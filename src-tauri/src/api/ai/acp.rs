@@ -21,7 +21,7 @@ use crate::api::ai::events::{
 };
 use crate::api::operation_api::{
     emit_permission_request_event, emit_permission_resolved_event, PermissionResolvedEvent,
-    ACP_PERMISSION_REQUEST_EVENT, ACP_PERMISSION_RESOLVED_EVENT,
+    ACP_PERMISSION_RESOLVED_EVENT,
 };
 use crate::db::assistant_db::{AssistantDatabase, AssistantModelConfig};
 use crate::db::conversation_db::{
@@ -498,10 +498,12 @@ impl AcpPermissionState {
         Ok(())
     }
 
-    pub(crate) async fn mark_presented(&self, id: &str, payload: JsonValue) {
+    pub(crate) async fn mark_presented(&self, id: &str, payload: JsonValue) -> bool {
         if let Some(request) = self.pending_requests.lock().await.get_mut(id) {
             request.presented = Some(payload);
+            return true;
         }
+        false
     }
 
     pub(crate) async fn presented_permissions(&self, conversation_ids: &[i64]) -> Vec<JsonValue> {
@@ -2614,6 +2616,39 @@ fn fallback_acp_tool_call_info_from_locations(
     Some((server_name, "read_file".to_string(), params.to_string()))
 }
 
+fn acp_permission_event(args: &acp::RequestPermissionRequest, conversation_id: i64, request_id: String)
+    -> AcpPermissionRequestEvent
+{
+    let options = args
+        .options
+        .iter()
+        .map(|option| AcpPermissionOptionPayload {
+            option_id: option.option_id.0.to_string(),
+            name: option.name.clone(),
+            kind: permission_option_kind_to_string(&option.kind),
+        })
+        .collect::<Vec<_>>();
+
+    // ACP may describe an operation using locations or content without rawInput.
+    let fields = &args.tool_call.fields;
+    let parameters = Some(serde_json::json!({
+        "kind": fields.kind, "rawInput": fields.raw_input,
+        "locations": fields.locations, "content": fields.content,
+    }).to_string());
+    let kind = args.tool_call.fields.kind.map(|k| format!("{:?}", k));
+
+    AcpPermissionRequestEvent {
+        request_id,
+        conversation_id: Some(conversation_id),
+        agent_kind: Some("acp".to_string()),
+        tool_call_id: args.tool_call.tool_call_id.0.to_string(),
+        title: args.tool_call.fields.title.clone(),
+        kind,
+        parameters,
+        options,
+    }
+}
+
 /// Tauri client implementation that forwards ACP events to the frontend
 #[derive(Clone)]
 pub struct AcpTauriClient {
@@ -2623,6 +2658,8 @@ pub struct AcpTauriClient {
     run_id: String,
     native_session_id: Arc<TokioMutex<Option<String>>>,
     diagnostics: AgentDiagnosticBuffer,
+    working_directory: PathBuf,
+    prompt_scope: crate::acp_mcp_bridge::provenance::NativeMcpScope,
     pub message_id: Arc<TokioMutex<i64>>,
     pub window: Arc<TokioMutex<tauri::Window>>,
     operation_state: Arc<OperationState>,
@@ -2646,12 +2683,16 @@ impl AcpTauriClient {
         permission_manager: Arc<PermissionManager>,
         instance_id: Option<i64>,
         run_id: String,
+        working_directory: PathBuf,
+        prompt_scope: crate::acp_mcp_bridge::provenance::NativeMcpScope,
     ) -> Self {
         Self {
             app_handle,
             conversation_id,
             instance_id,
             run_id,
+            working_directory,
+            prompt_scope,
             native_session_id: Arc::new(TokioMutex::new(None)),
             diagnostics: AgentDiagnosticBuffer::default(),
             message_id: Arc::new(TokioMutex::new(message_id)),
@@ -4100,105 +4141,34 @@ impl AcpTauriClient {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
 
-        let options = args
-            .options
-            .iter()
-            .map(|option| AcpPermissionOptionPayload {
-                option_id: option.option_id.0.to_string(),
-                name: option.name.clone(),
-                kind: permission_option_kind_to_string(&option.kind),
-            })
-            .collect::<Vec<_>>();
-
-        let parameters = args
-            .tool_call
-            .fields
-            .raw_input
-            .as_ref()
-            .map(|raw| serde_json::to_string(raw).unwrap_or_else(|_| raw.to_string()));
-
-        let kind = args.tool_call.fields.kind.map(|k| format!("{:?}", k));
-
-        let event = AcpPermissionRequestEvent {
-            request_id: request_id.clone(),
-            conversation_id: Some(self.conversation_id),
-            agent_kind: Some("acp".to_string()),
-            tool_call_id: args.tool_call.tool_call_id.0.to_string(),
-            title: args.tool_call.fields.title.clone(),
-            kind,
-            parameters,
-            options,
-        };
-
-        let state = self.app_handle.state::<AcpPermissionState>();
+        let event = acp_permission_event(&args, self.conversation_id, request_id);
+        let prompt = self.prompt_scope.current_prompt().map_err(|error| acp::Error::internal_error().data(error))?;
+        let turn = prompt.as_ref().map(|p| p.source_message_id());
         let butler_guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(
-            &self.app_handle, self.conversation_id, Some(*self.message_id.lock().await),
+            &self.app_handle, self.conversation_id, turn,
             "acp.permission", serde_json::to_value(&event).map_err(|e| acp::Error::internal_error().data(e.to_string()))?,
         ).map_err(|e| acp::Error::internal_error().data(e))?;
-        state.store_request_guarded(event.clone(), tx,
-            crate::api::ai::agent_driver::approval::AgentRequestScope::native("acp", self.instance_id, self.conversation_id, self.run_id.clone()), butler_guard.clone())
-            .await.map_err(|error| acp::Error::internal_error().data(serde_json::json!(error)))?;
-
-        let delivered_to_feishu = match state.get_request(&request_id).await {
-            Some(snapshot) => match crate::feishu::try_deliver_acp_permission_to_feishu(
-                &self.app_handle,
-                self.conversation_id,
-                &snapshot,
-            )
-            .await
-            {
-                Ok(delivered) => delivered,
-                Err(error) => {
-                    warn!(
-                        conversation_id = self.conversation_id,
-                        request_id = %request_id,
-                        error = %error,
-                        "failed to deliver ACP permission to Feishu"
-                    );
-                    false
+        let scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native("acp", self.instance_id, self.conversation_id, self.run_id.clone());
+        super::agent_driver::native_agents::register_session_permission(&self.app_handle, &event, tx, scope,
+            butler_guard.clone(), turn, "ACP", &self.working_directory).await
+            .map_err(|error| acp::Error::internal_error().data(error))?;
+        let response = if let Some(prompt) = prompt {
+            let cancellation = prompt.cancellation();
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    let state = self.app_handle.state::<AcpPermissionState>();
+                    if let Some(resolution) = state.resolve_request(&event.request_id, AcpPermissionDecision::Cancelled)
+                        .await.map_err(|error| acp::Error::internal_error().data(error))? {
+                        notify_cancelled_acp_permission_requests(&self.app_handle, vec![(event.request_id, resolution)]).await;
+                    }
+                    return Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled));
                 }
-            },
-            None => false,
-        };
-
-        if let Err(e) = emit_permission_request_event(
-            &self.app_handle,
-            ACP_PERMISSION_REQUEST_EVENT,
-            Some(self.conversation_id),
-            &event,
-        ) {
-            if delivered_to_feishu {
-                warn!(
-                    conversation_id = self.conversation_id,
-                    request_id = %request_id,
-                    error = %e,
-                    "ACP permission frontend emit failed, but Feishu delivery is active"
-                );
-            } else {
-                state.remove_request(&request_id).await;
-                error!(error = %e, "ACP permission request emit failed");
-                return Ok(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Cancelled,
-                ));
+                response = wait_for_acp_permission_decision(rx) => response,
             }
-        }
-
-        if let Err(error) = crate::api::butler_api::emit_butler_task_permission_state_changed(
-            &self.app_handle,
-            self.conversation_id,
-            "acp",
-            true,
-        )
-        .await
-        {
-            warn!(
-                conversation_id = self.conversation_id,
-                error = %error,
-                "failed to refresh Butler ACP permission state"
-            );
-        }
-
-        let response = wait_for_acp_permission_decision(rx).await;
+        } else {
+            wait_for_acp_permission_decision(rx).await
+        };
         let grants = match &response.outcome {
             acp::RequestPermissionOutcome::Selected(selected) =>
                 crate::api::ai::agent_driver::approval::permission_option_requires_authorization(
@@ -4937,6 +4907,7 @@ async fn run_acp_session(
     };
     let _ = send_startup_error;
 
+    let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id).map_err(AppError::UnknownError)?;
     let mut client_impl = AcpTauriClient::new(
         app_handle.clone(),
         conversation_id,
@@ -4946,6 +4917,8 @@ async fn run_acp_session(
         permission_manager,
         acp_config.instance_id,
         run_id.to_string(),
+        acp_config.working_directory.clone(),
+        mcp_scope,
     );
     client_impl.diagnostics = diagnostics.clone();
     let client_handle = client_impl.clone();
@@ -5150,12 +5123,12 @@ async fn run_acp_connected_session(
         .close
         .is_some();
     startup_failure_stage = AgentFailureStage::Mcp;
-    let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id).map_err(AppError::UnknownError)?;
+    let mcp_scope = &client_handle.prompt_scope;
     let acp_mcp_servers = match build_acp_manual_mcp_servers(
         &app_handle,
         conversation_id,
         &acp_config.selected_mcp_tools_payload,
-        &mcp_scope,
+        mcp_scope,
     )
     .await
     {

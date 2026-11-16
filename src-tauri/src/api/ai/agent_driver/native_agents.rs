@@ -614,12 +614,69 @@ pub(crate) enum ReviewOutcome { Allow(String), Ask(String) }
 pub(crate) fn review_outcome(options: &[crate::api::ai::acp::AcpPermissionOptionPayload], verdict: &str, reason: &str) -> ReviewOutcome {
     match verdict {
         "safe" => match options.iter().find(|option| option.kind == "allow_once") {
-            Some(option) => ReviewOutcome::Allow(option.option_id.clone()),
+            Some(option) if options.iter().filter(|other| other.option_id == option.option_id).count() == 1
+                && !option.option_id.is_empty() => ReviewOutcome::Allow(option.option_id.clone()),
+            Some(_) => ReviewOutcome::Ask("智能体提供的一次性允许选项编号无效或重复，需要人工确认".into()),
             None => ReviewOutcome::Ask(format!("自动审核判定安全（{reason}），但智能体没有提供「本次允许」选项，需要人工确认")),
         },
         "risky" => ReviewOutcome::Ask(format!("自动审核认为需要人工确认：{reason}")),
         _ => ReviewOutcome::Ask(format!("自动审核未完成，需要人工确认：{reason}")),
     }
+}
+
+/// Register the native decision channel before starting the review. Both manual and
+/// model replies then pass through the same scope, advertised options and Butler guard.
+pub(crate) async fn register_session_permission(
+    app: &tauri::AppHandle, event: &crate::api::ai::acp::AcpPermissionRequestEvent,
+    sender: oneshot::Sender<crate::api::ai::acp::AcpPermissionDecision>, scope: super::approval::AgentRequestScope,
+    guard: Option<crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard>,
+    turn: Option<i64>, agent: &'static str, cwd: &std::path::Path,
+) -> Result<(), String> {
+    let conversation_id = event.conversation_id.ok_or("原生权限请求缺少会话编号")?;
+    let review_turn = if let Some(id) = turn {
+        let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
+        let conversation = db.conversation_repo().map_err(|e| e.to_string())?.read(conversation_id)
+            .map_err(|e| e.to_string())?.ok_or_else(|| format!("审核会话 {conversation_id} 不存在"))?;
+        (crate::mcp::tool_review::effective_review_mode(app, conversation.assistant_id.unwrap_or_default(), conversation_id)
+            == "auto_model").then_some(id)
+    } else { None };
+    let state = app.state::<crate::api::ai::acp::AcpPermissionState>();
+    state.store_request_guarded(event.clone(), sender, scope.clone(), guard).await?;
+    if let Some(turn) = review_turn {
+        tauri::async_runtime::spawn(review_permission(app.clone(), event.clone(), scope, turn, agent, cwd.display().to_string()));
+    } else if let Err(error) = present_permission(app, event, json!(event)).await {
+        state.remove_request(&event.request_id).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn present_permission(app: &tauri::AppHandle, event: &crate::api::ai::acp::AcpPermissionRequestEvent, payload: Value) -> Result<(), String> {
+    use crate::api::operation_api::{emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT};
+    let state = app.state::<crate::api::ai::acp::AcpPermissionState>();
+    let Some(snapshot) = state.get_request(&event.request_id).await else { return Ok(()); };
+    let mut delivered = false;
+    if event.agent_kind.as_deref() == Some("acp") {
+        if let Some(id) = event.conversation_id {
+            match crate::feishu::try_deliver_acp_permission_to_feishu(app, id, &snapshot).await {
+                Ok(sent) => delivered = sent,
+                Err(error) => tracing::warn!(conversation_id = id, %error, "ACP permission Feishu delivery failed"),
+            }
+        }
+    }
+    if !state.mark_presented(&event.request_id, payload.clone()).await { return Ok(()); }
+    if let Err(error) = emit_permission_request_event(app, ACP_PERMISSION_REQUEST_EVENT, event.conversation_id, &payload) {
+        if !delivered { return Err(error); }
+        tracing::warn!(%error, "ACP permission desktop delivery failed; Feishu delivery is active");
+    }
+    if event.agent_kind.as_deref() == Some("acp") {
+        if let Some(id) = event.conversation_id {
+            if let Err(error) = crate::api::butler_api::emit_butler_task_permission_state_changed(app, id, "acp", true).await {
+                tracing::warn!(conversation_id = id, %error, "Failed to refresh Butler permission state");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Review first; the card (and its notification) only appears when the review does not clear the request.
@@ -650,9 +707,9 @@ pub(crate) async fn review_permission(app: tauri::AppHandle, event: crate::api::
     if state.get_request(&event.request_id).await.is_none() { return; }
     let mut payload = serde_json::to_value(&event).unwrap_or_else(|_| json!({}));
     payload["review"] = json!({ "verdict": draft.verdict, "reason": reason });
-    state.mark_presented(&event.request_id, payload.clone()).await;
-    if let Err(error) = crate::api::operation_api::emit_permission_request_event(&app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(conversation_id), &payload) {
-        tracing::warn!(conversation_id, request_id = %event.request_id, error = %error, "Failed to show reviewed native agent permission");
+    if let Err(error) = present_permission(&app, &event, payload).await {
+        tracing::warn!(conversation_id, request_id = %event.request_id, %error, "Failed to show reviewed native agent permission");
+        state.remove_request(&event.request_id).await;
     }
 }
 

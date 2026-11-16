@@ -243,3 +243,26 @@ fn test_claude_reuse_mismatch_leaves_entry_unchanged_and_entries_are_isolated() 
     assert_eq!(first.handle.run_id, "first-run");
     assert_eq!(serde_json::to_value(&first.snapshot).unwrap(), first_snapshot);
 }
+
+#[tokio::test]
+async fn test_agent_permission_review_claude_native_reply_and_late_decision() {
+    use crate::api::ai::agent_driver::native_agents::{review_outcome, ReviewOutcome};
+    let options = vec![AcpPermissionOptionPayload { option_id: "allow".into(), name: "本次允许".into(), kind: "allow_once".into() }];
+    let request = json!({"tool_name":"Read","input":{"file_path":"README.md"}});
+    let ReviewOutcome::Allow(option) = review_outcome(&options, "safe", "读取说明") else { panic!("expected one-time approval") };
+    let (tx, rx) = oneshot::channel();
+    tx.send(AcpPermissionDecision::Selected(option)).unwrap();
+    let (_signal, mut cancellation) = watch::channel(0);
+    let state = AcpPermissionState::new();
+    let (decision, _) = wait_claude_permission_decision(&state, "claude:42:run:req", rx, &mut cancellation, 0).await;
+    let response = claude_permission_response("req", &request, decision);
+    assert_eq!(response["response"]["request_id"], "req");
+    assert_eq!(response["response"]["response"]["behavior"], "allow");
+    assert_eq!(response["response"]["response"]["updatedInput"], request["input"]);
+
+    let (tx, rx) = oneshot::channel();
+    let (_signal, mut cancelled) = watch::channel(1);
+    let (decision, _) = wait_claude_permission_decision(&state, "claude:42:run:req", rx, &mut cancelled, 0).await;
+    assert!(tx.send(AcpPermissionDecision::Selected("allow".into())).is_err());
+    assert_eq!(claude_permission_response("req", &request, decision)["response"]["response"]["behavior"], "deny");
+}
