@@ -12,7 +12,7 @@ Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与
 
 | 驱动 | 管家说明的投递位置 |
 | --- | --- |
-| Codex app-server | `turn/start.additionalContext` 中的应用条目，每条最多 4,000 个 UTF-8 字节。原生线程压缩结束后恢复当前指令。 |
+| Codex app-server | `turn/start.additionalContext` 中的应用条目，每条最多 4,000 个 UTF-8 字节。收到原生压缩完成事件即在同一回合补回当前指令；同轮再次压缩会再次补回。 |
 | Claude Code | CLI 的 `--append-system-prompt-file`。新建和恢复进程都追加到 Claude 自带系统提示。 |
 | Pi | 扩展在 `before_agent_start` 填充系统提示 section，旧版扩展接口使用追加的系统提示文本。 |
 | Cursor | SDK 发送的首个普通回合附带管家说明，成功后该运行实例后续回合省略重复内容。 |

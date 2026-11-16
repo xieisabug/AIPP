@@ -1231,6 +1231,60 @@ fn codex_application_context(mut text: &str) -> serde_json::Map<String, Value> {
     entries
 }
 
+// The legacy event omits the item ID. Match both event streams by their
+// turn-local ordinal so either can arrive first without injecting twice.
+#[derive(Default)]
+struct CodexContextRestore {
+    completed_items: std::collections::HashSet<String>,
+    legacy_completions: usize,
+    sent: usize,
+    pending: std::collections::HashSet<u64>,
+}
+
+impl CodexContextRestore {
+    async fn on_notification(
+        &mut self, method: &str, params: &Value, manual_compact: bool, thread_id: &str,
+        context: &serde_json::Map<String, Value>, request_id: &mut u64,
+        stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+    ) -> Result<(), String> {
+        if context.is_empty() { return Ok(()); }
+        let count = match method {
+            "item/completed" if params.pointer("/item/type").and_then(Value::as_str) == Some("contextCompaction") => {
+                let id = params.pointer("/item/id").and_then(Value::as_str)
+                    .ok_or_else(|| format!("Codex thread {thread_id}: contextCompaction item/completed omitted item.id"))?;
+                self.completed_items.insert(id.to_owned());
+                self.completed_items.len()
+            }
+            "thread/compacted" => {
+                self.legacy_completions += 1;
+                self.legacy_completions
+            }
+            // Explicit /compact may finish without a separate completion item.
+            "turn/completed" if manual_compact && params.pointer("/turn/status").and_then(Value::as_str) == Some("completed") => 1,
+            _ => return Ok(()),
+        };
+        if count <= self.sent { return Ok(()); }
+        self.sent = count;
+        *request_id += 1;
+        self.pending.insert(*request_id);
+        let items: Vec<_> = context.iter().map(|(key, entry)| {
+            let value = entry["value"].as_str().unwrap_or_default();
+            json!({"type":"message","role":"developer","content":[{"type":"input_text","text":format!("<{key}>{value}</{key}>")}]})
+        }).collect();
+        write_frame(stdin, &json_rpc_request(*request_id, "thread/inject_items", json!({"threadId":thread_id,"items":items}))).await
+            .map_err(|e| format!("Codex thread {thread_id} 压缩后发送管家指令失败：{e}"))
+    }
+
+    fn acknowledge(&mut self, thread_id: &str, frame: &Value) -> Result<(), String> {
+        if frame["id"].as_u64().is_some_and(|id| self.pending.remove(&id)) {
+            if let Some(error) = frame.get("error") {
+                return Err(format!("Codex thread {thread_id} 压缩后恢复管家指令失败：{error}"));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str, context: &serde_json::Map<String, Value>) -> Value {
     let mut params = json!({
         "threadId": thread_id,
@@ -1400,7 +1454,7 @@ async fn handle_server_request(
     Ok(true)
 }
 
-async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<(), String> {
+async fn write_frame(stdin: &mut (impl tokio::io::AsyncWrite + Unpin), frame: &Value) -> Result<(), String> {
     let mut bytes = serde_json::to_vec(frame)
         .map_err(|error| format!("序列化 Codex JSON-RPC 请求失败：{error}"))?;
     bytes.push(b'\n');
@@ -2453,7 +2507,8 @@ async fn run_session(
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
                 let mut usage_tracker = CodexTurnUsageTracker::default();
-                let mut compacted = manual_compact;
+                let mut restore = CodexContextRestore::default();
+                let mut turn_completed = false;
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
@@ -2461,7 +2516,7 @@ async fn run_session(
                 // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
                 let mut item_content_offsets = HashMap::<String, u64>::new();
                 let mut item_orders = HashMap::<String, u64>::new();
-                loop {
+                while !turn_completed || !restore.pending.is_empty() {
                     let frame = if let Some(frame) = pending_notifications.pop_front() {
                         frame
                     } else {
@@ -2541,12 +2596,18 @@ async fn run_session(
                         }
                         continue;
                     }
+                    if frame.get("method").is_none() {
+                        restore.acknowledge(&thread_id, &frame)?;
+                        continue;
+                    }
                     if !codex_notification_matches_turn(&frame, &thread_id, turn_id.as_deref()) {
                         debug!(conversation_id, thread_id, turn_id = ?turn_id, "Ignoring Codex notification for another thread or turn");
                         continue;
                     }
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
+                    restore.on_notification(method, &params, manual_compact, &thread_id,
+                        &application_context, &mut request_id, &mut stdin).await?;
                     usage_tracker.note_notification(method, &params);
                     match method {
                                 "turn/started" => {
@@ -2615,9 +2676,8 @@ async fn run_session(
                                         }
                                     }
                                 }
-                                "thread/compacted" => compacted = true,
+                                "thread/compacted" => {},
                                 "item/started" | "item/completed" => {
-                                    compacted |= method == "item/completed" && params.pointer("/item/type").and_then(Value::as_str) == Some("contextCompaction");
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let item_type = item.get("type").and_then(Value::as_str);
@@ -2711,7 +2771,7 @@ async fn run_session(
                                             .map(str::to_string)
                                             .or_else(|| Some("Codex turn failed".to_string()));
                                     }
-                                    break;
+                                    turn_completed = true;
                                 },
                                 "mcpServer/startupStatus/updated" => {
                                     let server_name = params.get("name").and_then(Value::as_str).unwrap_or("unknown");
@@ -2752,17 +2812,6 @@ async fn run_session(
                 }
                 if let Some(error) = turn_error {
                     return Err(error);
-                }
-                if compacted && !application_context.is_empty() {
-                    let items: Vec<_> = application_context.iter().map(|(key, entry)| {
-                        let value = entry["value"].as_str().unwrap_or_default();
-                        json!({"type":"message","role":"developer","content":[{"type":"input_text","text":format!("<{key}>{value}</{key}>")}]})
-                    }).collect();
-                    request_id += 1;
-                    write_frame(&mut stdin, &json_rpc_request(request_id, "thread/inject_items", json!({"threadId":thread_id,"items":items}))).await?;
-                    read_rpc_response_with_approvals(&app_handle, conversation_id, &mut stdin, &mut lines, request_id,
-                        &mut pending_notifications, Some(&request_cancellation)).await
-                        .map_err(|err| format!("Codex thread {thread_id} 压缩后恢复管家指令失败：{err}"))?;
                 }
                 persist_codex_timing(&app_handle, message_id, turn_start_time, first_any_token_time);
                 for plan_message in plan_messages.values_mut() {
