@@ -22,7 +22,7 @@ function cursorFixture() {
   const agent = { agentId: 'cursor1', async send(_text, options) {
     let finish, fail;
     const completion = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
-    turns.push({ options, finish, fail });
+    turns.push({ text: _text, options, finish, fail });
     return { wait: () => completion, async cancel() {} };
   }, async close() {} };
   return { turns, events, sdk: { Agent: { async create() { return agent; } } } };
@@ -247,4 +247,16 @@ test('should persist the browser sign-in only after the SDK login completes and 
   assert.throws(() => loginUrl('https://evil.example/cursor.com'), /Unexpected Cursor sign-in URL host/);
   assert.throws(() => loginUrl('http://cursor.com/login'), /Unexpected/);
   assert.equal(loginUrl('https://www.cursor.com/login?x=1'), 'https://www.cursor.com/login?x=1');
+});
+
+test('should append Butler context once after Cursor completes a normal turn', async () => {
+  const f = cursorFixture();
+  const runtime = await openCursor({ cwd: '/repo', butlerInstructions: 'role' }, e => f.events.push(e), f);
+  try {
+    for (const [text, expected] of [['first','first\n\nrole'],['second','second'],['/compact','/compact'],['after','after\n\nrole']]) {
+      await runtime.prompt(text, text);
+      assert.equal(f.turns.at(-1).text, expected);
+      f.turns.at(-1).finish({ status:'finished', result:'ok' }); await tick();
+    }
+  } finally { await runtime.close(); }
 });

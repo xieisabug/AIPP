@@ -6,6 +6,22 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。
 
+### 管家会话的角色和工具说明
+
+管家主会话、联系人、独立任务和群成员共用 AIPP 的角色构造逻辑。模型按本次 MCP 目录里的实际注册名和参数定义调用工具。动态工具先加载，将回执条目的 `server`、`tool` 分别填入 `server_name`、`tool_name`，再用 `call_mcp_tool` 传对象类型的 `parameters`，无参数时传 `{}`。角色与工具说明在原生驱动发送时注入；用户消息、附件、引用和长期记忆仍走原有本轮上下文链路。
+
+| 驱动 | 管家说明的投递位置 |
+| --- | --- |
+| Codex app-server | `turn/start.additionalContext` 中的应用条目，每条最多 4,000 个 UTF-8 字节。原生线程压缩结束后恢复当前指令。 |
+| Claude Code | CLI 的 `--append-system-prompt-file`。新建和恢复进程都追加到 Claude 自带系统提示。 |
+| Pi | 扩展在 `before_agent_start` 填充系统提示 section，旧版扩展接口使用追加的系统提示文本。 |
+| Cursor | SDK 发送的首个普通回合附带管家说明，成功后该运行实例后续回合省略重复内容。 |
+| OpenCode | AIPP 当前支持的本机 HTTP 服务协议在 `prompt_async.system` 接收说明，每次随回合发送。 |
+| 通用 ACP、Kiro V3 | 首个普通 `session/prompt` 追加独立文本块。会话恢复到新的驱动实例时重新投递；手动压缩后在下一普通回合补发。 |
+| Antigravity | 原生端支持时，在新建或恢复的 `_meta.antigravity.systemPrompt.append` 发送。其余受支持版本使用 ACP 文本块。 |
+
+上下文说明不授予工具权限。工具启停、审批、凭据保险箱和会话归属仍由原有 AIPP 执行路径检查。
+
 ### 原生智能体的环境检测与更新
 
 Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动检测运行环境，不需要手动填写命令：

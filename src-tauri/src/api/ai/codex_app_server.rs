@@ -55,6 +55,7 @@ pub struct CodexAppServerConfig {
     pub sandbox: Option<String>,
     pub approvals_reviewer: Option<String>,
     pub collaboration_mode: Option<String>,
+    pub developer_instructions: Option<String>,
     pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
@@ -432,6 +433,7 @@ pub fn extract_codex_app_server_config(
         sandbox,
         approvals_reviewer,
         collaboration_mode: None,
+        developer_instructions: None,
         selected_mcp_tools_payload: String::new(),
         session_signature: String::new(),
     };
@@ -452,6 +454,7 @@ fn codex_config_signature(config: &CodexAppServerConfig) -> String {
         "approvals_reviewer": config.approvals_reviewer,
         "collaboration_mode": config.collaboration_mode,
         "env": config.env_vars,
+        "developer_instructions": config.developer_instructions,
         "selected_mcp": config.selected_mcp_tools_payload,
     }))
     .unwrap_or_default()
@@ -1211,8 +1214,25 @@ fn apply_codex_config_option(
     Err(format!("Codex 不支持会话配置：{config_id}"))
 }
 
-fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str) -> Value {
-    json!({
+// Codex truncates individual additionalContext entries above 4,000 UTF-8 bytes.
+fn codex_application_context(mut text: &str) -> serde_json::Map<String, Value> {
+    let mut entries = serde_json::Map::new();
+    while !text.is_empty() {
+        let mut end = text.len().min(4000);
+        while !text.is_char_boundary(end) { end -= 1; }
+        if end < text.len() {
+            // Keep paragraphs and individual rules together when they fit.
+            if let Some(newline) = text[..end].rfind('\n') { end = newline + 1; }
+        }
+        let (part, rest) = text.split_at(end);
+        entries.insert(format!("aipp_butler_{:08}", entries.len()), json!({"kind":"application","value":part}));
+        text = rest;
+    }
+    entries
+}
+
+fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str, context: &serde_json::Map<String, Value>) -> Value {
+    let mut params = json!({
         "threadId": thread_id,
         "model": snapshot.model,
         "reasoningEffort": snapshot.reasoning_effort,
@@ -1221,7 +1241,9 @@ fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionS
         "approvalsReviewer": snapshot.approvals_reviewer,
         "collaborationMode": codex_collaboration_mode_json(snapshot),
         "input": [{"type":"text","text":prompt,"text_elements":[]}],
-    })
+    });
+    if !context.is_empty() { params["additionalContext"] = json!(context); }
+    params
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2211,6 +2233,7 @@ async fn run_session(
         &requests, conversation_id, &config, stored_thread.as_deref(), mcp_config_overrides,
         request_id, &mut stdin, &mut lines, &mut pending_notifications,
     ).await?;
+    let application_context = codex_application_context(config.developer_instructions.as_deref().unwrap_or_default());
     let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
     let connection_event_id = restored_session_method
         .as_ref()
@@ -2397,7 +2420,7 @@ async fn run_session(
                 let (turn_method, turn_params) = if manual_compact {
                     ("thread/compact/start", json!({ "threadId": thread_id }))
                 } else {
-                    ("turn/start", codex_turn_start_params(&thread_id, &snapshot, &prompt))
+                    ("turn/start", codex_turn_start_params(&thread_id, &snapshot, &prompt, &application_context))
                 };
                 request_id += 1;
                 write_frame(
@@ -2430,6 +2453,7 @@ async fn run_session(
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
                 let mut usage_tracker = CodexTurnUsageTracker::default();
+                let mut compacted = manual_compact;
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
@@ -2591,7 +2615,9 @@ async fn run_session(
                                         }
                                     }
                                 }
+                                "thread/compacted" => compacted = true,
                                 "item/started" | "item/completed" => {
+                                    compacted |= method == "item/completed" && params.pointer("/item/type").and_then(Value::as_str) == Some("contextCompaction");
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let item_type = item.get("type").and_then(Value::as_str);
@@ -2726,6 +2752,17 @@ async fn run_session(
                 }
                 if let Some(error) = turn_error {
                     return Err(error);
+                }
+                if compacted && !application_context.is_empty() {
+                    let items: Vec<_> = application_context.iter().map(|(key, entry)| {
+                        let value = entry["value"].as_str().unwrap_or_default();
+                        json!({"type":"message","role":"developer","content":[{"type":"input_text","text":format!("<{key}>{value}</{key}>")}]})
+                    }).collect();
+                    request_id += 1;
+                    write_frame(&mut stdin, &json_rpc_request(request_id, "thread/inject_items", json!({"threadId":thread_id,"items":items}))).await?;
+                    read_rpc_response_with_approvals(&app_handle, conversation_id, &mut stdin, &mut lines, request_id,
+                        &mut pending_notifications, Some(&request_cancellation)).await
+                        .map_err(|err| format!("Codex thread {thread_id} 压缩后恢复管家指令失败：{err}"))?;
                 }
                 persist_codex_timing(&app_handle, message_id, turn_start_time, first_any_token_time);
                 for plan_message in plan_messages.values_mut() {
@@ -2991,7 +3028,7 @@ mod tests {
             collaboration_mode: Some("plan".to_string()),
             ..Default::default()
         };
-        let params = codex_turn_start_params("thread-1", &snapshot, "hello");
+        let params = codex_turn_start_params("thread-1", &snapshot, "hello", &Default::default());
         assert_eq!(params["model"], "gpt-a");
         assert_eq!(params["reasoningEffort"], "ultra");
         assert_eq!(params["collaborationMode"]["mode"], "plan");
@@ -3065,7 +3102,7 @@ mod tests {
     #[test]
     fn builds_turn_start_with_approval_and_sandbox_overrides() {
         let default_snapshot = CodexConversationSessionState::default();
-        let default_params = codex_turn_start_params("thread-1", &default_snapshot, "hello");
+        let default_params = codex_turn_start_params("thread-1", &default_snapshot, "hello", &Default::default());
         assert!(default_params["approvalPolicy"].is_null());
         assert!(default_params["sandboxPolicy"].is_null());
 
@@ -3075,7 +3112,7 @@ mod tests {
             approvals_reviewer: Some("auto_review".to_string()),
             ..Default::default()
         };
-        let params = codex_turn_start_params("thread-1", &snapshot, "hello");
+        let params = codex_turn_start_params("thread-1", &snapshot, "hello", &Default::default());
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandboxPolicy"], json!({"type": "workspaceWrite"}));
         assert_eq!(params["approvalsReviewer"], "auto_review");
@@ -3370,6 +3407,7 @@ mod tests {
             sandbox: None,
             approvals_reviewer: None,
             collaboration_mode: None,
+            developer_instructions: None,
             selected_mcp_tools_payload: String::new(),
             session_signature: String::new(),
         }
@@ -3456,3 +3494,7 @@ mod protocol_tests;
 #[cfg(test)]
 #[path = "codex_app_server_activity_tests.rs"]
 mod activity_tests;
+
+#[cfg(test)]
+#[path = "codex_app_server_context_tests.rs"]
+mod context_tests;

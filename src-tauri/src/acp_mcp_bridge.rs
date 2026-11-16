@@ -273,6 +273,33 @@ fn open_mcp_db(db_path: PathBuf) -> Result<MCPDatabase, String> {
     Ok(MCPDatabase { conn })
 }
 
+pub(crate) fn native_butler_instructions(role: &str, payload: &str) -> Result<String, String> {
+    let tools = parse_selected_mcp_tools(payload)?;
+    let registered = |name: &str| {
+        let mut matches = tools.iter().filter(|tool| tool.tool_name == name);
+        let tool = matches.next()?;
+        matches.next().is_none().then(|| acp_loaded_tool_name(tool.tool_id, name))
+    };
+    // These two product-authored rules require the transcript card. The native
+    // tool catalog currently omits the card until the native UI can render it.
+    let preview_available = registered("preview_message").is_some();
+    let mut instructions = role.lines().filter(|line| {
+        preview_available || !(line.starts_with("- 要把成员的答复、独立任务的最终答复或定时任务的产出原样交给用户时，用 `preview_message`")
+            || line.starts_with("- 要把其他成员的答复原样交给用户时，用 `preview_message`"))
+    }).collect::<Vec<_>>().join("\n");
+    instructions.push_str("\n\n## AIPP 工具调用\n请使用当前 MCP 目录中的实际注册名，按 inputSchema 提交 JSON 对象。只在明确参数校验失败且未执行时修正重试。不可用的工具如实说明。");
+    if let Some(progress) = registered("report_progress") {
+        instructions.push_str(&format!(r#" 直接调用 {progress}，例如 {{"text":"我会核对任务记录。"}}；text 填本次实际要做的事。"#));
+    }
+    if let (Some(load), Some(call)) = (registered("load_mcp_tool"), registered("call_mcp_tool")) {
+        instructions.push_str(&format!(" 动态工具先用 {load} 加载定义，再用 {call} 调用：server_name 取加载结果的 server，tool_name 取 tool，parameters 按加载结果的 parameters 定义填写实际参数对象。"));
+    }
+    if let (Some(inspect), Some(execute)) = (registered("superadmin_inspect"), registered("superadmin_execute")) {
+        instructions.push_str(&format!(" 先从 {inspect} 读取 args_schema，调用 {execute} 时把对应动作字段放进 args 对象。"));
+    }
+    Ok(instructions)
+}
+
 fn parse_selected_mcp_tools(raw: &str) -> Result<Vec<AcpSelectedMcpTool>, String> {
     if raw.trim().is_empty() {
         return Ok(Vec::new());

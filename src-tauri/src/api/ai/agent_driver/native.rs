@@ -90,6 +90,7 @@ fn prepare_selected_config(
                 codex_config.collaboration_mode = Some(mode.to_string());
             }
         }
+        codex_config.developer_instructions = request.native_butler_role.clone();
         codex_config.instance_id = Some(selected.provider_id);
         return Ok(PreparedAgentSession::Codex(codex_config));
     }
@@ -107,6 +108,7 @@ fn prepare_selected_config(
                 config.permission_mode = Some(mode.to_string());
             }
         }
+        config.butler_instructions = request.native_butler_role.clone();
         config.instance_id = Some(selected.provider_id);
         return Ok(PreparedAgentSession::Claude(config));
     }
@@ -156,6 +158,7 @@ fn prepare_selected_config(
         acp_config.additional_args.len()
     );
 
+    acp_config.butler_instructions = request.native_butler_role.clone();
     acp_config.instance_id = Some(selected.provider_id);
     Ok(PreparedAgentSession::Acp(acp_config))
 }

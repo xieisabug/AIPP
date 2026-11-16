@@ -275,3 +275,31 @@ for (const driver of ['kiro', 'antigravity']) {
     } finally { await runtime.close(); }
   });
 }
+
+for (const driver of ['kiro', 'antigravity']) {
+  test(`should deliver Butler context once on restored ${driver} and preserve the next input`, async () => {
+    const f = fixture();
+    const runtime = await f.open(driver, { session: 's1', butlerInstructions: 'Butler role' });
+    try {
+      for (const text of ['first', 'second', '/compact', 'after']) {
+        const pending = runtime.prompt(text, text);
+        await tick();
+        const frame = f.commands.filter(item => item.method === 'session/prompt').at(-1);
+        assert.deepEqual(frame.params.prompt.map(item => item.text),
+          ['first', 'after'].includes(text) ? [text, 'Butler role'] : [text]);
+        f.finish(); await pending;
+      }
+    } finally { await runtime.close(); }
+  });
+}
+
+test('should use the advertised Antigravity system append on resume without repeating it in user input', async () => {
+  const f = fixture({ capabilities: { _meta: { antigravity: { systemPrompt: { append: true } } } } });
+  const runtime = await f.open('antigravity', { session: 's1', butlerInstructions: 'role' });
+  try {
+    assert.equal(f.commands.find(c => c.method === 'session/resume').params._meta.antigravity.systemPrompt.append, 'role');
+    const pending = runtime.prompt('hello', 1); await tick();
+    assert.deepEqual(f.commands.at(-1).params.prompt, [{type:'text', text:'hello'}]);
+    f.finish(); await pending;
+  } finally { await runtime.close(); }
+});
