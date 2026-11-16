@@ -137,7 +137,10 @@ async fn login(http: &OAuthHttp, provider: &Provider, account: &str, id: i64) ->
     let mut callback = reqwest::Url::parse(&pending.redirect).unwrap();
     callback.query_pairs_mut().append_pair("state", &pending.state).append_pair("code", account);
     let (credential, response) = tokio::join!(finish_with(http, pending), http.client.get(callback).send());
-    assert!(response.unwrap().status().is_success());
+    let response = response.unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.headers()["content-type"], "text/html; charset=utf-8");
+    assert!(response.text().await.unwrap().contains("授权已完成"));
     let mut credential = credential.unwrap(); credential.server_id = id; credential
 }
 
@@ -199,8 +202,10 @@ async fn test_apps_oauth_denial_never_exchanges_a_token() {
     let http = OAuthHttp::loopback();
     let pending = begin_with(&http, &format!("{}/mcp",provider.base), Some("known-client"), &[]).await.unwrap();
     let callback = format!("{}?state={}&error=access_denied",pending.redirect,pending.state);
-    let (result, _) = tokio::join!(finish_with(&http, pending), http.client.get(callback).send());
+    let (result, response) = tokio::join!(finish_with(&http, pending), http.client.get(callback).send());
     assert!(result.err().unwrap().contains("拒绝"));
+    let page = response.unwrap().text().await.unwrap();
+    assert!(page.contains("授权未完成") && !page.contains("access_denied"));
     assert_eq!(provider.state.lock().unwrap().registrations, 0);
     assert!(provider.state.lock().unwrap().refreshes.is_empty());
 }

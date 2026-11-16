@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN" data-state="{{STATE}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{TITLE}} · AIPP</title>
+<style>
+  :root {
+    --bg: #fafafa; --card: #ffffff; --border: #e5e5e5;
+    --fg: #0a0a0a; --muted: #737373; --badge: #0a0a0a; --badge-fg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0a0a; --card: #171717; --border: #262626;
+      --fg: #fafafa; --muted: #a3a3a3; --badge: #fafafa; --badge-fg: #0a0a0a;
+    }
+  }
+  [data-state="error"] { --badge: transparent; --badge-fg: var(--fg); }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main {
+    width: 100%; max-width: 400px; padding: 40px 32px 32px; text-align: center;
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .04);
+    animation: rise .35s ease-out both;
+  }
+  .mark { position: relative; width: 64px; height: 64px; margin: 0 auto 24px; }
+  .mark img { width: 64px; height: 64px; border-radius: 14px; display: block; }
+  .badge {
+    position: absolute; right: -6px; bottom: -6px; width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center; border-radius: 50%;
+    background: var(--badge); color: var(--badge-fg); border: 3px solid var(--card);
+  }
+  [data-state="error"] .badge { background: var(--card); border: 1.5px solid var(--fg); }
+  .badge svg { width: 14px; height: 14px; }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+  p { margin: 0; color: var(--muted); }
+  .hint {
+    margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { main { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark">
+    <img src="data:image/png;base64,{{LOGO}}" alt="AIPP">
+    <span class="badge" aria-hidden="true">{{ICON}}</span>
+  </div>
+  <h1>{{TITLE}}</h1>
+  <p>{{MESSAGE}}</p>
+  <p class="hint">可以关闭此页面 · You can close this tab</p>
+</main>
+</body>
+</html>

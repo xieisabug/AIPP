@@ -219,6 +219,23 @@ pub(super) async fn begin_options(http: &OAuthHttp, endpoint: &str, client_id: O
     Ok(PendingLogin { client_secret:secret.map(str::to_string),client_auth_method:method.into(), url: auth_url.to_string(), listener, state, verifier, redirect, client_id, token_endpoint, endpoint: endpoint.to_owned(), resource: expected_resource.into(), revocation_endpoint })
 }
 
+/// Browser page shown on the loopback callback. Self-contained (inline CSS, embedded logo) because it is
+/// served from a one-shot socket with no other routes. The token exchange happens after this page is sent,
+/// so success only means "authorization received"; failure details stay in AIPP instead of being echoed here.
+pub(super) fn callback_page(ok: bool) -> String {
+    const CHECK: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>"#;
+    const CROSS: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>"#;
+    let (state, icon, title, message) = if ok {
+        ("ok", CHECK, "授权已完成", "已收到服务的授权，请回到 AIPP 完成连接。")
+    } else {
+        ("error", CROSS, "授权未完成", "授权被拒绝或已失效，请回到 AIPP 查看原因并重试。")
+    };
+    let logo = base64::engine::general_purpose::STANDARD.encode(include_bytes!("../../../icons/128x128.png"));
+    include_str!("oauth_callback.html")
+        .replace("{{STATE}}", state).replace("{{ICON}}", icon)
+        .replace("{{TITLE}}", title).replace("{{MESSAGE}}", message).replace("{{LOGO}}", &logo)
+}
+
 /// Read one request head from the loopback socket. `None` for an empty/oversized/non-UTF-8 request.
 async fn read_request_head(socket: &mut tokio::net::TcpStream) -> Option<String> {
     let mut bytes = Vec::new();
@@ -251,8 +268,8 @@ pub(super) async fn finish_with(http: &OAuthHttp, pending: PendingLogin) -> Resu
                         continue;
                     }
                     let result = callback_path(&head, &pending.state, redirect_url.path());
-                    let body = if result.is_ok() { "Authorization received. Return to AIPP to finish connecting." } else { "Authorization rejected. Return to AIPP for details." };
-                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let body = callback_page(result.is_ok());
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                     let _ = socket.write_all(response.as_bytes()).await;
                     return result;
                 }
