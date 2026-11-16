@@ -545,7 +545,7 @@ function ButlerExperimentWindow() {
         handleOpenChange: handlePreviewFileOpenChange,
         reopenPersistedPreview: reopenPersistedPreviewFile,
     } = usePreviewFile({
-        conversationId: contact?.conversationId ?? conversationIdNumber,
+        conversationId: groupId === null && activeConversationId ? Number(activeConversationId) : undefined,
     });
 
     const handlePreviewFileContextSelection = useCallback((selection: PreviewFileContextSelection) => {

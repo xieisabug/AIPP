@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -518,6 +518,7 @@ function getLatestPreviewFileState(
     const candidates = calls
         .filter((call) => (
             call.tool_name === PREVIEW_FILE_TOOL_NAME
+            && call.conversation_id === conversationId
             && (targetCallId === undefined || targetCallId === null || call.id === targetCallId)
         ))
         .sort((a, b) => b.id - a.id);
@@ -826,7 +827,22 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
     const [dismissedPersistedCallId, setDismissedPersistedCallId] = useState<number | null>(null);
     const [targetPersistedCallId, setTargetPersistedCallId] = useState<number | null>(null);
 
+    // Each mounted conversation owns its requests, including an A -> B -> A switch.
+    const scope = useMemo(() => ({ active: false, revision: 0 }), [conversationId]);
+    useLayoutEffect(() => {
+        scope.active = true;
+        setPendingRequest(null);
+        setPersistedState(null);
+        setIsDialogOpen(false);
+        setDismissedPersistedCallId(null);
+        setTargetPersistedCallId(null);
+        return () => { scope.active = false; scope.revision++; };
+    }, [scope]);
+
     const refreshPersistedState = useCallback(async (requestedCallId?: number | null) => {
+        if (!scope.active) return;
+        const revision = ++scope.revision;
+        const isCurrent = () => scope.active && scope.revision === revision;
         if (conversationId === undefined) {
             setPersistedState(null);
             return;
@@ -835,6 +851,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
             const calls = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
                 conversationId,
             });
+            if (!isCurrent()) return;
             const latest = getLatestPreviewFileState(
                 calls,
                 conversationId,
@@ -853,11 +870,13 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
                         request: latest.request,
                     }
                 );
+                if (!isCurrent()) return;
                 setPersistedState({
                     ...latest,
                     request: normalizedRequest,
                 });
             } catch (error) {
+                if (!isCurrent()) return;
                 console.error(
                     "Failed to normalize persisted preview_file request:",
                     getErrorMessage(error)
@@ -865,29 +884,23 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
                 setPersistedState(latest);
             }
         } catch (error) {
+            if (!isCurrent()) return;
             console.error("Failed to load persisted preview_file state:", getErrorMessage(error));
         }
-    }, [conversationId, targetPersistedCallId]);
-
-    useEffect(() => {
-        setPendingRequest(null);
-        setIsDialogOpen(false);
-        setDismissedPersistedCallId(null);
-        setTargetPersistedCallId(null);
-    }, [conversationId]);
+    }, [conversationId, targetPersistedCallId, scope]);
 
     useEffect(() => {
         void refreshPersistedState();
     }, [refreshPersistedState]);
 
     useEffect(() => {
+        let active = true;
+        const timers = new Set<ReturnType<typeof setTimeout>>();
         const unsubscribe = listen<PreviewFileRequest>("preview-file-request", (event) => {
             const request = event.payload;
 
             if (
-                conversationId !== undefined &&
-                request.conversation_id !== undefined &&
-                request.conversation_id !== null &&
+                !active || conversationId === undefined ||
                 request.conversation_id !== conversationId
             ) {
                 return;
@@ -896,13 +909,17 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
             setPendingRequest(request);
             setIsDialogOpen(true);
             setTargetPersistedCallId(null);
-            void refreshPersistedState();
-            setTimeout(() => {
-                void refreshPersistedState();
+            void refreshPersistedState(null);
+            const timer = setTimeout(() => {
+                timers.delete(timer);
+                if (active) void refreshPersistedState(null);
             }, 300);
+            timers.add(timer);
         });
 
         return () => {
+            active = false;
+            timers.forEach(clearTimeout);
             unsubscribe.then((f) => f());
         };
     }, [conversationId, refreshPersistedState]);
@@ -911,8 +928,10 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         if (conversationId === undefined) {
             return;
         }
+        let active = true;
         const eventName = `conversation_event_${conversationId}`;
         const unsubscribe = listen<any>(eventName, (event) => {
+            if (!active) return;
             const payload = event.payload as { type?: string; data?: { tool_name?: string } };
             if (payload?.type !== "mcp_tool_call_update") {
                 return;
@@ -927,12 +946,16 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         });
 
         return () => {
+            active = false;
             unsubscribe.then((f) => f());
         };
     }, [conversationId, refreshPersistedState]);
 
+    const currentPersistedState = conversationId !== undefined
+        && persistedState?.request.conversation_id === conversationId ? persistedState : null;
     const previewFileView = useMemo(() => {
-        if (pendingRequest && isDialogOpen) {
+        const persistedState = currentPersistedState;
+        if (conversationId !== undefined && pendingRequest?.conversation_id === conversationId && isDialogOpen) {
             let persistedAnchor: PreviewFilePersistedState | null = null;
 
             if (persistedState) {
@@ -989,7 +1012,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
             callId: null as number | null,
             messageId: null as number | null,
         };
-    }, [pendingRequest, isDialogOpen, persistedState, dismissedPersistedCallId, targetPersistedCallId]);
+    }, [conversationId, pendingRequest, isDialogOpen, currentPersistedState, dismissedPersistedCallId, targetPersistedCallId]);
 
     const handleOpenChange = useCallback((open: boolean) => {
         setIsDialogOpen(open);
@@ -1015,7 +1038,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         isDialogOpen: previewFileView.isOpen,
         callId: previewFileView.callId,
         messageId: previewFileView.messageId,
-        managedCallId: previewFileView.callId ?? persistedState?.callId,
+        managedCallId: previewFileView.callId ?? currentPersistedState?.callId,
         handleOpenChange,
         reopenPersistedPreview,
     };
