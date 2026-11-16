@@ -198,6 +198,15 @@ describe("useAcpPermission", () => {
         expect(result.current.isDialogOpen).toBe(false);
     });
 
+    it("should recover a pending Codex approval when opening its conversation", async () => {
+        mockInvokeHandler("list_presented_agent_permissions", () => [{
+            request_id: "codex:9:17", conversation_id: 9, tool_call_id: "item-1",
+            agent_kind: "codex_app_server", options: [],
+        }]);
+        const { result } = renderHook(() => useAcpPermission({ conversationId: 9 }));
+        await waitFor(() => expect(result.current.pendingRequest?.request_id).toBe("codex:9:17"));
+    });
+
     it("routes Codex approval decisions to the native confirmation command", async () => {
         const invokeHandler = vi.fn();
         mockInvokeHandler("confirm_codex_permission", invokeHandler);

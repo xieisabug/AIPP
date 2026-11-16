@@ -411,10 +411,9 @@ pub fn extract_codex_app_server_config(
             return Err(AppError::UnknownError(format!("Codex 不支持沙箱模式：{value}")));
         }
     }
-    // 审批人：默认人工（user），auto_review 表示由 Codex 子代理按风险框架自动审批
+    // 未显式指定审批人时，由 Codex 使用自己的配置。
     let approvals_reviewer = model_value("codex_approvals_reviewer")
-        .or_else(|| provider_value("codex_approvals_reviewer"))
-        .or_else(|| Some("user".to_string()));
+        .or_else(|| provider_value("codex_approvals_reviewer"));
     if let Some(value) = approvals_reviewer.as_deref() {
         if !CODEX_APPROVALS_REVIEWERS.contains(&value) {
             return Err(AppError::UnknownError(format!("Codex 不支持审批人：{value}")));
@@ -568,15 +567,16 @@ fn codex_permission_options(method: &str, params: &Value) -> Vec<AcpPermissionOp
     let mut decisions = available
         .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
         .unwrap_or_default();
-    if decisions.is_empty() {
+    if available.is_none() {
         decisions = if method == "item/permissions/requestApproval" {
             vec!["accept", "acceptForSession", "decline"]
         } else {
             vec!["accept", "acceptForSession", "decline", "cancel"]
         };
     }
-    decisions
+    let mut options: Vec<_> = decisions
         .into_iter()
+        .filter(|value| matches!(*value, "accept" | "acceptForSession" | "cancel" | "decline"))
         .map(|decision| AcpPermissionOptionPayload {
             option_id: decision.to_string(),
             name: match decision {
@@ -595,7 +595,21 @@ fn codex_permission_options(method: &str, params: &Value) -> Vec<AcpPermissionOp
             }
             .to_string(),
         })
-        .collect()
+        .collect();
+    if method == "item/commandExecution/requestApproval" {
+        for (index, decision) in available.into_iter().flatten().enumerate() {
+            if let Some(prefix) = decision.pointer("/acceptWithExecpolicyAmendment/execpolicy_amendment").and_then(Value::as_array) {
+                if !prefix.is_empty() && prefix.iter().all(Value::is_string) {
+                    options.push(AcpPermissionOptionPayload {
+                        option_id: format!("execpolicy:{index}"),
+                        name: format!("允许并记住命令前缀：{}", prefix.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" · ")),
+                        kind: "allow_always".into(),
+                    });
+                }
+            }
+        }
+    }
+    options
 }
 
 fn codex_approval_response(method: &str, params: &Value, decision: AcpPermissionDecision) -> Value {
@@ -606,6 +620,13 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
         AcpPermissionDecision::Selected(value) => value,
         AcpPermissionDecision::Cancelled => "cancel".to_string(),
     };
+    if method == "item/commandExecution/requestApproval" {
+        if let Some(index) = selected.strip_prefix("execpolicy:").and_then(|index| index.parse::<usize>().ok()) {
+            if codex_permission_options(method, params).iter().any(|option| option.option_id == selected) {
+                return json!({"decision": params["availableDecisions"][index]});
+            }
+        }
+    }
     if method == "item/permissions/requestApproval" {
         if selected == "accept" || selected == "acceptForSession" {
             json!({
@@ -616,11 +637,7 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
             json!({"permissions": {}})
         }
     } else {
-        // Native command/file approvals support these string variants. Command
-        // policy amendments are structured objects, which Selected(String) and
-        // the current permission UI cannot represent. Never forward an arbitrary
-        // string (including serialized amendment JSON) as a native decision.
-        // `cancel` denies the action and interrupts the turn in both protocols.
+        // Unknown selections cancel the request.
         let supported_method = matches!(method,
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval");
         let selected = if supported_method
@@ -757,15 +774,35 @@ async fn handle_approval_request(
         app_handle, conversation_id, cancellation.and_then(|c| c.source_message_id),
         "codex.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
     )?;
-    permission_state.store_request_guarded(event.clone(), decision_tx, scope, butler_guard.clone()).await?;
-    if let Err(error) = emit_permission_request_event(
-        app_handle,
-        ACP_PERMISSION_REQUEST_EVENT,
-        Some(conversation_id),
-        &event,
-    ) {
-        permission_state.remove_request(&request_id).await;
-        return Err(error);
+    let mut review_turn = None;
+    if let Some(turn) = cancellation.and_then(|context| context.source_message_id) {
+        let conversation = ConversationDatabase::new(app_handle)
+            .map_err(|error| format!("Codex 审批连接数据库失败：{error}"))?
+            .conversation_repo()
+            .map_err(|error| format!("Codex 审批打开会话库失败：{error}"))?
+            .read(conversation_id)
+            .map_err(|error| format!("Codex 审批读取会话 {conversation_id} 失败：{error}"))?
+            .ok_or_else(|| format!("Codex 审批会话 {conversation_id} 不存在"))?;
+        if crate::mcp::tool_review::effective_review_mode(
+            app_handle, conversation.assistant_id.unwrap_or_default(), conversation_id,
+        ) == "auto_model" {
+            review_turn = Some(turn);
+        }
+    }
+    permission_state.store_request_guarded(event.clone(), decision_tx, scope.clone(), butler_guard.clone()).await?;
+    if let Some(turn) = review_turn {
+        tauri::async_runtime::spawn(super::agent_driver::native_agents::review_permission(
+            app_handle.clone(), event.clone(), scope, turn, "Codex",
+            params["cwd"].as_str().unwrap_or("未提供").to_string(),
+        ));
+    } else {
+        permission_state.mark_presented(&request_id, json!(event)).await;
+        if let Err(error) = emit_permission_request_event(
+            app_handle, ACP_PERMISSION_REQUEST_EVENT, Some(conversation_id), &event,
+        ) {
+            permission_state.remove_request(&request_id).await;
+            return Err(error);
+        }
     }
     let (decision, cancelled_by_control) = wait_codex_approval_decision(
         &permission_state, &request_id, decision_rx, cancellation,
@@ -1491,23 +1528,46 @@ async fn initialize_codex_transport(
     write_frame(stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await
 }
 
+// With no reviewer configured, a new Codex thread defaults to user review.
+// A resumed thread instead restores its saved reviewer unless explicitly overridden.
+fn reviewer_from_codex_config(result: &Value) -> Result<&str, String> {
+    let config = result["config"].as_object().ok_or("Codex config/read 响应缺少 config 对象")?;
+    match config.get("approvals_reviewer") {
+        None | Some(Value::Null) => Ok("user"),
+        Some(Value::String(reviewer)) if !reviewer.is_empty() => Ok(reviewer),
+        _ => Err("Codex config/read 返回了无效的 approvals_reviewer".into()),
+    }
+}
+
 async fn open_codex_thread(
     requests: &impl CodexServerRequests,
     conversation_id: i64,
     config: &CodexAppServerConfig,
     stored_thread: Option<&str>,
     mcp_config_overrides: Option<serde_json::Map<String, Value>>,
-    request_id: u64,
+    request_id: &mut u64,
     stdin: &mut tokio::process::ChildStdin,
     lines: &mut Lines<BufReader<ChildStdout>>,
     pending_notifications: &mut VecDeque<Value>,
 ) -> Result<Value, String> {
     let (method, params) = if let Some(thread_id) = stored_thread {
+        let reviewer = match config.approvals_reviewer.clone() {
+            Some(value) => value,
+            None => {
+                write_frame(stdin, &json_rpc_request(*request_id, "config/read", json!({
+                    "cwd": config.working_directory, "includeLayers": false,
+                }))).await?;
+                let result = read_codex_rpc_response(requests, conversation_id, stdin, lines, *request_id, pending_notifications)
+                    .await.map_err(|error| format!("Codex 恢复会话 {thread_id} 前读取审批人失败：{error}"))?;
+                *request_id += 1;
+                reviewer_from_codex_config(&result)?.to_owned()
+            }
+        };
         ("thread/resume", json!({
             "threadId": thread_id,
             "approvalPolicy": config.approval_policy,
             "sandbox": config.sandbox,
-            "approvalsReviewer": config.approvals_reviewer,
+            "approvalsReviewer": reviewer,
             "config": mcp_config_overrides,
         }))
     } else {
@@ -1521,8 +1581,8 @@ async fn open_codex_thread(
             "config": mcp_config_overrides,
         }))
     };
-    write_frame(stdin, &json_rpc_request(request_id, method, params)).await?;
-    read_codex_rpc_response(requests, conversation_id, stdin, lines, request_id, pending_notifications)
+    write_frame(stdin, &json_rpc_request(*request_id, method, params)).await?;
+    read_codex_rpc_response(requests, conversation_id, stdin, lines, *request_id, pending_notifications)
         .await.map_err(|error| {
             if stored_thread.is_some() {
                 format!("Codex thread 恢复失败：{error}")
@@ -2209,7 +2269,7 @@ async fn run_session(
     *failure_stage = if stored_thread.is_some() { AgentFailureStage::Resume } else { AgentFailureStage::Initialize };
     let thread_result = open_codex_thread(
         &requests, conversation_id, &config, stored_thread.as_deref(), mcp_config_overrides,
-        request_id, &mut stdin, &mut lines, &mut pending_notifications,
+        &mut request_id, &mut stdin, &mut lines, &mut pending_notifications,
     ).await?;
     let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
     let connection_event_id = restored_session_method
@@ -2253,6 +2313,8 @@ async fn run_session(
     .await
     .map_err(|error| format!("Codex collaborationMode/list 失败：{error}"))?;
     let plan_mode_supported = codex_supports_plan_mode(&collaboration_modes);
+    let reviewer = thread_result["approvalsReviewer"].as_str().map(str::to_owned)
+        .or_else(|| config.approvals_reviewer.clone());
     // Save only after the first Prompt is submitted: eager startup can finish
     // before acquisition registers the native handle and provider binding.
     let mut snapshot = CodexConversationSessionState {
@@ -2271,7 +2333,7 @@ async fn run_session(
             .or_else(|| stored_thread.is_none().then(|| config.reasoning_effort.clone()).flatten()),
         approval_policy: config.approval_policy.clone(),
         sandbox: config.sandbox.clone(),
-        approvals_reviewer: config.approvals_reviewer.clone(),
+        approvals_reviewer: reviewer.clone(),
         collaboration_mode: plan_mode_supported.then(|| {
             config.collaboration_mode.clone().unwrap_or_else(|| "default".to_string())
         }),
@@ -2319,7 +2381,7 @@ async fn run_session(
                 name: "审批人".to_string(),
                 description: Some("Codex 审批请求由人工处理还是自动审批；从下一轮起生效".to_string()),
                 category: Some("approvals_reviewer".to_string()),
-                current_value: config.approvals_reviewer.clone().unwrap_or_default(),
+                current_value: reviewer.unwrap_or_default(),
                 options: codex_approvals_reviewer_options(),
             });
             if plan_mode_supported {
@@ -3338,7 +3400,7 @@ mod tests {
         let config = extract_codex_app_server_config(&[], &[], None).unwrap();
         assert_eq!(config.approval_policy.as_deref(), Some("on-request"));
         assert_eq!(config.sandbox.as_deref(), Some("workspace-write"));
-        assert_eq!(config.approvals_reviewer.as_deref(), Some("user"));
+        assert!(config.approvals_reviewer.is_none());
 
         let config = extract_codex_app_server_config(
             &[model_config("codex_approval_policy", "never")],

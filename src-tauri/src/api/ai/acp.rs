@@ -403,6 +403,7 @@ pub enum AcpPermissionDecision {
 }
 
 struct PendingAcpPermissionRequest {
+    presented: Option<JsonValue>,
     butler_guard: Option<crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard>,
     sender: oneshot::Sender<AcpPermissionDecision>,
     conversation_id: Option<i64>,
@@ -490,11 +491,23 @@ impl AcpPermissionState {
             return Err(format!("Permission request '{request_id}' is already pending"));
         }
         pending.insert(request_id.clone(), PendingAcpPermissionRequest {
-            sender, conversation_id, event, scope, butler_guard,
+            presented: None, sender, conversation_id, event, scope, butler_guard,
             review_code: Self::build_review_code(&request_id),
             feishu_message_id: None, allowed_open_id: None, allowed_chat_id: None,
         });
         Ok(())
+    }
+
+    pub(crate) async fn mark_presented(&self, id: &str, payload: JsonValue) {
+        if let Some(request) = self.pending_requests.lock().await.get_mut(id) {
+            request.presented = Some(payload);
+        }
+    }
+
+    pub(crate) async fn presented_permissions(&self, conversation_ids: &[i64]) -> Vec<JsonValue> {
+        self.pending_requests.lock().await.values()
+            .filter(|request| request.conversation_id.is_some_and(|id| conversation_ids.contains(&id)))
+            .filter_map(|request| request.presented.clone()).collect()
     }
 
     pub(crate) async fn butler_guard_for_reply(

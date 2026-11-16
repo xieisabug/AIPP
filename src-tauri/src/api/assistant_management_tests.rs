@@ -303,7 +303,7 @@ fn test_assistant_management_channel_overrides_inherit_and_match_codex_runtime()
     let restored = channel::patch(&db,&llm,id,&json!({}),&json!(["codex_sandbox","codex_approval_policy","codex_approvals_reviewer"]),false).unwrap();
     assert_eq!(field(&restored,"codex_sandbox")["effective_value"],"read-only");
     assert_eq!(field(&restored,"codex_sandbox")["source"],"provider");
-    assert_eq!(field(&restored,"codex_approvals_reviewer")["effective_value"],"user");
+    assert!(field(&restored,"codex_approvals_reviewer")["effective_value"].is_null());
     assert!(!restored["runtime_verified"].as_bool().unwrap());
 }
 

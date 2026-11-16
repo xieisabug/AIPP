@@ -50,7 +50,6 @@ pub(crate) fn read(db: &AssistantDatabase, llm: &LLMDatabase, id: i64) -> Result
         let default = match field.name.as_str() {
             "codex_sandbox" => Some("workspace-write".to_string()),
             "codex_approval_policy" => Some("on-request".to_string()),
-            "codex_approvals_reviewer" => Some("user".to_string()),
             "tool_review_mode" => Some("off".to_string()),
             "stream" => Some(crate::api::ai::config::DEFAULT_STREAM.to_string()),
             _ => None,

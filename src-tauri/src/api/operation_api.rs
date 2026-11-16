@@ -27,9 +27,24 @@ pub async fn list_acp_elicitation_requests(
     Ok(app_handle.state::<AcpElicitationState>().list_forms(conversation_id).await)
 }
 
+#[tauri::command]
+pub async fn list_presented_agent_permissions(app_handle: AppHandle, conversation_ids: Vec<i64>) -> Vec<serde_json::Value> {
+    app_handle.state::<AcpPermissionState>().presented_permissions(&conversation_ids).await
+}
+
+#[tauri::command]
+pub async fn list_pending_operation_permissions(app_handle: AppHandle, conversation_ids: Vec<i64>)
+    -> Vec<crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent>
+{
+    let state = app_handle.state::<OperationState>();
+    let mut events = Vec::new();
+    for id in conversation_ids {
+        events.extend(state.list_permission_requests_for_conversation(id).await.into_iter().map(|request| request.event));
+    }
+    events
+}
+
 const BUTLER_WINDOW_LABEL: &str = "butler_experiment";
-const BUTLER_MAIN_KIND: &str = "butler_main";
-const BUTLER_TASK_KIND: &str = "butler_task";
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PermissionResolvedEvent {
@@ -76,7 +91,7 @@ fn can_route_to_visible_butler_window(
         return false;
     };
 
-    matches!(conversation.conversation_kind.as_str(), BUTLER_MAIN_KIND | BUTLER_TASK_KIND)
+    crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind)
 }
 
 pub(crate) fn emit_permission_request_event<T: Serialize>(

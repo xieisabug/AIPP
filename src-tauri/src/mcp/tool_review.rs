@@ -976,7 +976,7 @@ pub async fn should_auto_execute_after_review(
 }
 
 /// 管家模式下所有助手与总管家一致，使用模型审核；其他会话看助手配置。
-fn effective_review_mode(app_handle: &tauri::AppHandle, assistant_id: i64, conversation_id: i64) -> String {
+pub(crate) fn effective_review_mode(app_handle: &tauri::AppHandle, assistant_id: i64, conversation_id: i64) -> String {
     let kind = crate::mcp::butler_tools::conversation_kind(app_handle, Some(conversation_id)).unwrap_or_default();
     if crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind) {
         return "auto_model".to_string();

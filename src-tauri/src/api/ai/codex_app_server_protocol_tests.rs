@@ -71,8 +71,9 @@ for step in steps:
     }
 
     async fn open(&mut self, stored_thread: Option<&str>, notifications: &mut VecDeque<Value>) -> Result<Value, String> {
+        let mut request_id = 2;
         tokio::time::timeout(Duration::from_secs(5), open_codex_thread(
-            &NoDesktopRequests, 41, &wire_config(), stored_thread, None, 2,
+            &NoDesktopRequests, 41, &wire_config(), stored_thread, None, &mut request_id,
             &mut self.stdin, &mut self.lines, notifications,
         )).await.expect("thread open fixture timed out")
     }
@@ -137,6 +138,30 @@ async fn test_codex_transport_initializes_then_starts_or_resumes_without_history
         assert_eq!(notifications[0]["method"], "thread/started");
         peer.finish(0).await;
     }
+}
+
+#[tokio::test]
+async fn test_codex_resume_inherits_current_reviewer_over_saved_thread_setting() {
+    let mut config = wire_config();
+    config.approvals_reviewer = None;
+    let mut steps = handshake_steps();
+    steps.extend([
+        json!({"expect":json_rpc_request(2, "config/read", json!({"cwd":config.working_directory,"includeLayers":false}))}),
+        json!({"send":{"id":2,"result":{"config":{"approvals_reviewer":"auto_review"}}}}),
+        json!({"expect":json_rpc_request(3, "thread/resume", json!({"threadId":"old","approvalPolicy":"on-request",
+            "sandbox":"workspace-write","approvalsReviewer":"auto_review","config":null}))}),
+        json!({"send":{"id":3,"result":{"thread":{"id":"old"},"approvalsReviewer":"auto_review"}}}),
+        json!({"eof":true}),
+    ]);
+    let mut peer = WirePeer::start(json!(steps)).await;
+    let mut pending = VecDeque::new();
+    peer.initialize(&mut pending).await.unwrap();
+    let mut id = 2;
+    let result = tokio::time::timeout(Duration::from_secs(5), open_codex_thread(&NoDesktopRequests, 41,
+        &config, Some("old"), None, &mut id, &mut peer.stdin, &mut peer.lines, &mut pending)).await.unwrap().unwrap();
+    assert_eq!(result["approvalsReviewer"], "auto_review");
+    assert_eq!(id, 3);
+    peer.finish(0).await;
 }
 
 #[tokio::test]

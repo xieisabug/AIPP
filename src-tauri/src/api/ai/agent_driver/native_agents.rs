@@ -623,7 +623,7 @@ pub(crate) fn review_outcome(options: &[crate::api::ai::acp::AcpPermissionOption
 }
 
 /// Review first; the card (and its notification) only appears when the review does not clear the request.
-async fn review_permission(app: tauri::AppHandle, event: crate::api::ai::acp::AcpPermissionRequestEvent,
+pub(crate) async fn review_permission(app: tauri::AppHandle, event: crate::api::ai::acp::AcpPermissionRequestEvent,
     scope: super::approval::AgentRequestScope, turn: i64, agent: &'static str, working_directory: String) {
     use crate::api::ai::acp::AcpPermissionState;
     use super::approval::{AgentInteractionReply, AgentPermissionReply, AgentReplyTarget};
@@ -650,6 +650,7 @@ async fn review_permission(app: tauri::AppHandle, event: crate::api::ai::acp::Ac
     if state.get_request(&event.request_id).await.is_none() { return; }
     let mut payload = serde_json::to_value(&event).unwrap_or_else(|_| json!({}));
     payload["review"] = json!({ "verdict": draft.verdict, "reason": reason });
+    state.mark_presented(&event.request_id, payload.clone()).await;
     if let Err(error) = crate::api::operation_api::emit_permission_request_event(&app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(conversation_id), &payload) {
         tracing::warn!(conversation_id, request_id = %event.request_id, error = %error, "Failed to show reviewed native agent permission");
     }

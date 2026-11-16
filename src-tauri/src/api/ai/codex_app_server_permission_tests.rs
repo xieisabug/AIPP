@@ -47,7 +47,10 @@ fn test_codex_command_structured_extensions_do_not_replace_supported_string_opti
     ]});
     let options = codex_permission_options("item/commandExecution/requestApproval", &params);
     assert_eq!(options.iter().map(|option| option.option_id.as_str()).collect::<Vec<_>>(),
-        vec!["accept", "acceptForSession", "decline", "cancel"]);
+        vec!["accept", "acceptForSession", "decline", "cancel", "execpolicy:2"]);
+    assert_eq!(options.last().unwrap().kind, "allow_always");
+    assert_eq!(codex_approval_response("item/commandExecution/requestApproval", &params,
+        AcpPermissionDecision::Selected("execpolicy:2".into())), json!({"decision":params["availableDecisions"][2]}));
 }
 
 #[test]
@@ -91,6 +94,19 @@ async fn pending_native_permission(
         options: codex_permission_options("item/commandExecution/requestApproval", &json!({})),
     }, tx).await;
     rx
+}
+
+#[tokio::test]
+async fn test_codex_pending_card_recovery_only_returns_presented_unresolved_requests_in_scope() {
+    let state = AcpPermissionState::new();
+    let _receiver = pending_native_permission(&state, "req", 42).await;
+    assert!(state.presented_permissions(&[42]).await.is_empty());
+    let card = json!({"request_id":"req","conversation_id":42,"review":{"reason":"人工确认"}});
+    state.mark_presented("req", card.clone()).await;
+    assert!(state.presented_permissions(&[43]).await.is_empty());
+    assert_eq!(state.presented_permissions(&[42]).await, vec![card]);
+    state.resolve_request("req", AcpPermissionDecision::Cancelled).await.unwrap();
+    assert!(state.presented_permissions(&[42]).await.is_empty());
 }
 
 /// Uses the unified facade and the same pending-decision wait as the native actor.
@@ -209,4 +225,14 @@ async fn test_codex_user_input_wait_cancels_and_drops_only_its_pending_future() 
     assert!(error.contains("cancelled by Stop"));
     assert!(dropped.load(Ordering::SeqCst));
     assert!(!peer_dropped.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_codex_resume_reviewer_uses_effective_config_and_handles_missing_setting() {
+    for reviewer in ["user", "auto_review"] {
+        assert_eq!(reviewer_from_codex_config(&json!({"config":{"approvals_reviewer":reviewer}})).unwrap(), reviewer);
+    }
+    assert_eq!(reviewer_from_codex_config(&json!({"config":{}})).unwrap(), "user");
+    assert!(reviewer_from_codex_config(&json!({})).is_err());
+    assert!(reviewer_from_codex_config(&json!({"config":{"approvals_reviewer":false}})).is_err());
 }

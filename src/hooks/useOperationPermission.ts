@@ -60,7 +60,6 @@ interface UsePermissionRequestQueueOptions {
     conversationIds?: number[];
     requestEventName: string;
     resolvedEventName: string;
-    logLabel: string;
 }
 
 interface PermissionRequestQueueController<TRequest extends PermissionRequestBase> {
@@ -81,7 +80,6 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
         conversationIds,
         requestEventName,
         resolvedEventName,
-        logLabel,
     } = options;
     const [requestQueue, setRequestQueue] = useState<TRequest[]>([]);
     const [decisionError, setDecisionError] = useState<string | null>(null);
@@ -104,8 +102,10 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
     }, []);
 
     useEffect(() => {
-        const unsubscribe = listen<TRequest>(requestEventName, (event) => {
-            const request = event.payload;
+        let active = true;
+        const resolved = new Set<string>();
+        const enqueue = (request: TRequest) => {
+            if (!active || resolved.has(request.request_id)) return;
             if (
                 !shouldHandleConversationRequest(
                     request.conversation_id,
@@ -116,7 +116,6 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
                 return;
             }
 
-            console.log(`Received ${logLabel} request:`, request);
             setRequestQueue((prev) => {
                 if (prev.some((item) => item.request_id === request.request_id)) {
                     return prev;
@@ -127,27 +126,34 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
                 }
                 return [...prev, request];
             });
-        });
-
-        return () => {
-            unsubscribe.then((f) => f());
         };
-    }, [conversationId, conversationIds, logLabel, requestEventName]);
-
-    useEffect(() => {
-        const unsubscribe = listen<PermissionResolvedEvent>(resolvedEventName, (event) => {
-            const requestId = event.payload?.request_id;
-            if (!requestId) {
-                return;
-            }
-            console.log(`Received ${logLabel} resolution:`, event.payload);
-            removeRequestById(requestId);
+        const unsubscribe = listen<TRequest>(requestEventName, (event) => enqueue(event.payload));
+        const ids = conversationIds?.length ? conversationIds : conversationId ? [conversationId] : [];
+        let recovering = ids.length > 0;
+        const resolvedSubscription = listen<PermissionResolvedEvent>(resolvedEventName, (event) => {
+            const id = event.payload?.request_id;
+            if (!id || !active) return;
+            if (recovering) resolved.add(id);
+            removeRequestById(id);
         });
-
+        if (recovering) {
+            void Promise.all([unsubscribe, resolvedSubscription]).then(async () => {
+                if (!active) return;
+                const command = requestEventName === "acp-permission-request"
+                    ? "list_presented_agent_permissions" : "list_pending_operation_permissions";
+                const requests = await invoke<TRequest[]>(command, { conversationIds: ids });
+                requests?.forEach(enqueue);
+            }).catch((error) => console.warn("恢复待审批请求失败", error)).finally(() => {
+                recovering = false;
+                resolved.clear();
+            });
+        }
         return () => {
+            active = false;
             unsubscribe.then((f) => f());
+            resolvedSubscription.then((f) => f());
         };
-    }, [logLabel, removeRequestById, resolvedEventName]);
+    }, [conversationId, conversationIds, requestEventName, resolvedEventName, removeRequestById]);
 
     return {
         pendingRequest,
@@ -175,7 +181,6 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
         conversationIds,
         requestEventName: "operation-permission-request",
         resolvedEventName: "operation-permission-resolved",
-        logLabel: "operation permission",
     });
 
     const handleDecision = useCallback(
@@ -254,7 +259,6 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
         conversationIds,
         requestEventName: "acp-permission-request",
         resolvedEventName: "acp-permission-resolved",
-        logLabel: "ACP permission",
     });
 
     const handleDecision = useCallback(

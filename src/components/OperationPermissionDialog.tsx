@@ -240,6 +240,93 @@ const acpOptionClassName = (kind: string) => {
     }
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function McpApprovalDetails({ server, meta }: { server: string; meta: Record<string, unknown> }) {
+    const name = typeof meta.tool_name === "string" ? meta.tool_name : "";
+    const historySearch = server === "aipp" && /^(?:aipp_t\d+_)?search_bot_history$/.test(name);
+    const labels = new Map<string, string>(historySearch ? [
+        ["bot_id", "助手编号"], ["query", "搜索词"], ["before_message_id", "早于消息编号"],
+    ] : []);
+    const displayValues = new Map<string, unknown>();
+    if (Array.isArray(meta.tool_params_display)) {
+        for (const field of meta.tool_params_display) {
+            if (!isRecord(field) || typeof field.name !== "string") continue;
+            if (!labels.has(field.name) && typeof field.display_name === "string") {
+                labels.set(field.name, field.display_name);
+            }
+            if ("value" in field) displayValues.set(field.name, field.value);
+        }
+    }
+    // Use the actual invocation values even when a display hint abbreviates or omits them.
+    const args = isRecord(meta.tool_params) ? Object.entries(meta.tool_params) : [...displayValues];
+    return <>
+        <p className="break-words font-medium">{historySearch ? "搜索管家聊天记录（含归档会话）" : "调用 MCP 工具"}</p>
+        <p className="break-all text-xs text-muted-foreground">{server} / {name || "未提供工具名"}</p>
+        {args.length > 0 && <dl className="space-y-2">
+            {args.map(([key, value]) => <div key={key} className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-3">
+                <dt className="break-all text-muted-foreground">{labels.get(key) || key}</dt>
+                <dd className="min-w-0 whitespace-pre-wrap break-all text-foreground">{typeof value === "string" && value.length ? value : JSON.stringify(value, null, 2)}</dd>
+            </div>)}
+        </dl>}
+        {typeof meta.tool_description === "string" && <details open={!historySearch}>
+            <summary className="cursor-pointer text-xs">工具说明</summary>
+            <p className="mt-1 whitespace-pre-wrap break-words">{meta.tool_description}</p>
+        </details>}
+    </>;
+}
+
+function PermissionReviewNotice({ review }: { review: NonNullable<AcpPermissionRequest["review"]> }) {
+    const timeout = review.reason.match(/自动审核模型超时（(\d+)秒）$/);
+    return <div role="status" className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-foreground">
+        {timeout ? <>
+            <p>自动审核在 {timeout[1]} 秒内没有返回结果，请你决定是否允许。</p>
+            <details className="mt-1 text-xs text-muted-foreground">
+                <summary className="cursor-pointer">审核详情</summary>
+                <p className="break-words">{review.reason}</p>
+            </details>
+        </> : review.reason}
+    </div>;
+}
+
+function CodexPermissionDetails({ request }: { request: AcpPermissionRequest }) {
+    let params: Record<string, unknown> = {};
+    try {
+        const parsed = JSON.parse(request.parameters ?? "{}");
+        if (parsed && typeof parsed === "object") params = parsed;
+    } catch { /* Keep the original payload accessible below. */ }
+    const meta = isRecord(params._meta) && params._meta.codex_approval_kind === "mcp_tool_call" ? params._meta : undefined;
+    const reason = params.reason || params.message || request.title;
+    const fields = [
+        ["命令", params.command],
+        ["工作目录", params.cwd],
+        ["服务", params.serverName],
+        ["写入范围", params.grantRoot],
+        ["申请权限", params.permissions],
+        ["网络访问", params.networkApprovalContext],
+        ["附加权限", params.additionalPermissions],
+    ] as const;
+    return (
+        <div className={permissionDetailPanelClassName}>
+            {meta ? <McpApprovalDetails server={typeof params.serverName === "string" ? params.serverName : "MCP"} meta={meta} /> : <>
+            <p className="break-words font-medium">{typeof reason === "string" ? reason : "Codex 请求授权"}</p>
+            {fields.map(([label, value]) => value != null && (
+                <div key={label}>
+                    <span className="text-xs text-muted-foreground">{label}</span>
+                    <pre className={permissionCodeBlockClassName}>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre>
+                </div>
+            ))}
+            </>}
+            {request.parameters && <details>
+                <summary className="cursor-pointer text-xs">原始请求</summary>
+                <pre className={permissionCodeBlockClassName}>{request.parameters}</pre>
+            </details>}
+        </div>
+    );
+}
+
 export function AcpPermissionDialog({
     request,
     isOpen,
@@ -261,13 +348,8 @@ export function AcpPermissionDialog({
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
                         <div className={permissionDialogBodyClassName}>
-                            <p>AI 助手请求执行以下工具调用：</p>
-                            {request.review ? (
-                                <p role="status" className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-foreground">
-                                    {request.review.reason}
-                                </p>
-                            ) : null}
-                            <div className={permissionDetailPanelClassName}>
+                            {request.review && <PermissionReviewNotice review={request.review} />}
+                            {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">标题:</span>
                                     <span className="min-w-0 break-words text-muted-foreground">
@@ -294,7 +376,7 @@ export function AcpPermissionDialog({
                                         </pre>
                                     </div>
                                 )}
-                            </div>
+                            </div>}
                             {errorMessage ? (
                                 <p className="text-xs text-destructive">{errorMessage}</p>
                             ) : null}
@@ -303,7 +385,7 @@ export function AcpPermissionDialog({
                 </AlertDialogHeader>
                 <AlertDialogFooter className="min-w-0 overflow-hidden">
                     <div className="grid min-w-0 w-full grid-cols-1 gap-2 sm:grid-cols-2">
-                        <Button
+                        {!request.options.some(option => option.option_id === "cancel") && <Button
                             variant="outline"
                             onClick={() => onDecision(request.request_id, undefined, true)}
                             disabled={isSubmitting}
@@ -311,7 +393,7 @@ export function AcpPermissionDialog({
                         >
                             <ShieldAlert className="h-4 w-4 shrink-0" />
                             取消请求
-                        </Button>
+                        </Button>}
                         {request.options.map((option) => (
                             <Button
                                 key={option.option_id}
@@ -325,7 +407,7 @@ export function AcpPermissionDialog({
                                 ) : (
                                     <ShieldAlert className="h-4 w-4 shrink-0" />
                                 )}
-                                {acpOptionLabel(option)}
+                                {request.agent_kind === "codex_app_server" ? option.name : acpOptionLabel(option)}
                             </Button>
                         ))}
                     </div>

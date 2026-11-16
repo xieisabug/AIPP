@@ -1141,6 +1141,8 @@ pub fn run() {
             search_butler_messages,
             crate::api::butler_contact_activity::list_butler_contact_activity,
             crate::api::approval_attention::list_pending_approval_conversations,
+            crate::api::operation_api::list_presented_agent_permissions,
+            crate::api::operation_api::list_pending_operation_permissions,
             crate::api::approval_attention::set_approval_surface,
             crate::api::butler_progress::get_butler_progress_summary,
             get_butler_cache_activity,
