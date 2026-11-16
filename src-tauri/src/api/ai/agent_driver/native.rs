@@ -103,7 +103,7 @@ fn prepare_selected_config(
         if let Some(overrides) = override_model_config.as_ref() {
             if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
             if let Some(mode) = overrides.get("permission_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
-                if !matches!(mode, "default" | "plan") { return Err(AppError::UnknownError(format!("Claude Code 不支持工作模式：{mode}"))); }
+                if !matches!(mode, "default" | "plan" | "auto") { return Err(AppError::UnknownError(format!("Claude Code 不支持工作模式：{mode}"))); }
                 config.permission_mode = Some(mode.to_string());
             }
         }
@@ -334,7 +334,7 @@ impl AgentDriver for BuiltinDriver {
             ]),
             AgentSessionKind::Claude => fields.extend([
                 string("claude_cli_command"),
-                choice("claude_permission_mode", &["default", "plan"]),
+                choice("claude_permission_mode", &["default", "plan", "auto"]),
                 choice("claude_effort", &["default", "low", "medium", "high", "max"]),
             ]),
         }

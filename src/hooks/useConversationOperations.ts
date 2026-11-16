@@ -315,7 +315,7 @@ export function useConversationOperations({
                     assistant_id: assistantId,
                     override_model_id: agentOverrides.overrideModelId,
                 },
-                override_model_config: agentOverrides.overrideModelConfig,
+                overrideModelConfig: agentOverrides.overrideModelConfig,
             });
         } catch (error) {
             setAiIsResponsing(false);
@@ -536,7 +536,7 @@ export function useConversationOperations({
                         override_model_id: agentOverrides.overrideModelId,
                         quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
                     },
-                    override_model_config: agentOverrides.overrideModelConfig,
+                    overrideModelConfig: agentOverrides.overrideModelConfig,
                 })
                     .then((res) => {
                         console.log("ask ai response", res);

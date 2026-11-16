@@ -719,6 +719,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         options: [
                             { value: "default", label: "默认询问" },
                             { value: "acceptEdits", label: "自动接受编辑" },
+                            { value: "auto", label: "Claude Code 原生自动审核（auto）" },
                             { value: "plan", label: "计划模式" },
                             { value: "dontAsk", label: "不询问" },
                         ],

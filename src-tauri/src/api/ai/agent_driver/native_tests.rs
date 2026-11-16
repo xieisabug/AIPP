@@ -229,7 +229,7 @@ fn test_prepare_codex_rejects_invalid_turn_modes_and_permissions() {
 #[test]
 fn test_prepare_claude_validates_turn_permission_modes() {
     let mut fixture = Fixture::new();
-    for mode in ["default", "plan"] {
+    for mode in ["default", "plan", "auto"] {
         fixture.overrides(&[("permission_mode", mode), ("claude_effort", "high")]);
         let PreparedAgentSession::Claude(config) = fixture.prepare("claude_sdk", Vec::new()).unwrap() else {
             panic!("expected Claude");

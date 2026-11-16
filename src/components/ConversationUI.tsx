@@ -345,9 +345,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [selectedAgentEffort, setSelectedAgentEffort] = useState("");
         const [selectedAgentApprovalPolicy, setSelectedAgentApprovalPolicy] = useState("");
         const [selectedAgentSandbox, setSelectedAgentSandbox] = useState("");
-        const [selectedAgentMode, setSelectedAgentMode] = useState("default");
+        const [selectedAgentMode, setSelectedAgentMode] = useState("");
         useEffect(() => {
-            setSelectedAgentMode("default");
+            setSelectedAgentMode("");
         }, [selectedAssistant]);
         const handleAgentConfigChange = useCallback((model: string, effort: string, approvalPolicy: string, sandbox: string) => {
             setSelectedAgentModel(model);

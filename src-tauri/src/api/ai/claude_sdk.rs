@@ -836,12 +836,13 @@ fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOption
         AcpSessionConfigOptionPayload {
             id: "permission_mode".into(),
             name: "工作模式".into(),
-            description: Some("控制 Claude Code 下一轮是先制定计划还是直接执行".into()),
+            description: Some("选择 Claude Code 的原生工作模式。AIPP 自动审核单独处理 Claude Code 发给 AIPP 的权限请求。".into()),
             category: Some("mode".into()),
             current_value: config.permission_mode.clone().unwrap_or_else(|| "default".into()),
             options: [
                 ("default", "执行模式"),
                 ("plan", "Plan 模式"),
+                ("auto", "Claude Code 原生自动审核（auto）"),
             ]
             .into_iter()
             .map(|(value, name)| AcpSessionConfigChoicePayload {
@@ -1245,7 +1246,7 @@ pub fn spawn_claude_session_task(
                         }
                         "effort" => config.effort = (value != "default").then_some(value),
                         "permission_mode" => {
-                            if !matches!(value.as_str(), "default" | "plan") {
+                            if !matches!(value.as_str(), "default" | "plan" | "auto") {
                                 let _ = response.send(Err(format!("Claude Code 不支持工作模式：{value}")));
                                 continue;
                             }

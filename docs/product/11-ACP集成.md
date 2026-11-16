@@ -25,7 +25,7 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 | Kiro | Autopilot | 关闭：逐项审批（默认）/ 开启：Kiro 自动执行 |
 | Antigravity | 原生权限模式 | 默认逐项审批（默认）/ 自动接受编辑 / 全部自动执行（yolo）；当前 agy 不提供所选模式时直接报错并列出可用模式 |
 | OpenCode | 本机配置的 `permissions` 规则 | AIPP 不改写（新旧版本的规则格式不同），默认几乎全部放行 |
-| Claude Code | 原生 `can_use_tool` 请求 | 按助手设置人工或模型审核；`AskUserQuestion` 仍交给用户回答 |
+| Claude Code | Provider「权限模式」和会话「工作模式」均可选「Claude Code 原生自动审核（auto）」 | 以 `--permission-mode auto` 启动，由 Claude Code 自行判断。Claude Code 发给 AIPP 的 `can_use_tool` 请求再按 AIPP 的审批设置处理；`AskUserQuestion` 仍交给用户回答 |
 | 通用 ACP | 原生 `session/request_permission` 请求 | 安全时只回传 Agent 提供的一次性允许选项；转人工时仍可通过已有飞书通道处理 |
 | Cursor | SDK 自带的自动审核（Auto-review） | SDK 不支持逐项人工审批，不会弹出确认 |
 

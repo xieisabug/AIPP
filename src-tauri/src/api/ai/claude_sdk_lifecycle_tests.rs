@@ -3,6 +3,25 @@
 // Unix process tests invoke the system false executable directly, without a shell.
 use super::*;
 
+#[test]
+fn test_claude_native_auto_for_new_and_resumed_sessions() {
+    let provider_mode = crate::db::llm_db::LLMProviderConfig {
+        id: 1, llm_provider_id: 1, name: "claude_permission_mode".into(),
+        value: "auto".into(), append_location: String::new(), is_addition: false,
+    };
+    let config = extract_claude_sdk_config(&[], &[provider_mode], None, Vec::new()).unwrap();
+    let mode = claude_config_options(&config).into_iter()
+        .find(|option| option.id == "permission_mode").unwrap();
+    assert_eq!(mode.current_value, "auto");
+    assert!(mode.options.iter().any(|choice| choice.value == "auto"));
+    for session_id in [None, Some("existing-session")] {
+        let (command, _) = build_claude_command(&config, session_id);
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(args.iter().filter(|arg| **arg == "--permission-mode").count(), 1);
+        assert!(args.windows(2).any(|pair| pair == ["--permission-mode", "auto"]));
+    }
+}
+
 fn handle_channel(run_id: &str) -> (ClaudeSessionHandle, mpsc::UnboundedReceiver<SessionCommand>) {
     let (sender, receiver) = mpsc::unbounded_channel();
     (ClaudeSessionHandle { sender, cancel_signal: watch::channel(0).0, run_id: run_id.into() }, receiver)

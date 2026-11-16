@@ -12,9 +12,10 @@ vi.mock("./useConversationManager", () => ({
     default: () => ({ deleteConversation: vi.fn(), updateConversationName: vi.fn() }),
 }));
 
-function setup(quietRuntimeErrors = false) {
+function setup(quietRuntimeErrors = false, selectedAgentMode = "") {
     const props: any = {
         quietRuntimeErrors,
+        selectedAgentMode,
         conversation: null,
         selectedAssistant: 1,
         assistants: [{ id: 1, name: "快速使用助手", assistant_type: 0 }],
@@ -70,6 +71,7 @@ describe.each([
             "ask_ai",
             expect.objectContaining({
                 request: expect.objectContaining({ override_model_id: undefined, assistant_id: 1 }),
+                overrideModelConfig: undefined,
             }),
         );
     });
@@ -94,6 +96,15 @@ describe.each([
         await waitFor(() => expect(props.onChangeConversationId).toHaveBeenCalledWith("7"));
         expect(props.setAiIsResponsing).toHaveBeenLastCalledWith(true);
         expect(toastMock.error).not.toHaveBeenCalled();
+    });
+
+    it("should pass an explicitly selected Claude permission mode to the native command", async () => {
+        mockInvokeHandler("ask_ai", () => ({ conversation_id: 7, request_prompt_result_with_context: "" }));
+        const { result } = setup(false, "auto");
+        await act(async () => { result.current.handleSend(); });
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("ask_ai", expect.objectContaining({
+            overrideModelConfig: expect.objectContaining({ permission_mode: "auto" }),
+        })));
     });
 
     it("turns a serialized NoModelFound rejection into a readable message", async () => {
