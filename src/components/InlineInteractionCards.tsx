@@ -1,14 +1,12 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useId } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
-import { FileText, ImageIcon, Shield, ShieldCheck } from "lucide-react";
+import { cn } from "@/utils/utils";
+import { Check, ChevronDown, CircleCheck, FileText, Files, Globe, ImageIcon, MessageCircleQuestion } from "lucide-react";
 import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
 import {
     hasActionablePreviewResources,
@@ -88,10 +86,24 @@ interface AskUserQuestionCardProps {
 interface PreviewFileCardProps {
     request: PreviewFileRequest | null;
     isOpen: boolean;
-    onOpenChange: (open: boolean) => void;
+    /** 已不再调用：卡片只在内部收起/展开，不会自行关闭。保留以兼容现有调用方。 */
+    onOpenChange?: (open: boolean) => void;
 }
 
 const OTHER_OPTION_VALUE = "__other__";
+
+/**
+ * 交互卡片统一外观：细边框 + 紧凑标题行，与引用消息卡片（MessagePreviewToolCall）一致，只用主题语义色。
+ * 卡片会渲染在消息气泡的 `.prose` 里，typography 与 App.css 按标签名给 p/pre/img/figure/dl 加外边距，
+ * 所以卡片骨架只用 div/section 等不受影响的标签，正文 markdown 才交给 prose。
+ */
+const CARD_CLASS = "w-full max-w-3xl overflow-hidden rounded-lg border border-border bg-card text-card-foreground";
+const CARD_HEADER_CLASS = "flex min-w-0 items-center gap-2 border-b border-border/60 px-3 py-2 text-xs text-muted-foreground";
+const CARD_FOOTER_CLASS = "flex items-center gap-2 border-t border-border/60 px-3 py-2";
+const OPTION_ROW_CLASS = "flex items-start gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors has-data-[state=checked]:bg-muted";
+const PILL_CLASS = "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-xs transition-colors";
+const pillState = (active: boolean) =>
+    active ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground";
 
 export function AskUserQuestionCard({
     request,
@@ -220,34 +232,36 @@ export function AskUserQuestionCard({
     const summaryAnswers = completedAnswers ?? {};
     const hasMultipleQuestions = request.questions.length > 1;
 
+    const renderOptionText = (label: string, description: string) => (
+        <div className="min-w-0 space-y-0.5">
+            <div className="font-medium leading-5 text-foreground">{label}</div>
+            {description && (
+                <div className="text-xs leading-5 text-muted-foreground">{description}</div>
+            )}
+        </div>
+    );
+
+    const optionRowClass = cn(OPTION_ROW_CLASS, readOnly ? "cursor-default" : "cursor-pointer hover:bg-muted/60");
+
     const renderQuestionContent = (question: AskUserQuestionItem, index: number) => {
         const isFreeform = question.options.length === 0;
         const selected = selectedAnswers[index] ?? [];
         const includesOther = selected.includes(OTHER_OPTION_VALUE);
         const options = [
             ...question.options,
-            { label: OTHER_OPTION_VALUE, description: "自定义输入" },
+            { label: OTHER_OPTION_VALUE, description: "" },
         ];
+        const displayLabel = (label: string) => (label === OTHER_OPTION_VALUE ? "其他" : label);
 
         return (
-            <div className="rounded-md border border-border p-3 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                        <Badge variant="outline">{question.header}</Badge>
-                        {question.required === false && (
-                            <span className="text-xs text-muted-foreground">选填</span>
-                        )}
-                    </div>
-                    {hasMultipleQuestions && (
-                        <span className="text-xs text-muted-foreground">
-                            {index + 1} / {request.questions.length}
-                        </span>
+            <div className="space-y-2.5">
+                <div className="flex items-baseline gap-2">
+                    <div className="text-sm font-medium leading-6 text-foreground">{question.question}</div>
+                    {question.required === false && (
+                        <span className="shrink-0 text-xs text-muted-foreground">选填</span>
                     )}
                 </div>
-                <div className="text-sm leading-6 font-medium">
-                    {question.question}
-                </div>
-                <div className="max-h-[30vh] pr-2 overflow-y-auto">
+                <div className="-mx-1 max-h-[30vh] overflow-y-auto px-1">
                     {isFreeform ? (
                         <Input
                             type={question.isSecret ? "password" : "text"}
@@ -262,21 +276,13 @@ export function AskUserQuestionCard({
                             placeholder="请输入答案"
                         />
                     ) : question.multiSelect ? (
-                        <div className="space-y-2">
+                        <div className="space-y-0.5">
                             {options.map((option) => {
                                 const optionValue = option.label;
-                                const checked = selected.includes(optionValue);
-                                const displayLabel =
-                                    optionValue === OTHER_OPTION_VALUE
-                                        ? "Other"
-                                        : option.label;
                                 return (
-                                    <label
-                                        key={optionValue}
-                                        className="flex items-start gap-2 rounded-md border border-border px-3 py-2 cursor-pointer"
-                                    >
+                                    <label key={optionValue} className={optionRowClass}>
                                         <Checkbox
-                                            checked={checked}
+                                            checked={selected.includes(optionValue)}
                                             disabled={readOnly}
                                             onCheckedChange={(value) =>
                                                 !readOnly &&
@@ -288,12 +294,7 @@ export function AskUserQuestionCard({
                                             }
                                             className="mt-0.5"
                                         />
-                                        <div className="space-y-1 text-sm">
-                                            <div className="font-medium">{displayLabel}</div>
-                                            <div className="text-muted-foreground text-xs">
-                                                {option.description}
-                                            </div>
-                                        </div>
+                                        {renderOptionText(displayLabel(optionValue), option.description)}
                                     </label>
                                 );
                             })}
@@ -304,30 +305,18 @@ export function AskUserQuestionCard({
                             onValueChange={(value) =>
                                 !readOnly && updateSingleSelect(index, value)
                             }
-                            className="space-y-2"
+                            className="gap-0.5"
                         >
                             {options.map((option) => {
                                 const optionValue = option.label;
-                                const displayLabel =
-                                    optionValue === OTHER_OPTION_VALUE
-                                        ? "Other"
-                                        : option.label;
                                 return (
-                                    <label
-                                        key={optionValue}
-                                        className="flex items-start gap-2 rounded-md border border-border px-3 py-2 cursor-pointer"
-                                    >
+                                    <label key={optionValue} className={optionRowClass}>
                                         <RadioGroupItem
                                             value={optionValue}
-                                            className="mt-1"
+                                            className="mt-0.5"
                                             disabled={readOnly}
                                         />
-                                        <div className="space-y-1 text-sm">
-                                            <div className="font-medium">{displayLabel}</div>
-                                            <div className="text-muted-foreground text-xs">
-                                                {option.description}
-                                            </div>
-                                        </div>
+                                        {renderOptionText(displayLabel(optionValue), option.description)}
                                     </label>
                                 );
                             })}
@@ -345,6 +334,7 @@ export function AskUserQuestionCard({
                             }))
                         }
                         placeholder="请输入自定义答案"
+                        autoFocus={!readOnly}
                     />
                 )}
             </div>
@@ -359,36 +349,32 @@ export function AskUserQuestionCard({
                 data-message-type="ui_interaction_ask_user_question"
                 data-request-id={request.request_id}
             >
-                <Card className="w-full max-w-3xl py-4 gap-3">
-                    <CardHeader className="px-4 pb-0 gap-2">
-                        <CardTitle className="flex items-center gap-2 text-base">
-                            <ShieldCheck className="h-5 w-5" />
-                            问题回答结果
-                        </CardTitle>
-                        <div className="text-sm text-muted-foreground">
-                            以下是本次 ask_user_question 的问题与回答。
-                        </div>
-                    </CardHeader>
-                    <CardContent className="px-4 space-y-3">
+                <section className={CARD_CLASS}>
+                    <header className={CARD_HEADER_CLASS}>
+                        <CircleCheck className="h-3.5 w-3.5 shrink-0" />
+                        <span className="font-medium text-foreground">已回答</span>
+                        {hasMultipleQuestions && (
+                            <span className="ml-auto shrink-0 tabular-nums">{request.questions.length} 个问题</span>
+                        )}
+                    </header>
+                    <div className="divide-y divide-border/60">
                         {request.questions.map((question, index) => (
-                            <div
-                                key={`${question.header}-answer-${index}`}
-                                className="rounded-md border border-border p-3 space-y-2"
-                            >
-                                <div className="flex items-center gap-2">
-                                    <Badge variant="outline">{question.header}</Badge>
-                                </div>
-                                <div className="text-sm font-medium">{question.question}</div>
-                                <div className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
-                                    {summaryAnswers[question.question] || "（无回答）"}
+                            <div key={`${question.header}-answer-${index}`} className="space-y-0.5 px-3 py-2">
+                                <div className="text-xs leading-5 text-muted-foreground">{question.question}</div>
+                                <div className="text-sm leading-6 text-foreground whitespace-pre-wrap break-words">
+                                    {summaryAnswers[question.question] || (
+                                        <span className="text-muted-foreground">（无回答）</span>
+                                    )}
                                 </div>
                             </div>
                         ))}
-                    </CardContent>
-                </Card>
+                    </div>
+                </section>
             </div>
         );
     }
+
+    const activeQuestion = request.questions[activeQuestionIndex];
 
     return (
         <div
@@ -397,90 +383,77 @@ export function AskUserQuestionCard({
             data-message-type="ui_interaction_ask_user_question"
             data-request-id={request.request_id}
         >
-            <Card className="w-full max-w-3xl py-4 gap-3">
-                <CardHeader className="px-4 pb-0 gap-2">
-                    <CardTitle className="flex items-center gap-2 text-base">
-                        <Shield className="h-5 w-5" />
-                        用户问题确认
-                    </CardTitle>
-                    <div className="text-sm text-muted-foreground">
-                        AI 助手需要你的选择来继续执行，请完成以下问题。
-                    </div>
-                </CardHeader>
-                <CardContent className="px-4 space-y-4">
+            <section className={CARD_CLASS}>
+                <header className={CARD_HEADER_CLASS}>
+                    <MessageCircleQuestion className="h-3.5 w-3.5 shrink-0" />
                     {hasMultipleQuestions ? (
-                        <Tabs
-                            value={activeTab}
-                            onValueChange={(value) => {
-                                if (!readOnly) {
-                                    setActiveTab(value);
-                                }
-                            }}
-                            className="w-full space-y-3"
-                        >
-                            <TabsList className="w-full justify-start overflow-x-auto h-auto min-h-9">
-                                {request.questions.map((question, index) => (
-                                    <TabsTrigger
+                        <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" aria-label="问题列表">
+                            {request.questions.map((question, index) => {
+                                const active = index === activeQuestionIndex;
+                                return (
+                                    <button
                                         key={`${question.header}-${index}`}
-                                        value={`${index}`}
-                                        className="min-w-[96px]"
-                                        disabled={readOnly}
+                                        type="button"
+                                        className={cn(PILL_CLASS, pillState(active))}
+                                        aria-current={active ? "step" : undefined}
+                                        onClick={() => setActiveTab(`${index}`)}
                                     >
-                                        {question.header}
-                                    </TabsTrigger>
-                                ))}
-                            </TabsList>
-                            {request.questions.map((question, index) => (
-                                <TabsContent
-                                    key={`${question.header}-content-${index}`}
-                                    value={`${index}`}
-                                    className="mt-0"
-                                >
-                                    {renderQuestionContent(question, index)}
-                                </TabsContent>
-                            ))}
-                        </Tabs>
+                                        {!active && hasAnswerValue(index) && <Check className="h-3 w-3" />}
+                                        <span className="max-w-[140px] truncate">{question.header}</span>
+                                    </button>
+                                );
+                            })}
+                        </nav>
                     ) : (
-                        request.questions[0]
-                            ? renderQuestionContent(request.questions[0], 0)
-                            : (
-                                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                                    暂无可回答的问题。
-                                </div>
-                            )
+                        <span className="min-w-0 truncate font-medium text-foreground">
+                            {activeQuestion?.header || "需要你的确认"}
+                        </span>
                     )}
+                    {hasMultipleQuestions && (
+                        <span className="ml-auto shrink-0 tabular-nums">
+                            {activeQuestionIndex + 1} / {request.questions.length}
+                        </span>
+                    )}
+                </header>
+                <div className="px-3 py-3">
+                    {activeQuestion
+                        ? renderQuestionContent(activeQuestion, activeQuestionIndex)
+                        : <div className="text-sm text-muted-foreground">暂无可回答的问题。</div>}
                     {errorMessage && (
-                        <div className="text-sm text-destructive">{errorMessage}</div>
+                        <div className="mt-2 text-xs text-destructive">{errorMessage}</div>
                     )}
-                    <div className="flex items-center justify-between border-t border-border pt-3">
-                        {readOnly ? <div /> : (
-                            <Button variant="outline" onClick={() => onCancel(request.request_id)}>
+                </div>
+                <footer className={CARD_FOOTER_CLASS}>
+                    {readOnly ? (
+                        <span className="ml-auto text-xs text-muted-foreground">已提交，执行中</span>
+                    ) : (
+                        <>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="mr-auto text-muted-foreground"
+                                onClick={() => onCancel(request.request_id)}
+                            >
                                 取消
                             </Button>
-                        )}
-                        <div className="flex items-center gap-2">
-                            {!readOnly && request.questions.length > 1 && activeQuestionIndex > 0 && (
-                                <Button variant="outline" onClick={handlePrevious}>
+                            {hasMultipleQuestions && activeQuestionIndex > 0 && (
+                                <Button variant="ghost" size="sm" onClick={handlePrevious}>
                                     上一步
                                 </Button>
                             )}
-                            {readOnly ? (
-                                <Badge variant="outline">执行中</Badge>
+                            {!isLastQuestion ? (
+                                <Button size="sm" onClick={handleNext} disabled={!canGoNext}>
+                                    下一步
+                                </Button>
                             ) : (
-                                !isLastQuestion ? (
-                                    <Button onClick={handleNext} disabled={!canGoNext}>
-                                        下一步
-                                    </Button>
-                                ) : (
-                                    <Button onClick={handleSubmit} disabled={!canSubmit}>
-                                        提交
-                                    </Button>
-                                )
+                                <Button size="sm" onClick={handleSubmit} disabled={!canSubmit}>
+                                    提交
+                                </Button>
                             )}
-                        </div>
-                    </div>
-                </CardContent>
-            </Card>
+                        </>
+                    )}
+                </footer>
+            </section>
         </div>
     );
 }
@@ -488,9 +461,9 @@ export function AskUserQuestionCard({
 const fileTypeIcon = (type: string) => {
     switch (type) {
         case "image":
-            return <ImageIcon className="h-4 w-4" />;
+            return <ImageIcon className="h-3.5 w-3.5 shrink-0" />;
         default:
-            return <FileText className="h-4 w-4" />;
+            return <FileText className="h-3.5 w-3.5 shrink-0" />;
     }
 };
 
@@ -513,10 +486,13 @@ const resolvePdfSrc = (file: PreviewFileItem): string | null => {
     return `data:application/pdf;base64,${file.content}`;
 };
 
+const FRAME_CLASS = "block h-[60vh] w-full bg-background";
+
+/** 文件内容贴边铺满卡片，不再套额外边框；文本类内容自带内边距。 */
 const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
     if (file.type === "markdown") {
         return (
-            <div className="prose prose-sm max-w-none dark:prose-invert">
+            <div className="prose prose-sm max-w-none px-3 py-2 dark:prose-invert [&>:first-child]:mt-0! [&>:last-child]:mb-0!">
                 <UnifiedMarkdown noProseWrapper>{file.content ?? ""}</UnifiedMarkdown>
             </div>
         );
@@ -526,24 +502,26 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
         const text = file.content ?? file.url ?? "";
         if (file.language) {
             return (
-                <UnifiedMarkdown noProseWrapper>{`\`\`\`${file.language}\n${text}\n\`\`\``}</UnifiedMarkdown>
+                <div className="px-3 py-2">
+                    <UnifiedMarkdown noProseWrapper>{`\`\`\`${file.language}\n${text}\n\`\`\``}</UnifiedMarkdown>
+                </div>
             );
         }
         return (
-            <pre className="text-xs font-mono whitespace-pre-wrap break-words rounded-md border border-border bg-muted p-3">
+            <div className="bg-muted/30 px-3 py-2 text-xs leading-5 font-mono whitespace-pre-wrap break-words">
                 {text}
-            </pre>
+            </div>
         );
     }
 
     if (file.type === "image") {
         const src = resolveImageSrc(file);
         if (!src) {
-            return <div className="text-sm text-muted-foreground">无法展示图片内容。</div>;
+            return <div className="px-3 py-2 text-sm text-muted-foreground">无法展示图片内容。</div>;
         }
         return (
-            <div className="rounded-md border border-border bg-muted p-2">
-                <img src={src} alt={file.title} className="max-h-[60vh] w-full object-contain" />
+            <div className="flex justify-center bg-muted/30 p-2">
+                <img src={src} alt={file.title} className="my-0! max-h-[60vh] max-w-full rounded-md object-contain" />
             </div>
         );
     }
@@ -551,52 +529,39 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
     if (file.type === "pdf") {
         const src = resolvePdfSrc(file);
         if (!src) {
-            return <div className="text-sm text-muted-foreground">无法展示 PDF 内容。</div>;
+            return <div className="px-3 py-2 text-sm text-muted-foreground">无法展示 PDF 内容。</div>;
         }
-        return (
-            <iframe
-                src={src}
-                title={file.title}
-                className="h-[60vh] w-full rounded-md border border-border bg-background"
-            />
-        );
+        return <iframe src={src} title={file.title} className={FRAME_CLASS} />;
     }
 
     if (file.type === "html") {
         if (file.url?.trim()) {
-            return (
-                <iframe
-                    src={file.url}
-                    title={file.title}
-                    className="h-[60vh] w-full rounded-md border border-border bg-background"
-                />
-            );
+            return <iframe src={file.url} title={file.title} className={FRAME_CLASS} />;
         }
-        return (
-            <iframe
-                srcDoc={file.content ?? ""}
-                title={file.title}
-                className="h-[60vh] w-full rounded-md border border-border bg-background"
-            />
-        );
+        return <iframe srcDoc={file.content ?? ""} title={file.title} className={FRAME_CLASS} />;
     }
 
-    return <div className="text-sm text-muted-foreground">不支持的文件类型：{file.type}</div>;
+    return <div className="px-3 py-2 text-sm text-muted-foreground">不支持的文件类型：{file.type}</div>;
 };
+
+const FileDescription: React.FC<{ text?: string }> = ({ text }) =>
+    text ? <div className="px-3 pt-2 text-xs leading-5 text-muted-foreground">{text}</div> : null;
 
 export function PreviewFileCard({
     request,
     isOpen,
-    onOpenChange,
 }: PreviewFileCardProps) {
-    const [activeTab, setActiveTab] = useState("0");
+    const [activeTab, setActiveTab] = useState(0);
+    const [collapsed, setCollapsed] = useState(false);
     const [currentRequest, setCurrentRequest] = useState<PreviewFileRequest | null>(request);
     const [isResourceDialogOpen, setIsResourceDialogOpen] = useState(false);
+    const bodyId = useId();
 
     useEffect(() => {
         if (request?.files.length) {
-            setActiveTab("0");
+            setActiveTab(0);
         }
+        setCollapsed(false);
         setCurrentRequest(request);
     }, [request]);
 
@@ -605,26 +570,95 @@ export function PreviewFileCard({
     const viewMode = currentRequest.viewMode ?? "tabs";
     const files = currentRequest.files;
     const useTabs = viewMode === "tabs" && files.length > 1;
+    const activeIndex = Math.min(activeTab, Math.max(files.length - 1, 0));
+    const activeFile = useTabs ? files[activeIndex] : undefined;
     const showExternalResourceButton =
         hasActionablePreviewResources(currentRequest.externalResources);
+    const origin = currentRequest.metadata?.origin;
 
-    const renderFileContent = (file: PreviewFileItem, index: number) => (
-        <div
-            key={`${file.title}-${index}`}
-            className="rounded-md border border-border p-3 space-y-2"
-        >
-            <div className="flex items-center gap-2">
-                <Badge variant="outline">{file.type}</Badge>
-                <span className="text-sm font-medium">{file.title}</span>
+    const renderHeading = () => {
+        if (useTabs) {
+            return (
+                <nav className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" aria-label="文件列表">
+                    {files.map((file, index) => (
+                        <button
+                            key={`${file.title}-${index}`}
+                            type="button"
+                            className={cn(PILL_CLASS, pillState(index === activeIndex))}
+                            aria-current={index === activeIndex ? "page" : undefined}
+                            onClick={() => {
+                                setActiveTab(index);
+                                setCollapsed(false);
+                            }}
+                        >
+                            {fileTypeIcon(file.type)}
+                            <span className="max-w-[180px] truncate">{file.title}</span>
+                        </button>
+                    ))}
+                </nav>
+            );
+        }
+        if (files.length === 1) {
+            return (
+                <>
+                    {fileTypeIcon(files[0].type)}
+                    <span className="min-w-0 truncate font-medium text-foreground">{files[0].title}</span>
+                </>
+            );
+        }
+        return (
+            <>
+                <Files className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-medium text-foreground">
+                    {files.length > 0 ? `${files.length} 个文件` : "文件预览"}
+                </span>
+            </>
+        );
+    };
+
+    const renderBody = () => {
+        if (activeFile) {
+            return (
+                <>
+                    <FileDescription text={activeFile.description} />
+                    <PreviewFileContent file={activeFile} />
+                </>
+            );
+        }
+        if (files.length === 0) {
+            return <div className="px-3 py-3 text-sm text-muted-foreground">暂无可预览文件。</div>;
+        }
+        if (files.length === 1) {
+            return (
+                <>
+                    <FileDescription text={files[0].description} />
+                    <PreviewFileContent file={files[0]} />
+                </>
+            );
+        }
+        // list / grid：每个文件一个小节，用细分隔线区分，标题行与卡片标题同一层级感。
+        return (
+            <div
+                className={cn(
+                    "divide-y divide-border/60",
+                    viewMode === "grid" && "lg:grid lg:grid-cols-2 lg:gap-px lg:divide-y-0 lg:bg-border/60",
+                )}
+            >
+                {files.map((file, index) => (
+                    <section key={`${file.title}-${index}`} className="min-w-0 bg-card">
+                        <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2 text-xs text-muted-foreground">
+                            {fileTypeIcon(file.type)}
+                            <span className="truncate font-medium text-foreground">{file.title}</span>
+                        </div>
+                        <FileDescription text={file.description} />
+                        <div className="pt-1">
+                            <PreviewFileContent file={file} />
+                        </div>
+                    </section>
+                ))}
             </div>
-            {file.description && (
-                <div className="text-xs text-muted-foreground">
-                    {file.description}
-                </div>
-            )}
-            <PreviewFileContent file={file} />
-        </div>
-    );
+        );
+    };
 
     return (
         <div
@@ -633,79 +667,46 @@ export function PreviewFileCard({
             data-message-type="ui_interaction_preview_file"
             data-request-id={currentRequest.request_id}
         >
-            <Card className="w-full max-w-5xl py-4 gap-3">
-                <CardHeader className="px-4 pb-0 gap-2">
-                    <div className="flex items-start justify-between gap-3">
-                        <div className="space-y-2">
-                            <CardTitle className="flex items-center gap-2 text-base">
-                                <FileText className="h-5 w-5" />
-                                文件预览
-                            </CardTitle>
-                            <div className="text-sm text-muted-foreground">
-                                由 PreviewFile 工具生成的只读文件展示组件。
-                            </div>
-                        </div>
+            <div className={cn(CARD_CLASS, "max-w-5xl")}>
+                <div className={cn(CARD_HEADER_CLASS, collapsed && "border-b-0")}>
+                    {renderHeading()}
+                    {origin && (
+                        <span className="hidden min-w-0 max-w-[40%] truncate sm:inline" title={`来源：${origin}`}>
+                            {origin}
+                        </span>
+                    )}
+                    <div className="ml-auto flex shrink-0 items-center gap-0.5">
                         {showExternalResourceButton && (
                             <Button
                                 type="button"
-                                variant="outline"
+                                variant="ghost"
                                 size="sm"
+                                className="h-6 gap-1 px-2 text-xs has-[>svg]:px-2"
                                 onClick={() => setIsResourceDialogOpen(true)}
                             >
-                                需要加载外部资源
+                                <Globe className="size-3.5" />
+                                加载外部资源
                             </Button>
                         )}
-                    </div>
-                </CardHeader>
-                <CardContent className="px-4 space-y-3">
-                    {useTabs ? (
-                        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                            <TabsList className="w-full justify-start overflow-x-auto h-auto min-h-9">
-                                {files.map((file, index) => (
-                                    <TabsTrigger
-                                        key={`${file.title}-${index}`}
-                                        value={`${index}`}
-                                        className="flex items-center gap-1"
-                                    >
-                                        {fileTypeIcon(file.type)}
-                                        <span className="max-w-[180px] truncate">{file.title}</span>
-                                    </TabsTrigger>
-                                ))}
-                            </TabsList>
-                            {files.map((file, index) => (
-                                <TabsContent key={`${file.title}-content-${index}`} value={`${index}`}>
-                                    {renderFileContent(file, index)}
-                                </TabsContent>
-                            ))}
-                        </Tabs>
-                    ) : (
-                        <div
-                            className={
-                                viewMode === "grid"
-                                    ? "grid grid-cols-1 lg:grid-cols-2 gap-3"
-                                    : "space-y-3"
-                            }
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-6 text-muted-foreground"
+                            aria-label={collapsed ? "展开预览" : "收起预览"}
+                            title={collapsed ? "展开预览" : "收起预览"}
+                            aria-expanded={!collapsed}
+                            aria-controls={bodyId}
+                            onClick={() => setCollapsed((value) => !value)}
                         >
-                            {files.length > 0 ? files.map((file, index) => renderFileContent(file, index)) : (
-                                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                                    暂无可预览文件。
-                                </div>
-                            )}
-                        </div>
-                    )}
-                    {currentRequest.metadata?.origin && (
-                        <div className="text-xs text-muted-foreground flex items-center gap-1">
-                            <ShieldCheck className="h-3 w-3" />
-                            来源: {currentRequest.metadata.origin}
-                        </div>
-                    )}
-                    <div className="flex justify-end">
-                        <Button variant="outline" onClick={() => onOpenChange(false)}>
-                            关闭
+                            <ChevronDown className={cn("size-3.5 transition-transform", !collapsed && "rotate-180")} />
                         </Button>
                     </div>
-                </CardContent>
-            </Card>
+                </div>
+                <div id={bodyId} hidden={collapsed}>
+                    {renderBody()}
+                </div>
+            </div>
             <PreviewExternalResourcesDialog<unknown, PreviewFileRequest>
                 externalResources={currentRequest.externalResources}
                 open={isResourceDialogOpen}
