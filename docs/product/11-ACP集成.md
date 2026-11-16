@@ -321,6 +321,8 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 
 - Codex app-server 通道通过 `thread/start` / `thread/resume` 的 `config` 覆盖（`mcp_servers.aipp.*`）把 AIPP 桥（`--aipp-acp-mcp-bridge`）注册为 `aipp` MCP server，以此挂载助手选中的 MCP 工具
 - 工具执行经由与 ACP 桥相同的 TCP 代理和权限路径回流
+- Codex 发出的 MCP 工具审批（`mcpServer/elicitation/request`）显示在现有权限卡片中，可本次允许、拒绝或取消；不会因为协议未处理而误报为“用户拒绝”，也不会隐式保存长期允许。停止会撤销当前运行的请求。
+- 同一协议的普通 form 表单复用现有提问卡片，保留字段类型和选项值。URL 等未支持的交互模式明确报出协议、模式和请求标识，不自动接受或切换通道。
 - 选中工具负载是 session 签名的一部分：绑定变更会重建 session，同时恢复同一线程
 
 ---
