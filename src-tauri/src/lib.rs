@@ -222,6 +222,7 @@ use crate::mcp::registry_api::{
     toggle_mcp_server,
     update_mcp_server,
     update_mcp_server_prompt,
+    set_connection_tools_enabled,
     update_mcp_server_tool,
 };
 use crate::mcp::summarizer::summarize_all_mcp_catalogs;
@@ -1250,6 +1251,7 @@ pub fn run() {
             delete_mcp_server,
             toggle_mcp_server,
             get_mcp_server_tools,
+            set_connection_tools_enabled,
             update_mcp_server_tool,
             get_mcp_server_resources,
             get_mcp_server_prompts,

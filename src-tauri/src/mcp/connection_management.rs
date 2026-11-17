@@ -217,8 +217,7 @@ fn changes(
                 }
                 Some(t)
                     if !same_tool(t, tool)
-                        || signatures.get(&t.id).map(String::as_str).unwrap_or("null")
-                            != tool.signature =>
+                        || signatures.get(&t.id).is_some_and(|saved| saved != &tool.signature) =>
                 {
                     diff.changed.push(tool.name.clone());
                     diff.permissions.push(format!(
@@ -309,14 +308,22 @@ fn restrict_changed_tools(
         return Ok(None);
     }
     let diff = changes(signatures, previous, remote);
-    for name in diff.changed.iter().chain(&diff.removed) {
+    for name in &diff.removed {
         tx.execute("UPDATE mcp_server_tool SET is_enabled=0,is_auto_run=0 WHERE server_id=?1 AND tool_name=?2",
             params![server.id,name]).map_err(|e|e.to_string())?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
     if diff.added.is_empty() && diff.changed.is_empty() && diff.removed.is_empty() {
+        // Older installations and synced tools may have no local comparison baseline.
+        for tool in remote.unwrap_or_default() {
+            if let Some(old) = previous.iter().find(|old| old.tool_name == tool.name && !signatures.contains_key(&old.id)) {
+                tx.execute("INSERT INTO connection_tool_signature(tool_id,signature) VALUES(?1,?2)",
+                    params![old.id,tool.signature]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         return Ok(None);
     }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(Some(format!(
         "服务工具已变化（新增 {}、修改 {}、移除 {}），请刷新并查看变化。",
         diff.added.len(),

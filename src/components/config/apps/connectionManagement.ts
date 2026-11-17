@@ -25,7 +25,7 @@ export async function reviewRefresh(serverId: number) {
     const diff = await invoke<{token: string; added: string[]; changed: string[]; removed: string[]; permissions?: string[]}>('preview_connection_refresh', {serverId});
     const lines = [
         ...diff.added.map(name => '新增（停用）　' + name),
-        ...diff.changed.map(name => '定义变化（重新启用前保持停用）　' + name),
+        ...diff.changed.map(name => '定义变化（保留原设置）　' + name),
         ...diff.removed.map(name => '移除工具及其授权　' + name),
         ...(diff.permissions ?? []),
     ];

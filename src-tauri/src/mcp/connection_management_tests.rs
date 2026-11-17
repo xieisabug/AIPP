@@ -75,7 +75,9 @@ fn test_connection_refresh_previews_permission_change_and_invalidates_old_confir
     )
     .unwrap();
     let after = db.get_mcp_server_tools(server.id).unwrap();
-    assert!(!after[0].is_enabled && !after[0].is_auto_run);
+    assert!(after[0].is_enabled && after[0].is_auto_run);
+    assert_eq!(after[0].id, before[0].id);
+    assert!(changes(&HashMap::new(), &before, Some(&tools("write"))).changed.is_empty());
 }
 
 #[test]
@@ -101,8 +103,15 @@ fn test_connection_restart_quarantines_removed_tools_without_applying_new_ones()
         VALUES(?1,'generation','service','{}','a','{}','available','previous')",[id]).unwrap();
     let server = db.get_mcp_server(id).unwrap();
     db.upsert_mcp_server_tool(id, "removed", None, Some("{}")).unwrap();
+    let retained = db.upsert_mcp_server_tool(id, "retained", None, Some("{}")).unwrap();
+    db.update_mcp_server_tool(retained, true, true).unwrap();
     let old = db.get_mcp_server_tools(id).unwrap();
     let remote = [SimpleTool {
+        name: "retained".into(),
+        description: Some("updated description".into()),
+        params_json: "{}".into(),
+        signature: "null".into(),
+    }, SimpleTool {
         name: "new".into(),
         description: None,
         params_json: "{}".into(),
@@ -120,7 +129,29 @@ fn test_connection_restart_quarantines_removed_tools_without_applying_new_ones()
     .unwrap();
     assert!(reason.contains("移除 1"));
     let pending = db.get_mcp_server_tools(id).unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 2);
+    assert!(pending[1].is_enabled && pending[1].is_auto_run);
     assert_eq!(pending[0].tool_name, "removed");
     assert!(!pending[0].is_enabled);
+}
+
+#[test]
+fn test_connection_bulk_switch_preserves_auto_run_and_other_connections() {
+    let db = database();
+    import_configs(&db, &[request("a"), request("b")]).unwrap();
+    let servers = db.get_mcp_servers().unwrap();
+    let id = servers[0].id;
+    let other = servers[1].id;
+    let first = db.upsert_mcp_server_tool(id, "one", None, None).unwrap();
+    db.update_mcp_server_tool(first, true, true).unwrap();
+    db.upsert_mcp_server_tool(id, "two", None, None).unwrap();
+    db.upsert_mcp_server_tool(other, "one", None, None).unwrap();
+    for enabled in [false, true] {
+        update_connection_tool_switches(&db, id, enabled).unwrap();
+        let tools = db.get_mcp_server_tools(id).unwrap();
+        assert!(tools.iter().all(|t| t.is_enabled == enabled));
+        assert!(tools[0].is_auto_run);
+        assert!(!tools[1].is_auto_run);
+        assert!(db.get_mcp_server_tools(other).unwrap()[0].is_enabled);
+    }
 }

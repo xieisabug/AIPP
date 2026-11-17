@@ -326,7 +326,15 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
                 <div className="px-6 py-6">
                     {connectView ? connectViewContent : server ? <Tabs value={tab} onValueChange={setTab}>
                         <TabsContent value="overview" className="mt-0">{overview}</TabsContent>
-                        <TabsContent value="tools" className="mt-0"><MCPConfig key={server.id} initialServerId={server.id} detailOnly compact
+                        <TabsContent value="tools" className="mt-0">
+                            {!server.is_builtin && !!serverTools?.length && <div className="mb-4 flex flex-wrap justify-end gap-2">
+                                {[true, false].map(enabled => <Button key={String(enabled)} size="sm" variant="outline"
+                                    disabled={!!busy || !deviceSupported || serverTools.every(tool => tool.is_enabled === enabled)}
+                                    onClick={() => void run('正在更新工具开关…', () => invoke('set_connection_tools_enabled', { serverId: server.id, isEnabled: enabled }))}>
+                                    {enabled ? '全部开启' : '全部关闭'}
+                                </Button>)}
+                            </div>}
+                            <MCPConfig key={server.id} initialServerId={server.id} detailOnly compact
                             onEditManaged={connection ? () => connection.definition.connection.transport === 'stdio' ? void openPluginConnection(connection.definition) : startConnect(connection) : undefined}
                             onRefreshManaged={!server.is_builtin ? () => verify(server.id) : undefined} /></TabsContent>
                         {!server.is_builtin && <TabsContent value="access" className="mt-0"><AppAssistantAccess serverId={server.id} /></TabsContent>}

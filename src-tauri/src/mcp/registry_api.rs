@@ -187,8 +187,10 @@ fn persist_reviewed(db:&MCPDatabase, server:&MCPServer, label:&str, tools_opt:Op
                 t.description.as_deref(),
                 Some(&t.params_json),
             ).map_err(|e| format!("连接 {server_id} 保存工具 {} 失败：{e}", t.name))?;
-            if !previous.iter().any(|old| same_tool(old, t) && signatures.get(&old.id).map(String::as_str).unwrap_or("null") == t.signature) {
+            if !previous.iter().any(|old| old.id == id) {
                 db.update_mcp_server_tool(id, false, false).map_err(|e| e.to_string())?;
+            }
+            if signatures.get(&id) != Some(&t.signature) {
                 db.conn.execute("INSERT OR REPLACE INTO connection_tool_signature(tool_id,signature) VALUES(?1,?2)",
                     rusqlite::params![id,t.signature]).map_err(|e|e.to_string())?;
             }
@@ -409,6 +411,32 @@ pub async fn update_mcp_server_tool(
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit("mcp_state_changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_connection_tools_enabled(
+    app_handle: tauri::AppHandle,
+    server_id: i64,
+    is_enabled: bool,
+) -> Result<(), String> {
+    let db = open_db(&app_handle)?;
+    update_connection_tool_switches(&db, server_id, is_enabled)?;
+    db.rebuild_dynamic_mcp_catalog_force().map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
+    Ok(())
+}
+
+fn update_connection_tool_switches(db: &MCPDatabase, server_id: i64, is_enabled: bool) -> Result<(), String> {
+    let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
+    if server.is_builtin {
+        return Err("内置工具请逐项设置".into());
+    }
+    db.conn.execute(
+        "UPDATE mcp_server_tool SET is_enabled=?2 WHERE server_id=?1 AND is_enabled!=?2",
+        rusqlite::params![server_id, is_enabled],
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 

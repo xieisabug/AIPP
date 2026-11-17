@@ -312,20 +312,13 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let header_json = if needs_credentials { serde_json::json!({credentials::REFERENCE_HEADER: reference}).to_string() } else { "{}".into() };
         let name = format!("{} · {}", request.label.trim(), &request.request_id[..8]);
+        let enable_after_save = match request.server_id {
+            Some(id) if request.update_http_definition => transaction.query_row(
+                "SELECT is_enabled FROM mcp_server WHERE id=?1", [id], |row| row.get::<_, bool>(0),
+            ).map_err(|e| e.to_string())?,
+            _ => true,
+        };
         let id = if let Some(id) = request.server_id {
-            if request.update_http_definition {
-                let old:String = transaction.query_row("SELECT definition FROM app_connection WHERE server_id=?1",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
-                let old:AppDefinition = serde_json::from_str(&old).map_err(|e|e.to_string())?;
-                if let Some(previous)=old.connection.http_api {
-                    for op in previous.tools {
-                        let unchanged = old.connection.url == app.connection.url && app.connection.http_api.as_ref().and_then(|api|api.tools.iter().find(|t|t.name==op.name))
-                            .is_some_and(|new|serde_json::json!(new)==serde_json::json!(op));
-                        if !unchanged {
-                            transaction.execute("UPDATE mcp_server_tool SET is_enabled=0,is_auto_run=0 WHERE server_id=?1 AND tool_name=?2",params![id,op.name]).map_err(|e|e.to_string())?;
-                        }
-                    }
-                }
-            }
             transaction.execute("UPDATE mcp_server SET headers=?2,is_enabled=0,name=?3,url=?4,transport_type=?5 WHERE id=?1", params![id, header_json, name, app.connection.url, app.connection.transport]).map_err(|e| e.to_string())?;
             id
         } else {
@@ -339,9 +332,9 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
             transaction.execute("INSERT OR IGNORE INTO app_credential_cleanup(reference,server_id) VALUES(?1,?2)", params![old,id]).map_err(|e| e.to_string())?;
         }
         transaction.commit().map_err(|e| e.to_string())?;
-        Ok::<i64,String>(id)
+        Ok::<_,String>((id, enable_after_save))
     })();
-    let id = match id_result {
+    let (id, enable_after_save) = match id_result {
         Ok(id) => id,
         Err(e) => { if needs_credentials { let key = reference.clone(); let vault_app = app_handle.clone(); let _ = tokio::task::spawn_blocking(move || credentials::clear(&vault_app, &key)).await; } return Err(e); }
     };
@@ -419,6 +412,9 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
             }
         }
         set_status(&app_handle, id, "unchecked", None)?;
+        if !enable_after_save {
+            return Ok(ConnectResult { server_id: id, authorization_url: None });
+        }
         db(&app_handle)?.toggle_mcp_server(id, true).map_err(|e| e.to_string())?;
         drop(_change);
         let _ = verify_app_connection(app_handle, id).await;

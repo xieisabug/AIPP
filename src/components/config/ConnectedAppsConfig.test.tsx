@@ -116,6 +116,32 @@ describe('ConnectedAppsConfig', () => {
         expect(await screen.findByRole('button', { name: /公司知识库/ })).toHaveTextContent('工具未检测');
         expect(screen.getByRole('button', { name: /搜索工具/ })).toHaveTextContent('0 / 0 个工具');
     });
+    it('should switch all tools on and off for the selected connection', async () => {
+        const defaults = vi.mocked(invoke).getMockImplementation()!;
+        let enabled = false;
+        vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+            if (cmd === 'get_mcp_server_tools' && (args as { serverId: number }).serverId === legacy.id) {
+                return [{ tool_name: 'read', is_enabled: enabled }];
+            }
+            if (cmd === 'set_connection_tools_enabled') {
+                enabled = (args as { isEnabled: boolean }).isEnabled;
+                return;
+            }
+            return defaults(cmd, args);
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await user.click(await screen.findByRole('button', { name: /公司知识库/ }));
+        await user.click(await screen.findByRole('tab', { name: /工具/ }));
+        for (const [label, value] of [['全部开启', true], ['全部关闭', false]] as const) {
+            const button = screen.getByRole('button', { name: label });
+            await waitFor(() => expect(button).toBeEnabled());
+            await user.click(button);
+            expect(invoke).toHaveBeenCalledWith('set_connection_tools_enabled', { serverId: legacy.id, isEnabled: value });
+            await waitFor(() => expect(button).toBeDisabled());
+        }
+    });
     it('should reopen the pending authorization without creating another connection when login is in progress', async () => {
         vi.mocked(invoke).mockImplementation(async command => {
             if (command === 'list_connection_checks') return [];
