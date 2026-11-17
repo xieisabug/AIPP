@@ -98,9 +98,9 @@ export function contactVisual(rows: ContactActivity[], feedback: ContactFeedback
         if (streaming.detail?.stream === "plan") return { state: "writing", label: "制定计划" };
         return { state: "streaming", label: "回复中" };
     }
-    if (rows.some(r => r.waiting_peer)) return { state: "waiting", label: "等待协作" };
     // 还没有推理或回复 token：请求已发出，模型尚未开始输出。不叫思考。
     if (active.length) return { state: "sending", label: "投递中" };
+    if (rows.some(r => r.waiting_peer)) return { state: "waiting", label: "待收协作答复" };
     if (rows.some(r => r.status === "running")) return { state: "working", label: "任务处理中" };
     if (rows.some(r => r.status === "accepted")) return { state: "receiving", label: "已接收任务" };
     if (feedback && feedback.until > now) return { state: feedback.state, label: feedbackLabels[feedback.state] };

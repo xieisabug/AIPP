@@ -57,7 +57,8 @@ describe("contact activity priority", () => {
         expect(contactVisual([], { state: "blocked", until: 100 }, false, 200).state).toBe("idle");
     });
     it("should distinguish peer waiting and avoid replaying historical terminal tasks", () => {
-        expect(contactVisual([activity({ waiting_peer: true })], undefined, false, 0).label).toBe("等待协作");
+        expect(contactVisual([activity({ waiting_peer: true })], undefined, false, 0).label).toBe("待收协作答复");
+        expect(contactVisual([activity({ waiting_peer: true }), running("user_pending")], undefined, false, 0).label).toBe("投递中");
         for (const status of ["succeeded", "failed", "cancelled", "interrupted"]) {
             expect(contactVisual([activity({ status })], undefined, false, 0).state).toBe("idle");
         }
