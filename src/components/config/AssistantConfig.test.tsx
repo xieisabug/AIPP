@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { StrictMode, useState } from "react";
 import { Controller, type UseFormReturn } from "react-hook-form";
 import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -82,6 +83,33 @@ describe("AssistantConfig sync selection", () => {
         await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("2"));
         expect(screen.getByLabelText("prompt")).toHaveValue("prompt-2");
         expect(consumed).toHaveBeenCalled();
+    });
+
+    it("still selects the requested assistant when effects replay and the parent clears subNav only after selection", async () => {
+        mockInvokeHandler("get_assistants", () => [1, 2, 3].map((id) => detail(id).assistant));
+        mockInvokeHandler("get_assistant", (args) => detail(Number(args?.assistantId)));
+        mockInvokeHandler("get_plugin_assistant_configs", (args) => config(Number(args?.assistantId)));
+        function Harness() {
+            const [subNav, setSubNav] = useState<string | undefined>("2");
+            return <StrictMode>
+                <AssistantConfig pluginList={plugins} navigateTo={() => undefined} subNav={subNav}
+                    onSubNavConsumed={() => setSubNav(undefined)} />
+            </StrictMode>;
+        }
+        render(<Harness />);
+        await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("2"));
+        expect(screen.getByLabelText("prompt")).toHaveValue("prompt-2");
+    });
+
+    it("switches to the requested assistant when settings is already open on another assistant", async () => {
+        mockInvokeHandler("get_assistants", () => [1, 2, 3].map((id) => detail(id).assistant));
+        mockInvokeHandler("get_assistant", (args) => detail(Number(args?.assistantId)));
+        mockInvokeHandler("get_plugin_assistant_configs", (args) => config(Number(args?.assistantId)));
+        const view = render(<AssistantConfig pluginList={plugins} navigateTo={() => undefined} />);
+        await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("1"));
+        view.rerender(<AssistantConfig pluginList={plugins} navigateTo={() => undefined} subNav="3" onSubNavConsumed={() => undefined} />);
+        await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("3"));
+        expect(screen.getByLabelText("prompt")).toHaveValue("prompt-3");
     });
 
     it("preserves a dirty prompt on external refresh while allowing explicit selection", async () => {

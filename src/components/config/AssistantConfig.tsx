@@ -4,6 +4,7 @@ import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
 import { Bot, Settings, User, Download } from "lucide-react";
 import { Button } from "../ui/button";
@@ -53,6 +54,11 @@ interface AssistantConfigProps {
     /** 从其他窗口打开设置时要选中的助手 id。 */
     subNav?: string;
     onSubNavConsumed?: () => void;
+}
+
+function parseAssistantSubNav(subNav?: string): number | null {
+    const id = Number(subNav);
+    return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 /** Clone form values so later edits cannot mutate the discard snapshot. */
@@ -304,25 +310,35 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
     // 首次进入：列表与首个助手详情（含表单回填）都完成后才展示，避免先闪空状态/空表单
     const [initialLoaded, setInitialLoaded] = useState(false);
-    // 打开设置时指定的助手。列表还没回来时先记下来，避免先选中第一个再跳走。
+    // 打开设置时指定的助手。在渲染阶段写入，这样列表请求返回时一定读得到；
+    // 不要在副作用里立刻清掉父组件传来的 subNav，否则开发模式重放副作用后第二次只会选中第一个助手。
     const requestedAssistantIdRef = useRef<number | null>(null);
+    const choosingAssistantIdRef = useRef<number | null>(null);
+    const requestedFromProp = parseAssistantSubNav(subNav);
+    if (requestedFromProp != null) requestedAssistantIdRef.current = requestedFromProp;
 
     // 初始化助手列表
     useEffect(() => {
+        let cancelled = false;
         loadAssistants()
             .then((assistantList) => {
+                if (cancelled) return;
                 const requested = requestedAssistantIdRef.current;
-                requestedAssistantIdRef.current = null;
-                const requestedAssistant = requested == null ? undefined : assistantList.find(assistant => assistant.id === requested);
-                if (requested != null && !requestedAssistant) {
-                    toast.error(`设置里没有编号为 ${requested} 的助手，已打开助手列表`);
-                }
+                const requestedAssistant = requested == null
+                    ? undefined
+                    : assistantList.find(assistant => Number(assistant.id) === requested);
+                if (requested != null && !requestedAssistant) requestedAssistantIdRef.current = null;
                 const target = requestedAssistant ?? assistantList[0];
-                if (target) return handleChooseAssistant(target);
+                if (!target) return;
+                const targetId = Number(target.id);
+                if (choosingAssistantIdRef.current === targetId) return;
+                choosingAssistantIdRef.current = targetId;
+                return handleChooseAssistant(target, true);
             })
             // 列表/详情读取失败已在 useAssistantOperations 中 toast 具体原因
             .catch(() => undefined)
-            .finally(() => setInitialLoaded(true));
+            .finally(() => { if (!cancelled) setInitialLoaded(true); });
+        return () => { cancelled = true; };
     }, [loadAssistants]);
     // Only explicit selections invalidate a refresh. Its own fallback selection
     // must finish loading plugin values and resetting the form.
@@ -392,26 +408,36 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         ]
     );
 
-    // 窗口已经打开时再收到导航：列表已在，直接选中；首次进入则交给上面的初始化。
-    useEffect(() => {
-        if (!subNav) return;
-        const id = Number(subNav);
-        onSubNavConsumed?.();
-        if (!Number.isInteger(id) || id <= 0) return;
-        requestedAssistantIdRef.current = id;
-        if (!initialLoaded) return;
+    const finishAssistantNavigation = useCallback((id: number) => {
         requestedAssistantIdRef.current = null;
-        const assistant = assistants.find(item => item.id === id);
+        choosingAssistantIdRef.current = null;
+        void emit("config-assistant-ready", { assistantId: id });
+        onSubNavConsumed?.();
+    }, [onSubNavConsumed]);
+
+    // 窗口已经停在助手页时再收到导航。同一个编号只加载一次，避免先画出一个助手再跳到另一个。
+    useEffect(() => {
+        const id = parseAssistantSubNav(subNav);
+        if (id == null || !initialLoaded) return;
+        if (Number(currentAssistant?.assistant.id) === id && formAssistantId === id) {
+            finishAssistantNavigation(id);
+            return;
+        }
+        const assistant = assistants.find(item => Number(item.id) === id);
         if (!assistant) {
-            toast.error(`设置里没有编号为 ${id} 的助手`);
+            toast.error(`设置里没有编号为 ${id} 的助手，已打开助手列表`);
+            finishAssistantNavigation(id);
             return;
         }
-        if (isFormDirtyNow() && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
-            setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant); } });
+        if (isFormDirtyNow() && currentAssistant) {
+            setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant, true); } });
+            finishAssistantNavigation(id);
             return;
         }
-        void handleChooseAssistant(assistant);
-    }, [subNav, initialLoaded]);
+        if (choosingAssistantIdRef.current === id) return;
+        choosingAssistantIdRef.current = id;
+        void handleChooseAssistant(assistant, true);
+    }, [subNav, initialLoaded, assistants, currentAssistant, formAssistantId, handleChooseAssistant, isFormDirtyNow, finishAssistantNavigation]);
 
 
     useEffect(() => {
@@ -434,7 +460,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 toast.warning("助手配置已更新，未保存的编辑已保留；保存或切换助手后可重新加载。");
                 return;
             }
-            const selected = list.find((a) => a.id === currentAssistant?.assistant.id) ?? list[0];
+            const requested = requestedAssistantIdRef.current;
+            const selected = (requested == null ? undefined : list.find(assistant => Number(assistant.id) === requested))
+                ?? list.find((a) => a.id === currentAssistant?.assistant.id)
+                ?? list[0];
             if (selected) await handleChooseAssistant(selected, true, () => isCurrent() && !isFormDirtyNow());
             else {
                 selectionRequestRef.current += 1;
@@ -790,7 +819,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         </AlertDialog></>
     );
 
-    if (!initialLoaded) {
+    const waitingForAssistant = parseAssistantSubNav(subNav);
+    // 指定了助手时先不要画出上一个或列表里的第一个，窗口显示出来就是目标助手。
+    if (!initialLoaded || (waitingForAssistant != null && (Number(currentAssistant?.assistant.id) !== waitingForAssistant || formAssistantId !== waitingForAssistant))) {
         return <ConfigPageLoading />;
     }
 

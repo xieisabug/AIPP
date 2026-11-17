@@ -123,8 +123,10 @@ describe("Butler profile editor", () => {
             model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }}
             onSave={vi.fn()} onClose={vi.fn()} />);
         fireEvent.click(screen.getByRole("button", { name: "在设置中修改配置" }));
-        await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_config_window"));
         await waitFor(() => expect(emit).toHaveBeenCalledWith("config-navigate-to", { menu: "assistant-config", subNav: "7" }));
+        expect(invoke).not.toHaveBeenCalledWith("open_config_window");
+        await emit("config-assistant-ready", { assistantId: 7 });
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_config_window"));
         fireEvent.mouseDown(screen.getByRole("tab", { name: "形象" }), { button: 0 });
         expect(screen.queryByRole("button", { name: "在设置中修改配置" })).toBeNull();
     });

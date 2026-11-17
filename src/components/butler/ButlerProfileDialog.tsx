@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -90,16 +90,36 @@ function ModelSelect({ field, picked, onPick }: { field: ProfileModelField; pick
     </div>;
 }
 
+/** 设置窗口预先创建、平时是隐藏的。先让它在隐藏时选中助手，再显示，避免打开后从别的页或别的助手跳一次。 */
+function waitForConfigAssistant(assistantId: number) {
+    return new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (matched: boolean) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timer);
+            void unlisten.then(off => off());
+            resolve(matched);
+        };
+        const timer = window.setTimeout(() => finish(false), 1500);
+        const unlisten = listen<{ assistantId?: number }>("config-assistant-ready", (event) => {
+            if (Number(event.payload?.assistantId) === assistantId) finish(true);
+        });
+    });
+}
+
 async function openAssistantSettings(assistantId: number, mobile: boolean) {
     if (mobile) {
         navigateMobileConfig("assistant-config", String(assistantId));
         return;
     }
+    const ready = waitForConfigAssistant(assistantId);
+    const navigation = { menu: "assistant-config", subNav: String(assistantId) };
+    await emit("config-navigate-to", navigation);
+    const matched = await ready;
     await invoke("open_config_window");
-    // 设置窗口是预创建的，稍等再发导航，避免窗口刚显示时监听还没挂上。
-    window.setTimeout(() => {
-        void emit("config-navigate-to", { menu: "assistant-config", subNav: String(assistantId) });
-    }, 50);
+    // 隐藏窗口有时要等显示后才处理事件。超时再发一次，已经选中时不会再发。
+    if (!matched) await emit("config-navigate-to", navigation);
 }
 
 export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, model: modelField,
