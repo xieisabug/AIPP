@@ -43,9 +43,13 @@ const toolVisuals: [string[], ContactVisual][] = [
     [["message_bot", "spawn_task_conversation", "task_conversation_operation"], { state: "sending", label: "联络助手" }],
     [["show_artifact", "preview_file", "preview_code", "preview_message", "capture_artifact_screenshot"], { state: "spawning", label: "生成展示" }],
 ];
+function writingVisual(hasCode: boolean): ContactVisual {
+    return hasCode ? { state: "coding", label: "编程中" } : { state: "writing", label: "书写中" };
+}
+
 export function toolVisual(tool?: string, path?: string): ContactVisual {
     if (tool === "write_file" || tool === "edit_file") {
-        return path && CODE_FILE.test(path) ? { state: "coding", label: "编程中" } : { state: "writing", label: "书写中" };
+        return writingVisual(CODE_FILE.test(path ?? ""));
     }
     return toolVisuals.find(([names]) => tool && names.includes(tool))?.[1] ?? { state: "working", label: "执行中" };
 }
@@ -57,7 +61,7 @@ export function updateNativeActivity(active: Map<string, ContactVisual>, event: 
         active.delete(event.item_id);
         return;
     }
-    const input = event.input as { path?: string; file_path?: string; tool_name?: string; parameters?: { path?: string; file_path?: string } } | null;
+    const input = event.input as { changes?: unknown; path?: string; file_path?: string; tool_name?: string; parameters?: { path?: string; file_path?: string } } | null;
     const metadata = event.metadata as { tool?: string; display_tool?: string } | null;
     let visual: ContactVisual;
     switch (event.kind) {
@@ -66,7 +70,13 @@ export function updateNativeActivity(active: Map<string, ContactVisual>, event: 
         case "file_read": visual = toolVisual("read_file"); break;
         case "file_search": visual = { state: "searching", label: "搜索文件" }; break;
         case "patch":
-        case "file_write": visual = toolVisual("edit_file", input?.path ?? input?.file_path); break;
+        case "file_write": {
+            const hasCodeChange = Array.isArray(input?.changes) && input.changes.some(
+                change => typeof change?.path === "string" && CODE_FILE.test(change.path),
+            );
+            visual = writingVisual(hasCodeChange || CODE_FILE.test(input?.path ?? input?.file_path ?? ""));
+            break;
+        }
         case "sub_agent": visual = { state: "spawning", label: "委派助手" }; break;
         default: {
             const name = metadata?.display_tool ?? metadata?.tool ?? event.title;

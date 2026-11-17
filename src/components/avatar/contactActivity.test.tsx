@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contactVisual, toolVisual, type ContactActivity } from "./contactActivity";
+import { contactVisual, toolVisual, updateNativeActivity, type ContactActivity, type ContactVisual } from "./contactActivity";
 
 export const activity = (overrides: Partial<ContactActivity> = {}): ContactActivity => ({
     assistant_id: 8, conversation_id: 3, status: null, waiting_peer: false, permission: false, question: false,
@@ -43,6 +43,18 @@ describe("contact activity priority", () => {
         expect(toolVisual("edit_file", "src/app.tsx").state).toBe("coding");
         expect(toolVisual("write_file", "notes/plan.md").state).toBe("writing");
         expect(toolVisual("write_file").state).toBe("writing");
+    });
+    it.each([
+        { paths: ["src/main.rs"], state: "coding", label: "编程中" },
+        { paths: ["README.md", "notes.txt"], state: "writing", label: "书写中" },
+        { paths: ["README.md", "src/view.tsx"], state: "coding", label: "编程中" },
+        { paths: [], state: "writing", label: "书写中" },
+    ])("should show $label when Codex changes $paths", ({ paths, state, label }) => {
+        const active = new Map<string, ContactVisual>();
+        updateNativeActivity(active, { item_id: "edit", kind: "patch", status: "executing",
+            input: { type: "fileChange", changes: paths.map(path => ({ path, kind: { type: "update" } })) },
+        });
+        expect(active.get("edit")).toEqual({ state, label });
     });
     it("should separate accepted tasks from running tasks", () => {
         expect(stateOf([activity({ status: "accepted" })])).toBe("receiving");
