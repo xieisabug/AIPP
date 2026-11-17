@@ -15,10 +15,8 @@ import { maskToolCall } from "@/utils/antiLeakage";
 import { getErrorMessage } from "@/utils/error";
 
 // 所有工具调用都以 pending 创建：免审核/审核通过的调用会很快转为 executing，
-// 只有持续停在 pending 的才是真正等待用户确认的调用。
+// 只有持续停在 pending、且没有自动审核在进行的，才是真正等待用户确认的调用。
 export const HELD_TOOL_CALL_DELAY_MS = 1500;
-// 自动审核通常要几秒；短暂延迟只为避免极快完成的审核闪一下卡片。
-export const REVIEWING_NOTICE_DELAY_MS = 400;
 const INPUT_CAPSULE_SELECTOR = '[data-aipp-slot="chat-input-area-container"]';
 const DOCK_GAP_PX = 8;
 const SUMMARY_VALUE_MAX = 40;
@@ -31,10 +29,10 @@ interface Props {
 }
 
 /**
- * 总管家简洁视图会隐藏工具调用卡片。这里把等待中的调用单独展示成审核卡片：
- * 自动审核进行中显示「正在自动审核」（用户也可跳过审核直接处理）；
- * 审核不通过 / 审核失败 / 需要人工确认时，同一张卡片原地切换为待确认。
- * 审核通过或用户允许、拒绝后状态离开 pending，卡片随之消失。
+ * 总管家简洁视图会隐藏工具调用卡片。等待用户确认的调用单独展示在输入框上方。
+ * 自动审核进行中不弹出；审核通过后调用会离开 pending，卡片不出现。
+ * 只有自动审核未通过（有风险 / 失败），或没有审核、需要人工确认时，才弹出待确认卡片。
+ * 用户允许或拒绝后状态离开 pending，卡片随之消失。
  */
 export default function ButlerHeldToolCalls({ conversationId, mcpToolCallStates, floating = false }: Props) {
     const pending = useMemo(
@@ -94,26 +92,21 @@ function FloatingDock({ children }: { children: ReactNode }) {
     );
 }
 
-type CardMode = "reviewing" | "held";
-
 function HeldToolCall({ call }: { call: MCPToolCallUpdateEvent }) {
     const review = useToolReview(call.call_id);
     const reviewing = review?.phase === "reviewing";
     const verdict = review?.phase === "done" ? review.verdict : null;
     // 还没有审核事件：免审核调用会很快转为 executing，稍等再判断是否真的需要人工确认。
     const unknownSettled = useSettledFlag(review === null, HELD_TOOL_CALL_DELAY_MS);
-    const reviewingSettled = useSettledFlag(reviewing, REVIEWING_NOTICE_DELAY_MS);
-    // 卡片出现过就不再因状态切换而隐藏再出现（例如审核事件晚于卡片到达）。
-    const shownRef = useRef(false);
 
-    let mode: CardMode | null;
-    if (verdict === "safe" || verdict === "cancelled") mode = null; // 审核通过或用户已手动处理，马上离开 pending
-    else if (reviewing) mode = reviewingSettled || shownRef.current ? "reviewing" : null;
-    else if (review === null) mode = unknownSettled || shownRef.current ? "held" : null;
-    else mode = "held"; // 审核结论已出（有风险/失败）：立即请用户确认
-    if (mode) shownRef.current = true;
-    if (!mode) return null;
-    return <HeldToolCallCard call={call} review={review} mode={mode} />;
+    // 自动审核进行中、审核通过、或用户已手动处理：不弹卡片。
+    // 审核结论已出（有风险/失败）立即请用户确认；一直没有审核事件则等延迟后再当作人工确认。
+    const visible = !reviewing
+        && verdict !== "safe"
+        && verdict !== "cancelled"
+        && (review !== null || unknownSettled);
+    if (!visible) return null;
+    return <HeldToolCallCard call={call} review={review} />;
 }
 
 /** 审核结论放在首位：用户首先需要知道「为什么被拦下」，其次才是参数细节。 */
@@ -147,7 +140,7 @@ export function summarizeParameters(parameters: string): string {
 
 type Decision = "execute" | "reject";
 
-function HeldToolCallCard({ call, review, mode }: { call: MCPToolCallUpdateEvent; review: ToolReviewView | null; mode: CardMode }) {
+function HeldToolCallCard({ call, review }: { call: MCPToolCallUpdateEvent; review: ToolReviewView | null }) {
     const isMobile = useIsMobilePlatform();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
     const [expanded, setExpanded] = useState(false);
@@ -163,10 +156,7 @@ function HeldToolCallCard({ call, review, mode }: { call: MCPToolCallUpdateEvent
         ? maskToolCall(raw.serverName, raw.toolName, raw.parameters)
         : raw;
     const summary = useMemo(() => summarizeParameters(display.parameters), [display.parameters]);
-    const isReviewing = mode === "reviewing";
-    const hold = isReviewing
-        ? { title: "正在自动审核", reason: "通过后会自动执行，无需操作" }
-        : describeHold(review);
+    const hold = describeHold(review);
 
     const decide = useCallback(async (decision: Decision) => {
         if (decidingRef.current) return;
@@ -190,14 +180,11 @@ function HeldToolCallCard({ call, review, mode }: { call: MCPToolCallUpdateEvent
 
     const buttonSize = isMobile ? "min-h-11 px-4" : "h-8 px-3";
     return (
-        <div data-aipp-slot="butler-held-tool-call" data-aipp-state={mode} role="group"
-            aria-label={`${isReviewing ? "正在自动审核的工具调用" : "待确认的工具调用"} ${display.toolName}`}
-            aria-busy={isReviewing}
+        <div data-aipp-slot="butler-held-tool-call" data-aipp-state="held" role="group"
+            aria-label={`待确认的工具调用 ${display.toolName}`}
             className="rounded-xl border border-border bg-background p-3 text-sm shadow-md">
             <div className="flex items-start gap-2">
-                {isReviewing
-                    ? <Loader2 aria-hidden="true" className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
-                    : <ShieldAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}
+                <ShieldAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                 <div className="min-w-0 flex-1 space-y-0.5">
                     <div className="flex min-w-0 items-baseline gap-1.5">
                         <span className="truncate font-medium" title={display.toolName}>{display.toolName}</span>
@@ -205,7 +192,7 @@ function HeldToolCallCard({ call, review, mode }: { call: MCPToolCallUpdateEvent
                     </div>
                     <p className="text-xs text-foreground" data-aipp-slot="butler-held-tool-call-reason" aria-live="polite">
                         <span className="font-medium">{hold.title}</span>
-                        {hold.reason ? <span className="text-muted-foreground">{isReviewing ? "，" : "："}{hold.reason}</span> : null}
+                        {hold.reason ? <span className="text-muted-foreground">：{hold.reason}</span> : null}
                     </p>
                 </div>
             </div>
@@ -224,11 +211,10 @@ function HeldToolCallCard({ call, review, mode }: { call: MCPToolCallUpdateEvent
                     {deciding === "reject" ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
                     拒绝
                 </Button>
-                {/* 审核中也允许手动介入（后端会停止自动审核）；此时不用主按钮，避免诱导跳过审核。 */}
-                <Button size="sm" variant={isReviewing ? "outline" : "default"} className={buttonSize} disabled={deciding !== null}
+                <Button size="sm" variant="default" className={buttonSize} disabled={deciding !== null}
                     onClick={() => void decide("execute")}>
                     {deciding === "execute" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                    {isReviewing ? "跳过审核执行" : "允许执行"}
+                    允许执行
                 </Button>
             </div>
         </div>
