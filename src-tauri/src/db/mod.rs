@@ -5,6 +5,7 @@ pub mod butler_goal;
 pub mod butler_execution;
 pub mod butler_control;
 pub mod butler_question_history;
+pub mod butler_interactions;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 

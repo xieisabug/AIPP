@@ -19,7 +19,7 @@ pub struct AnswerRecord {
 
 fn delivered_status() -> String { "delivered".into() }
 
-fn schema(conn: &Connection) -> Result<()> {
+pub(super) fn schema(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS butler_task_question_answer (
         task_conversation_id INTEGER NOT NULL, question_key TEXT NOT NULL, record_json TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

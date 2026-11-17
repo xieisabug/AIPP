@@ -1253,7 +1253,7 @@ fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEven
         data: serde_json::to_value(MCPToolCallUpdateEvent {
             call_id: tool_call.id,
             conversation_id: tool_call.conversation_id,
-            message_id: tool_call.message_id,
+            message_id: tool_call.assistant_message_id.or(tool_call.message_id),
             status: tool_call.status.clone(),
             llm_call_id: tool_call.llm_call_id.clone(),
             server_name: Some(tool_call.server_name.clone()),
@@ -2015,6 +2015,8 @@ pub async fn create_mcp_tool_call_with_llm_id(
     .await
 }
 
+tokio::task_local! { pub(crate) static INTERACTION_CALL_ID: i64; }
+
 /// 调用方作用域里与工具执行相关的 task-local（工具所属消息、输出归属、续跑回送标记）。
 /// task-local 不会跟着换线程，换到大栈线程执行工具时要原样重新设置。
 struct ToolTaskLocals {
@@ -2100,8 +2102,8 @@ pub async fn execute_tool_by_transport_on_large_stack(
     let thread_tool_name = tool_name.clone();
     crate::utils::async_thread::run_on_large_stack("aipp-tool-transport", move || async move {
         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-        locals
-            .scope(execute_tool_by_transport(
+        let preview_params = (server.command.as_deref() == Some("aipp:ui_interaction") && thread_tool_name == "preview_file").then(|| parameters.as_str());
+        let transport = locals.scope(execute_tool_by_transport(
                 &app_handle,
                 &feature_config_state,
                 &server,
@@ -2109,8 +2111,10 @@ pub async fn execute_tool_by_transport_on_large_stack(
                 &parameters,
                 conversation_id,
                 Some(token),
-            ))
-            .await
+            ));
+        if let Some(raw) = preview_params {
+            crate::db::butler_interactions::PREVIEW_ARGUMENTS.scope(raw.to_owned(), transport).await
+        } else { transport.await }
     })
     .await
     .map_err(|error| format!("{error} (server_id={server_id}, tool={tool_name}, conversation_id={conversation_id:?})"))?
@@ -2428,6 +2432,7 @@ async fn execute_mcp_tool_call_on_current_thread(
             Some(tool_call.conversation_id),
             Some(cancel_token.clone()),
         );
+        let exec_future = INTERACTION_CALL_ID.scope(call_id, exec_future);
         let exec_future = crate::api::butler_peer::TOOL_MESSAGE.scope(tool_call.assistant_message_id.or(tool_call.message_id), exec_future);
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),

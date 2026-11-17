@@ -505,7 +505,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             const update: MCPToolCallUpdateEvent = {
                 call_id: call.id,
                 conversation_id: call.conversation_id,
-                message_id: call.message_id,
+                message_id: call.assistant_message_id ?? call.message_id,
                 status: call.status,
                 llm_call_id: call.llm_call_id,
                 server_name: call.server_name,

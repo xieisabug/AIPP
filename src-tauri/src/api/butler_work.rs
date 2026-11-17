@@ -447,6 +447,7 @@ pub(crate) async fn tick(app: &AppHandle, recovering: bool) -> anyhow::Result<bo
 
 #[derive(Debug, Serialize)]
 pub struct TaskQuestion {
+    pub position: Option<(i64, i64)>,
     pub task_conversation_id: i64,
     pub task_title: String,
     /// 仍有执行在等待：在窗口里直接回答即回到原执行。
@@ -493,6 +494,7 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
             .map_err(|e| format!("读取任务 #{task} 问答记录失败：{e:#}"))? {
             uncertain_delivery |= record.delivery_status == "pending";
             result.push(TaskQuestion {
+                position: None,
                 task_conversation_id: task, task_title: title.clone(), request_id: None, call_id: None,
                 stale: false, questions: record.questions, metadata: record.metadata,
                 history_key: Some(record.key), answers: Some(record.answers), cancelled: record.cancelled, delivery_status: Some(record.delivery_status),
@@ -501,6 +503,7 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
         let live = interactions.list_requests_for_conversation(task).await;
         for request in &live {
             result.push(TaskQuestion {
+                position: None,
                 task_conversation_id: task,
                 task_title: title.clone(),
                 request_id: Some(request.request_id.clone()),
@@ -522,10 +525,21 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
             let event:Value=serde_json::from_str(&event).map_err(|e|e.to_string())?;
             let Some(request_id)=event["request_id"].as_str() else {continue};
             result.push(TaskQuestion {
+                position: None,
                 task_conversation_id:task, task_title:title.clone(), request_id:Some(request_id.to_string()), call_id:None,
                 stale:true, questions:event["questions"].clone(), metadata:event["metadata"].clone(),
                 history_key:None,answers:None,cancelled:false,delivery_status:None,
             });
+        }
+    }
+    let conn = connection(&app_handle).map_err(|e| e.to_string())?;
+    crate::db::butler_goal::schema(&conn).map_err(|e| e.to_string())?;
+    let mut position = conn.prepare("SELECT rowid,coalesce(json_extract(event_json,'$.occurred_ms'),(expires_at-86400)*1000)
+        FROM butler_goal_question WHERE conversation_id=?1 AND request_id=?2").map_err(|e| e.to_string())?;
+    for question in &mut result {
+        if let Some(id) = question.request_id.as_deref().or_else(|| question.history_key.as_deref()?.strip_prefix("request:")) {
+            question.position = position.query_row(rusqlite::params![question.task_conversation_id,id],
+                |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(|e| e.to_string())?;
         }
     }
     Ok(result)

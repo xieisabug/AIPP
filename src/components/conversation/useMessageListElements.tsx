@@ -89,6 +89,7 @@ export interface MessageElementEntry {
 }
 
 function exchangeEntry(message: Message): MessageElementEntry {
+    if (message.butler_interaction) return { messageId: message.id, groupControl: null, messageElement: <div className="w-full">{message.butler_interaction}</div> };
     if (message.message_type === "butler_processing") {
         return {
             messageId: message.id, groupControl: null, estimatedHeight: 32,
@@ -322,8 +323,13 @@ export function useMessageListElements({
             const existing = map.get(item.messageId) ?? [];
             map.set(item.messageId, [...existing, item]);
         });
+        for (const message of allDisplayMessages) {
+            if (message.butler_inline_interactions) {
+                map.set(message.id, [...(map.get(message.id) ?? []), ...message.butler_inline_interactions]);
+            }
+        }
         return map;
-    }, [inlineInteractionItems]);
+    }, [inlineInteractionItems, allDisplayMessages]);
 
     // Agent 活动按所属响应消息分组，收进对应消息气泡内展示；
     // userMessage/agentMessage 这类已在正文体现的 kind 直接过滤掉（含历史数据）
@@ -389,10 +395,10 @@ export function useMessageListElements({
 
     const fallbackInlineInteractionItems = useMemo(() => {
         return (inlineInteractionItems ?? []).filter(
-            (item) =>
+            (item) => !item.requireCallMarker && (
                 item.messageId === undefined
                 || item.messageId === null
-                || !displayedMessageIdSet.has(item.messageId),
+                || !displayedMessageIdSet.has(item.messageId)),
         );
     }, [inlineInteractionItems, displayedMessageIdSet]);
 
@@ -508,7 +514,7 @@ export function useMessageListElements({
         if (!isMergeAssistantMessages) {
             // 非合并模式：每条消息单独渲染
             const entries = allDisplayMessages.map((message) => {
-                if (message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
+                if (message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
                 const custom = customEntry(message);
                 if (custom) return custom;
                 const streamEvent = streamingMessages.get(message.id);
@@ -654,7 +660,7 @@ export function useMessageListElements({
         };
 
         for (const message of allDisplayMessages) {
-            if (message.butler_posts || message.message_type === "butler_processing") {
+            if (message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") {
                 flushGroup({ keepExpanded: false });
                 result.push(exchangeEntry(message));
                 continue;

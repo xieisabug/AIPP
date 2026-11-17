@@ -1135,6 +1135,8 @@ pub fn run() {
             crate::api::butler_memory::get_butler_memory_source,
             crate::api::butler_work::list_butler_contact_task_questions,
             crate::mcp::builtin_mcp::interaction::list_recoverable_butler_questions,
+            crate::db::butler_interactions::list_butler_interactions,
+            crate::db::butler_interactions::prepare_butler_file_preview,
             crate::api::butler_work::answer_butler_task_question,
             crate::api::butler_work::respond_butler_contact_task_question,
             list_butler_contact_previews,

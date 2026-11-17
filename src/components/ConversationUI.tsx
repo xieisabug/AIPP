@@ -69,6 +69,7 @@ import { ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteJumpContext, isQuotableM
 import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
 import { useLinger } from "@/hooks/useStablePresence";
 import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
+import { useButlerInteractions, type InteractionRow } from "@/components/butler/butlerInteractions";
 import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
@@ -126,6 +127,9 @@ export interface ConversationUIRef {
 
 export interface InlineInteractionItem {
     key: string;
+    requestId?: string;
+    requireCallMarker?: boolean;
+    taskQuestionPosition?: [number, number] | null;
     callId?: number | null;
     messageId?: number | null;
     content: ReactNode;
@@ -889,6 +893,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return queuedMessages.map((queued) => {
                 const queueKind = queued.queue_kind === "interrupt" ? "interrupt" : "normal";
                 const createdTime = queued.created_time ? new Date(queued.created_time) : new Date();
+                let recoveryId: string | undefined;
+                if (queueKind === "interrupt") {
+                    try { recoveryId = JSON.parse(queued.request_json).recovered_question_id; } catch { /* Legacy queue record. */ }
+                }
                 return {
                     id: -queued.id,
                     conversation_id: queued.conversation_id,
@@ -907,6 +915,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     regenerate: null,
                     attachment_list: [],
                     metadata_json: JSON.stringify({
+                        ...(recoveryId ? { origin: "internal", recovered_question_id: recoveryId } : {}),
                         queue_status: "queued",
                         queue_kind: queueKind,
                         queue_id: queued.id,
@@ -979,6 +988,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const transcriptActivities = useMemo(() => resultOnly
             ? new Map<string, AgentActivityEvent>()
             : displayAgentActivities, [resultOnly, displayAgentActivities]);
+        const savedInteractions = useButlerInteractions(Number(conversationId), resultOnly);
+        const interactions = useMemo(() => {
+            if (!resultOnly) return undefined;
+            const rows: InteractionRow[] = [...(savedInteractions ?? [])];
+            for (const item of inlineInteractionItems ?? []) {
+                if (!item.requestId || !item.taskQuestionPosition) continue;
+                const [id, occurred_ms] = item.taskQuestionPosition;
+                rows.push({ id, occurred_ms, kind: "task", request_id: item.requestId, anchor: null });
+            }
+            return rows;
+        }, [savedInteractions, inlineInteractionItems, resultOnly]);
+        const remainingInlineItems = useMemo(() => {
+            if (!interactions?.length) return inlineInteractionItems;
+            const positioned = new Set(interactions.map(row => row.request_id));
+            return inlineInteractionItems?.filter(item => !item.requestId || !positioned.has(item.requestId));
+        }, [interactions, inlineInteractionItems]);
         const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
         const butlerRunningHeld = useLinger(resultOnly && effectiveAiIsResponsing, BUTLER_IDLE_GAP_MS, conversationId);
         const transcript = useMemo(() => {
@@ -993,11 +1018,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     unpublished.add(message.id);
                 }
             }
-            const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId));
+            const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId), interactions, inlineInteractionItems, mcpToolCallStates);
             // 工具轮次之间运行态会短暂回落为空闲；保留"处理中"直到真正的回复发布，避免提示行闪烁。
             return withButlerProcessing(visible, Number(conversationId),
                 effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)));
-        }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId]);
+        }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId, interactions, inlineInteractionItems, mcpToolCallStates]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -2325,7 +2350,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 onQueuedMessagePromote={readOnly ? undefined : handleQueuedMessagePromote}
                                 onQueuedMessageSendNow={readOnly ? undefined : handleQueuedMessageSendNow}
                                 onToggleReasoningExpand={toggleReasoningExpand}
-                                inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
+                                inlineInteractionItems={conversationId ? remainingInlineItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
                                 renderMessageActions={renderMessageActionsWithQuote}
                                 actionableAgentPlanMessageId={actionableAgentPlanMessageId}

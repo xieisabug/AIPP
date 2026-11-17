@@ -101,6 +101,10 @@ impl AskUserQuestionRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskUserQuestionRequestEvent {
+    #[serde(default)]
+    pub message_id: Option<i64>,
+    #[serde(default)]
+    pub call_id: Option<i64>,
     pub request_id: String,
     pub conversation_id: Option<i64>,
     pub questions: Vec<AskUserQuestionItem>,
@@ -214,6 +218,10 @@ impl PreviewFileRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewFileRequestEvent {
+    #[serde(default)]
+    pub message_id: Option<i64>,
+    #[serde(default)]
+    pub call_id: Option<i64>,
     pub request_id: String,
     pub conversation_id: Option<i64>,
     pub files: Vec<PreviewFileItem>,
@@ -914,6 +922,8 @@ pub(crate) async fn request_ask_user_question_scoped(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let event = AskUserQuestionRequestEvent {
+        message_id: crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
+        call_id: crate::mcp::execution_api::INTERACTION_CALL_ID.try_with(|id| *id).ok(),
         request_id: request_id.clone(),
         conversation_id,
         questions: request.questions,
@@ -1007,6 +1017,8 @@ pub async fn emit_preview_file_request(
     conversation_id: Option<i64>,
     request: PreviewFileRequest,
 ) -> Result<String, String> {
+    // Keep invocation order even if preparing the first file takes longer than the second.
+    let occurred_ms = chrono::Utc::now().timestamp_micros() as f64 / 1000.0;
     let mut request = request;
     request.validate()?;
     rewrite_local_preview_urls(app_handle, conversation_id, &mut request.files)?;
@@ -1019,6 +1031,8 @@ pub async fn emit_preview_file_request(
         _ => "tabs".to_string(),
     };
     let event = PreviewFileRequestEvent {
+        message_id: crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
+        call_id: crate::mcp::execution_api::INTERACTION_CALL_ID.try_with(|id| *id).ok(),
         request_id: request_id.clone(),
         conversation_id,
         files: request.files,
@@ -1048,6 +1062,12 @@ pub async fn emit_preview_file_request(
         event
     };
 
+    if let (Some(cid), Some(anchor), Ok(raw)) = (conversation_id, event.message_id, crate::db::butler_interactions::PREVIEW_ARGUMENTS.try_with(Clone::clone)) {
+        let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db| db.get_connection()).map_err(|e| e.to_string())?;
+        if crate::db::butler_goal::is_butler(&conn,cid).map_err(|e| e.to_string())? {
+            crate::db::butler_interactions::save_preview(&conn,cid,anchor,&request_id,occurred_ms,&raw).map_err(|e| e.to_string())?;
+        }
+    }
     if let Err(e) = app_handle.emit("preview-file-request", &event) {
         warn!(request_id = %request_id, error = %e, "Failed to emit preview-file-request");
         return Err("Failed to emit PreviewFile event".to_string());
@@ -1170,6 +1190,7 @@ pub async fn prepare_preview_file_request_for_ui(
         _ => "tabs".to_string(),
     };
     let event = PreviewFileRequestEvent {
+        message_id: None, call_id: None,
         request_id,
         conversation_id,
         files: request.files,
@@ -1295,6 +1316,7 @@ pub async fn submit_ask_user_question_response(
         }
         crate::db::butler_goal::recover_answer(&mut conn,&request_id,&answers.clone().unwrap_or_default(),cancelled.unwrap_or(false),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
         drop(conn);
+        let _ = app_handle.emit("butler_interactions_changed", id);
         if !cancelled.unwrap_or(false) {
             let window=crate::api::butler_api::resolve_or_create_butler_execution_window(&app_handle)?;
             crate::api::ai_api::try_dispatch_queued_message_after_completion(&app_handle,&window,id).await;

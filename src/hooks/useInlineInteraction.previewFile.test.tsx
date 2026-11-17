@@ -93,3 +93,20 @@ describe("usePreviewFile conversation isolation", () => {
         expect(query).not.toHaveBeenCalled();
     });
 });
+
+it("should use the event's own call and message even when a different preview is executing", async () => {
+    const other = { ...call(2), status: "executing" };
+    mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => [other]);
+    mockInvokeHandler("prepare_preview_file_request_for_ui", args => args?.request);
+    try {
+        const { result } = renderHook(() => usePreviewFile({ conversationId: 2 }));
+        await waitFor(() => expect(result.current.callId).toBe(2));
+        await act(async () => { await emit("preview-file-request", { ...request(2), call_id: 17, message_id: 19 }); });
+        expect([result.current.callId, result.current.messageId]).toEqual([17, 19]);
+        await act(async () => { await emit("preview-file-request", { ...request(2), request_id: "no-match" }); });
+        expect(result.current.callId).toBeNull();
+        expect(result.current.managedCallId).toBeUndefined();
+    } finally {
+        clearAllMockHandlers();
+    }
+});

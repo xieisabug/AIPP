@@ -870,6 +870,9 @@ pub async fn send_queued_conversation_message_now(
     Ok(())
 }
 
+// Presentation metadata for the queued user-role input. Relay origin controls execution semantics separately.
+tokio::task_local! { static RECOVERED_QUESTION_ID: Option<String>; }
+
 fn dispatch_queued_message(
     app_handle: tauri::AppHandle,
     window: tauri::Window,
@@ -877,8 +880,14 @@ fn dispatch_queued_message(
 ) -> Result<bool, AppError> {
     emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id);
 
-    let request: AiRequest = serde_json::from_str(&queued.request_json)
-        .map_err(|error| AppError::UnknownError(format!("解析排队消息失败: {}", error)))?;
+    #[derive(serde::Deserialize)]
+    struct QueuedInput {
+        #[serde(flatten)]
+        request: AiRequest,
+        recovered_question_id: Option<String>,
+    }
+    let QueuedInput { request, recovered_question_id } = serde_json::from_str(&queued.request_json)
+        .map_err(|error| AppError::UnknownError(format!("解析排队消息失败: {error}")))?;
 
     if let Some(revision)=request.butler_goal_revision {
         let db=ConversationDatabase::new(&app_handle)?;
@@ -889,7 +898,7 @@ fn dispatch_queued_message(
     }
     tokio::spawn(async move {
         let queued_id = queued.id;
-        let response = ask_ai(
+        let response = RECOVERED_QUESTION_ID.scope(recovered_question_id, ask_ai(
             app_handle.clone(),
             app_handle.state::<AppState>(),
             app_handle.state::<AcpSessionState>(),
@@ -903,7 +912,7 @@ fn dispatch_queued_message(
             None,
             None,
             None,
-        )
+        ))
         .await;
 
         let db = match ConversationDatabase::new(&app_handle).map_err(AppError::from) {
@@ -4053,7 +4062,11 @@ async fn initialize_conversation(
         } else {
             // 内部续跑的来源与回送标记随消息一次写入
             // 内部续跑标记；管家会话的引用身份（引用回复）随用户消息保存，重进或重启后仍可追溯。
-            let metadata = (origin == Some("internal")).then(crate::api::butler_api::internal_prompt_metadata).or(user_metadata);
+            let metadata = if let Some(id) = RECOVERED_QUESTION_ID.try_with(Clone::clone).ok().flatten() {
+                Some(serde_json::json!({"origin":"internal","recovered_question_id":id}).to_string())
+            } else {
+                (origin == Some("internal")).then(crate::api::butler_api::internal_prompt_metadata).or(user_metadata)
+            };
             let message = add_message_with_metadata(app_handle, None, conversation_id, "user".to_string(),
                 display_user_prompt_with_context.clone(), Some(assistant_detail.model[0].id),
                 Some(assistant_detail.model[0].model_code.clone()), None, None, 0, None, None, metadata)?;

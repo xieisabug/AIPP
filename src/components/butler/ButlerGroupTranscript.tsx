@@ -137,7 +137,7 @@ function useGroupResults(members: ButlerGroupMember[]) {
 
 function groupPreview(call: MCPToolCall, live = false) {
     return <ButlerInteractionResult key={call.id} toolName={call.tool_name} callId={call.id} status={call.status}
-        conversationId={call.conversation_id} messageId={call.message_id} parameters={call.parameters} isLastMessage={live} />;
+        conversationId={call.conversation_id} messageId={call.assistant_message_id ?? call.message_id} parameters={call.parameters} isLastMessage={live} />;
 }
 
 interface Props {
@@ -187,7 +187,8 @@ export default function ButlerGroupTranscript({ groupId, messages, members, runn
             const calls = previewCalls.get(member.conversation_id) ?? [];
             const replies = messages.filter(message => message.source_conversation_id === member.conversation_id && message.source_message_id);
             for (const call of calls) {
-                const reply = replies.find(row => call.message_id && row.source_message_id! >= call.message_id);
+                const owner = call.assistant_message_id ?? call.message_id;
+                const reply = replies.find(row => owner && row.source_message_id! >= owner);
                 if (reply) {
                     const previews = previewsBySeq.get(reply.seq) ?? [];
                     previews.push(call);

@@ -247,7 +247,7 @@ pub(crate) async fn resolve_agent_interaction_response(
             let is_task: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM butler_task_definition WHERE task_conversation_id=?1)", [task], |r| r.get(0),
             ).map_err(|e| format!("读取任务归属失败，尚未提交：{e}"))?;
-            if is_task {
+            if is_task || (request.call_id.is_none() && crate::db::butler_goal::is_butler(&conn, task).map_err(|e| e.to_string())?) {
                 let key = format!("request:{}", request.request_id);
                 crate::db::butler_question_history::save(&conn, task, crate::db::butler_question_history::AnswerRecord {
                     key: key.clone(), questions: serde_json::to_value(request.questions).map_err(|e| e.to_string())?,
@@ -274,6 +274,7 @@ pub(crate) async fn resolve_agent_interaction_response(
                 .and_then(|db| db.get_connection()).map_err(|e| format!("回复已送达，但记录状态未确认，请勿重复提交：{e}"))?;
             crate::db::butler_question_history::finish_delivery(&conn, task, &key)
                 .map_err(|e| format!("回复已送达，但记录状态未确认，请勿重复提交：{e:#}"))?;
+            let _ = app_handle.emit("butler_interactions_changed", task);
             crate::api::butler_peer::updated(app_handle);
         }
     }

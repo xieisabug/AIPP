@@ -9,12 +9,16 @@ import { visibleText } from "@/utils/turnContext";
 export const BUTLER_SILENT_REPLY = "[[NO_REPLY]]";
 
 // Rendering only. Conversation history, runtime and export retain the original messages.
-export function butlerTranscript(messages: Message[], unpublished = new Set<number>()): Message[] {
+export function butlerTranscript(messages: Message[], unpublished = new Set<number>(), questionIds = new Set<string>(),
+    calls?: ReadonlyMap<number, { tool_name?: string }>): Message[] {
     const result: Message[] = [];
     let internalTurn = false;
     for (const message of messages) {
         if (message.message_type === "user") {
             internalTurn = false;
+            // Older continuations predate origin metadata. Match the generated envelope and a real question in this conversation.
+            const recovery = /^\[用户回答已恢复的问题，问题编号 ([\w-]+)\]\n问题：/.exec(message.content);
+            if (recovery && questionIds.has(recovery[1]) && visibleText(message.content).trimEnd().endsWith("旧权限不自动恢复。")) continue;
             if (message.metadata_json) {
                 try {
                     const metadata = JSON.parse(message.metadata_json);
@@ -56,7 +60,7 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
             /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:(?:"(?:\\.|[^"\\])*(?:"|\\?$)|[^"])*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,
             (segment, backticks, tildes) => {
                 if (backticks || tildes) return segment;
-                const name = completeToolName(segment);
+                const name = completeToolName(segment, calls);
                 if (isButlerInteractionTool(name) || (!pending && name === "preview_message" && !segment.startsWith("<!-- MCP_TOOL_CALL_STREAMING"))) {
                     if (scheduledResult && !pending) return segment;
                     shownPreviews.push(segment);
@@ -85,11 +89,12 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
     return result;
 }
 
-function completeToolName(segment: string): string | undefined {
+function completeToolName(segment: string, calls?: ReadonlyMap<number, { tool_name?: string }>): string | undefined {
     const comment = segment.match(/^<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:([\s\S]*)-->$/i);
     if (comment) {
         try {
-            return JSON.parse(comment[1])?.tool_name;
+            const marker = JSON.parse(comment[1]);
+            return marker?.display_tool_name ?? marker?.tool_name ?? calls?.get(Number(marker?.call_id ?? marker))?.tool_name;
         } catch {
             return undefined;
         }

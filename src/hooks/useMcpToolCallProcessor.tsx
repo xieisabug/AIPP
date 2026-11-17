@@ -399,7 +399,7 @@ function extractMcpToolCallXmlTags(content: string): ParsedMcpToolCallComment[] 
     return tags;
 }
 
-function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
+export function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
     const merged = [
         ...extractMcpToolCallComments(content),
         ...extractMcpToolCallXmlTags(content),
@@ -519,13 +519,14 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         );
 
         if (mcpCalls.length === 0) {
-            if (!inlineInteractionItems || inlineInteractionItems.length === 0) {
+            const items = inlineInteractionItems?.filter(item => !item.requireCallMarker);
+            if (!items?.length) {
                 return fallbackElement;
             }
             return (
                 <div>
                     {fallbackElement}
-                    {renderInlineInteractionGroup("inline-tail-no-mcp", inlineInteractionItems)}
+                    {renderInlineInteractionGroup("inline-tail-no-mcp", items)}
                 </div>
             );
         }
@@ -539,6 +540,17 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         for (const [index, match] of mcpCalls.entries()) {
             const data = match.data;
 
+            // Stream markers may only carry the model's call ID until the DB insert is acknowledged.
+            let callId = data.call_id;
+            if (!callId && data.llm_call_id && mcpToolCallStates) {
+                for (const [id, state] of mcpToolCallStates) {
+                    const owner = state.message_id;
+                    if (state.llm_call_id === data.llm_call_id && owner === messageId && state.tool_name === data.tool_name) {
+                        callId = id;
+                        break;
+                    }
+                }
+            }
             const beforeComment = markdownContent.slice(lastIndex, match.start);
 
             // 添加注释前的内容
@@ -562,14 +574,14 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                 <McpToolCallRenderer
                     key={toolCallKey}
                     serverName={data.server_name}
-                    toolName={data.tool_name}
+                    toolName={data.tool_name ?? (callId ? mcpToolCallStates?.get(callId)?.tool_name : undefined)}
                     parameters={data.parameters ?? "{}"}
                     llmCallId={data.llm_call_id}
                     status={data.status}
                     error={data.error}
                     conversationId={conversationId}
                     messageId={messageId}
-                    callId={data.call_id} // 传递 callId，如果存在的话
+                    callId={callId} // 传递 callId，如果存在的话
                     mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
                     shiningMcpCallId={shiningMcpCallId}
                     isLastCall={isLastCall} // 是否是最后一个工具调用
@@ -579,9 +591,9 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                 />
             );
 
-            if (data.call_id && inlineInteractionItems && inlineInteractionItems.length > 0) {
+            if (callId && inlineInteractionItems && inlineInteractionItems.length > 0) {
                 const matchedInlineItems = inlineInteractionItems.filter(
-                    (item) => item.callId === data.call_id
+                    (item) => item.callId === callId
                 );
                 if (matchedInlineItems.length > 0) {
                     matchedInlineItems.forEach((item) => renderedInlineKeys.add(item.key));
@@ -613,7 +625,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
 
         if (inlineInteractionItems && inlineInteractionItems.length > 0) {
             const remainingInlineItems = inlineInteractionItems.filter(
-                (item) => !renderedInlineKeys.has(item.key)
+                (item) => !item.requireCallMarker && !renderedInlineKeys.has(item.key)
             );
             if (remainingInlineItems.length > 0) {
                 parts.push(

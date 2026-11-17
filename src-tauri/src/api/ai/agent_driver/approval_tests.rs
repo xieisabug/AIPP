@@ -67,6 +67,7 @@ fn permission_event(target: &AgentReplyTarget) -> AcpPermissionRequestEvent {
 
 fn question_event(target: &AgentReplyTarget) -> AskUserQuestionRequestEvent {
     AskUserQuestionRequestEvent {
+        message_id: None, call_id: None,
         request_id: target.request_id.clone(), conversation_id: target.scope.conversation_id,
         questions: vec![AskUserQuestionItem {
             question: "Which plan?".into(), header: "Plan".into(), options: vec![],

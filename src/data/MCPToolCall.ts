@@ -1,6 +1,7 @@
 export interface MCPToolCall {
     id: number;
     conversation_id: number;
+    assistant_message_id?: number | null;
     message_id?: number;
     server_id: number;
     server_name: string;

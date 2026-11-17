@@ -43,6 +43,8 @@ export interface AskUserQuestionMetadata {
 }
 
 export interface AskUserQuestionRequest {
+    message_id?: number | null;
+    call_id?: number | null;
     request_id: string;
     conversation_id?: number;
     questions: AskUserQuestionItem[];
@@ -63,6 +65,8 @@ export interface PreviewFileMetadata {
 }
 
 export interface PreviewFileRequest {
+    message_id?: number | null;
+    call_id?: number | null;
     request_id: string;
     conversation_id?: number;
     files: PreviewFileItem[];

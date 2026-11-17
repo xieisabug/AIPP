@@ -30,6 +30,7 @@ vi.mock("@/components/magicui/shine-border", () => ({
 }));
 
 interface HarnessProps {
+    inlineInteractionItems?: import("@/components/ConversationUI").InlineInteractionItem[];
     markdown: string;
     conversationId?: number;
     messageId?: number;
@@ -38,7 +39,7 @@ interface HarnessProps {
 }
 
 const ProcessorHarness: React.FC<HarnessProps> = ({
-    markdown,
+    markdown, inlineInteractionItems,
     conversationId = 1,
     messageId = 1,
     mcpToolCallStates,
@@ -51,7 +52,7 @@ const ProcessorHarness: React.FC<HarnessProps> = ({
             markdownComponents: {},
         },
         {
-            conversationId,
+            conversationId, inlineInteractionItems,
             messageId,
             mcpToolCallStates,
             shiningMcpCallId,
@@ -81,6 +82,20 @@ describe("useMcpToolCallProcessor MCP identity", () => {
     afterEach(() => {
         clearAllMockHandlers();
         vi.clearAllMocks();
+    });
+
+    it("should place each file at its marker when call IDs arrive in a different order", () => {
+        const marker = (llmId: string) => `<!-- MCP_TOOL_CALL: {"llm_call_id":"${llmId}","tool_name":"preview_file"} -->`;
+        const states = new Map<number, MCPToolCallUpdateEvent>([12, 11].map(id => [id, {
+            call_id: id, llm_call_id: String(id), message_id: 1, conversation_id: 1,
+            status: "success", tool_name: "preview_file",
+        }]));
+        const items = [12, 13, 11].map(id => ({
+            callId: id, key: String(id), messageId: 1, requireCallMarker: true,
+            content: <span data-testid="file-result">{id}</span>,
+        }));
+        render(<ProcessorHarness markdown={marker("11") + marker("12")} mcpToolCallStates={states} inlineInteractionItems={items} />);
+        expect(screen.getAllByTestId("file-result").map(node => node.textContent)).toEqual(["11","12"]);
     });
 
     it("keeps identical tool parameters separated by call_id", async () => {

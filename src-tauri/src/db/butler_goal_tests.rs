@@ -121,6 +121,8 @@ fn test_recovered_task_answer_history_is_atomic_and_survives_refresh() {
     assert!(waiting_questions(&c, 3, 102).unwrap().is_empty());
     let records = crate::db::butler_question_history::list(&c, 3).unwrap();
     assert_eq!(records.len(), 1);
+    let queued_id: String = c.query_row("SELECT json_extract(request_json,'$.recovered_question_id') FROM queued_conversation_message", [], |row| row.get(0)).unwrap();
+    assert_eq!(queued_id, "recovered");
     assert_eq!(records[0].key, "request:recovered");
     assert_eq!(records[0].questions[0]["question"], "Which format?");
     assert_eq!(records[0].metadata["purpose"], "report");

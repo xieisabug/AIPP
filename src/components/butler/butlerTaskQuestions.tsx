@@ -7,6 +7,7 @@ import type { InlineInteractionItem } from "@/components/ConversationUI";
 
 /** 执行助手在独立任务里向用户提出、尚未回答的问题（后台 list_butler_contact_task_questions）。 */
 export interface ButlerTaskQuestion {
+    position?: [number, number] | null;
     task_conversation_id: number;
     task_title: string;
     request_id: string | null;
@@ -111,6 +112,8 @@ export function taskQuestionItems(
         };
         return {
             key: `butler-task-question-${question.task_conversation_id}-${key}`,
+            taskQuestionPosition: question.position,
+            requestId: `task-question-${question.task_conversation_id}-${key.replace(/^request:/, "")}`,
             callId: null,
             messageId: null,
             content: <div className="space-y-1.5" data-aipp-slot="butler-task-question">

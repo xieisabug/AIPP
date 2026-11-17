@@ -23,6 +23,8 @@ export interface ConversationWithMessages {
 
 export interface Message {
     /** Display-only communication row in the desktop Butler timeline. */
+    butler_inline_interactions?: import("../components/ConversationUI").InlineInteractionItem[];
+    butler_interaction?: import("react").ReactNode;
     butler_posts?: import("../components/butler/butlerTimeline").PeerPost[];
     id: number;
     conversation_id: number;

@@ -55,3 +55,23 @@ describe("hasPublishedReply", () => {
         expect(hasPublishedReply([row(1, "user"), row(2, "error")])).toBe(true);
     });
 });
+
+it("should keep the recovered answer at the original question across reload", () => {
+    const question = { kind: "question" as const, id: 7, request_id: "q-7", anchor: null, occurred_ms: at(2).getTime(),
+        request: { request_id: "q-7", questions: [] }, answers: { format: "PDF" } };
+    const continuation = raw(4, "user", "[用户回答已恢复的问题，问题编号 q-7]\n问题：[]\n答案：{}\n旧权限不自动恢复。");
+    const rows = [raw(1, "user", "生成报告"), raw(3, "response", "已收到"), continuation, raw(5, "response", "已交付")];
+    for (const history of [rows, structuredClone(rows)]) {
+        const timeline = withPeerTimeline(history, new Set(), [], 20, [question]);
+        expect(timeline.map(row => row.message_type)).toEqual(["user", "butler_interaction", "response", "response"]);
+    }
+    expect(withPeerTimeline(rows, new Set(), [], 20)).toContain(continuation);
+});
+
+it("should keep two native previews before their final reply in invocation order", () => {
+    const files = [1, 2].map(id => ({ id, kind: "file" as const, anchor: 3, request_id: String(id),
+        occurred_ms: id, request: '{"files":[]}' }));
+    const live = files.map(row => ({ key: row.request_id, requestId: row.request_id, content: "file-" + row.id }));
+    const rows = withPeerTimeline([raw(1, "user", "预览"), raw(3, "response", "完成")], new Set(), [], 20, files, live);
+    expect(rows.map(row => row.butler_interaction ?? row.content)).toEqual(["预览","file-1","file-2","完成"]);
+});

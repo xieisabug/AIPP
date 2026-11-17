@@ -289,26 +289,11 @@ function extractPreviewRequestIdFromNode(node: unknown): string | null {
     return null;
 }
 
-function parsePreviewFileRequestId(result?: string): string | null {
+export function parsePreviewFileRequestId(result?: string): string | null {
     if (!result?.trim()) return null;
     const parsed = safeParseJson(result);
     if (!parsed) return null;
     return extractPreviewRequestIdFromNode(parsed);
-}
-
-function buildPreviewFileSignature(request: PreviewFileRequest | null): string | null {
-    if (!request) return null;
-    return JSON.stringify({
-        viewMode: request.viewMode ?? "tabs",
-        files: request.files.map((file) => ({
-            title: file.title,
-            type: file.type,
-            content: file.content ?? null,
-            url: file.url ?? null,
-            language: file.language ?? null,
-            description: file.description ?? null,
-        })),
-    });
 }
 
 export function toAskUserPersistedState(
@@ -328,7 +313,7 @@ export function toAskUserPersistedState(
         call.status === "unknown" ? "failed" : (call.status as AskUserQuestionPersistedState["status"]);
     return {
         callId: call.id,
-        messageId: call.message_id ?? null,
+        messageId: call.assistant_message_id ?? call.message_id ?? null,
         request,
         status: normalizedStatus,
         answers: normalizedStatus === "success" ? parseAskUserQuestionAnswers(call.result) : null,
@@ -399,9 +384,11 @@ function resolveAskUserQuestionView(args: {
     const resolvePersistedAnchor = (
         request: AskUserQuestionRequest | null
     ): AskUserQuestionPersistedState | null => {
-        if (!request || !persistedState) {
-            return null;
+        if (!request || !persistedState) return null;
+        if (request.call_id !== undefined) {
+            return request.call_id === persistedState.callId ? persistedState : null;
         }
+        if (request.message_id != null && request.message_id !== persistedState.messageId) return null;
         // Prefer call-id / request-id match over question-text signature so two
         // different asks in one turn never share the wrong answers card.
         if (
@@ -438,24 +425,12 @@ function resolveAskUserQuestionView(args: {
             mode: "questionnaire",
             completedAnswers: null,
             readOnly: false,
-            callId: persistedAnchor?.callId ?? null,
-            messageId: persistedAnchor?.messageId ?? null,
+            callId: pendingRequest.call_id ?? persistedAnchor?.callId ?? null,
+            messageId: pendingRequest.message_id ?? persistedAnchor?.messageId ?? null,
         };
     }
 
-    const summaryMatchesPersisted = (() => {
-        if (!submittedSummary || !persistedState) return false;
-        if (
-            submittedSummary.request.request_id
-            && persistedState.request.request_id
-            && submittedSummary.request.request_id === persistedState.request.request_id
-        ) {
-            return true;
-        }
-        const summarySig = buildAskUserQuestionSignature(submittedSummary.request);
-        const persistedSig = buildAskUserQuestionSignature(persistedState.request);
-        return Boolean(summarySig && persistedSig && summarySig === persistedSig);
-    })();
+    const summaryMatchesPersisted = !!resolvePersistedAnchor(submittedSummary?.request ?? null);
 
     // 2) In-flight persisted call for a *different* ask beats a stale local summary.
     //    - executing → show that call's questionnaire
@@ -494,8 +469,8 @@ function resolveAskUserQuestionView(args: {
             mode: "summary",
             completedAnswers: submittedSummary.answers,
             readOnly: true,
-            callId: persistedAnchor?.callId ?? null,
-            messageId: persistedAnchor?.messageId ?? null,
+            callId: submittedSummary.request.call_id ?? persistedAnchor?.callId ?? null,
+            messageId: submittedSummary.request.message_id ?? persistedAnchor?.messageId ?? null,
         };
     }
 
@@ -537,7 +512,7 @@ function getLatestPreviewFileState(
             call.status === "unknown" ? "failed" : call.status;
         return {
             callId: call.id,
-            messageId: call.message_id ?? null,
+            messageId: call.assistant_message_id ?? call.message_id ?? null,
             request,
             status: normalizedStatus,
             requestId: parsePreviewFileRequestId(call.result),
@@ -956,37 +931,12 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
     const previewFileView = useMemo(() => {
         const persistedState = currentPersistedState;
         if (conversationId !== undefined && pendingRequest?.conversation_id === conversationId && isDialogOpen) {
-            let persistedAnchor: PreviewFilePersistedState | null = null;
-
-            if (persistedState) {
-                if (
-                    persistedState.requestId &&
-                    persistedState.requestId === pendingRequest.request_id
-                ) {
-                    persistedAnchor = persistedState;
-                } else {
-                    const pendingSignature = buildPreviewFileSignature(pendingRequest);
-                    const persistedSignature = buildPreviewFileSignature(persistedState.request);
-                    if (
-                        pendingSignature &&
-                        persistedSignature &&
-                        pendingSignature === persistedSignature
-                    ) {
-                        persistedAnchor = persistedState;
-                    } else if (
-                        persistedState.status === "pending" ||
-                        persistedState.status === "executing"
-                    ) {
-                        persistedAnchor = persistedState;
-                    }
-                }
-            }
-
+            const sameRequest = persistedState?.requestId === pendingRequest.request_id ? persistedState : null;
             return {
                 request: pendingRequest,
                 isOpen: true,
-                callId: persistedAnchor?.callId ?? (null as number | null),
-                messageId: persistedAnchor?.messageId ?? (null as number | null),
+                callId: pendingRequest.call_id ?? sameRequest?.callId ?? null,
+                messageId: pendingRequest.message_id ?? sameRequest?.messageId ?? null,
             };
         }
 
@@ -1038,7 +988,10 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         isDialogOpen: previewFileView.isOpen,
         callId: previewFileView.callId,
         messageId: previewFileView.messageId,
-        managedCallId: previewFileView.callId ?? currentPersistedState?.callId,
+        // Resource preparation creates a new authorization request. Keep the originating tool
+        // request ID separately so history and the live preview share one timeline position.
+        sourceRequestId: pendingRequest && isDialogOpen ? pendingRequest.request_id : currentPersistedState?.requestId,
+        managedCallId: previewFileView.isOpen ? previewFileView.callId ?? undefined : currentPersistedState?.callId,
         handleOpenChange,
         reopenPersistedPreview,
     };

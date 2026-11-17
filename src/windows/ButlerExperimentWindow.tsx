@@ -541,6 +541,7 @@ function ButlerExperimentWindow() {
         isDialogOpen: isPreviewFileDialogOpen,
         callId: previewFileCallId,
         managedCallId: managedPreviewFileCallId,
+        sourceRequestId: previewSourceRequestId,
         messageId: previewFileMessageId,
         handleOpenChange: handlePreviewFileOpenChange,
         reopenPersistedPreview: reopenPersistedPreviewFile,
@@ -567,6 +568,7 @@ function ButlerExperimentWindow() {
     if (isAskUserDialogOpen && pendingAskUserRequest) {
         inlineInteractionItems.push({
             key: `butler-ask-user-${pendingAskUserRequest.request_id}`,
+            requestId: pendingAskUserRequest.request_id,
             callId: askUserCallId,
             messageId: askUserMessageId,
             content: (
@@ -602,6 +604,8 @@ function ButlerExperimentWindow() {
     if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
         inlineInteractionItems.push({
             key: `butler-preview-${pendingPreviewFileRequest.request_id}`,
+            requireCallMarker: previewFileCallId != null || (previewFileMessageId != null && detailsConversation !== activeConversationId),
+            requestId: previewSourceRequestId ?? pendingPreviewFileRequest.request_id,
             callId: previewFileCallId,
             messageId: previewFileMessageId,
             content: (

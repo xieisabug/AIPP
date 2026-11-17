@@ -429,6 +429,7 @@ mod tests {
     #[test]
     fn build_ask_user_question_card_renders_single_and_multi_select_fields() {
         let card = build_ask_user_question_card(&AskUserQuestionRequestEvent {
+        message_id: None, call_id: None,
             request_id: "req-1".to_string(),
             conversation_id: Some(42),
             questions: vec![

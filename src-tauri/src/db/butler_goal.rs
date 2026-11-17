@@ -125,7 +125,7 @@ pub fn save_question(conn:&Connection,conversation:i64,id:&str,event:&str,source
         None=>anyhow::bail!("问题所属原始目标版本不明，不能使用当前目标代替"),
     };
     if revision>0 {assert_current(&tx,conversation,revision)?;}
-    tx.execute("INSERT INTO butler_goal_question VALUES(?1,?2,?3,?4,?5,'waiting')",params![id,conversation,revision,now+86400,event])?;
+    tx.execute("INSERT INTO butler_goal_question VALUES(?1,?2,?3,?4,json_set(?5,'$.occurred_ms',?6),'waiting')",params![id,conversation,revision,now+86400,event,chrono::Utc::now().timestamp_millis()])?;
     tx.commit()?;Ok(())
 }
 pub fn validate_question(conn:&Connection,id:&str,now:i64)->Result<Option<i64>> {
@@ -165,7 +165,7 @@ pub fn recover_answer(conn:&mut Connection,id:&str,answers:&std::collections::Ha
         ensure!(answers.keys().all(|k|allowed.contains(&k.as_str())),"答案与题目版本不匹配");
         let assistant:i64=tx.query_row("SELECT assistant_id FROM conversation WHERE id=?1",[conversation],|r|r.get(0))?;
         let prompt=format!("[用户回答已恢复的问题，问题编号 {id}]\n问题：{}\n答案：{}\n按当前要求继续；不重放此前已发生或结果不明的外部操作，旧权限不自动恢复。",event["questions"],serde_json::to_string(answers)?);
-        let request=serde_json::json!({"conversation_id":conversation.to_string(),"assistant_id":assistant,"prompt":prompt,"butler_intent":"aside","butler_goal_revision":current_revision(&tx,conversation)?});
+        let request=serde_json::json!({"conversation_id":conversation.to_string(),"assistant_id":assistant,"prompt":prompt,"recovered_question_id":id,"butler_intent":"aside","butler_goal_revision":current_revision(&tx,conversation)?});
         tx.execute("INSERT INTO queued_conversation_message(conversation_id,queue_kind,status,request_json,prompt,assistant_id) VALUES(?1,'interrupt','queued',?2,?3,?4)",params![conversation,request.to_string(),prompt,assistant])?;
     }
     // Recovery has no live request store, so it bypasses the normal reply-history
@@ -179,7 +179,7 @@ pub fn recover_answer(conn:&mut Connection,id:&str,answers:&std::collections::Ha
             cancelled, delivery_status: "delivered".into(),
         })?;
     let state=if cancelled {"cancelled"} else {"answered"};
-    tx.execute("UPDATE butler_goal_question SET state=?2 WHERE request_id=?1",params![id,state])?;
+    tx.execute("UPDATE butler_goal_question SET state=?2,event_json=json_set(event_json,'$.recovered',1) WHERE request_id=?1",params![id,state])?;
     tx.commit()?;Ok(conversation)
 }
 
