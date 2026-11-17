@@ -8,7 +8,7 @@ export interface AvatarDefinition {
     label: string;
     // All artwork and anchors use the same 510-unit coordinate system.
     parts: { path: string; color: "primary" | "secondary" | "white"; outlineWidth?: number }[];
-    /** Uniform artwork scale around the avatar center, including equipped accessories. */
+    /** Match the AIPP body's 507-unit width (including outline). Accessories follow the same transform. */
     artworkScale?: number;
     eyeColor?: string;
     eyeScale?: number;
@@ -54,7 +54,7 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
         colorLabels: { secondary: "身体" }, capabilities: ["eyes", "headwear"],
     },
     blossom: {
-        id: "blossom", label: "花团",
+        id: "blossom", label: "花团", artworkScale: 507 / 485.52,
         parts: [{
             color: "white", outlineWidth: 24,
             path: "M300 70C360 45 449 95 444 181C502 224 495 325 423 357C407 434 327 475 259 437C187 468 98 439 76 368C37 345 26 299 43 262C-1 206 24 126 99 112C128 31 231 8 300 70Z",
@@ -65,7 +65,7 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
         colorLabels: { secondary: "轮廓" }, capabilities: ["eyes", "headwear"],
     },
     pebble: {
-        id: "pebble", label: "圆团",
+        id: "pebble", label: "圆团", artworkScale: 507 / 420,
         parts: [
             { color: "secondary", path: "M255 35C384 35 465 125 465 257C465 387 382 463 255 463C128 463 45 387 45 257C45 125 126 35 255 35Z" },
             { color: "primary", path: "M255 75C357 75 419 149 419 250C419 351 353 401 255 401C157 401 91 351 91 250C91 149 153 75 255 75Z" },

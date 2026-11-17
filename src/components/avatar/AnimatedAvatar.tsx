@@ -40,8 +40,8 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
     const headItem = definition.capabilities.includes("headwear") ? appearance.accessories.head : null;
     const glasses = faceItem === "round-glasses";
     const hat = headItem === "beret" || headItem === "baseball-cap" || headItem === "baseball-cap-left";
-    // 变形中心对齐可视区域中心：带头饰/大尺寸的 viewBox 整体上移了 45 单位。
-    const morphCenterY = headItem || full ? 210 : 255;
+    // 与当前画幅中心对齐，佩戴头饰不改变身体的位置或大小。
+    const morphCenterY = full ? 210 : 255;
     // 身体原地缩成圆核；绕竖轴的转身用 cos(spin) 压缩横向，半程正好侧对观众。
     const bodyScaleX = useTransform(() => v.sx.get()*v.zoom.get()*Math.cos(v.yaw.get()*0.45*Math.PI/180)*m.scale.get()*m.sx.get()*Math.cos(m.spin.get()));
     const bodyScaleY = useTransform(() => v.sy.get()*v.zoom.get()*m.scale.get()*m.sy.get());
@@ -114,7 +114,7 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
             targetX.set(Math.max(-9, Math.min(9, (event.clientX - rect.left - rect.width / 2) / rect.width * 18)));
             targetY.set(Math.max(-6, Math.min(6, (event.clientY - rect.top - rect.height / 2) / rect.height * 12)));
         }}>
-        <svg viewBox={headItem || full ? "-55 -100 620 620" : "-12 -12 534 534"} className="h-full w-full overflow-visible" focusable="false">
+        <svg viewBox={full ? "-55 -100 620 620" : "-12 -12 534 534"} className="h-full w-full overflow-visible" focusable="false">
             <g transform="translate(255 255)">
                 <motion.g style={{ x: bodyX, y: bodyY, rotate: v.roll, scaleX: bodyScaleX, scaleY: bodyScaleY, opacity: m.opacity, transformOrigin: "0px 0px" }}>
                     {performance.kind && <motion.g data-avatar-core="" style={{ opacity: discOpacity }}>

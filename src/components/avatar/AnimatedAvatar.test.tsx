@@ -64,9 +64,11 @@ describe("avatar rendering", () => {
         const { container } = render(<>
             <AnimatedAvatar size={48} appearance={defaultAppearance} />
             <AnimatedAvatar size={48} compact appearance={defaultAppearance} />
+            <AnimatedAvatar size={48} compact appearance={{ ...defaultAppearance, accessories: { eyes: "blush", head: "beret" } }} />
         </>);
         const svgs = container.querySelectorAll("svg");
         expect(svgs[0]).toHaveAttribute("viewBox", "-55 -100 620 620");
         expect(svgs[1]).toHaveAttribute("viewBox", "-12 -12 534 534");
+        expect(svgs[2]).toHaveAttribute("viewBox", svgs[1].getAttribute("viewBox"));
     });
 });
