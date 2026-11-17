@@ -1,3 +1,4 @@
+import { reviewRefresh } from './connectionManagement';
 import { CatalogEndpoints, CatalogSkills } from './CatalogCapabilities';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -187,7 +188,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                     }}>{connection.definition.connection.transport === 'stdio' ? '重新配置并连接' : '重新登录'}</Button>
                     <Button size="sm" variant="outline" disabled={!!busy || connection.status === 'disconnected'} onClick={() => void run('正在断开连接…', async () => { await invoke('disconnect_app_connection', { serverId, revokeRemote: true }); await reload(); onChanged(); })}>断开连接</Button>
                 </div></div>}
-                {serverId && <><div className="rounded-lg border p-3"><div className="flex items-center justify-between"><h4 className="font-medium">{tools.length || connection?.status === 'available' ? `检测到的工具 · ${tools.length}` : '工具尚未检测'}</h4><Button size="sm" variant="outline" disabled={!!busy || (connection && ['connecting', 'disconnected', 'auth_required'].includes(connection.status))} onClick={() => void run('正在刷新工具…', async () => { if (connection) await invoke('verify_app_connection', { serverId }); else await invoke('refresh_mcp_server_capabilities', { serverId }); setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })); await reload(); onChanged(); })}>刷新工具</Button></div>{tools.map(t => <details key={t.id} className="border-b py-2"><summary className="cursor-pointer text-sm">{t.tool_name}</summary><p className="py-2 text-xs text-muted-foreground">{t.tool_description}</p></details>)}</div>
+                {serverId && <><div className="rounded-lg border p-3"><div className="flex items-center justify-between"><h4 className="font-medium">{tools.length || connection?.status === 'available' ? `检测到的工具 · ${tools.length}` : '工具尚未检测'}</h4><Button size="sm" variant="outline" disabled={!!busy || (connection && ['connecting', 'disconnected', 'auth_required'].includes(connection.status))} onClick={() => void run('正在刷新工具…', async () => { if (!await reviewRefresh(serverId)) return; setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })); await reload(); onChanged(); })}>刷新工具</Button></div>{tools.map(t => <details key={t.id} className="border-b py-2"><summary className="cursor-pointer text-sm">{t.tool_name}</summary><p className="py-2 text-xs text-muted-foreground">{t.tool_description}</p></details>)}</div>
                     <AppAssistantAccess key={`${preview.key}:${serverId}`} serverId={serverId} pluginKey={current?.preview.key} />
                 </>}
             </section>;

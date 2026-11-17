@@ -261,7 +261,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                 toast.success('添加MCP服务器成功');
 
                 // 新增服务器后自动获取能力
-                try {
+                if (formData.is_enabled) try {
                     await invoke('refresh_mcp_server_capabilities', { serverId });
                     toast.success('自动获取服务器能力成功');
                 } catch (e) {

@@ -61,12 +61,21 @@ async fn recheck(app: &tauri::AppHandle, id: i64) -> Result<(), String> {
             tracing::warn!(server_id=id,%error,"Could not refresh published tool summaries");
         }
     }
-    if let Err(error) = super::super::registry_api::refresh_mcp_server_capabilities(app.clone(), id).await {
+    if let Err(error) = super::super::registry_api::check_after_restart(app, &check.server).await {
         // Authentication rejection is recorded by the transport. Missing credentials are device-local.
         if error.contains(credentials::MISSING_ON_DEVICE) { return Ok(()); }
         let _change = CHANGE_LOCK.lock().await;
         if check.record_failure(&db(app)?, &error)? {
             let _ = app.emit("mcp_state_changed", ());
+        }
+    } else {
+        let _change = CHANGE_LOCK.lock().await;
+        let database = db(app)?;
+        if database.get_mcp_server(id).map_err(|e|e.to_string())? == check.server {
+            let changed = database.conn.execute("UPDATE app_connection SET verified_session=?1 WHERE server_id=?2
+                AND request_id=?3 AND verified_session IS ?4 AND credential_ref IS ?5 AND status='available'",
+                params![SESSION.as_str(),id,check.request_id,check.session,check.credential]).map_err(|e|e.to_string())?;
+            if changed>0 { let _ = app.emit("mcp_state_changed", ()); }
         }
     }
     Ok(())

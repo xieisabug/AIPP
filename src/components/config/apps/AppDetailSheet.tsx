@@ -1,3 +1,5 @@
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { shareConfig, reviewRefresh, checkFailure, type ConnectionCheck } from './connectionManagement';
 import { CatalogEndpoints } from './CatalogCapabilities';
 import { ReactNode, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -30,6 +32,8 @@ const safeOrigin = (url: string) => { try { return new URL(url).origin; } catch 
 export const sourceMatches = (a?: PluginSource | null, b?: PluginSource | null) => !!a && !!b && a.repo.toLowerCase() === b.repo.toLowerCase() && a.path === b.path;
 
 interface Props {
+    directoryCards?: {id:string; source?: PluginSource | null}[];
+    checks?: ConnectionCheck[];
     selection?: Selection;
     onSelect: (selection?: Selection) => void;
     apps: AppDefinition[];
@@ -74,7 +78,7 @@ function Panel({ title, description, children, danger = false }: { title: string
     </section>;
 }
 
-export default function AppDetailSheet({ selection, onSelect, apps, servers, connections, tools, pluginCatalog, mobile, refresh, onOpenPluginManager }: Props) {
+export default function AppDetailSheet({ directoryCards, checks, selection, onSelect, apps, servers, connections, tools, pluginCatalog, mobile, refresh, onOpenPluginManager }: Props) {
     const [tab, setTab] = useState('overview');
     // Connect view replaces the tabs: `connection` set = re-login/reconfigure of that instance.
     const [connectView, setConnectView] = useState<{ connection?: AppConnection; update?: AppDefinition; generation: number }>();
@@ -95,7 +99,8 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
     const pluginOverview = !mobile && !!pluginSource;
     const deviceSupported = !server || !mobile || isMobileExecutableMcpServer(server);
     const appSupported = (definition: AppDefinition) => !mobile || definition.platforms.includes('android');
-    const status = server ? displayStatus(server, connection, deviceSupported) : undefined;
+    const check = checks?.find(c => c.server_id === serverId);
+    const status = server ? displayStatus(server, connection, deviceSupported, check) : undefined;
     const serverTools = server ? tools.get(server.id) : undefined;
     const summary = server ? toolSummary(serverTools, server, connection) : undefined;
     const isCustom = !!server && !server.is_builtin && !connection;
@@ -141,7 +146,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
         if (!url) { reconnect(target); return; }
         await openUrl(url);
     });
-    const verify = (id: number) => run('正在测试连接…', async () => { await invoke('verify_app_connection', { serverId: id }); return '连接可用，工具列表已更新'; });
+    const verify = (id: number) => run('正在测试连接…', async () => { if (await reviewRefresh(id)) return '连接可用，工具列表已更新'; });
     const disconnect = (id: number, revokeRemote = true) => run('正在断开连接…', () => invoke<string>('disconnect_app_connection', { serverId: id, revokeRemote }));
     const enable = (id: number) => run('正在启用…', async () => { await invoke('toggle_mcp_server', { id, isEnabled: true }); });
 
@@ -190,22 +195,31 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
             }
             if (!server.is_enabled) return <Notice icon={<Power />} title="连接已停用" actions={<Button size="sm" variant="outline" disabled={!!busy} onClick={() => void enable(server.id)}>{busyIcon('正在启用…')}启用</Button>}>
                 停用期间助手不会调用它的工具。</Notice>;
-            if (connection.status === 'error') return <Notice tone="error" icon={<AlertTriangle />} title="上次验证失败" actions={<>
+            if (connection.status === 'error') return <Notice tone="error" icon={<AlertTriangle />} title={checkFailure(connection.error ?? "")} actions={<>
                 <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void verify(server.id)}>{busyIcon('正在测试连接…') ?? <RefreshCw className="h-4 w-4" />}重新测试</Button>
                 <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => reconnect(connection)}>重新配置</Button>
             </>}>{error}</Notice>;
         } else if (!server.is_enabled) {
             return <Notice icon={<Power />} title="已停用" actions={<Button size="sm" variant="outline" disabled={!!busy} onClick={() => void enable(server.id)}>{busyIcon('正在启用…')}启用</Button>}>停用期间助手不会调用它的工具。</Notice>;
         }
+        if (isCustom && check?.error) return <Notice tone="error" icon={<AlertTriangle />} title={checkFailure(check.error)}
+            actions={<Button size="sm" disabled={!!busy} onClick={() => void verify(server.id)}>重新测试</Button>}>{check.error}</Notice>;
         if (justConnected === server.id && !server.is_builtin && tab !== 'access') return <Notice icon={<Users />} title="下一步：选择可以使用它的助手"
             actions={<Button size="sm" variant="outline" onClick={() => { setTab('access'); setJustConnected(undefined); }}>去授权</Button>}>
-            新连接不会自动开放给任何助手。</Notice>;
+            请先在「工具」启用需要的工具，再选择允许使用它们的助手。</Notice>;
         return null;
     })();
 
     const headerActions = (() => {
         if (connectView) return null;
         const menu: ReactNode[] = [];
+        if (server && !server.is_builtin) menu.push(<DropdownMenuItem key="share" onSelect={() => void run('正在复制…', async () => {
+            const publicUrl = !connection && server.transport_type === 'http' ? await invoke<string|null>('public_connection_endpoint',{serverId:server.id}) : undefined;
+            const directoryId = directoryCards?.find(card => sourceMatches(card.source, connection?.definition.plugin_source))?.id;
+            const config = shareConfig(server, connection, publicUrl, directoryId);
+            await writeText(JSON.stringify(config, null, 2));
+            return config.app ? '已复制应用配置，对方可从 JSON 导入后连接自己的账号' : '已复制配置模板，对方导入时填写服务地址或本地命令';
+        })}>复制分享配置</DropdownMenuItem>);
         if (connection && connection.definition.connection.transport !== 'stdio') menu.push(<DropdownMenuItem key="reconfigure" onSelect={() => startConnect(connection)}>重新配置</DropdownMenuItem>);
         if (connection?.definition.connection.transport === 'http_api') {
             menu.push(<DropdownMenuItem key="update-definition" onSelect={() => void run('正在读取接口定义…', async () => {
@@ -314,7 +328,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
                         <TabsContent value="overview" className="mt-0">{overview}</TabsContent>
                         <TabsContent value="tools" className="mt-0"><MCPConfig key={server.id} initialServerId={server.id} detailOnly compact
                             onEditManaged={connection ? () => connection.definition.connection.transport === 'stdio' ? void openPluginConnection(connection.definition) : startConnect(connection) : undefined}
-                            onRefreshManaged={connection ? () => verify(server.id) : undefined} /></TabsContent>
+                            onRefreshManaged={!server.is_builtin ? () => verify(server.id) : undefined} /></TabsContent>
                         {!server.is_builtin && <TabsContent value="access" className="mt-0"><AppAssistantAccess serverId={server.id} /></TabsContent>}
                         {connection && <TabsContent value="settings" className="mt-0 space-y-4">
                             <Panel title="账号与凭据" description={connection.credential_status}>
@@ -341,7 +355,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
                 </div>
             </SheetContent>
         </Sheet>
-        <ConfirmDialog isOpen={!!removing} title="删除连接" confirmText={`删除「${removing ? connections.find(c => c.server_id === removing.id)?.label ?? removing.name : ''}」的连接、工具配置和凭据。GitHub 插件包和复用此服务的其他连接不会被卸载。`}
+        <ConfirmDialog isOpen={!!removing} title="删除连接" confirmText={`删除「${removing ? connections.find(c => c.server_id === removing.id)?.label ?? removing.name : ''}」的连接、工具配置和凭据。聊天历史、服务商账号、共享技能和其他连接会保留。`}
             onCancel={() => { if (!busy) setRemoving(undefined); }}
             onConfirm={() => {
                 if (!removing || busy) return;

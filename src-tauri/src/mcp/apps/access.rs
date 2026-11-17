@@ -34,7 +34,31 @@ pub fn validate(
 
 pub fn validate_execution(app: &tauri::AppHandle, server: &MCPServer, tool_name: &str, conversation_id: Option<i64>) -> Result<(), String> {
     let db = super::db(app)?;
-    if !is_managed(&db.conn, server.id)? { return Ok(()); }
+    if !is_managed(&db.conn, server.id)? {
+        if server.is_builtin { return Ok(()); }
+        let current = db.get_mcp_server(server.id).map_err(|e|format!("连接已移除：{e}"))?;
+        if !current.is_enabled || current != *server { return Err("连接已停用或配置已变化，请重新发起调用".into()); }
+        let tools = db.get_mcp_server_tools(server.id).map_err(|e|e.to_string())?;
+        let tool = tools.iter().find(|t| t.tool_name==tool_name).or_else(|| tools.iter().find(|t| crate::api::ai_api::sanitize_tool_name(&t.tool_name)==tool_name))
+            .ok_or_else(||format!("连接中已无工具 {tool_name}，请刷新工具列表"))?;
+        if !tool.is_enabled { return Err(format!("工具 {tool_name} 已停用")); }
+        // Custom MCP follows the chat's existing loading policy. A Butler turn uses the
+        // global list, while explicit per-assistant revocations apply in ordinary chats.
+        if let Some(id) = conversation_id {
+            let conversations = crate::db::conversation_db::ConversationDatabase::new(app).map_err(|e|e.to_string())?;
+            let conn = conversations.get_connection().map_err(|e|e.to_string())?;
+            let (assistant,kind):(Option<i64>,String) = conn.query_row("SELECT assistant_id,conversation_kind FROM conversation WHERE id=?1",
+                [id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|format!("读取会话 {id} 授权失败：{e}"))?;
+            if let Some(assistant)=assistant.filter(|_|!crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind)) {
+                let assistants=crate::db::assistant_db::AssistantDatabase::new(app).map_err(|e|e.to_string())?;
+                let revoked:bool=assistants.conn.query_row("SELECT EXISTS(SELECT 1 FROM assistant_mcp_config
+                    WHERE assistant_id=?1 AND mcp_server_id=?2 AND is_enabled=0) OR EXISTS(SELECT 1 FROM assistant_mcp_tool_config
+                    WHERE assistant_id=?1 AND mcp_tool_id=?3 AND is_enabled=0)",params![assistant,server.id,tool.id],|r|r.get(0)).map_err(|e|e.to_string())?;
+                if revoked { return Err(format!("助手 {assistant} 对工具 {tool_name} 的权限已撤销")); }
+            }
+        }
+        return Ok(());
+    }
     let conversation_id = conversation_id.ok_or("应用工具调用缺少会话身份，无法校验助手授权")?;
     let conversations = crate::db::conversation_db::ConversationDatabase::new(app).map_err(|e| e.to_string())?;
     let conn = conversations.get_connection().map_err(|e| e.to_string())?;

@@ -7,6 +7,10 @@ use std::time::Duration;
 use tauri::Emitter;
 use tracing::{info, instrument, warn};
 
+#[path = "connection_management.rs"]
+mod connection_management;
+pub use connection_management::*;
+
 // 超时常量集中定义，避免魔法数字分散
 const STDIO_TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -115,9 +119,15 @@ fn open_db(app_handle: &tauri::AppHandle) -> Result<MCPDatabase, String> {
 
 // 简化后的能力实体，用于统一持久化逻辑
 struct SimpleTool {
+    signature: String,
     name: String,
     description: Option<String>,
     params_json: String,
+}
+
+fn same_tool(old: &MCPServerTool, new: &SimpleTool) -> bool {
+    old.tool_name == new.name && old.tool_description == new.description
+        && old.parameters.as_deref() == Some(new.params_json.as_str())
 }
 
 struct SimpleResource {
@@ -142,6 +152,11 @@ fn persist_capability_sets(
     resources_opt: Option<Vec<SimpleResource>>,
     prompts_opt: Option<Vec<SimplePrompt>>,
 ) -> Result<(), String> {
+    persist_reviewed(db,server,label,tools_opt,resources_opt,prompts_opt,None)
+}
+
+fn persist_reviewed(db:&MCPDatabase, server:&MCPServer, label:&str, tools_opt:Option<Vec<SimpleTool>>,
+    resources_opt:Option<Vec<SimpleResource>>, prompts_opt:Option<Vec<SimplePrompt>>, expected:Option<(&[MCPServerTool], &std::collections::HashMap<i64,String>)>) -> Result<(),String> {
     let server_id = server.id;
     // Tool cleanup also writes assistant.db. Keep its journal guard alive until
     // the outer transaction has committed or rolled back.
@@ -159,14 +174,24 @@ fn persist_capability_sets(
     if let Some(tools) = tools_opt {
         let remote_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         info!(server_id, tool_count = remote_names.len(), label, "Persisting tools");
+        let previous = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
+        let signatures = connection_management::tool_signatures(db,server_id)?;
+        if expected.is_some_and(|(tools,saved)| tools != previous.as_slice() || saved != &signatures) {
+            return Err("工具或权限在预览后已变更，请重新检测".into());
+        }
         for t in &tools {
             info!(server_id, tool_name = %t.name, label, "Fetched MCP tool");
-            db.upsert_mcp_server_tool(
+            let id = db.upsert_mcp_server_tool(
                 server_id,
                 &t.name,
                 t.description.as_deref(),
                 Some(&t.params_json),
             ).map_err(|e| format!("连接 {server_id} 保存工具 {} 失败：{e}", t.name))?;
+            if !previous.iter().any(|old| same_tool(old, t) && signatures.get(&old.id).map(String::as_str).unwrap_or("null") == t.signature) {
+                db.update_mcp_server_tool(id, false, false).map_err(|e| e.to_string())?;
+                db.conn.execute("INSERT OR REPLACE INTO connection_tool_signature(tool_id,signature) VALUES(?1,?2)",
+                    rusqlite::params![id,t.signature]).map_err(|e|e.to_string())?;
+            }
         }
         db.delete_mcp_server_tools_not_in(server_id, &remote_names)
             .map_err(|e| format!("连接 {server_id} 清理已移除的工具失败：{e}"))?;
@@ -326,7 +351,8 @@ pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<
         return Err("系统内置工具集不可删除".to_string());
     }
 
-    crate::mcp::apps::disconnect_app_connection(app_handle.clone(), id, None).await?;
+    let _change = crate::mcp::apps::CHANGE_LOCK.lock().await;
+    crate::mcp::apps::disconnect_locked(app_handle.clone(), id, None).await?;
 
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
@@ -563,44 +589,17 @@ pub async fn refresh_mcp_server_capabilities(
     let db = open_db(&app_handle)?;
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
-    // Use incremental updates instead of clearing existing data
-
-    // Try to connect to MCP server and get capabilities
-    let result = match server.transport_type.as_str() {
-        "stdio" => {
-            // If aipp builtin server, register tools directly
-            if let Some(cmd) = &server.command {
-                if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    let db = open_db(&app_handle)?;
-                    for tool in crate::mcp::builtin_mcp::get_builtin_tools_for_command(cmd) {
-                        let params_json = tool.input_schema.to_string();
-                        let _ = db.upsert_mcp_server_tool(
-                            server_id,
-                            &tool.name,
-                            Some(&tool.description),
-                            Some(&params_json),
-                        );
-                    }
-                    Ok(())
-                } else {
-                    get_stdio_capabilities(app_handle.clone(), server_id, server.clone()).await
-                }
-            } else {
-                get_stdio_capabilities(app_handle.clone(), server_id, server.clone()).await
-            }
+    let result = if server.transport_type == "stdio" && server.command.as_deref().is_some_and(crate::mcp::builtin_mcp::is_builtin_mcp_call) {
+        for tool in crate::mcp::builtin_mcp::get_builtin_tools_for_command(server.command.as_deref().unwrap_or_default()) {
+            db.upsert_mcp_server_tool(server_id, &tool.name, Some(&tool.description), Some(&tool.input_schema.to_string())).map_err(|e| e.to_string())?;
         }
-        "sse" => get_sse_capabilities(app_handle.clone(), server_id, server.clone()).await,
-        "http_api" => {
-            let api = super::apps::declarative::probe(&app_handle, &server).await?;
-            let tools = api.tools.into_iter().map(|t| SimpleTool {
-                name: t.name, description: Some(t.description), params_json: t.input_schema.to_string(),
-            }).collect();
-            persist_capability_sets(&db, &server, "http_api", Some(tools), Some(vec![]), Some(vec![]))
+        Ok(())
+    } else {
+        match discover_capabilities(&app_handle, &server).await {
+            Ok((tools, resources, prompts)) => persist_capability_sets(&db, &server, &server.transport_type, tools, resources, prompts),
+            Err(e) => Err(e),
         }
-        "http" => get_http_capabilities(app_handle.clone(), server_id, server.clone()).await,
-        _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
     };
-
     match result {
         Ok(_) => {
             db.rebuild_dynamic_mcp_catalog_force().map_err(|e| e.to_string())?;
@@ -623,13 +622,31 @@ pub async fn refresh_mcp_server_capabilities(
     }
 }
 
+type Discovery = (Option<Vec<SimpleTool>>, Option<Vec<SimpleResource>>, Option<Vec<SimplePrompt>>);
+
+async fn discover_capabilities(app: &tauri::AppHandle, server: &MCPServer) -> Result<Discovery, String> {
+    match server.transport_type.as_str() {
+        "stdio" => get_stdio_capabilities(app.clone(), server.clone()).await,
+        "http" => get_http_capabilities(app.clone(), server.clone()).await,
+        "http_api" => {
+            let api = super::apps::declarative::probe(app, server).await?;
+            let tools = api.tools.into_iter().map(|t| SimpleTool {
+                signature: serde_json::json!([t.method,t.path,t.query,t.headers,t.body,t.result_pointer]).to_string(),
+                name: t.name, description: Some(t.description), params_json: t.input_schema.to_string(),
+            }).collect();
+            Ok((Some(tools), Some(vec![]), Some(vec![])))
+        }
+        "sse" => Err("当前版本不支持 SSE，请改用 HTTP transport".into()),
+        other => Err(format!("不支持的传输方式：{other}")),
+    }
+}
+
 // Stdio transport implementation
 #[instrument(level = "debug", skip_all)]
 async fn get_stdio_capabilities(
     app_handle: tauri::AppHandle,
-    server_id: i64,
     server: MCPServer,
-) -> Result<(), String> {
+) -> Result<Discovery, String> {
     // 外部 stdio 在移动端不可执行（aipp:* 内置已在调用方分流，不会进入此函数）。
     if cfg!(mobile) {
         return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
@@ -641,7 +658,7 @@ async fn get_stdio_capabilities(
     };
     use tokio::process::Command;
 
-    let db = open_db(&app_handle)?;
+
 
     // 获取命令，如果没有则返回错误
     let command = server.command.clone().ok_or("No command specified for stdio transport")?;
@@ -727,6 +744,7 @@ async fn get_stdio_capabilities(
         tools
             .into_iter()
             .map(|tool| SimpleTool {
+                signature: serde_json::json!(tool.annotations).to_string(),
                 name: tool.name.to_string(),
                 description: tool.description.as_ref().map(|d| d.to_string()),
                 params_json: serde_json::to_string(&tool.input_schema)
@@ -763,42 +781,23 @@ async fn get_stdio_capabilities(
             .collect::<Vec<_>>()
     });
 
-    persist_capability_sets(
-        &db,
-        &server,
-        "stdio",
-        tools_simple,
-        resources_simple,
-        prompts_simple,
-    )?;
-
     // 取消客户端连接
     let _ = client.cancel().await;
 
-    Ok(())
+    Ok((tools_simple, resources_simple, prompts_simple))
 }
 
-#[instrument(level = "debug", skip_all)]
-async fn get_sse_capabilities(
-    _app_handle: tauri::AppHandle,
-    _server_id: i64,
-    _server: MCPServer,
-) -> Result<(), String> {
-    Err("SSE transport 已在当前 rmcp 版本移除，请改用 HTTP transport".to_string())
-}
-
-#[instrument(level = "debug", skip(app_handle, server), fields(server_id))]
+#[instrument(level = "debug", skip(app_handle, server), fields(server_id = server.id))]
 async fn get_http_capabilities(
     app_handle: tauri::AppHandle,
-    server_id: i64,
     server: MCPServer,
-) -> Result<(), String> {
+) -> Result<Discovery, String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
         ServiceExt,
     };
 
-    let db = open_db(&app_handle)?;
+
 
     // 创建HTTP传输和客户端（复用 test_http_connection 中的模式，仅增加能力同步逻辑）
     let client_result = tokio::time::timeout(
@@ -864,6 +863,7 @@ async fn get_http_capabilities(
         tools
             .into_iter()
             .map(|tool| SimpleTool {
+                signature: redactor.clean(&serde_json::json!(tool.annotations).to_string()),
                 name: redactor.clean(tool.name.as_ref()),
                 description: tool.description.as_ref().map(|d| redactor.clean(d)),
                 params_json: redactor.clean(&serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string())),
@@ -898,19 +898,10 @@ async fn get_http_capabilities(
             })
             .collect::<Vec<_>>()
     });
-    persist_capability_sets(
-        &db,
-        &server,
-        "http",
-        tools_simple,
-        resources_simple,
-        prompts_simple,
-    )?;
-
     // 取消客户端连接
     let _ = client.cancel().await;
 
-    Ok(())
+    Ok((tools_simple, resources_simple, prompts_simple))
 }
 
 #[tauri::command]

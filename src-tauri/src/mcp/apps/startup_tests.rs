@@ -44,3 +44,18 @@ fn test_startup_recheck_discards_failure_after_new_verification_or_configuration
     db.conn.execute("UPDATE mcp_server SET proxy_enabled=1 WHERE id=?1", [id]).unwrap();
     assert!(!current.record_failure(&db, "late").unwrap());
 }
+
+#[test]
+fn test_connection_edit_and_reenable_require_a_fresh_check() {
+    let (db,id) = previous_connection();
+    db.conn.execute("UPDATE mcp_server SET timeout=45000 WHERE id=?1",[id]).unwrap();
+    let status = || db.conn.query_row("SELECT status FROM app_connection WHERE server_id=?1",[id],|r|r.get::<_,String>(0)).unwrap();
+    assert_eq!(status(),"unchecked");
+    db.conn.execute("UPDATE app_connection SET status='available'",[]).unwrap();
+    db.toggle_mcp_server(id,false).unwrap();
+    db.toggle_mcp_server(id,true).unwrap();
+    assert_eq!(status(),"unchecked");
+    db.conn.execute("UPDATE app_connection SET status='auth_required'",[]).unwrap();
+    db.conn.execute("UPDATE mcp_server SET timeout=55000 WHERE id=?1",[id]).unwrap();
+    assert_eq!(status(),"auth_required");
+}

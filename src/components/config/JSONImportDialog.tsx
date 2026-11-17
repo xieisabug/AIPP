@@ -10,16 +10,20 @@ import { readText } from '@tauri-apps/plugin-clipboard-manager';
 interface JSONImportDialogProps {
     isOpen: boolean;
     onClose: () => void;
-    onImport: (configs: MCPServerRequest[]) => void;
+    onImport: (configs: MCPServerRequest[]) => void | Promise<void>;
+    onCatalog?: (id: string) => Promise<void>;
 }
 
 
 const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
     isOpen,
     onClose,
-    onImport
+    onImport, onCatalog
 }) => {
     const [jsonText, setJsonText] = useState('');
+    const [preview, setPreview] = useState<MCPServerRequest[]>([]);
+    const [catalog, setCatalog] = useState('');
+    const [submitting, setSubmitting] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
 
     // 如果剪贴板里的是 json 就直接加载到对话框
@@ -27,7 +31,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
         if (isOpen) {
             loadClipboardContent();
         } else {
-            setJsonText('');
+            setJsonText(''); setPreview([]); setCatalog('');
         }
     }, [isOpen]);
 
@@ -130,7 +134,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                 headers: headersJson,
                 timeout: config.timeout || 30000,
                 is_long_running: config.is_long_running || false,
-                is_enabled: config.is_enabled !== false, // Default to true
+                is_enabled: false,
                 proxy_enabled: false,
             });
         }
@@ -171,33 +175,46 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
             transport_type: config.transport_type,
             command: config.command || '',
             environment_variables: envVars,
-            headers: config.headers ? JSON.stringify(config.headers) : undefined,
+            headers: typeof config.headers === 'string' ? config.headers : config.headers ? JSON.stringify(config.headers) : undefined,
             url: config.url || '',
             timeout: config.timeout || 30000,
             is_long_running: config.is_long_running || false,
-            is_enabled: config.is_enabled !== false, // Default to true
+            is_enabled: false,
             proxy_enabled: false,
         };
     };
 
-    const handleImport = useCallback(() => {
-        if (!jsonText.trim()) {
-            toast.error('请输入JSON配置');
-            return;
-        }
-
+    const handleImport = async () => {
+        if (submitting) return;
+        setSubmitting(true);
         try {
-            const config = JSON.parse(jsonText);
-            const mcpConfigs = validateMCPConfig(config);
-            onImport(mcpConfigs);
-            const count = mcpConfigs.length;
-            toast.success(`成功导入 ${count} 个MCP服务器配置`);
-        } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'JSON格式无效';
-            toast.error(`导入失败: ${errorMessage}`);
-        }
-    }, [jsonText, onImport]);
-
+            if (catalog) {
+                if (!onCatalog) throw new Error('请在「应用与工具 → 从 JSON 导入」打开目录配置');
+                await onCatalog(catalog);
+            } else if (preview.length) {
+                await onImport(preview);
+            } else {
+                const raw = JSON.parse(jsonText);
+                if (raw?.format === 'aipp.connection.v1') {
+                    if (typeof raw.app === 'string' && raw.app.trim()) setCatalog(raw.app);
+                    else if (['http', 'stdio'].includes(raw.transport)) setPreview([{
+                        name: '导入的 MCP', transport_type: raw.transport, url: typeof raw.url === 'string' ? raw.url : '', command: '',
+                        timeout: Number.isInteger(raw.timeout) && raw.timeout > 0 ? raw.timeout : 30000,
+                        is_long_running: raw.longRunning === true, proxy_enabled: false, is_enabled: false,
+                    }]);
+                    else throw new Error('无效的连接模板');
+                } else {
+                    const configs = validateMCPConfig(raw);
+                    if (!configs.length) throw new Error('配置中没有连接');
+                    setPreview(configs);
+                }
+            }
+        } catch (error) { toast.error(String(error)); }
+        finally { setSubmitting(false); }
+    };
+    const reviewing = !!catalog || preview.length > 0;
+    const update = (i: number, key: 'name'|'command'|'url', value: string) =>
+        setPreview(items => items.map((item, index) => index === i ? {...item, [key]: value} : item));
     const handleCancel = useCallback(() => {
         onClose();
     }, [onClose]);
@@ -209,7 +226,19 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                     <DialogTitle>JSON导入MCP服务器配置</DialogTitle>
                 </DialogHeader>
 
-                <div className="space-y-4 py-4">
+                {reviewing ? <div className="space-y-4 py-4">
+                    {catalog && <p>来源：AIPP 应用目录 · {catalog}。打开详情可查看服务地址和登录要求，再决定是否连接。</p>}
+                    {preview.map((config, i) => <section key={i} className="space-y-2 rounded-md border p-3 text-sm">
+                        <p>来源：导入的自定义 MCP · {config.transport_type}</p>
+                        <label className="block">连接名称<input className="block w-full rounded border p-2" value={config.name} onChange={e => update(i, 'name', e.target.value)} /></label>
+                        <label className="block">{config.transport_type === 'stdio' ? '本地命令（启用后可执行）' : '服务地址'}
+                            <Textarea value={config.transport_type === 'stdio' ? config.command ?? '' : config.url ?? ''} onChange={e => update(i, config.transport_type === 'stdio' ? 'command' : 'url', e.target.value)} />
+                        </label>
+                        <p>认证：{config.headers || config.environment_variables ? '配置含请求头或环境变量，请核对来源' : '未导入凭据，如服务需要请在设置中填写'}。</p>
+                    </section>)}
+                    {preview.length > 0 && <p className="text-sm">导入后保持停用。保存配置不会启动程序、登录或授权工具。</p>}
+                    <Button variant="outline" disabled={submitting} onClick={() => {setCatalog('');setPreview([]);}}>返回 JSON</Button>
+                </div> : <div className="space-y-4 py-4">
                     <div className="space-y-2">
                         <Label htmlFor="json-content">JSON配置</Label>
                         <Textarea
@@ -258,7 +287,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                             清空
                         </Button>
                     </div>
-                </div>
+                </div>}
 
                 <DialogFooter>
                     <Button
@@ -269,9 +298,9 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                     </Button>
                     <Button
                         onClick={handleImport}
-                        disabled={!jsonText.trim()}
+                        disabled={submitting || !jsonText.trim()}
                     >
-                        导入
+                        {catalog ? '查看目录详情' : reviewing ? '保存为停用连接' : '预览配置'}
                     </Button>
                 </DialogFooter>
             </DialogContent>

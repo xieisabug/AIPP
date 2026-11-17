@@ -63,7 +63,7 @@ pub struct MCPServer {
     pub created_time: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MCPServerTool {
     pub id: i64,
     pub server_id: i64,
@@ -333,6 +333,17 @@ impl MCPDatabase {
             );",
             (),
         )?;
+
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS connection_check (
+            server_id INTEGER PRIMARY KEY REFERENCES mcp_server(id) ON DELETE CASCADE,
+            session TEXT NOT NULL, error TEXT
+        );
+        CREATE TRIGGER IF NOT EXISTS clear_connection_check_after_edit AFTER UPDATE OF headers,url,command,environment_variables,transport_type,is_enabled,proxy_enabled,timeout ON mcp_server
+        BEGIN DELETE FROM connection_check WHERE server_id=NEW.id; END;
+        CREATE TABLE IF NOT EXISTS connection_tool_signature (
+            tool_id INTEGER PRIMARY KEY REFERENCES mcp_server_tool(id) ON DELETE CASCADE,
+            signature TEXT NOT NULL
+        );")?;
 
         // Create MCP server tools table
         self.conn.execute(

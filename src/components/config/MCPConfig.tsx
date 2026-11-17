@@ -1,3 +1,4 @@
+import { reviewRefresh, importDisabled } from './apps/connectionManagement';
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
@@ -339,6 +340,10 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
             return;
         }
         try {
+            if (!selectedServer?.is_builtin) {
+                if (await reviewRefresh(serverId)) toast.success('工具列表已更新');
+                return;
+            }
             const [tools, resources, prompts] = await invoke<[MCPServerTool[], MCPServerResource[], MCPServerPrompt[]]>(
                 'refresh_mcp_server_capabilities',
                 { serverId }
@@ -352,7 +357,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
         } finally {
             setIsRefreshing(false);
         }
-    }, [onRefreshManaged]);
+    }, [onRefreshManaged, selectedServer?.is_builtin]);
 
     // 更新工具配置
     const handleUpdateTool = useCallback(async (toolId: number, isEnabled: boolean, isAutoRun: boolean) => {
@@ -412,44 +417,11 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
 
     // 处理JSON导入确认  
     const handleJSONImportConfirm = useCallback(async (configs: MCPServerRequest[]) => {
+        await importDisabled(configs);
         setJsonImportDialogOpen(false);
-
-        // 如果只有一个服务器，直接打开对话框编辑
-        if (configs.length === 1) {
-            openAddServerDialog(configs[0].transport_type, configs[0]);
-            return;
-        }
-
-        // 多个服务器，批量创建
-        let successCount = 0;
-        let errorCount = 0;
-
-        for (const config of configs) {
-            try {
-                const serverId = await invoke<number>('add_mcp_server', { request: config });
-                successCount++;
-
-                // 尝试自动获取能力
-                try {
-                    await invoke('refresh_mcp_server_capabilities', { serverId });
-                } catch (e) {
-                    console.warn('自动获取能力失败:', e);
-                }
-            } catch (e) {
-                console.error('创建服务器失败:', e);
-                errorCount++;
-            }
-        }
-
-        if (successCount > 0) {
-            toast.success(`成功创建 ${successCount} 个MCP服务器`);
-            getMcpServers(); // 刷新服务器列表
-        }
-
-        if (errorCount > 0) {
-            toast.error(`${errorCount} 个服务器创建失败`);
-        }
-    }, [openAddServerDialog, getMcpServers]);
+        getMcpServers();
+        toast.success('连接已保存为停用状态');
+    }, [getMcpServers]);
 
     // 关闭JSON导入对话框
     const closeJSONImportDialog = useCallback(() => {

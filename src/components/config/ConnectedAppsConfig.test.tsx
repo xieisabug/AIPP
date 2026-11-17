@@ -28,6 +28,7 @@ describe('ConnectedAppsConfig', () => {
         const storage=new Map<string,string>();
         vi.stubGlobal('localStorage',{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>storage.set(k,v)});
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [builtin, legacy];
             if (command === 'list_app_connections') return [];
             if (command === 'fetch_agent_plugin_catalog') return {revision:'test',entries:[]};
@@ -89,6 +90,7 @@ describe('ConnectedAppsConfig', () => {
     });
     it('should open the same MCP instance when managing an application from the catalog', async () => {
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, name: '笔记 · 1234' }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null, credential_status: '连接凭据仅在本机加密保存' }];
             if (command === 'fetch_app_directory') return response();
@@ -116,6 +118,7 @@ describe('ConnectedAppsConfig', () => {
     });
     it('should reopen the pending authorization without creating another connection when login is in progress', async () => {
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'connecting', error: null }];
             if (command === 'get_app_authorization_url') return 'https://example.com/authorize?state=test';
@@ -144,6 +147,7 @@ describe('ConnectedAppsConfig', () => {
         let status = 'available';
         let error: string | null = null;
         vi.mocked(invoke).mockImplementation(async (command, args) => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: status === 'available' }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status, error }];
             if (command === 'disconnect_app_connection') {
@@ -169,6 +173,7 @@ describe('ConnectedAppsConfig', () => {
     it('should remove an existing connection only after confirmation from its overview', async () => {
         let removed = false;
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return removed ? [] : [{ ...legacy, is_deletable: true }];
             if (command === 'delete_mcp_server') { removed = true; return; }
             return [];
@@ -217,6 +222,7 @@ describe('ConnectedAppsConfig', () => {
             if (command === 'get_app_directory_detail') return app;
             if (command === 'fetch_agent_plugin_catalog') return {revision:'a',entries:[{name:'Notion',description:'Notes',category:'效率',source,icon:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/light.png',icon_dark:'https://aipp-helper.xiejingyang.com/agent-plugin-icons/dark.png'}]};
             if (command === 'inspect_agent_plugin') return {key:'abc',source,revision:'a'.repeat(40),digest:'x',name:'Notion',version:'1',publisher:'Notion',description:'Notes',servers:[],skills:[],files:[],notices:[],locally_modified:false};
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{...legacy,id:21}];
             if (command === 'list_app_connections') return [{server_id:21,app_id:'agent-plugin:abc:notion',definition:{...app,id:'agent-plugin:abc:notion'},label:'Notion 工作区',status:'available',config:{}}];
             return [];
@@ -237,6 +243,7 @@ describe('ConnectedAppsConfig', () => {
     it('should re-authorize an OAuth connection in one click when no secret is needed', async () => {
         const oauth = { ...definition, connection: { ...definition.connection, auth: 'oauth' } };
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition: oauth, label: '工作笔记', config: { region: 'eu' }, status: 'auth_required', error: 'invalid_grant: refresh token expired' }];
             if (command === 'connect_catalog_app') return { server_id: 21, authorization_url: 'https://example.com/authorize?state=again' };
@@ -256,6 +263,7 @@ describe('ConnectedAppsConfig', () => {
     it('should ask for the secret again instead of reconnecting silently when the token expired', async () => {
         const pat = { ...definition, connection: { ...definition.connection, auth: 'fields' }, fields: [{ key: 'token', label: 'Token', kind: 'password', required: true, secret: true, header: 'Authorization' }] };
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition: pat, label: '工作笔记', config: {}, status: 'auth_required', error: '401 Unauthorized' }];
             return [];
@@ -272,6 +280,7 @@ describe('ConnectedAppsConfig', () => {
 
     it('should list connections that need attention first', async () => {
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [builtin, legacy, { ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'auth_required', error: null }];
             return [];
@@ -287,6 +296,7 @@ describe('ConnectedAppsConfig', () => {
 
     it('should not report a disabled connection as available on its catalog card', async () => {
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null }];
             if (command === 'fetch_app_directory') return response();
@@ -302,6 +312,7 @@ describe('ConnectedAppsConfig', () => {
     it('should explain a credential that did not sync to this device without offering a re-login', async () => {
         const oauth = { ...definition, connection: { ...definition.connection, auth: 'oauth' } };
         vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_connection_checks') return [];
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
             if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition: oauth, label: '工作笔记', config: {}, status: 'auth_required', error: '连接凭据不存在', credential_on_device: false, credential_sync: 'not_configured' }];
             return [];

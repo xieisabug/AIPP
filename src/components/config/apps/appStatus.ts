@@ -1,6 +1,7 @@
 import { AppConnection, missingCredentialHint } from '@/data/ConnectedApp';
 import type { MCPServer, MCPServerTool } from '@/data/MCP';
 
+import { checkFailure, type ConnectionCheck } from './connectionManagement';
 export type StatusTone = 'ok' | 'idle' | 'pending' | 'warn' | 'error';
 export interface DisplayStatus { label: string; tone: StatusTone; attention: boolean }
 
@@ -9,7 +10,7 @@ export interface DisplayStatus { label: string; tone: StatusTone; attention: boo
  * Authorization problems win over the enable switch: a disabled connection that needs re-login
  * must say so, otherwise the user re-enables it and gets an opaque failure.
  */
-export function displayStatus(server: Pick<MCPServer, 'is_enabled' | 'is_builtin'> | undefined, connection?: AppConnection, supported = true): DisplayStatus {
+export function displayStatus(server: Pick<MCPServer, 'is_enabled' | 'is_builtin'> | undefined, connection?: AppConnection, supported = true, check?: ConnectionCheck): DisplayStatus {
     if (!supported) return { label: '此设备不可执行', tone: 'idle', attention: false };
     switch (connection?.status) {
         case 'connecting': return { label: '等待授权', tone: 'pending', attention: true };
@@ -28,10 +29,13 @@ export function displayStatus(server: Pick<MCPServer, 'is_enabled' | 'is_builtin
     if (connection?.status === 'auth_required') return { label: '需要重新登录', tone: 'warn', attention: true };
     if (server && !server.is_enabled) return { label: '已停用', tone: 'idle', attention: false };
     switch (connection?.status) {
-        case 'error': return { label: '连接失败', tone: 'error', attention: true };
+        case 'error': return { label: checkFailure(connection?.error ?? ''), tone: 'error', attention: true };
         case 'available': return { label: '可用', tone: 'ok', attention: false };
         case 'unchecked': return { label: '待验证', tone: 'idle', attention: false };
     }
+    if (!server?.is_builtin && check?.error) return { label: checkFailure(check.error), tone: 'error', attention: true };
+    if (!server?.is_builtin && check && !check.current) return { label: '待验证', tone: 'idle', attention: false };
+    if (!server?.is_builtin && check?.current) return { label: '可用', tone: 'ok', attention: false };
     return { label: '已启用', tone: 'ok', attention: false };
 }
 

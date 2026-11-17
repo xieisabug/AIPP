@@ -28,7 +28,7 @@ fn test_tool_refresh_prepares_attached_database_before_transaction_and_rolls_bac
         Authorization::Allow
     }));
     let refresh = |prompts| persist_capability_sets(&db, &server, "test",
-        Some(vec![SimpleTool { name: "new".into(), description: None, params_json: "{}".into() }]),
+        Some(vec![SimpleTool { signature: "null".into(), name: "new".into(), description: None, params_json: "{}".into() }]),
         None, prompts);
     let bindings = || db.conn.query_row("SELECT COUNT(*) FROM aipp_delete_assistant.assistant_mcp_tool_config",
         [], |row| row.get::<_, i64>(0)).unwrap();

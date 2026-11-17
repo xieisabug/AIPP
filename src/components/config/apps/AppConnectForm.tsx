@@ -69,6 +69,15 @@ export default function AppConnectForm({ app, connection, updateDefinition, onCo
 
     const submitLabel = busy ? '正在准备连接…' : app.connection.auth === 'oauth' ? '登录并连接' : '保存并验证';
     return <form className="space-y-5" onSubmit={e => { e.preventDefault(); void connect(); }}>
+        {updateDefinition && connection && <section className="rounded-md border p-3 text-sm">
+            <h4 className="font-medium">更新后的工具和权限</h4>
+            {(app.connection.http_api?.tools ?? []).map(tool => {
+                const old = connection.definition.connection.http_api?.tools?.find(t => t.name === tool.name);
+                return <p key={tool.name}>{tool.name} · {tool.method} {tool.path} · {old ? JSON.stringify(old) === JSON.stringify(tool) ? '保留' : '定义已变化，需重新启用' : '新增，默认停用'}</p>;
+            })}
+            {connection.definition.connection.http_api?.tools?.filter(old => !app.connection.http_api?.tools?.some(t => t.name === old.name)).map(t => <p key={t.name}>{t.name} · 将移除</p>)}
+            <p>授权范围：{connection.definition.connection.scopes?.join('、') || '无声明'} → {app.connection.scopes?.join('、') || '无声明'}</p>
+        </section>}
         <Intro app={app} connection={connection} />
         {app.connection.transport === 'http_api' && <p className="text-sm">API Key 发送至 {app.connection.url}</p>}
         {keyUrl && <Button type="button" variant="outline"

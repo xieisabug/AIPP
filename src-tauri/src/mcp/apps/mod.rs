@@ -17,10 +17,10 @@ use std::sync::LazyLock;
 use tauri::Emitter;
 use tokio::sync::Mutex;
 
-static CHANGE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+pub(super) static CHANGE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 struct LoginJob { reference: String, url: String, abort: tokio::task::AbortHandle }
 static LOGIN_JOBS: LazyLock<Mutex<HashMap<i64, LoginJob>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static SESSION: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+pub(super) static SESSION: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
 pub fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS app_catalog_cache (
@@ -45,8 +45,21 @@ pub fn init(conn: &Connection) -> Result<(), String> {
     if !has_id { conn.execute_batch("ALTER TABLE app_connection ADD COLUMN id INTEGER;").map_err(|e| e.to_string())?; }
     conn.execute_batch("UPDATE app_connection SET id=server_id WHERE id IS NULL;
         CREATE TRIGGER IF NOT EXISTS app_connection_sync_id AFTER INSERT ON app_connection BEGIN
-        UPDATE app_connection SET id=NEW.server_id WHERE server_id=NEW.server_id; END;").map_err(|e| e.to_string())
-
+        UPDATE app_connection SET id=NEW.server_id WHERE server_id=NEW.server_id; END;").map_err(|e|e.to_string())?;
+    // Sync can initialize connection metadata before all transport columns have migrated.
+    let full_server:bool=conn.query_row("SELECT COUNT(*)=8 FROM pragma_table_info('mcp_server')
+        WHERE name IN ('is_enabled','url','headers','command','environment_variables','timeout','transport_type','proxy_enabled')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if full_server {
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS invalidate_app_check_on_server_edit
+        AFTER UPDATE ON mcp_server WHEN OLD.is_enabled IS NOT NEW.is_enabled OR OLD.url IS NOT NEW.url
+            OR OLD.headers IS NOT NEW.headers OR OLD.command IS NOT NEW.command OR OLD.environment_variables IS NOT NEW.environment_variables
+            OR OLD.timeout IS NOT NEW.timeout OR OLD.transport_type IS NOT NEW.transport_type OR OLD.proxy_enabled IS NOT NEW.proxy_enabled
+        BEGIN
+            UPDATE app_connection SET status='unchecked',error=NULL,verified_session=NULL
+            WHERE server_id=NEW.id AND status IN ('available','error');
+        END;").map_err(|e|e.to_string())?;
+    }
+    Ok(())
 }
 
 fn db(app: &tauri::AppHandle) -> Result<MCPDatabase, String> {
@@ -149,6 +162,7 @@ pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<Ap
             status = "auth_required".into();
             error = Some("上次连接未完成，请重新连接".into());
         }
+        if status == "available" && session.as_deref() != Some(SESSION.as_str()) { status = "unchecked".into(); }
         let mut definition:AppDefinition=serde_json::from_str(&raw).map_err(|e| format!("连接 {server_id} 的应用描述损坏：{e}"))?;
         definition.tool_summaries.clear();
         result.push(AppConnection { server_id, app_id, definition, label,
@@ -299,6 +313,19 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         let header_json = if needs_credentials { serde_json::json!({credentials::REFERENCE_HEADER: reference}).to_string() } else { "{}".into() };
         let name = format!("{} · {}", request.label.trim(), &request.request_id[..8]);
         let id = if let Some(id) = request.server_id {
+            if request.update_http_definition {
+                let old:String = transaction.query_row("SELECT definition FROM app_connection WHERE server_id=?1",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+                let old:AppDefinition = serde_json::from_str(&old).map_err(|e|e.to_string())?;
+                if let Some(previous)=old.connection.http_api {
+                    for op in previous.tools {
+                        let unchanged = old.connection.url == app.connection.url && app.connection.http_api.as_ref().and_then(|api|api.tools.iter().find(|t|t.name==op.name))
+                            .is_some_and(|new|serde_json::json!(new)==serde_json::json!(op));
+                        if !unchanged {
+                            transaction.execute("UPDATE mcp_server_tool SET is_enabled=0,is_auto_run=0 WHERE server_id=?1 AND tool_name=?2",params![id,op.name]).map_err(|e|e.to_string())?;
+                        }
+                    }
+                }
+            }
             transaction.execute("UPDATE mcp_server SET headers=?2,is_enabled=0,name=?3,url=?4,transport_type=?5 WHERE id=?1", params![id, header_json, name, app.connection.url, app.connection.transport]).map_err(|e| e.to_string())?;
             id
         } else {
@@ -439,6 +466,10 @@ pub async fn verify_app_connection(app_handle: tauri::AppHandle, server_id: i64)
 #[tauri::command]
 pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: i64, revoke_remote: Option<bool>) -> Result<String, String> {
     let _change = CHANGE_LOCK.lock().await;
+    disconnect_locked(app_handle,server_id,revoke_remote).await
+}
+
+pub(super) async fn disconnect_locked(app_handle:tauri::AppHandle,server_id:i64,revoke_remote:Option<bool>) -> Result<String,String> {
     if let Some(job) = LOGIN_JOBS.lock().await.remove(&server_id) { job.abort.abort(); }
     let reference: Option<String> = {
         let db = db(&app_handle)?;
@@ -448,18 +479,24 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
         reference.flatten()
     };
     set_status(&app_handle, server_id, "disconnected", None)?;
+    let result = clear_disconnected(&app_handle, server_id, reference, revoke_remote.unwrap_or(true)).await;
+    if let Err(error) = &result { set_status(&app_handle, server_id, "disconnected", Some(error))?; }
+    result
+}
+
+async fn clear_disconnected(app_handle:&tauri::AppHandle, server_id:i64, reference:Option<String>, revoke_remote:bool) -> Result<String,String> {
     let _guard = credentials::CREDENTIAL_LOCK.lock().await;
     let mut references = {
-        let db = db(&app_handle)?;
+        let db = db(app_handle)?;
         let mut stmt = db.conn.prepare("SELECT reference FROM app_credential_cleanup WHERE server_id=?1").map_err(|e| e.to_string())?;
         let rows = stmt.query_map([server_id], |r| r.get::<_,String>(0)).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     if let Some(key) = reference { references.push(key); }
     let mut revoked = false;
-    let http = if revoke_remote.unwrap_or(true) { Some(credentials::oauth_http_for(&app_handle, server_id).await?) } else { None };
+    let http = if revoke_remote && !references.is_empty() { Some(credentials::oauth_http_for(app_handle, server_id).await?) } else { None };
     for reference in references {
-        if revoke_remote.unwrap_or(true) {
+        if revoke_remote {
             let key = reference.clone();
             let vault_app = app_handle.clone();
             let credential = tokio::task::spawn_blocking(move || credentials::load_optional(&vault_app, &key)).await.map_err(|_| "读取待撤销凭据任务失败")??;
@@ -468,7 +505,6 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
                     Ok(value) => revoked |= value,
                     Err(error) => {
                         let error = format!("连接已停用，但服务商撤销未完成：{error}。可重试断开，或选择删除凭据但不撤销服务商授权；启用同步时删除会传播。");
-                        set_status(&app_handle, server_id, "disconnected", Some(&error))?;
                         return Err(error);
                     }
                 }
@@ -477,10 +513,10 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
         let key = reference.clone();
         let vault_app = app_handle.clone();
         let cleared = tokio::task::spawn_blocking(move || credentials::clear(&vault_app, &key)).await.map_err(|_| "删除凭据任务失败".to_string()).and_then(|r| r);
-        if let Err(e) = cleared { set_status(&app_handle, server_id, "disconnected", Some(&e))?; return Err(e); }
-        db(&app_handle)?.conn.execute("DELETE FROM app_credential_cleanup WHERE reference=?1", [reference]).map_err(|e| e.to_string())?;
+        cleared?;
+        db(app_handle)?.conn.execute("DELETE FROM app_credential_cleanup WHERE reference=?1", [reference]).map_err(|e| e.to_string())?;
     }
-    db(&app_handle)?.conn.execute("UPDATE app_connection SET credential_ref=NULL WHERE server_id=?1", [server_id]).map_err(|e| e.to_string())?;
+    db(app_handle)?.conn.execute("UPDATE app_connection SET credential_ref=NULL WHERE server_id=?1", [server_id]).map_err(|e| e.to_string())?;
     Ok(if revoked { "已断开连接、撤销服务商令牌并删除凭据；启用同步时会同步删除" } else { "已断开并删除凭据；启用同步时会同步删除，服务商侧授权尚未撤销" }.into())
 }
 

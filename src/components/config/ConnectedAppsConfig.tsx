@@ -22,6 +22,7 @@ import AppIcon, { OfficialIcon } from './apps/AppIcon';
 import AppStatusBadge from './apps/AppStatusBadge';
 import { aggregateStatus, DisplayStatus, displayStatus, toolSummary } from './apps/appStatus';
 import { DirectoryCard, useAppDirectory } from './apps/useAppDirectory';
+import { importDisabled, type ConnectionCheck } from './apps/connectionManagement';
 import { getQuickStartTemplates } from '@/data/MCPTemplates';
 
 interface Builtin { id: string; name: string; description: string; command: string }
@@ -69,6 +70,7 @@ export default function ConnectedAppsConfig() {
     const detailRequest = useRef(0);
     const scroll = useRef<HTMLDivElement>(null);
     const [refreshCount, setRefreshCount] = useState(0);
+    const [checks,setChecks] = useState<ConnectionCheck[]>([]);
     const [servers, setServers] = useState<MCPServer[]>([]);
     const [connections, setConnections] = useState<AppConnection[]>([]);
     const [builtins, setBuiltins] = useState<Builtin[]>([]);
@@ -84,11 +86,11 @@ export default function ConnectedAppsConfig() {
     const [pluginSource, setPluginSource] = useState<PluginSource>();
 
     const refresh = useCallback(async (isCurrent: () => boolean = () => true) => {
-        const [nextServers, nextConnections, nextBuiltins] = await Promise.all([
-            invoke<MCPServer[]>('get_mcp_servers'), invoke<AppConnection[]>('list_app_connections'), invoke<Builtin[]>('list_aipp_builtin_templates'),
+        const [nextServers, nextConnections, nextBuiltins, nextChecks] = await Promise.all([
+            invoke<MCPServer[]>('get_mcp_servers'), invoke<AppConnection[]>('list_app_connections'), invoke<Builtin[]>('list_aipp_builtin_templates'), invoke<ConnectionCheck[]>('list_connection_checks'),
         ]);
         if (!isCurrent()) return;
-        setServers(nextServers); setConnections(nextConnections); setBuiltins(nextBuiltins);
+        setChecks(nextChecks); setServers(nextServers); setConnections(nextConnections); setBuiltins(nextBuiltins);
         setError(''); setLoading(false);
     }, []);
     useDataRefresh({ events: ['mcp_state_changed'], initial: true, refresh,
@@ -125,7 +127,7 @@ export default function ConnectedAppsConfig() {
     const connectionOf = useMemo(() => new Map(connections.map(c => [c.server_id, c])), [connections]);
     const official = (source?: PluginSource | null): OfficialIcon | undefined => pluginCatalog?.entries.find(entry => sourceMatches(entry.source, source));
     const matches = (text: string) => text.toLowerCase().includes(query.trim().toLowerCase());
-    const serverStatus = (server: MCPServer) => displayStatus(server, connectionOf.get(server.id), !mobile || isMobileExecutableMcpServer(server));
+    const serverStatus = (server: MCPServer) => displayStatus(server, connectionOf.get(server.id), !mobile || isMobileExecutableMcpServer(server), checks.find(c => c.server_id === server.id));
     const appStatus = (app: DirectoryCard) => aggregateStatus(connections
         .filter(c => c.app_id === app.id || sourceMatches(c.definition.plugin_source, app.source))
         .map(c => displayStatus(servers.find(s => s.id === c.server_id), c)));
@@ -151,13 +153,10 @@ export default function ConnectedAppsConfig() {
     const attentionCount = servers.filter(server => serverStatus(server).attention).length;
     const categories = [ALL, BUILTIN, '外部服务', '自定义 MCP'];
     const importConfigs = async (configs: MCPServerRequest[]) => {
-        setImportOpen(false);
-        if (configs.length === 1) { setInitialConfig(configs[0]); setConfigOpen(true); return; }
-        try {
-            for (const request of configs) await invoke('add_mcp_server', { request: { ...request, is_enabled: false } });
-            await refresh(); setPage('installed'); setCategory(ALL);
-            toast.success('已导入配置，保持停用；请检查后启用并测试连接。');
-        } catch (e) { toast.error(`导入未全部完成：${String(e)}`); await reload(); }
+        await importDisabled(configs);
+        setImportOpen(false); await refresh(); setPage('installed'); setCategory(ALL);
+        toast.success('连接已保存为停用状态');
+
     };
     const listing = category !== ALL || !!query.trim();
     const renderCards = (items: DirectoryCard[]) => <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{items.map(card => {
@@ -261,11 +260,14 @@ export default function ConnectedAppsConfig() {
             {page === 'catalog' ? catalogPage : installedPage}
         </div>
 
-        <AppDetailSheet selection={selection} onSelect={setSelection} apps={apps} servers={servers} connections={connections} tools={tools}
+        <AppDetailSheet directoryCards={cards} checks={checks} selection={selection} onSelect={setSelection} apps={apps} servers={servers} connections={connections} tools={tools}
             pluginCatalog={pluginCatalog} mobile={mobile} refresh={reload}
             onOpenPluginManager={source => { setPluginSource(source); setPluginsOpen(true); }} />
         <MCPServerDialog isOpen={configOpen} initialConfig={initialConfig} onClose={() => setConfigOpen(false)} onSubmit={() => { setConfigOpen(false); setPage('installed'); setCategory(ALL); void reload(); }} />
-        <JSONImportDialog isOpen={importOpen} onClose={() => setImportOpen(false)} onImport={configs => void importConfigs(configs)} />
+        <JSONImportDialog isOpen={importOpen} onClose={() => setImportOpen(false)} onImport={importConfigs} onCatalog={async id => {
+            const app = await invoke<AppDefinition>('get_app_directory_detail', {id});
+            setApps(old => [...old.filter(a => a.id !== app.id), app]); setImportOpen(false); setSelection({kind:'app',appId:app.id});
+        }} />
         <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl"><SheetHeader><SheetTitle>GitHub 插件</SheetTitle><SheetDescription>高级来源管理；应用详情与安装请从应用目录进入。</SheetDescription></SheetHeader>{pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig directoryCatalog={pluginCatalog} initialSource={pluginSource} onChanged={() => void reload()} /></div>}</SheetContent></Sheet>
         <BuiltinToolDialog isOpen={!!builtinId} initialTemplateId={builtinId} onClose={() => setBuiltinId(undefined)} onSubmit={() => { setBuiltinId(undefined); void reload(); }} />
     </div>;
