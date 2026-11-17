@@ -20,6 +20,7 @@ use tauri::Manager;
 pub(crate) struct AgentTurnRequest<'a> {
     pub assistant: &'a AssistantDetail,
     pub conversation_id: i64,
+    pub native_butler_role: Option<String>,
     pub source_message_id: Option<i64>,
     pub prompt: String,
     pub display_prompt: String,
@@ -66,7 +67,7 @@ struct RegisteredPreparedSession {
     prepared: Box<dyn PreparedAgentSession>,
 }
 
-pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Window, request: AgentTurnRequest<'_>) -> Result<AiResponse, AppError> {
+pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Window, mut request: AgentTurnRequest<'_>) -> Result<AiResponse, AppError> {
     let mut metadata = AgentDriverMetadata {
         id: "unresolved", display_name: "Agent", message_model_name: "agent",
         operations: super::session::AgentSessionCapabilities { structured_attachments: false, cancel_prompt: false, set_config_option: false },
@@ -87,10 +88,24 @@ pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Windo
         })?;
         metadata = registry().driver(&instance.driver_id)?.metadata();
         provider_id = Some(instance.provider_id);
-        let mut prepared = registry().prepare(&instance, &request, model_override.as_deref())?;
-        let prompt = prompt_for_driver(prepared.metadata(), &request)?;
         preparation_stage = super::failure::AgentFailureStage::Mcp;
         let payload = build_selected_mcp_tools_payload(&app_handle, request.assistant.assistant.id, Some(request.conversation_id)).map_err(AppError::UnknownError)?;
+        if let Some(role) = request.native_butler_role.take() {
+            request.native_butler_role = Some(crate::acp_mcp_bridge::native_butler_instructions(&role, &payload).map_err(AppError::UnknownError)?);
+        }
+        preparation_stage = super::failure::AgentFailureStage::Configuration;
+        let mut prepared = registry().prepare(&instance, &request, model_override.as_deref())?;
+        let prompt = prompt_for_driver(prepared.metadata(), &request)?;
+        // Native slash commands must arrive verbatim even when the stored message
+        // carries AIPP's hidden turn context. Preserve attached turns as ordinary input.
+        let prompt = if request.display_prompt.trim() == super::manual_compact::MANUAL_COMPACT_COMMAND
+            && super::manual_compact::is_manual_compact_prompt(&prompt)
+            && request.messages.iter().rev().find(|(role, _, _)| role == "user")
+                .is_some_and(|(_, _, attachments)| attachments.is_empty())
+        {
+            super::manual_compact::MANUAL_COMPACT_COMMAND.to_owned()
+        } else { prompt };
+        preparation_stage = super::failure::AgentFailureStage::Mcp;
         prepared.finalize(&app_handle, request.conversation_id, payload).await?;
         Ok((RegisteredPreparedSession { instance, prepared }, prompt))
     }.await;

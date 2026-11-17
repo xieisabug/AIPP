@@ -493,7 +493,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 name: "search_bot_history".into(),
                 description: "Search the messages of ALL Butler contacts, the chief and their task conversations by literal phrase, including archived conversations. Each match identifies the owning Bot, the speaker, conversation and message ID. archived=true means the match is from an old conversation the user archived when starting a new one: treat it as past history, not the current conversation. Use read_bot_message_context for the surrounding conversation.".into(),
                 input_schema: serde_json::json!({"type":"object","required":["query"],"properties":{
-                    "query":{"type":"string"},"bot_id":{"type":"integer"},"before_message_id":{"type":"integer"}
+                    "query":{"type":"string","minLength":1,"maxLength":512,"pattern":"\\S","description":"A nonblank literal phrase to find in message text. Supply a search phrase even when filtering by bot_id."},
+                    "bot_id":{"type":"integer","minimum":1},"before_message_id":{"type":"integer","minimum":1}
                 }}),
             },
             BuiltinToolInfo {
@@ -640,15 +641,15 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "properties": {
                         "server_name": {
                             "type": "string",
-                            "description": "目标工具集名称，使用 load_mcp_tool 返回的 server_name"
+                            "description": "目标工具集名称，取 load_mcp_tool 返回条目的 server 字段"
                         },
                         "tool_name": {
                             "type": "string",
-                            "description": "目标工具名称，使用 load_mcp_tool 返回的 tool_name"
+                            "description": "目标工具名称，取 load_mcp_tool 返回条目的 tool 字段"
                         },
                         "parameters": {
                             "type": "object",
-                            "description": "传给目标工具的参数对象。无参数时传 {}"
+                            "description": "按加载条目的 parameters 定义填写实际参数值，组成 JSON 对象。无参数时传 {}"
                         }
                     },
                     "required": ["server_name", "tool_name", "parameters"]

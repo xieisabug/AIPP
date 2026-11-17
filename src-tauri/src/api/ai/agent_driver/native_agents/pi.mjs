@@ -1,4 +1,6 @@
 import { deadline, jsonLines, launch, splitModel, stopChild } from './common.mjs';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // all: every tool call; read_only: read/grep/find/ls run without asking; none: Pi's native behaviour.
@@ -46,8 +48,12 @@ function toolActivity(frame, previous, cwd) {
 export async function openPi(config, emit, dependencies = {}) {
   const approval = config.pi_approval || 'all';
   if (!PI_APPROVAL_SCOPES.includes(approval)) throw new Error(`Unsupported Pi approval scope '${approval}'; expected ${PI_APPROVAL_SCOPES.join(', ')}`);
+  // The actor owns this private directory until the Pi process has stopped.
+  // Pass a path so long role/skill instructions do not exceed Windows env limits.
+  const contextFile = config.butlerInstructions ? join(config.temp_root, 'pi-butler.txt') : '';
+  if (contextFile) await writeFile(contextFile, config.butlerInstructions, { mode: 0o600, flag: 'wx' });
   const child = (dependencies.launch || launch)(config.command || 'pi', ['--mode', 'rpc', '--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url))],
-    { cwd: config.cwd, env: { ...process.env, AIPP_PI_APPROVAL: approval, ...(config.mcp ? { AIPP_PI_MCP: JSON.stringify(config.mcp) } : {}) } });
+    { cwd: config.cwd, env: { ...process.env, AIPP_PI_APPROVAL: approval, AIPP_PI_CONTEXT_FILE: contextFile, ...(config.mcp ? { AIPP_PI_MCP: JSON.stringify(config.mcp) } : {}) } });
   let sequence = 0, turn = null, failure, session, closing = false;
   const pending = new Map();
   const questions = new Map();

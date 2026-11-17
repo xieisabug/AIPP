@@ -175,3 +175,12 @@ test('should report OpenCode errors even before any assistant activity', async (
     assert.match(fixture.events.find(e => e.type === 'done').error, /configured model is unavailable/);
   } finally { await runtime.close(); }
 });
+
+test('should send Butler instructions in the OpenCode system field on resume', async () => {
+  const f = openCodeFixture();
+  const runtime = await openOpenCode({ cwd:'/repo', session:'s1', butlerInstructions:'role' }, () => {}, f);
+  try {
+    await runtime.prompt('hello', 1);
+    assert.deepEqual(f.requests.at(-1).body, {system:'role', parts:[{type:'text', text:'hello'}]});
+  } finally { await runtime.close(); }
+});

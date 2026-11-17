@@ -55,6 +55,7 @@ pub struct CodexAppServerConfig {
     pub sandbox: Option<String>,
     pub approvals_reviewer: Option<String>,
     pub collaboration_mode: Option<String>,
+    pub developer_instructions: Option<String>,
     pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
@@ -431,6 +432,7 @@ pub fn extract_codex_app_server_config(
         sandbox,
         approvals_reviewer,
         collaboration_mode: None,
+        developer_instructions: None,
         selected_mcp_tools_payload: String::new(),
         session_signature: String::new(),
     };
@@ -451,6 +453,7 @@ fn codex_config_signature(config: &CodexAppServerConfig) -> String {
         "approvals_reviewer": config.approvals_reviewer,
         "collaboration_mode": config.collaboration_mode,
         "env": config.env_vars,
+        "developer_instructions": config.developer_instructions,
         "selected_mcp": config.selected_mcp_tools_payload,
     }))
     .unwrap_or_default()
@@ -1248,8 +1251,79 @@ fn apply_codex_config_option(
     Err(format!("Codex 不支持会话配置：{config_id}"))
 }
 
-fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str) -> Value {
-    json!({
+// Codex truncates individual additionalContext entries above 4,000 UTF-8 bytes.
+fn codex_application_context(mut text: &str) -> serde_json::Map<String, Value> {
+    let mut entries = serde_json::Map::new();
+    while !text.is_empty() {
+        let mut end = text.len().min(4000);
+        while !text.is_char_boundary(end) { end -= 1; }
+        if end < text.len() {
+            // Keep paragraphs and individual rules together when they fit.
+            if let Some(newline) = text[..end].rfind('\n') { end = newline + 1; }
+        }
+        let (part, rest) = text.split_at(end);
+        entries.insert(format!("aipp_butler_{:08}", entries.len()), json!({"kind":"application","value":part}));
+        text = rest;
+    }
+    entries
+}
+
+// The legacy event omits the item ID. Match both event streams by their
+// turn-local ordinal so either can arrive first without injecting twice.
+#[derive(Default)]
+struct CodexContextRestore {
+    completed_items: std::collections::HashSet<String>,
+    legacy_completions: usize,
+    sent: usize,
+    pending: std::collections::HashSet<u64>,
+}
+
+impl CodexContextRestore {
+    async fn on_notification(
+        &mut self, method: &str, params: &Value, manual_compact: bool, thread_id: &str,
+        context: &serde_json::Map<String, Value>, request_id: &mut u64,
+        stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+    ) -> Result<(), String> {
+        if context.is_empty() { return Ok(()); }
+        let count = match method {
+            "item/completed" if params.pointer("/item/type").and_then(Value::as_str) == Some("contextCompaction") => {
+                let id = params.pointer("/item/id").and_then(Value::as_str)
+                    .ok_or_else(|| format!("Codex thread {thread_id}: contextCompaction item/completed omitted item.id"))?;
+                self.completed_items.insert(id.to_owned());
+                self.completed_items.len()
+            }
+            "thread/compacted" => {
+                self.legacy_completions += 1;
+                self.legacy_completions
+            }
+            // Explicit /compact may finish without a separate completion item.
+            "turn/completed" if manual_compact && params.pointer("/turn/status").and_then(Value::as_str) == Some("completed") => 1,
+            _ => return Ok(()),
+        };
+        if count <= self.sent { return Ok(()); }
+        self.sent = count;
+        *request_id += 1;
+        self.pending.insert(*request_id);
+        let items: Vec<_> = context.iter().map(|(key, entry)| {
+            let value = entry["value"].as_str().unwrap_or_default();
+            json!({"type":"message","role":"developer","content":[{"type":"input_text","text":format!("<{key}>{value}</{key}>")}]})
+        }).collect();
+        write_frame(stdin, &json_rpc_request(*request_id, "thread/inject_items", json!({"threadId":thread_id,"items":items}))).await
+            .map_err(|e| format!("Codex thread {thread_id} 压缩后发送管家指令失败：{e}"))
+    }
+
+    fn acknowledge(&mut self, thread_id: &str, frame: &Value) -> Result<(), String> {
+        if frame["id"].as_u64().is_some_and(|id| self.pending.remove(&id)) {
+            if let Some(error) = frame.get("error") {
+                return Err(format!("Codex thread {thread_id} 压缩后恢复管家指令失败：{error}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str, context: &serde_json::Map<String, Value>) -> Value {
+    let mut params = json!({
         "threadId": thread_id,
         "model": snapshot.model,
         "reasoningEffort": snapshot.reasoning_effort,
@@ -1258,7 +1332,9 @@ fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionS
         "approvalsReviewer": snapshot.approvals_reviewer,
         "collaborationMode": codex_collaboration_mode_json(snapshot),
         "input": [{"type":"text","text":prompt,"text_elements":[]}],
-    })
+    });
+    if !context.is_empty() { params["additionalContext"] = json!(context); }
+    params
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1415,7 +1491,7 @@ async fn handle_server_request(
     Ok(true)
 }
 
-async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<(), String> {
+async fn write_frame(stdin: &mut (impl tokio::io::AsyncWrite + Unpin), frame: &Value) -> Result<(), String> {
     let mut bytes = serde_json::to_vec(frame)
         .map_err(|error| format!("序列化 Codex JSON-RPC 请求失败：{error}"))?;
     bytes.push(b'\n');
@@ -2284,6 +2360,7 @@ async fn run_session(
         &requests, conversation_id, &config, stored_thread.as_deref(), mcp_config_overrides,
         &mut request_id, &mut stdin, &mut lines, &mut pending_notifications,
     ).await?;
+    let application_context = codex_application_context(config.developer_instructions.as_deref().unwrap_or_default());
     let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
     let connection_event_id = restored_session_method
         .as_ref()
@@ -2472,7 +2549,7 @@ async fn run_session(
                 let (turn_method, turn_params) = if manual_compact {
                     ("thread/compact/start", json!({ "threadId": thread_id }))
                 } else {
-                    ("turn/start", codex_turn_start_params(&thread_id, &snapshot, &prompt))
+                    ("turn/start", codex_turn_start_params(&thread_id, &snapshot, &prompt, &application_context))
                 };
                 request_id += 1;
                 write_frame(
@@ -2506,6 +2583,8 @@ async fn run_session(
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
                 let mut focused_message_id = None;
                 let mut usage_tracker = CodexTurnUsageTracker::default();
+                let mut restore = CodexContextRestore::default();
+                let mut turn_completed = false;
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
@@ -2513,7 +2592,7 @@ async fn run_session(
                 // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
                 let mut item_content_offsets = HashMap::<String, u64>::new();
                 let mut item_orders = HashMap::<String, u64>::new();
-                loop {
+                while !turn_completed || !restore.pending.is_empty() {
                     let frame = if let Some(frame) = pending_notifications.pop_front() {
                         frame
                     } else {
@@ -2593,12 +2672,18 @@ async fn run_session(
                         }
                         continue;
                     }
+                    if frame.get("method").is_none() {
+                        restore.acknowledge(&thread_id, &frame)?;
+                        continue;
+                    }
                     if !codex_notification_matches_turn(&frame, &thread_id, turn_id.as_deref()) {
                         debug!(conversation_id, thread_id, turn_id = ?turn_id, "Ignoring Codex notification for another thread or turn");
                         continue;
                     }
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
+                    restore.on_notification(method, &params, manual_compact, &thread_id,
+                        &application_context, &mut request_id, &mut stdin).await?;
                     usage_tracker.note_notification(method, &params);
                     let mut output_message_id = None;
                     match method {
@@ -2667,6 +2752,7 @@ async fn run_session(
                                         }
                                     }
                                 }
+                                "thread/compacted" => {},
                                 "item/started" | "item/completed" => {
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
@@ -2762,7 +2848,7 @@ async fn run_session(
                                             .map(str::to_string)
                                             .or_else(|| Some("Codex turn failed".to_string()));
                                     }
-                                    break;
+                                    turn_completed = true;
                                 },
                                 "mcpServer/startupStatus/updated" => {
                                     let server_name = params.get("name").and_then(Value::as_str).unwrap_or("unknown");
@@ -3076,7 +3162,7 @@ mod tests {
             collaboration_mode: Some("plan".to_string()),
             ..Default::default()
         };
-        let params = codex_turn_start_params("thread-1", &snapshot, "hello");
+        let params = codex_turn_start_params("thread-1", &snapshot, "hello", &Default::default());
         assert_eq!(params["model"], "gpt-a");
         assert_eq!(params["reasoningEffort"], "ultra");
         assert_eq!(params["collaborationMode"]["mode"], "plan");
@@ -3150,7 +3236,7 @@ mod tests {
     #[test]
     fn builds_turn_start_with_approval_and_sandbox_overrides() {
         let default_snapshot = CodexConversationSessionState::default();
-        let default_params = codex_turn_start_params("thread-1", &default_snapshot, "hello");
+        let default_params = codex_turn_start_params("thread-1", &default_snapshot, "hello", &Default::default());
         assert!(default_params["approvalPolicy"].is_null());
         assert!(default_params["sandboxPolicy"].is_null());
 
@@ -3160,7 +3246,7 @@ mod tests {
             approvals_reviewer: Some("auto_review".to_string()),
             ..Default::default()
         };
-        let params = codex_turn_start_params("thread-1", &snapshot, "hello");
+        let params = codex_turn_start_params("thread-1", &snapshot, "hello", &Default::default());
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandboxPolicy"], json!({"type": "workspaceWrite"}));
         assert_eq!(params["approvalsReviewer"], "auto_review");
@@ -3455,6 +3541,7 @@ mod tests {
             sandbox: None,
             approvals_reviewer: None,
             collaboration_mode: None,
+            developer_instructions: None,
             selected_mcp_tools_payload: String::new(),
             session_signature: String::new(),
         }
@@ -3541,3 +3628,7 @@ mod protocol_tests;
 #[cfg(test)]
 #[path = "codex_app_server_activity_tests.rs"]
 mod activity_tests;
+
+#[cfg(test)]
+#[path = "codex_app_server_context_tests.rs"]
+mod context_tests;

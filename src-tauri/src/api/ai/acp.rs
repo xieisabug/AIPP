@@ -76,6 +76,7 @@ pub struct AcpConfig {
     pub additional_args: Vec<String>,
     pub model: Option<String>,
     pub thought_level: Option<String>,
+    pub butler_instructions: Option<String>,
     pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
@@ -1253,13 +1254,14 @@ fn acp_config_signature(config: &AcpConfig) -> String {
     env_entries.sort();
 
     format!(
-        "instance_id={:?}\ncli={}\ncwd={}\nmodel={}\nthought_level={}\nselected_mcp={}\nargs={}\nenv={}",
+        "instance_id={:?}\ncli={}\ncwd={}\nmodel={}\nthought_level={}\nselected_mcp={}\nbutler={:?}\nargs={}\nenv={}",
         config.instance_id,
         config.cli_command,
         config.working_directory.display(),
         config.model.as_deref().unwrap_or_default(),
         config.thought_level.as_deref().unwrap_or_default(),
         config.selected_mcp_tools_payload,
+        config.butler_instructions,
         config.additional_args.join("\u{1f}"),
         env_entries.join("\u{1f}")
     )
@@ -2106,6 +2108,7 @@ fn build_acp_prompt_blocks(
     attachments: &[MessageAttachment],
     prompt_capabilities: &acp::PromptCapabilities,
     history_prefix: Option<String>,
+    instructions: Option<String>,
 ) -> Result<Vec<acp::ContentBlock>, AppError> {
     let prompt_to_send = build_prompt_to_send(prompt, history_prefix);
     let mut blocks = Vec::new();
@@ -2141,6 +2144,9 @@ fn build_acp_prompt_blocks(
         }
     }
 
+    if let Some(text) = instructions {
+        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(text)));
+    }
     Ok(blocks)
 }
 
@@ -4594,13 +4600,13 @@ async fn process_acp_prompt(
     prompt_capabilities: acp::PromptCapabilities,
     window: tauri::Window,
     history_prefix: Option<String>,
+    butler_instructions: Option<String>,
 ) -> Result<(), AppError> {
     client_handle.set_current_message(message_id).await;
     client_handle.set_window(window).await;
     client_handle.reset_buffers().await;
 
-    let prompt_blocks =
-        build_acp_prompt_blocks(prompt, &attachments, &prompt_capabilities, history_prefix)?;
+    let prompt_blocks = build_acp_prompt_blocks(prompt, &attachments, &prompt_capabilities, history_prefix, butler_instructions)?;
 
     info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
     let prompt_response = cx
@@ -5417,6 +5423,7 @@ async fn run_acp_connected_session(
     };
     let mut active_prompt: Option<oneshot::Receiver<Result<(), AppError>>> = None;
     let mut active_mcp_prompt = None;
+    let mut instructions_pending = true;
     let mut agent_closed_connection = false;
 
     loop {
@@ -5425,6 +5432,15 @@ async fn run_acp_connected_session(
             {
                 active_mcp_prompt = Some(mcp_scope.begin_prompt(message_id).map_err(AppError::UnknownError)?);
                 client_handle.set_active_prompt(true).await;
+                let visible = crate::utils::turn_context::visible(&prompt);
+                let command = visible.split_whitespace().next().and_then(|word| word.strip_prefix('/'))
+                    .is_some_and(|name| !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-')));
+                let instructions = if command {
+                    if visible.trim() == "/compact" { instructions_pending = true; }
+                    None
+                } else if std::mem::take(&mut instructions_pending) {
+                    acp_config.butler_instructions.clone()
+                } else { None };
                 let cx_prompt = cx.clone();
                 let client_handle_clone = client_handle.clone();
                 let session_id_clone = session_id.clone();
@@ -5442,6 +5458,7 @@ async fn run_acp_connected_session(
                         prompt_capabilities,
                         window,
                         history_prefix,
+                        instructions,
                     )
                     .await;
                     let _ = done_tx.send(result);
@@ -6072,6 +6089,7 @@ pub fn extract_acp_config(
         additional_args,
         model: None,
         thought_level: get_model_config("reasoning_effort"),
+        butler_instructions: None,
         selected_mcp_tools_payload: "[]".to_string(),
         session_signature: String::new(),
     };

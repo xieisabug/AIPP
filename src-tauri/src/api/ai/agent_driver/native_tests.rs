@@ -33,7 +33,7 @@ impl Fixture {
     }
 
     fn request(&self) -> AgentTurnRequest<'_> {
-        AgentTurnRequest { source_message_id: None,
+        AgentTurnRequest { source_message_id: None, native_butler_role: None,
             assistant: &self.assistant, conversation_id: 42,
             prompt: "runtime".into(), display_prompt: "display".into(),
             override_model_id: self.override_model_id.clone(), overrides: &self.overrides,
@@ -69,6 +69,26 @@ fn model_config(name: &str, value: &str) -> AssistantModelConfig {
 
 fn provider_configs() -> Vec<LLMProviderConfig> {
     vec![provider_config("acp_cli_command", "test-acp")]
+}
+
+#[test]
+fn test_butler_context_native_preparation_keeps_role_separate_from_user_input() {
+    let fixture = Fixture::new();
+    for api in ["codex_app_server", "anthropic", "acp"] {
+        let selected = load_agent_provider(&fixture.assistant, None, |_| Ok((api.into(), provider_configs()))).unwrap();
+        let mut request = fixture.request();
+        for role in [None, Some("管家角色约定")] {
+            request.native_butler_role = role.map(str::to_owned);
+            let prepared = prepare_selected_config(&request, &selected, vec![]).unwrap();
+            let instructions = match prepared {
+                PreparedAgentSession::Codex(c) => c.developer_instructions,
+                PreparedAgentSession::Claude(c) => c.butler_instructions,
+                PreparedAgentSession::Acp(c) => c.butler_instructions,
+            };
+            assert_eq!(instructions.as_deref(), role);
+            assert_eq!(request.prompt, "runtime");
+        }
+    }
 }
 
 fn signature(config: &PreparedAgentSession) -> &str {

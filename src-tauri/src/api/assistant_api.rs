@@ -1093,7 +1093,7 @@ pub async fn ensure_acp_session_connected(
     let feature_state = app_handle.state::<FeatureConfigState>();
     let features = feature_state.config_feature_map.lock().await.clone();
     let overrides = None;
-    let request = AgentTurnRequest { source_message_id: None,
+    let request = AgentTurnRequest { source_message_id: None, native_butler_role: None,
         assistant: &assistant, conversation_id, prompt: String::new(), display_prompt: String::new(),
         override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[],
     };

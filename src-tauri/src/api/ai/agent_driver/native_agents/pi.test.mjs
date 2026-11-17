@@ -1,7 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openPi } from './pi.mjs';
 import { piFixture } from './test-helpers.mjs';
+
+test('should supply long Butler instructions to Pi by file on actor startup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-context-test-'));
+  const role = '管家上下文'.repeat(10000);
+  const fixture = piFixture();
+  let runtime;
+  try {
+    runtime = await openPi({ cwd: root, temp_root: root, butlerInstructions: role }, () => {}, fixture);
+    const [, args, options] = fixture.launches[0];
+    assert.equal(await readFile(options.env.AIPP_PI_CONTEXT_FILE, 'utf8'), role);
+    assert.equal(Object.values(options.env).includes(role), false);
+    assert.equal(args.includes(role), false);
+  } finally {
+    await runtime?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('should inject the scoped MCP bridge into the Pi extension when tools are selected', async () => {
   const fixture = piFixture();

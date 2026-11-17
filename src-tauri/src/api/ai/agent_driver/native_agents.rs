@@ -68,6 +68,7 @@ impl AgentDriver for NativeDriver {
                 crate::api::ai::acp::apply_network_proxy_to_env_vars(&mut config.env, &proxy);
             }
         }
+        if let Some(role) = &request.native_butler_role { config.wire["butlerInstructions"] = json!(role); }
         Ok(Box::new(Prepared { driver: *self, instance: instance.clone(), config, mcp_scope: None }))
     }
     async fn lookup(&self, _: &tauri::AppHandle, conversation_id: i64) -> Result<Option<AgentSessionLookup>, AppError> {

@@ -38,8 +38,18 @@ pub(super) fn resolve_target(
         }
         return Ok(Target {server:source,tool_name:tool_name.into(),parameters:parameters.into()});
     }
-    let (server_name,tool_name,parameters) = crate::mcp::execution_api::project_call_mcp_tool(tool_name,parameters)
-        .ok_or("call_mcp_tool 需要非空 server_name、tool_name 和有效的参数对象")?;
+    let call: serde_json::Map<String, serde_json::Value> = serde_json::from_str(parameters)
+        .map_err(|_| "call_mcp_tool 参数校验失败，未执行。顶层参数必须是 JSON 对象")?;
+    let required_name = |key: &str| {
+        call.get(key).and_then(|value| value.as_str()).map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("call_mcp_tool 参数校验失败，未执行。{key} 必须是加载结果中的非空字符串"))
+    };
+    let server_name = required_name("server_name")?;
+    let tool_name = required_name("tool_name")?;
+    let parameters = call.get("parameters").filter(|value| value.is_object())
+        .ok_or("call_mcp_tool 参数校验失败，未执行。请传 parameters 对象，无参数时传 {}")?
+        .to_string();
     let servers = db.get_mcp_servers().map_err(|e|e.to_string())?;
     let exact = servers.iter().filter(|s|s.name==server_name).collect::<Vec<_>>();
     let matches = if exact.is_empty() {
