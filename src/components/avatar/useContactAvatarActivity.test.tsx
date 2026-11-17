@@ -10,6 +10,22 @@ const row = (status: string | null = null): ContactActivity => ({ assistant_id: 
     runtime: { conversation_id: 3, is_running: false, phase: "idle", epoch: 1, revision: 1 } });
 describe("contact activity subscriptions", () => {
     afterEach(() => { clearAllMockHandlers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+    it("should show a Pi contact reaching out while its native collaboration tool executes", async () => {
+        let now = 1000;
+        vi.spyOn(Date, "now").mockImplementation(() => now);
+        const running = { ...row(), runtime: { ...row().runtime, is_running: true, phase: "assistant_streaming" } };
+        mockInvokeHandler("list_butler_contact_activity", () => [running]);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("streaming"));
+        now += 1500;
+        await act(async () => { await emit("conversation_event_3", { type: "agent_activity",
+            data: { item_id: "42:send", kind: "tool", metadata: { tool: "aipp_t7_message_bot" }, status: "executing" } }); });
+        expect(result.current.visuals.get(8)).toEqual({ state: "sending", label: "联络助手" });
+        now += 1500;
+        await act(async () => { await emit("conversation_event_3", { type: "agent_activity",
+            data: { item_id: "42:send", status: "success" } }); });
+        expect(result.current.visuals.get(8)?.state).toBe("streaming");
+    });
     it("should baseline historical results and animate new task completion only once", async () => {
         let now = 1000;
         vi.spyOn(Date, "now").mockImplementation(() => now);

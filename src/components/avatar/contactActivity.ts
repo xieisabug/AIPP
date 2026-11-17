@@ -3,6 +3,7 @@ import type { AvatarState } from "./avatarDefinition";
 
 /** 前端从会话事件里推断出的细节：当前执行的工具、是否在自动审核、正在流式输出的消息类型。 */
 export interface ContactDetail {
+    native?: ContactVisual;
     tool?: string;
     path?: string;
     reviewing?: boolean;
@@ -49,6 +50,35 @@ export function toolVisual(tool?: string, path?: string): ContactVisual {
     return toolVisuals.find(([names]) => tool && names.includes(tool))?.[1] ?? { state: "working", label: "执行中" };
 }
 
+export type NativeActivity = { item_id?: string; kind?: string; status?: string; input?: unknown; metadata?: unknown; title?: string | null };
+export function updateNativeActivity(active: Map<string, ContactVisual>, event: NativeActivity) {
+    if (!event.item_id) return;
+    if (event.status !== "executing" && event.status !== "running" && event.status !== "pending") {
+        active.delete(event.item_id);
+        return;
+    }
+    const input = event.input as { path?: string; file_path?: string; tool_name?: string; parameters?: { path?: string; file_path?: string } } | null;
+    const metadata = event.metadata as { tool?: string; display_tool?: string } | null;
+    let visual: ContactVisual;
+    switch (event.kind) {
+        case "reasoning": visual = { state: "thinking", label: "思考中" }; break;
+        case "command": visual = toolVisual("execute_bash"); break;
+        case "file_read": visual = toolVisual("read_file"); break;
+        case "file_search": visual = { state: "searching", label: "搜索文件" }; break;
+        case "patch":
+        case "file_write": visual = toolVisual("edit_file", input?.path ?? input?.file_path); break;
+        case "sub_agent": visual = { state: "spawning", label: "委派助手" }; break;
+        default: {
+            const name = metadata?.display_tool ?? metadata?.tool ?? event.title;
+            const tool = typeof name === "string" ? name.replace(/^aipp_t\d+_/, "") : undefined;
+            const dynamic = tool === "call_mcp_tool";
+            const args = dynamic ? input?.parameters : input;
+            visual = toolVisual(dynamic ? input?.tool_name : tool, args?.file_path ?? args?.path);
+        }
+    }
+    active.set(event.item_id, visual);
+}
+
 const feedbackLabels: Record<ContactFeedback["state"], string> = {
     finished: "已完成", failed: "执行出错", notifying: "新消息", celebrate: "全部完成", blocked: "已中断",
 };
@@ -63,6 +93,7 @@ export function contactVisual(rows: ContactActivity[], feedback: ContactFeedback
     if (executing) return toolVisual(executing.detail?.tool, executing.detail?.path);
     const streaming = active.find(r => r.runtime.phase === "assistant_streaming");
     if (streaming) {
+        if (streaming.detail?.native) return streaming.detail.native;
         if (streaming.detail?.stream === "reasoning") return { state: "thinking", label: "思考中" };
         if (streaming.detail?.stream === "plan") return { state: "writing", label: "制定计划" };
         return { state: "streaming", label: "回复中" };

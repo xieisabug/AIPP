@@ -6,7 +6,7 @@ import type { AvatarState } from "./avatarDefinition";
 import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "@/components/butler/butlerProgress";
 import type { ContactPreview } from "@/components/butler/ButlerContactList";
 import { APPROVAL_ATTENTION_EVENT } from "@/hooks/useApprovalAttention";
-import { BUSY_STATES, contactVisual, successful, terminal, type ContactActivity, type ContactDetail, type ContactFeedback, type ContactVisual } from "./contactActivity";
+import { BUSY_STATES, updateNativeActivity, type NativeActivity, contactVisual, successful, terminal, type ContactActivity, type ContactDetail, type ContactFeedback, type ContactVisual } from "./contactActivity";
 
 // 运行态在工具轮次之间的短暂空闲窗口，见 ConversationActivityManager::recompute_focus。
 const IDLE_GAP_MS = 1200;
@@ -53,15 +53,16 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
         const callInfo = new Map<number, Map<number, ToolCallInfo>>();
         const executing = new Map<number, Set<number>>();
         const reviewing = new Map<number, Set<number>>();
+        const nativeActivities = new Map<number, Map<string, ContactVisual>>();
         const streams = new Map<number, ContactDetail["stream"]>();
         // todo 清单全部打勾的助手：下一次"完成"反馈改为庆祝。
         const celebrations = new Set<number>();
         const shown = new Map<number, { visual: ContactVisual; since: number }>();
-        const clearDetail = (id: number) => { callInfo.delete(id); executing.delete(id); reviewing.delete(id); streams.delete(id); };
+        const clearDetail = (id: number) => { callInfo.delete(id); executing.delete(id); reviewing.delete(id); streams.delete(id); nativeActivities.delete(id); };
         const detailOf = (id: number): ContactDetail => {
             const calls = executing.get(id);
             const current = calls?.size ? callInfo.get(id)?.get(Math.max(...calls)) : undefined;
-            return { tool: current?.tool, path: current?.path, reviewing: (reviewing.get(id)?.size ?? 0) > 0, stream: streams.get(id) };
+            return { native: Array.from(nativeActivities.get(id)?.values() ?? []).pop(), tool: current?.tool, path: current?.path, reviewing: (reviewing.get(id)?.size ?? 0) > 0, stream: streams.get(id) };
         };
         // 空档桥接与最短停留共用一个定时器，只保留最早的唤醒时间。
         let gapTimer: ReturnType<typeof setTimeout> | undefined;
@@ -131,7 +132,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
             if (feedback.get(id)?.state === "failed") feedback.delete(id);
             emit();
         } });
-        type Event = { type: string; data: {
+        type Event = { type: string; data: NativeActivity & {
             state?: ConversationRuntimeState; message_type?: string; has_response?: boolean; has_reasoning?: boolean;
             call_id?: number; status?: string; tool_name?: string; parameters?: string; phase?: string;
         } };
@@ -150,8 +151,12 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
                         cancelled.delete(id); failures.delete(current.assistant_id); feedback.delete(current.assistant_id);
                         if (next.epoch > old.epoch) clearDetail(id);
                     }
-                    if (!next.is_running) { executing.delete(id); reviewing.delete(id); streams.delete(id); }
+                    if (!next.is_running) { executing.delete(id); reviewing.delete(id); streams.delete(id); nativeActivities.delete(id); }
                     current.runtime = next;
+                } else if (event.type === "agent_activity") {
+                    const active = nativeActivities.get(id) ?? new Map<string, ContactVisual>();
+                    updateNativeActivity(active, event.data);
+                    nativeActivities.set(id, active);
                 } else if (event.type === "mcp_tool_call_update" && typeof event.data.call_id === "number") {
                     // 后续更新可能不再带工具名/参数，按 call_id 合并已知信息。
                     const callId = event.data.call_id;
@@ -196,6 +201,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
                     if (old && next.runtime.is_running && (!old.runtime.is_running || next.runtime.epoch > old.runtime.epoch)) {
                         cancelled.delete(next.conversation_id); failures.delete(next.assistant_id); feedback.delete(next.assistant_id);
                     }
+                    if (old && (next.runtime.epoch > old.runtime.epoch || (old.runtime.is_running && !next.runtime.is_running))) clearDetail(next.conversation_id);
                     if (initialized && old?.status !== next.status) {
                         if (successful(next.status)) pulse(next.assistant_id, "finished");
                         if (next.status === "failed") pulse(next.assistant_id, "failed");

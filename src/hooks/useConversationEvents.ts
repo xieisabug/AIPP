@@ -103,7 +103,7 @@ export function normalizeAcpSessionState(state: any): AcpConversationSessionStat
             ...command,
             input_hint: command.input_hint ?? command.inputHint ?? null,
         })),
-        has_active_prompt: state.has_active_prompt ?? state.hasActivePrompt ?? false,
+        has_active_prompt: state.has_active_prompt ?? state.hasActivePrompt ?? state.is_busy ?? false,
         context_tokens_used: state.context_tokens_used ?? state.contextTokensUsed ?? null,
         context_window_size: state.context_window_size ?? state.contextWindowSize ?? null,
         session_cost_amount: state.session_cost_amount ?? state.sessionCostAmount ?? null,

@@ -12,6 +12,32 @@ const summary = (conversation_id: number, epoch: number, text: string) => ({
 describe("ButlerProgressRow", () => {
     afterEach(() => clearAllMockHandlers());
 
+    it("should follow Pi activities and resume the remaining tool when concurrent work finishes", async () => {
+        mockInvokeHandler("get_butler_progress_summary", () => null);
+        mockInvokeHandler("get_conversation_runtime_state", () => ({ conversation_id: 9, is_running: true, phase: "assistant_streaming", epoch: 1, revision: 2 }));
+        render(<ButlerProgressRow conversationId={9} />);
+        expect(await screen.findByText("回复中")).toBeTruthy();
+        const activity = async (item_id: string, kind: string, status: string, path?: string) =>
+            act(async () => { await emit("conversation_event_9", { type: "agent_activity", data: { item_id, kind, status, input: { path } } }); });
+        await activity("thought", "reasoning", "executing");
+        expect(screen.getByText("思考中")).toBeTruthy();
+        await activity("thought", "reasoning", "success");
+        await activity("read", "file_read", "executing");
+        expect(screen.getByText("阅读中")).toBeTruthy();
+        await activity("edit", "patch", "executing", "src/app.ts");
+        expect(screen.getByText("编程中")).toBeTruthy();
+        await activity("edit", "patch", "failed");
+        expect(screen.getByText("阅读中")).toBeTruthy();
+        await activity("read", "file_read", "success");
+        await activity("find", "file_search", "executing");
+        expect(screen.getByText("搜索文件")).toBeTruthy();
+        await activity("find", "file_search", "success");
+        await activity("bash", "command", "executing");
+        expect(screen.getByText("运行命令")).toBeTruthy();
+        await activity("bash", "command", "cancelled");
+        expect(screen.getByText("回复中")).toBeTruthy();
+    });
+
     it("uses the same short status as the contact list when there is no helper summary", async () => {
         mockInvokeHandler("get_butler_progress_summary", () => null);
         mockInvokeHandler("get_conversation_runtime_state", () => ({ conversation_id: 3, is_running: true, phase: "user_pending", epoch: 1, revision: 1 }));

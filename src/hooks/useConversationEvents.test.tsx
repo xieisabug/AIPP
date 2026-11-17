@@ -80,6 +80,10 @@ const HookHarness = () => {
 };
 
 describe("useConversationEvents ACP session state", () => {
+    it("should show an active prompt while a native bridge reports busy", () => {
+        expect(normalizeAcpSessionState({ agent_kind: "pi", is_busy: true })?.has_active_prompt).toBe(true);
+        expect(normalizeAcpSessionState({ agent_kind: "pi", is_busy: false })?.has_active_prompt).toBe(false);
+    });
     const restoreNotice = (snapshot: Record<string, unknown>) =>
         agentSessionRestoreUnsupported(normalizeAcpSessionState({ session_id: "saved", ...snapshot }));
 

@@ -1285,7 +1285,7 @@ function ButlerExperimentWindow() {
                                     data-aipp-slot="butler-main-identity"
                                     onClick={() => void openProfile()}
                                     title="编辑资料与形象">
-                                    <ButlerAvatar id={headerAssistantId} chief={!contact} size={28} figure animated={headerState !== "idle"} state={headerState} />
+                                    <ButlerAvatar id={headerAssistantId} chief={!contact} size={28} figure animated state={headerState} />
                                     <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
