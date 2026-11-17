@@ -1075,6 +1075,7 @@ pub fn run() {
             api::ai::agent_driver::native_agents::auth::login_cursor,
             api::ai::agent_driver::native_agents::auth::logout_cursor,
             api::ai::agent_driver::native_agents::env::detect_native_agent_environment,
+            api::local_agent_defaults::read_local_agent_defaults,
             api::ai::agent_driver::native_agents::env::check_native_agent_update,
             api::ai::agent_driver::native_agents::env::run_native_agent_update,
             get_agent_runtime_info,

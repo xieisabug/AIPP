@@ -1,10 +1,10 @@
 import { useDataRefresh } from "@/hooks/useDataRefresh";
-import React, { useCallback, useRef, useState, useMemo } from 'react';
+import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
-import FormDialog from "../FormDialog";
 import ConfirmDialog from "../ConfirmDialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import NewProviderWizard from "./NewProviderWizard";
+import { PROVIDER_API_TYPES } from "./providerApiTypes";
 import ShareDialog from "../ShareDialog";
 import ImportDialog from "../ImportDialog";
 import PasswordDialog from "../PasswordDialog";
@@ -32,16 +32,6 @@ interface LLMProvider {
     description: string;
     is_official: boolean;
     is_enabled: boolean;
-}
-
-const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity']);
-
-/** 新增提供商名称。键盘「完成」和确认按钮共用：空或重名时返回提示，不创建。 */
-export function newProviderNameError(name: string, existingNames: readonly string[]): string | null {
-    const trimmed = name.trim();
-    if (!trimmed) return "请填写提供商名称";
-    if (existingNames.some((existing) => existing.trim() === trimmed)) return "已有同名提供商";
-    return null;
 }
 
 const LLMProviderConfig: React.FC = () => {
@@ -94,70 +84,31 @@ const LLMProviderConfig: React.FC = () => {
     });
 
     const [newProviderDialogOpen, setNewProviderDialogOpen] = useState(false);
-    const [providerName, setProviderName] = useState('');
-    const [providerNameError, setProviderNameError] = useState<string | null>(null);
-    const [formApiType, setFormApiType] = useState('openai_api');
-    const creatingProviderRef = useRef(false);
-    const apiTypes = [
-        { value: 'openai_api', label: 'OpenAI API' },
-        { value: 'ollama', label: 'Ollama API' },
-        { value: 'anthropic', label: 'Anthropic API' },
-        { value: 'cohere', label: 'Cohere API' },
-        { value: 'deepseek', label: 'DeepSeek API' },
-        { value: 'opencode_go', label: 'OpenCode Go' },
-        { value: 'magpie', label: 'Magpie' },
-        { value: 'github_copilot', label: 'GitHub Copilot' },
-        { value: 'acp', label: 'ACP (Agent Client Protocol)' },
-        { value: 'codex_app_server', label: 'Codex' },
-        { value: 'claude_sdk', label: 'Claude Code' },
-        { value: 'pi', label: 'Pi' },
-        { value: 'cursor', label: 'Cursor' },
-        { value: 'opencode', label: 'OpenCode' },
-        { value: 'kiro', label: 'Kiro' },
-        { value: 'antigravity', label: 'Antigravity' },
-    ]
-    // 本地 CLI Agent 类型仅桌面可新建；已有记录仍按 apiTypes 显示名称
+    // 本地 CLI Agent 类型仅桌面可新建；已有记录仍按完整类型表显示名称
     const localCliAgentAvailable = useFeatureAvailableOnPlatform("local_cli_agent");
-    const creatableApiTypes = localCliAgentAvailable
-        ? apiTypes
-        : apiTypes.filter((type) => !LOCAL_CLI_AGENT_API_TYPES.has(type.value));
+    const creatableApiTypes = useMemo(() => localCliAgentAvailable
+        ? PROVIDER_API_TYPES
+        : PROVIDER_API_TYPES.filter((type) => type.kind !== "local"), [localCliAgentAvailable]);
 
     const openNewProviderDialog = useCallback(() => {
-        setProviderNameError(null);
         setNewProviderDialogOpen(true);
     }, []);
 
     const closeNewProviderDialog = useCallback(() => {
-        setProviderNameError(null);
         setNewProviderDialogOpen(false);
     }, []);
 
-    const handleNewProviderSubmit = useCallback(() => {
-        // 键盘「完成 / Enter」与确认按钮相同：校验通过才提交。输入法组字中的 Enter 不走这里。
-        const error = newProviderNameError(providerName, LLMProviders.map((provider) => provider.name));
-        if (error) {
-            setProviderNameError(error);
-            return;
-        }
-        if (creatingProviderRef.current) return;
-        creatingProviderRef.current = true;
-        const name = providerName.trim();
-        invoke('add_llm_provider', {
-            name,
-            apiType: formApiType
-        }).then(() => {
-            toast.success('添加大模型提供商成功');
-            setProviderName('');
-            setProviderNameError(null);
-            setFormApiType('openai_api');
-            closeNewProviderDialog();
-            getLLMProviderList();
-        }).catch((e) => {
-            toast.error('添加大模型提供商失败: ' + e);
-        }).finally(() => {
-            creatingProviderRef.current = false;
-        });
-    }, [providerName, formApiType, LLMProviders, closeNewProviderDialog, getLLMProviderList]);
+    // 向导完成：刷新列表并选中新提供商
+    const handleProviderCreated = useCallback((providerId: number) => {
+        invoke<Array<LLMProvider>>('get_llm_providers')
+            .then((providers) => {
+                setLLMProviders(providers);
+                setSelectedProvider(providers.find((p) => String(p.id) === String(providerId)) ?? providers[0] ?? null);
+            })
+            .catch((e) => {
+                toast.error('获取大模型提供商失败: ' + e);
+            });
+    }, []);
 
     const [confirmDialogIsOpen, setConfirmDialogIsOpen] = useState(false);
     const [deleteLLMProviderId, setDeleteLLMProviderId] = useState("");
@@ -362,7 +313,7 @@ const LLMProviderConfig: React.FC = () => {
         </SidebarList>
     ), [filteredProviders, selectedProvider?.id, handleSelectProvider, addButton, searchQuery]);
 
-    const selectedProviderApiType = selectedProvider ? apiTypes.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
+    const selectedProviderApiType = selectedProvider ? PROVIDER_API_TYPES.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => selectedProvider ? (
@@ -393,10 +344,10 @@ const LLMProviderConfig: React.FC = () => {
         return <ConfigPageLoading />;
     }
 
-    // 空状态
-    if (LLMProviders.length === 0) {
-        return (
-            <>
+    // 空状态与列表共用同一棵树：向导创建草稿后列表从空变为非空时，向导不能被卸载
+    return (
+        <>
+            {LLMProviders.length === 0 ? (
                 <ConfigPageLayout
                     sidebar={null}
                     content={
@@ -432,84 +383,26 @@ const LLMProviderConfig: React.FC = () => {
                         />
                     }
                 />
-
-                {/* 导入对话框 */}
-                <ImportDialog
-                    title="提供商配置"
-                    isOpen={importDialogOpen}
-                    requiresPassword={true}
-                    onClose={closeImportDialog}
-                    onImport={handleImportProvider}
+            ) : (
+                <ConfigPageLayout
+                    sidebar={sidebar}
+                    content={content}
+                    selectOptions={selectOptions}
+                    selectedOptionId={selectedProvider?.id}
+                    onSelectOption={handleSelectFromDropdown}
+                    selectPlaceholder="选择提供商"
+                    addButton={addButton}
                 />
-            </>
-        );
-    }
+            )}
 
-    return (
-        <>
-            <ConfigPageLayout
-                sidebar={sidebar}
-                content={content}
-                selectOptions={selectOptions}
-                selectedOptionId={selectedProvider?.id}
-                onSelectOption={handleSelectFromDropdown}
-                selectPlaceholder="选择提供商"
-                addButton={addButton}
-            />
-
-            {/* 新增提供商对话框 */}
-            <FormDialog
-                title='新增模型提供商'
-                isOpen={newProviderDialogOpen}
+            {/* 新增提供商向导 */}
+            <NewProviderWizard
+                open={newProviderDialogOpen}
                 onClose={closeNewProviderDialog}
-                onSubmit={handleNewProviderSubmit}
-            >
-                <div className="space-y-5">
-                    <div className="space-y-2">
-                        <label htmlFor="new-provider-name" className="text-sm font-medium text-foreground">提供商名称</label>
-                        <input
-                            id="new-provider-name"
-                            className="w-full px-3 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground"
-                            type="text"
-                            autoCapitalize="none"
-                            enterKeyHint="done"
-                            placeholder="例如：我的 OpenAI"
-                            value={providerName}
-                            aria-invalid={providerNameError ? true : undefined}
-                            aria-describedby={providerNameError ? "new-provider-name-error" : undefined}
-                            onChange={e => {
-                                setProviderName(e.target.value);
-                                if (providerNameError) setProviderNameError(null);
-                            }}
-                            onKeyDown={event => {
-                                if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
-                                event.preventDefault();
-                                handleNewProviderSubmit();
-                            }}
-                        />
-                        {providerNameError && (
-                            <p id="new-provider-name-error" role="alert" className="text-sm text-destructive">
-                                {providerNameError}
-                            </p>
-                        )}
-                    </div>
-                    <div className="space-y-2">
-                        <label className="text-sm font-medium text-foreground">API 调用类型</label>
-                        <Select value={formApiType} onValueChange={setFormApiType}>
-                            <SelectTrigger className="w-full">
-                                <SelectValue placeholder="选择 API 类型" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {creatableApiTypes.map((type) => (
-                                    <SelectItem key={type.value} value={type.value}>
-                                        {type.label}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
-                    </div>
-                </div>
-            </FormDialog>
+                apiTypes={creatableApiTypes}
+                existingProviders={LLMProviders}
+                onCreated={handleProviderCreated}
+            />
 
             {/* 确认删除对话框 */}
             <ConfirmDialog

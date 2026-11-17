@@ -184,13 +184,13 @@ impl LLMDatabase {
         description: &str,
         is_official: bool,
         is_enabled: bool,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO llm_provider (name, api_type, description, is_official, is_enabled) VALUES (?, ?, ?, ?, ?)",
             params![name, api_type, description, is_official, is_enabled],
         )?;
         debug!("llm provider inserted");
-        Ok(())
+        Ok(self.conn.last_insert_rowid())
     }
 
     #[instrument(level = "debug", skip(self))]

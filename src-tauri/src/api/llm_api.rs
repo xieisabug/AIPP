@@ -137,12 +137,13 @@ pub async fn add_llm_provider(
     app: tauri::AppHandle,
     name: String,
     api_type: String,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
-    db.add_llm_provider(&*name, &*api_type, "", false, false).map_err(|e| e.to_string())?;
+    // 新建向导在创建后立即写入连接信息并获取模型列表，因此返回新 ID；完成向导时再启用。
+    let id = db.add_llm_provider(&*name, &*api_type, "", false, false).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app);
     emit_llm_provider_changed(&app);
-    Ok(())
+    Ok(id)
 }
 
 #[tauri::command]

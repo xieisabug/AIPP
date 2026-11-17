@@ -126,6 +126,21 @@ fn test_llm_provider_crud() {
     assert!(providers_after.is_empty());
 }
 
+/// 新建提供商返回新行 ID，新建向导用它立即写入连接信息并获取模型列表
+#[test]
+fn test_add_llm_provider_returns_inserted_id() {
+    let db = create_llm_db();
+
+    let first = db.add_llm_provider("OpenAI", "openai_api", "", false, false).unwrap();
+    let second = db.add_llm_provider("DeepSeek", "deepseek", "", false, false).unwrap();
+
+    assert_ne!(first, second);
+    assert_eq!(db.get_llm_provider(first).unwrap().name, "OpenAI");
+    let created = db.get_llm_provider(second).unwrap();
+    assert_eq!(created.api_type, "deepseek");
+    assert!(!created.is_enabled);
+}
+
 /// 测试 LLM Model 操作
 ///
 /// 验证内容：

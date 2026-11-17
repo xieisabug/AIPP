@@ -31,6 +31,7 @@ import { useCopilot, type CopilotTokenScanResult } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
 import CliEnvironmentStatus from "./CliEnvironmentStatus";
 import { getProviderEndpointStatus } from "@/utils/providerEndpoint";
+import { ACP_CLI_OPTIONS, CODEX_APPROVAL_OPTIONS, CODEX_SANDBOX_OPTIONS } from "./providerApiTypes";
 import { useVaultItems } from "@/hooks/useVaultItems";
 import VaultRefField from "./vault/VaultRefField";
 import { containsVaultRef } from "./vault/vaultRefs";
@@ -120,18 +121,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
 
-    // ACP CLI 命令选项
-    // 注意：大多数 AI 需要安装专门的 ACP 适配器
-    // - Claude Code: npm install -g @zed-industries/claude-code-acp -> 命令 claude-code-acp
-    // - Gemini: 原生支持 ACP，直接使用 gemini 命令
-    // - Kimi Code CLI: 原生支持 ACP，参考官方文档安装 kimi（启动时自动附加 acp 子命令）
-    // - DeepSeek Harness: npm install -g @deepseek-ai/dsh dsh-acp-server -> 命令 dsh-acp-server
-    const acpCliOptions = [
-        { value: "claude-code-acp", label: "Claude Code (需安装 @zed-industries/claude-code-acp)" },
-        { value: "gemini", label: "Gemini CLI (原生支持)" },
-        { value: "kimi", label: "Kimi Code CLI (原生支持)" },
-        { value: "dsh-acp-server", label: "DeepSeek Harness (需安装 dsh-acp-server)" },
-    ];
+    const acpCliOptions = ACP_CLI_OPTIONS;
 
     // GitHub Copilot 授权管理
     const copilot = useCopilot({
@@ -632,11 +622,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         type: "select" as const,
                         label: "审批策略",
                         value: "on-request",
-                        options: [
-                            { value: "on-request", label: "按需询问" },
-                            { value: "never", label: "从不询问" },
-                            { value: "untrusted", label: "不可信操作询问" },
-                        ],
+                        options: [...CODEX_APPROVAL_OPTIONS],
                     },
                 },
                 {
@@ -645,11 +631,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         type: "select" as const,
                         label: "沙箱模式",
                         value: "workspace-write",
-                        options: [
-                            { value: "read-only", label: "只读" },
-                            { value: "workspace-write", label: "工作区可写" },
-                            { value: "danger-full-access", label: "完全访问" },
-                        ],
+                        options: [...CODEX_SANDBOX_OPTIONS],
                     },
                 },
                 {
@@ -794,7 +776,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         type: "select" as const,
                         label: "CLI 命令",
                         value: "",
-                        options: acpCliOptions,
+                        options: [...acpCliOptions],
                         tooltip: "选择要使用的 ACP 兼容 CLI 工具",
                     },
                 },
