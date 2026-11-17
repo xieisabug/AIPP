@@ -251,7 +251,7 @@ function ButlerExperimentWindow() {
             setProfileTarget({ name: butlerDisplayName, conversationId: Number(mainConversationId) || undefined });
             return;
         }
-        // 记忆页按该助手的当前私聊读取；还没有私聊时不显示记忆页。
+        // 记忆页按该助手的当前私聊读取；还没有私聊时记忆页说明原因。
         const conversationId = contact?.assistantId === assistantId
             ? contact.conversationId
             : previews.find(preview => preview.assistantId === assistantId)?.conversationId;
@@ -660,7 +660,7 @@ function ButlerExperimentWindow() {
     }, [resetContactConversation]);
 
     const assistantItemActions = useAssistantItemActions({
-        // 右键「编辑」与顶部头像打开同一个联系人资料（含类型、模型与记忆页），不用配置页的精简编辑框。
+        // 右键「编辑」与顶部头像打开同一个三页资料框（资料、形象、记忆），不用配置页的精简编辑框。
         onEdit: assistant => openProfile(assistant.id),
         onReset: assistant => resetContactConversation(assistant.id),
     });
@@ -1285,10 +1285,10 @@ function ButlerExperimentWindow() {
                                     </Badge>}
                                 </div>
                                 <button type="button" className="group flex min-w-0 max-w-[22rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
-                                    aria-label="编辑助手资料与形象"
+                                    aria-label="编辑助手"
                                     data-aipp-slot="butler-main-identity"
                                     onClick={() => void openProfile()}
-                                    title="编辑资料与形象">
+                                    title="编辑资料、形象与记忆">
                                     <ButlerAvatar id={headerAssistantId} chief={!contact} size={28} figure animated state={headerState} />
                                     <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
@@ -1465,6 +1465,8 @@ function ButlerExperimentWindow() {
                 </AlertDialogContent>
             </AlertDialog>
             {profileTarget && <ButlerProfileDialog
+                butler
+                assistantId={profileTarget.id}
                 name={profileTarget.name}
                 appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}
                 description={profileTarget.description}

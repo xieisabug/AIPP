@@ -50,13 +50,16 @@ import type { AgentModelOption } from "@/utils/agentDefaults";
 interface AssistantConfigProps {
     pluginList: LoadedPlugin[];
     navigateTo: (menuKey: string) => void;
+    /** 从其他窗口打开设置时要选中的助手 id。 */
+    subNav?: string;
+    onSubNavConsumed?: () => void;
 }
 
 /** Clone form values so later edits cannot mutate the discard snapshot. */
 const cloneFormSnapshot = <T extends Record<string, any>>(values: T): T =>
     structuredClone(values);
 
-const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
+const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo, subNav, onSubNavConsumed }) => {
     const form = useForm();
     const [leavePrompt, setLeavePromptState] = useState<null | { proceed: () => void }>(null);
     const leavePromptRef = useRef<typeof leavePrompt>(null);
@@ -301,14 +304,21 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
     // 首次进入：列表与首个助手详情（含表单回填）都完成后才展示，避免先闪空状态/空表单
     const [initialLoaded, setInitialLoaded] = useState(false);
+    // 打开设置时指定的助手。列表还没回来时先记下来，避免先选中第一个再跳走。
+    const requestedAssistantIdRef = useRef<number | null>(null);
 
     // 初始化助手列表
     useEffect(() => {
         loadAssistants()
             .then((assistantList) => {
-                if (assistantList.length) {
-                    return handleChooseAssistant(assistantList[0]);
+                const requested = requestedAssistantIdRef.current;
+                requestedAssistantIdRef.current = null;
+                const requestedAssistant = requested == null ? undefined : assistantList.find(assistant => assistant.id === requested);
+                if (requested != null && !requestedAssistant) {
+                    toast.error(`设置里没有编号为 ${requested} 的助手，已打开助手列表`);
                 }
+                const target = requestedAssistant ?? assistantList[0];
+                if (target) return handleChooseAssistant(target);
             })
             // 列表/详情读取失败已在 useAssistantOperations 中 toast 具体原因
             .catch(() => undefined)
@@ -381,6 +391,27 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             commitFormBaseline,
         ]
     );
+
+    // 窗口已经打开时再收到导航：列表已在，直接选中；首次进入则交给上面的初始化。
+    useEffect(() => {
+        if (!subNav) return;
+        const id = Number(subNav);
+        onSubNavConsumed?.();
+        if (!Number.isInteger(id) || id <= 0) return;
+        requestedAssistantIdRef.current = id;
+        if (!initialLoaded) return;
+        requestedAssistantIdRef.current = null;
+        const assistant = assistants.find(item => item.id === id);
+        if (!assistant) {
+            toast.error(`设置里没有编号为 ${id} 的助手`);
+            return;
+        }
+        if (isFormDirtyNow() && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
+            setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant); } });
+            return;
+        }
+        void handleChooseAssistant(assistant);
+    }, [subNav, initialLoaded]);
 
 
     useEffect(() => {

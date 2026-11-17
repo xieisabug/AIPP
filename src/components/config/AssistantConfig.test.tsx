@@ -73,6 +73,17 @@ function setup() {
 describe("AssistantConfig sync selection", () => {
     afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
 
+    it("selects the assistant requested when settings open", async () => {
+        mockInvokeHandler("get_assistants", () => [1, 2, 3].map((id) => detail(id).assistant));
+        mockInvokeHandler("get_assistant", (args) => detail(Number(args?.assistantId)));
+        mockInvokeHandler("get_plugin_assistant_configs", (args) => config(Number(args?.assistantId)));
+        const consumed = vi.fn();
+        render(<AssistantConfig pluginList={plugins} navigateTo={() => undefined} subNav="2" onSubNavConsumed={consumed} />);
+        await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("2"));
+        expect(screen.getByLabelText("prompt")).toHaveValue("prompt-2");
+        expect(consumed).toHaveBeenCalled();
+    });
+
     it("preserves a dirty prompt on external refresh while allowing explicit selection", async () => {
         setup();
         await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));

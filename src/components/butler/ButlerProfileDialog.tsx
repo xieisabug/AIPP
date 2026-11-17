@@ -1,12 +1,18 @@
-import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
+import { ExternalLink, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { navigateMobileConfig } from "@/mobile/navigation";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useFilteredModels, type ModelForSelect } from "@/hooks/useFilteredModels";
 import AssistantProfileEditor, { PROFILE_DIALOG_CLASS, PROFILE_FOOTER_CLASS } from "./AssistantProfileEditor";
+import ButlerAvatar from "./ButlerAvatar";
 import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
 
@@ -30,7 +36,11 @@ interface Props {
     appearance?: ButlerAppearance;
     description?: string;
     model?: ProfileModelField;
-    /** 管家私聊或总管家会话：提供时多一个“记忆”页，查看和管理该助手的记忆。 */
+    /** 管家窗口：分成资料、形象、记忆三页。配置页编辑不传，仍是单页。 */
+    butler?: boolean;
+    /** 当前助手。资料页可据此打开设置并选中它；总管家没有对应条目时不传。 */
+    assistantId?: number;
+    /** 管家私聊或总管家会话。有值时记忆页可管理该助手的记忆；还没有私聊时记忆页只说明原因。 */
     memoryConversationId?: number;
     onClose: () => void;
     /** `model` 只在用户换了模型时传入，未改动为 undefined。 */
@@ -80,15 +90,36 @@ function ModelSelect({ field, picked, onPick }: { field: ProfileModelField; pick
     </div>;
 }
 
+async function openAssistantSettings(assistantId: number, mobile: boolean) {
+    if (mobile) {
+        navigateMobileConfig("assistant-config", String(assistantId));
+        return;
+    }
+    await invoke("open_config_window");
+    // 设置窗口是预创建的，稍等再发导航，避免窗口刚显示时监听还没挂上。
+    window.setTimeout(() => {
+        void emit("config-navigate-to", { menu: "assistant-config", subNav: String(assistantId) });
+    }, 50);
+}
+
 export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, model: modelField,
-    memoryConversationId, onClose, onSave, appearanceOnly = false }: Props) {
+    butler = false, assistantId, memoryConversationId, onClose, onSave, appearanceOnly = false }: Props) {
     const [name, setName] = useState(initialName);
     const [description, setDescription] = useState(initialDescription ?? "");
     const [pickedModel, setPickedModel] = useState<ModelForSelect | null>(null);
     const [appearance, setAppearance] = useState(initialAppearance ?? defaultAppearance);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
+    const [tab, setTab] = useState("profile");
+    const isMobilePlatform = useIsMobilePlatform();
+    const openSettings = () => {
+        if (assistantId == null || saving) return;
+        openAssistantSettings(assistantId, isMobilePlatform).catch(error => {
+            toast.error(`打开设置失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+    };
     const withDescription = !appearanceOnly && (initialDescription !== undefined || modelField !== undefined);
+    const tabbed = !appearanceOnly && (butler || memoryConversationId !== undefined);
     const save = async () => {
         if (!name.trim() || saving) return;
         setSaving(true);
@@ -107,53 +138,85 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
         }
     };
 
-    const profileForm = <form onSubmit={event => { event.preventDefault(); void save(); }} className="flex min-h-0 flex-1 flex-col gap-4">
+    const profileFields = !appearanceOnly && <>
+        <div className="space-y-2">
+            <label htmlFor="butler-profile-name" className="text-sm font-medium">名称</label>
+            <Input autoComplete="off" id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
+        </div>
+        {withDescription && <div className="space-y-2">
+            <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
+            <Input autoComplete="off" id="assistant-profile-description" value={description} placeholder="简单介绍助手的用途"
+                onChange={event => setDescription(event.target.value)} />
+        </div>}
+        {modelField && <>
+            <div className="space-y-2">
+                <label htmlFor="assistant-profile-type" className="text-sm font-medium">类型</label>
+                <Input id="assistant-profile-type" value={modelField.typeName} disabled readOnly />
+                <p className="text-xs text-muted-foreground">类型创建后不能修改。</p>
+            </div>
+            <ModelSelect field={modelField} picked={pickedModel} onPick={setPickedModel} />
+        </>}
+    </>;
+    const errorLine = error && <p role="alert" className="shrink-0 break-words text-sm text-destructive">{error}</p>;
+    const footer = <DialogFooter className={PROFILE_FOOTER_CLASS}>
+        <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
+        <Button type="submit" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
+    </DialogFooter>;
+    const onSubmit = (event: FormEvent) => { event.preventDefault(); void save(); };
+
+    const profileForm = <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
         <AssistantProfileEditor name={name} appearance={appearance} onAppearanceChange={setAppearance} disabled={saving}>
-            {!appearanceOnly && <>
-                <div className="space-y-2">
-                    <label htmlFor="butler-profile-name" className="text-sm font-medium">名称</label>
-                    <Input autoComplete="off" id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
-                </div>
-                {withDescription && <div className="space-y-2">
-                    <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
-                    <Input autoComplete="off" id="assistant-profile-description" value={description} placeholder="简单介绍助手的用途"
-                        onChange={event => setDescription(event.target.value)} />
-                </div>}
-                {modelField && <>
-                    <div className="space-y-2">
-                        <label htmlFor="assistant-profile-type" className="text-sm font-medium">类型</label>
-                        <Input id="assistant-profile-type" value={modelField.typeName} disabled readOnly />
-                        <p className="text-xs text-muted-foreground">类型创建后不能修改。</p>
-                    </div>
-                    <ModelSelect field={modelField} picked={pickedModel} onPick={setPickedModel} />
-                </>}
-            </>}
+            {profileFields}
         </AssistantProfileEditor>
-        {error && <p role="alert" className="shrink-0 break-words text-sm text-destructive">{error}</p>}
-        <DialogFooter className={PROFILE_FOOTER_CLASS}>
-            <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
-            <Button type="submit" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
-        </DialogFooter>
+        {errorLine}
+        {footer}
     </form>;
 
-    const tabbed = memoryConversationId !== undefined && !appearanceOnly;
-    const title = appearanceOnly ? "助手头像" : withDescription ? "编辑助手" : "名字与形象";
+    const title = appearanceOnly ? "助手头像" : withDescription || tabbed ? "编辑助手" : "名字与形象";
+    const descriptionText = appearanceOnly
+        ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。"
+        : tabbed
+            ? "资料和形象一起保存。记忆的修改立即生效。"
+            : "修改助手的基本信息，并搭配属于它的形象。";
     return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
         <DialogContent className={PROFILE_DIALOG_CLASS} showCloseButton={!saving}>
             <DialogHeader className="shrink-0">
                 <DialogTitle>{title}</DialogTitle>
-                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "修改助手的基本信息，并搭配属于它的形象。"}</DialogDescription>
+                <DialogDescription>{descriptionText}</DialogDescription>
             </DialogHeader>
-            {!tabbed ? profileForm : <Tabs defaultValue="profile" className="min-h-0 flex-1 gap-4">
-                <TabsList className="shrink-0">
-                    <TabsTrigger value="profile" className="px-4">{withDescription ? "资料与形象" : "名字与形象"}</TabsTrigger>
-                    <TabsTrigger value="memory" className="px-4">记忆</TabsTrigger>
+            {!tabbed ? profileForm : <Tabs value={tab} onValueChange={setTab} className="min-h-0 flex-1 gap-4">
+                <TabsList className="grid w-full shrink-0 grid-cols-3">
+                    <TabsTrigger value="profile">资料</TabsTrigger>
+                    <TabsTrigger value="appearance">形象</TabsTrigger>
+                    <TabsTrigger value="memory">记忆</TabsTrigger>
                 </TabsList>
-                {/* 资料页自己管理滚动（右侧表单滚动、底部操作栏固定）。 */}
-                <TabsContent value="profile" className="flex min-h-0 flex-col">{profileForm}</TabsContent>
-                {/* 记忆的修改立即生效，不跟随资料页的保存按钮。 */}
+                {/* 记忆页不放进这个表单：页内按钮会误触发表单。切到记忆时藏起保存栏。 */}
+                <form hidden={tab === "memory"} onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
+                    <TabsContent value="profile" className="flex min-h-0 flex-col overflow-y-auto">
+                        <div className="space-y-4 px-1 pb-1">
+                            <div className="flex justify-center py-2">
+                                <ButlerAvatar id={0} chief size={88} appearance={{ ...appearance, motion: true }} />
+                            </div>
+                            {profileFields}
+                        </div>
+                        {assistantId != null && <div className="mt-auto px-1 pt-4 pb-1">
+                            <button type="button" className="inline-flex items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                                data-aipp-slot="butler-profile-open-assistant-settings" disabled={saving} onClick={openSettings}>
+                                在设置中修改配置
+                                <ExternalLink className="size-3.5" />
+                            </button>
+                        </div>}
+                    </TabsContent>
+                    <TabsContent value="appearance" className="flex min-h-0 flex-col">
+                        <AssistantProfileEditor name={name} appearance={appearance} onAppearanceChange={setAppearance} disabled={saving} />
+                    </TabsContent>
+                    {errorLine}
+                    {footer}
+                </form>
                 <TabsContent value="memory" className="min-h-0 overflow-y-auto pr-1">
-                    <ButlerMemoryPanel conversationId={memoryConversationId} scope="assistant" />
+                    {memoryConversationId !== undefined
+                        ? <ButlerMemoryPanel conversationId={memoryConversationId} scope="assistant" />
+                        : <p className="text-sm text-muted-foreground">还没有私聊。开始对话后，可以在这里查看和管理记忆。</p>}
                 </TabsContent>
             </Tabs>}
         </DialogContent>

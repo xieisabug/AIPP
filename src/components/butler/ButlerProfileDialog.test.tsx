@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
+import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import ButlerProfileDialog from "./ButlerProfileDialog";
 
 const memoryApi = vi.hoisted(() => ({
@@ -15,7 +17,11 @@ const modelList = vi.hoisted(() => ({ current: { models: [] as unknown[], loadin
 vi.mock("@/hooks/useFilteredModels", () => ({ useFilteredModels: () => modelList.current }));
 
 describe("Butler profile editor", () => {
-    beforeEach(() => { modelList.current = { models: chatModels, loading: false, error: null }; });
+    beforeEach(() => {
+        modelList.current = { models: chatModels, loading: false, error: null };
+        memoryApi.listButlerMemories.mockReset();
+        memoryApi.onButlerMemoryChanged.mockReset();
+    });
     afterEach(cleanup);
 
     it("should edit description and model like the add form while keeping the type read-only", async () => {
@@ -23,6 +29,7 @@ describe("Butler profile editor", () => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="小A" description="写作" model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }}
             onSave={onSave} onClose={vi.fn()} />);
+        expect(screen.queryByRole("tab")).toBeNull();
         expect(screen.getByLabelText("类型")).toHaveValue("普通对话助手");
         expect(screen.getByLabelText("类型")).toBeDisabled();
         fireEvent.change(screen.getByLabelText("描述（选填）"), { target: { value: "写周报" } });
@@ -85,10 +92,51 @@ describe("Butler profile editor", () => {
             author_assistant_id: 2, source_message_id: 9, source_group_id: null, source_group_seq: null, revision: 1, created_at: 0, updated_at: 0 }]);
         memoryApi.onButlerMemoryChanged.mockResolvedValue(() => {});
         render(<ButlerProfileDialog name="小A" memoryConversationId={20} onSave={vi.fn()} onClose={vi.fn()} />);
+        expect(screen.getByRole("tab", { name: "资料" })).toHaveAttribute("data-state", "active");
+        expect(screen.getByRole("tab", { name: "形象" })).toBeInTheDocument();
         expect(memoryApi.listButlerMemories).not.toHaveBeenCalled();
         fireEvent.mouseDown(screen.getByRole("tab", { name: "记忆" }), { button: 0 });
         expect(await screen.findByText("用户希望回答先给结论")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
         expect(memoryApi.listButlerMemories).toHaveBeenCalledWith(20);
+    });
+
+    it("should keep profile fields and appearance on separate tabs and save both together", async () => {
+        const user = userEvent.setup();
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog butler name="小A" description="写作"
+            model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }}
+            onSave={onSave} onClose={vi.fn()} />);
+        expect(screen.getByLabelText("名称")).toBeInTheDocument();
+        expect(screen.getByLabelText("类型")).toHaveValue("普通对话助手");
+        expect(screen.queryByRole("button", { name: "像素仔" })).toBeNull();
+        fireEvent.change(screen.getByLabelText("名称"), { target: { value: "小B" } });
+        fireEvent.mouseDown(screen.getByRole("tab", { name: "形象" }), { button: 0 });
+        expect(screen.queryByLabelText("名称")).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "像素仔" }));
+        await user.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("小B", expect.objectContaining({ shape: "pixel", motion: true }), "写作", undefined));
+    });
+
+    it("should open assistant settings for the current assistant from the bottom of the profile tab", async () => {
+        render(<ButlerProfileDialog butler assistantId={7} name="小A" description="写作"
+            model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }}
+            onSave={vi.fn()} onClose={vi.fn()} />);
+        fireEvent.click(screen.getByRole("button", { name: "在设置中修改配置" }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_config_window"));
+        await waitFor(() => expect(emit).toHaveBeenCalledWith("config-navigate-to", { menu: "assistant-config", subNav: "7" }));
+        fireEvent.mouseDown(screen.getByRole("tab", { name: "形象" }), { button: 0 });
+        expect(screen.queryByRole("button", { name: "在设置中修改配置" })).toBeNull();
+    });
+
+    it("should explain that memory is unavailable before the first private chat", () => {
+        render(<ButlerProfileDialog butler name="总管家" onSave={vi.fn()} onClose={vi.fn()} />);
+        expect(screen.getByLabelText("名称")).toHaveValue("总管家");
+        expect(screen.queryByRole("button", { name: "在设置中修改配置" })).toBeNull();
+        expect(screen.queryByLabelText("描述（选填）")).toBeNull();
+        fireEvent.mouseDown(screen.getByRole("tab", { name: "记忆" }), { button: 0 });
+        expect(screen.getByText(/还没有私聊/)).toBeInTheDocument();
+        expect(memoryApi.listButlerMemories).not.toHaveBeenCalled();
     });
 
     it("should save trimmed name and independent colors when confirming the preview", async () => {
