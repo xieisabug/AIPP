@@ -42,7 +42,8 @@ jsonLines(process.stdin, request => {
       const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);
       runtime = await open(request.config, emit);
-      data = { session: runtime.session, config_options: runtime.configOptions };
+      data = { session: runtime.session, config_options: runtime.configOptions,
+        load_session_supported: runtime.canLoad, session_resume_supported: runtime.canResume };
     } else {
       if (!runtime) throw new Error('Native agent bridge is not initialized');
       switch (request.type) {

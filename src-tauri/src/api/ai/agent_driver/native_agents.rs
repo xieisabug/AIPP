@@ -32,7 +32,7 @@ impl NativeDriver {
     fn declaration(self) -> AgentCapabilityDeclaration {
         AgentCapabilityDeclaration { respond_permission: Some(self.0 != "cursor"),
             image_input: Some(false), audio_input: Some(false), embedded_context_input: Some(false),
-            resume_session: Some(true), load_session: Some(false),
+            resume_session: (self.0 != "kiro").then_some(true), load_session: (self.0 != "kiro").then_some(false),
             ..AgentCapabilityDeclaration::unknown(true, true, false) }
     }
 }
@@ -332,7 +332,13 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
         }
         let native_session = frame["data"]["session"].as_str().filter(|s| !s.is_empty()).ok_or("Native bridge returned no session identity")?.to_string();
         identity = identity.clone().with_session(&native_session);
-        snapshot.lock().unwrap()["session_id"] = json!(native_session);
+        {
+            let mut state = snapshot.lock().unwrap();
+            for key in ["load_session_supported", "session_resume_supported"] {
+                if let Some(value) = frame["data"][key].as_bool() { state[key] = json!(value); }
+            }
+            state["session_id"] = json!(native_session);
+        }
         if let Some(options) = frame["data"]["config_options"].as_array() {
             snapshot.lock().unwrap()["config_options"] = json!(options);
         }

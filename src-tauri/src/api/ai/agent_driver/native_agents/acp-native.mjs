@@ -240,10 +240,12 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     if (config.login) { ready = true; return { close }; }
     const params = { cwd: config.cwd, mcpServers: config.mcp ? [{ name: 'aipp', command: config.mcp.command, args: config.mcp.args,
       env: Object.entries(config.mcp.env || {}).map(([name, value]) => ({ name, value: String(value) })) }] : [] };
+    const canResume = driver === 'antigravity' || Boolean(init.agentCapabilities?.sessionCapabilities?.resume);
+    const canLoad = driver === 'kiro' && Boolean(init.agentCapabilities?.loadSession);
     let result;
     if (config.session) {
-      const method = driver === 'antigravity' || init.agentCapabilities?.sessionCapabilities?.resume ? 'session/resume' : 'session/load';
-      if (method === 'session/load' && !init.agentCapabilities?.loadSession) throw new Error(`${driver} does not support restoring this session`);
+      const method = canResume ? 'session/resume' : 'session/load';
+      if (method === 'session/load' && !canLoad) throw new Error(`${driver} does not support restoring this session`);
       session = config.session;
       result = await request(method, { ...params, sessionId: session });
       if (result.sessionId && result.sessionId !== session) throw new Error(`${driver} restored a different session`);
@@ -290,7 +292,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     if (config.probe && driver === 'kiro') await waitOption('model');
     ready = true;
     return {
-      session, get configOptions() { return snapshotOptions(options); },
+      session, canLoad, canResume, get configOptions() { return snapshotOptions(options); },
       async models() { return choices(options.find(option => option.category === 'model' || option.id === 'model')).map(choice => ({ id: choice.value, name: choice.name || choice.value })); },
       configure,
       async prompt(text, id) {

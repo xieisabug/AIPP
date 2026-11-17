@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn test_native_agent_restore_capabilities_in_session_snapshots() {
+    let sessions = |driver: &'static str, snapshot: Value| {
+        let payload = super::super::capabilities::snapshot_event_payload(
+            driver, NativeDriver(driver).declaration(), Some(&snapshot),
+        ).unwrap();
+        payload["state"]["agent_capabilities"]["sessions"].clone()
+    };
+    for driver in ["pi", "cursor", "opencode", "antigravity"] {
+        let caps = sessions(driver, json!({"session_id":"saved"}));
+        assert_eq!(caps["resume"]["support"], "supported", "{driver}");
+    }
+    let caps = sessions("kiro", json!({"session_id":"saved"}));
+    assert_eq!(caps["resume"]["support"], "unknown");
+    let caps = sessions("kiro", json!({"session_id":"saved", "load_session_supported":true, "session_resume_supported":false}));
+    assert_eq!(caps["load"]["support"], "supported");
+    assert_eq!(caps["resume"]["support"], "unsupported");
+}
+
+#[test]
 fn test_agent_output_focus_native_first_response() {
     for frame in [
         json!({"type":"text","text":"answer"}),

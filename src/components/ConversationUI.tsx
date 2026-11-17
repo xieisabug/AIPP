@@ -50,7 +50,7 @@ import {
     extractCommitMessage,
 } from "@/utils/agentWorkspace";
 import AgentWorkspacePanel from "./chat-sidebar/AgentWorkspacePanel";
-import { agentAllowsConfigMutation } from "@/utils/agentCapabilities";
+import { agentAllowsConfigMutation, agentSessionRestoreUnsupported } from "@/utils/agentCapabilities";
 
 interface AgentRuntimeInfo {
     agent_kind: string;
@@ -809,31 +809,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             streamingMessagesRef.current = streamingMessages;
         }, [streamingMessages]);
 
+        const unsupportedRestoreSession = acpSessionState?.conversation_id === Number(conversationId)
+            && agentSessionRestoreUnsupported(acpSessionState) ? acpSessionState.session_id : null;
         useEffect(() => {
-            const isNativeCodex = acpSessionState?.agent_kind === "codex_app_server";
-            const canRestoreAcpSession =
-                acpSessionState?.load_session_supported ||
-                acpSessionState?.session_resume_supported;
-            if (isNativeCodex || !acpSessionState?.session_id || canRestoreAcpSession) {
-                return;
-            }
-
-            const noticeKey = `${conversationId}:${acpSessionState.session_id}`;
+            if (!unsupportedRestoreSession) return;
+            const noticeKey = `${conversationId}:${unsupportedRestoreSession}`;
             if (acpLoadUnsupportedNoticeRef.current === noticeKey) {
                 return;
             }
 
             acpLoadUnsupportedNoticeRef.current = noticeKey;
-            toast.info("该 Agent 不支持恢复历史 ACP 会话", {
-                description: "AIPP 会使用本地对话上下文继续当前请求。",
-            });
-        }, [
-            acpSessionState?.load_session_supported,
-            acpSessionState?.session_resume_supported,
-            acpSessionState?.agent_kind,
-            acpSessionState?.session_id,
-            conversationId,
-        ]);
+            toast.info("该 Agent 不支持恢复原会话");
+        }, [conversationId, unsupportedRestoreSession]);
 
         useEffect(() => {
             const method = acpSessionState?.restored_session_method;
@@ -2113,14 +2100,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         工作目录：{acpWorkingDirectory}
                                     </div>
                                 ) : null}
-                                {acpSessionState?.session_id &&
-                                    acpSessionState.agent_kind !== "codex_app_server" &&
-                                    !(
-                                        acpSessionState.load_session_supported ||
-                                        acpSessionState.session_resume_supported
-                                    ) ? (
+                                {unsupportedRestoreSession ? (
                                     <div className="text-xs text-muted-foreground">
-                                        该 Agent 不支持恢复历史会话，新会话会使用 AIPP 对话上下文继续。
+                                        该 Agent 不支持恢复原会话
                                     </div>
                                 ) : null}
                             </div>
@@ -2175,6 +2157,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [
             acpMutationKey,
+            unsupportedRestoreSession,
             acpSessionState,
             acpWorkingDirectory,
             combinedHeaderActions,

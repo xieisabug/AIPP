@@ -317,7 +317,7 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 - `loadSession` 支持因代理而异
 - 部分代理只支持 `session/resume`，不能通过 `session/load` 回放历史消息
 - 会话持久化仅在代理支持 `loadSession` 或 `session/resume` 时有效
-- 当代理不支持恢复能力或恢复失败时，AIPP 会使用本地 conversation 历史构建一次 history fallback prompt
+- 聊天弹窗和会话详情只在当前驱动明确不支持 load 和 resume 时提示无法恢复；能力未知时不提示。Kiro 以当前连接的握手结果为准。通用 ACP 在两种方式都未声明时可使用本地历史构建提示词，已声明的恢复操作失败时会报告实际错误。
 
 ---
 

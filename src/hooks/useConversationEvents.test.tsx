@@ -2,6 +2,7 @@ import React from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeAcpSessionState, useConversationEvents } from "@/hooks/useConversationEvents";
+import { agentSessionRestoreUnsupported } from "@/utils/agentCapabilities";
 import type { AcpConversationSessionState } from "@/data/Conversation";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
@@ -79,6 +80,35 @@ const HookHarness = () => {
 };
 
 describe("useConversationEvents ACP session state", () => {
+    const restoreNotice = (snapshot: Record<string, unknown>) =>
+        agentSessionRestoreUnsupported(normalizeAcpSessionState({ session_id: "saved", ...snapshot }));
+
+    it.each(["pi", "cursor", "opencode", "kiro", "antigravity", "claude_sdk", "codex_app_server"])(
+        "should suppress the unsupported notice when %s declares native resume",
+        agent_kind => {
+            expect(restoreNotice({ agent_kind, load_session_supported: false, session_resume_supported: false,
+                agent_capabilities: { sessions: { load: { support: "unsupported" }, resume: { support: "supported" } } },
+            })).toBe(false);
+        },
+    );
+
+    it("should warn only when both negotiated capabilities are explicitly unsupported", () => {
+        const snapshot = (load: string, resume: string) => ({
+            agentCapabilities: { sessions: { load: { support: load }, resume: { support: resume } } },
+        });
+        expect(restoreNotice(snapshot("supported", "unsupported"))).toBe(false);
+        expect(restoreNotice(snapshot("unknown", "unsupported"))).toBe(false);
+        expect(restoreNotice(snapshot("unsupported", "unsupported"))).toBe(true);
+        expect(restoreNotice({ ...snapshot("unsupported", "unsupported"), session_id: null })).toBe(false);
+    });
+
+    it("should preserve missing legacy flags and honor explicit ACP handshake results", () => {
+        expect(restoreNotice({ agent_kind: "pi" })).toBe(false);
+        expect(restoreNotice({ loadSessionSupported: false })).toBe(false);
+        expect(restoreNotice({ loadSessionSupported: true, sessionResumeSupported: false })).toBe(false);
+        expect(restoreNotice({ loadSessionSupported: false, sessionResumeSupported: false })).toBe(true);
+    });
+
     afterEach(() => {
         clearAllMockHandlers();
         vi.clearAllMocks();

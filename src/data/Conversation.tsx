@@ -358,7 +358,7 @@ export interface AcpConversationSessionState {
     session_id?: string | null;
     title?: string | null;
     updated_at?: string | null;
-    load_session_supported: boolean;
+    load_session_supported?: boolean;
     session_resume_supported?: boolean;
     restored_session_method?: "resume" | "load" | string | null;
     connection_event_id?: string | null;

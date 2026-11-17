@@ -89,6 +89,18 @@ test('should preserve Kiro loadSession when resume is not advertised', async () 
   finally { await runtime.close(); }
 });
 
+for (const [capabilities, canLoad, canResume] of [
+  [{}, false, false],
+  [{ loadSession: true }, true, false],
+  [{ sessionCapabilities: { resume: {} } }, false, true],
+]) {
+  test(`should report Kiro handshake support with load=${canLoad} and resume=${canResume}`, async () => {
+    const runtime = await fixture({ capabilities }).open('kiro');
+    try { assert.deepEqual([runtime.canLoad, runtime.canResume], [canLoad, canResume]); }
+    finally { await runtime.close(); }
+  });
+}
+
 test('should wait for Kiro prompt activity before sending an early cancel', async () => {
   const f = fixture(); const runtime = await f.open('kiro');
   try {
