@@ -238,8 +238,12 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       await request('authenticate', { methodId: method }, config.login ? 300000 : 30000);
     }
     if (config.login) { ready = true; return { close }; }
+    const sessionAppend = driver === 'antigravity' && Boolean(config.butlerInstructions)
+      && (init.agentInfo?.version === '1.4.5' || init.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true);
+    let instructionsPending = !sessionAppend && Boolean(config.butlerInstructions);
     const params = { cwd: config.cwd, mcpServers: config.mcp ? [{ name: 'aipp', command: config.mcp.command, args: config.mcp.args,
       env: Object.entries(config.mcp.env || {}).map(([name, value]) => ({ name, value: String(value) })) }] : [] };
+    if (sessionAppend) params._meta = { antigravity: { systemPrompt: { append: config.butlerInstructions } } };
     let result;
     if (config.session) {
       const method = driver === 'antigravity' || init.agentCapabilities?.sessionCapabilities?.resume ? 'session/resume' : 'session/load';
@@ -297,8 +301,15 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
         if (turn !== null) throw new Error(`${driver} already has an active prompt`);
         turn = id; started = false; cancelling = false; cancelSent = false;
         try {
-          const result = await request('session/prompt', { sessionId: session, prompt: [{ type: 'text', text }] }, 24 * 60 * 60 * 1000);
+          const includeInstructions = instructionsPending && !/^\/[\w-]+(?:\s|$)/.test(text.trimStart());
+          const prompt = [{ type: 'text', text }];
+          if (includeInstructions) prompt.push({ type: 'text', text: config.butlerInstructions });
+          const result = await request('session/prompt', { sessionId: session, prompt }, 24 * 60 * 60 * 1000);
           if (!['end_turn', 'cancelled', 'max_tokens', 'max_turn_requests', 'refusal'].includes(result.stopReason)) throw new Error(`${driver} prompt omitted a supported stopReason: ${result.stopReason}`);
+          if (result.stopReason === 'end_turn') {
+            if (includeInstructions) instructionsPending = false;
+            if (!sessionAppend && config.butlerInstructions && text.trim() === '/compact') instructionsPending = true;
+          }
           thinking.end(id, result.stopReason === 'cancelled' ? 'cancelled' : result.stopReason === 'end_turn' ? 'success' : 'failed');
           emit({ type: 'done', turn: id, cancelled: result.stopReason === 'cancelled',
             ...(['max_tokens', 'max_turn_requests', 'refusal'].includes(result.stopReason) ? { error: `${driver} stopped: ${result.stopReason}` } : {}) });

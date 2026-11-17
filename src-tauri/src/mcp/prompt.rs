@@ -373,7 +373,7 @@ pub async fn format_mcp_prompt_with_filters(
 1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
 2. **查看工具列表**：调用 `load_mcp_server` 获取目标工具集的工具列表及摘要
 3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）。描述和参数只出现在该次工具返回里
-4. **调用工具**：使用 `call_mcp_tool`，传入返回中的 `server_name`、`tool_name` 和参数对象。不要直接调用目标工具名
+4. **调用工具**：使用 `call_mcp_tool`，将加载结果的 `server` 填入 `server_name`，`tool` 填入 `tool_name`，按返回的 `parameters` 定义填写实际参数对象。不要直接调用目标工具名
 5. 当调用失败提示"未加载"时，先 `load_mcp_tool` 再通过 `call_mcp_tool` 重试
 
 ⚠ 严禁直接调用未出现在当前工具列表中的工具名。
@@ -414,7 +414,7 @@ pub async fn format_mcp_prompt_with_filters(
 1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
 2. **查看工具列表**：调用 `load_mcp_server` 获取目标工具集的工具列表及摘要
 3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）。描述和参数只出现在该次工具返回里
-4. **调用工具**：使用 `call_mcp_tool`，传入返回中的 `server_name`、`tool_name` 和参数对象。不要直接调用目标工具名
+4. **调用工具**：使用 `call_mcp_tool`，将加载结果的 `server` 填入 `server_name`，`tool` 填入 `tool_name`，按返回的 `parameters` 定义填写实际参数对象。不要直接调用目标工具名
 5. 当调用失败提示"未加载"时，先 `load_mcp_tool` 再通过 `call_mcp_tool` 重试
 
 ⚠ 严禁直接调用未出现在当前工具列表中的工具名。

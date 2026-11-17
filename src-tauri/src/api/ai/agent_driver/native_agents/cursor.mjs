@@ -90,6 +90,7 @@ export async function openCursor(config, emit, dependencies = {}) {
   if (!agent.agentId || (config.session && agent.agentId !== config.session)) {
     await agent.close(); throw new Error('Cursor returned an invalid or different agent ID');
   }
+  let instructionsPending = Boolean(config.butlerInstructions);
   let run, admission, active = null, model = config.model;
   return {
     session: agent.agentId,
@@ -101,7 +102,10 @@ export async function openCursor(config, emit, dependencies = {}) {
       let sawText = false, diagnosticText = '';
       const thinking = thinkingStream(emit), calls = new Map();
       try {
-        admission = Promise.resolve(agent.send(text, { ...(model ? { model: { id: model } } : {}), onDelta(update) {
+        const command = /^\/[\w-]+(?:\s|$)/.test(text.trimStart());
+        const includeInstructions = instructionsPending && !command;
+        const input = includeInstructions ? text + '\n\n' + config.butlerInstructions : text;
+        admission = Promise.resolve(agent.send(input, { ...(model ? { model: { id: model } } : {}), onDelta(update) {
           if (active !== current) return;
           if (update.type === 'text-delta') {
             thinking.end(turn);
@@ -136,6 +140,10 @@ export async function openCursor(config, emit, dependencies = {}) {
           const diagnostic = result.status === 'finished' ? transportDiagnostic(result.result ?? diagnosticText) : undefined;
           const unexpected = !['finished', 'error', 'cancelled'].includes(result.status);
           const error = diagnostic || (result.status === 'error' ? JSON.stringify(result) : unexpected ? `Cursor returned unsupported run status: ${JSON.stringify(result)}` : undefined);
+          if (result.status === 'finished' && !error) {
+            if (includeInstructions) instructionsPending = false;
+            if (config.butlerInstructions && text.trim() === '/compact') instructionsPending = true;
+          }
           thinking.end(turn, result.status === 'cancelled' ? 'cancelled' : error ? 'failed' : 'success');
           if (!error && !sawText && typeof result.result === 'string' && result.result) emit({ type: 'text', turn, text: result.result });
           emit({ type: 'done', turn, error,

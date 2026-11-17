@@ -271,3 +271,11 @@ async fn test_protocol_removed_permission_waiter_returns_cancelled() {
     assert!(state.get_request("removed").await.is_none());
     wire.close().await;
 }
+
+#[test]
+fn test_butler_context_acp_sends_separate_text_block() {
+    let blocks = build_acp_prompt_blocks("用户原话".into(), &[], &acp::PromptCapabilities::default(), None, Some("角色".into())).unwrap();
+    let value = serde_json::to_value(blocks).unwrap();
+    assert_eq!(value[0]["text"], "用户原话");
+    assert_eq!(value[1]["text"], "角色");
+}

@@ -18,6 +18,18 @@ fn fixture() -> (MCPDatabase,MCPServer,i64,i64) {
 }
 
 fn arguments() -> String { json!({"server_name":"Notes","tool_name":"read_notes","parameters":{"query":"hello"}}).to_string() }
+
+#[test]
+fn test_native_dynamic_call_requires_object_parameters_even_for_loaded_target() {
+    let (db, agent, _, tool) = fixture();
+    db.upsert_conversation_loaded_tool(7, tool, None).unwrap();
+    for value in [None, Some(json!("{}")), Some(json!([])), Some(json!(null))] {
+        let mut args = json!({"server_name":"Notes","tool_name":"read_notes"});
+        if let Some(value) = value { args["parameters"] = value; }
+        let failure = error(resolve_target(&db, agent.clone(), "call_mcp_tool", &args.to_string(), 7, &Restrictions::default()));
+        assert!(failure.contains("parameters 对象"));
+    }
+}
 fn error(result: Result<Target,String>) -> String {match result {Ok(_)=>panic!("unexpected execution target"),Err(e)=>e}}
 
 #[test]
@@ -132,4 +144,23 @@ async fn test_native_dynamic_entries_recheck_global_flags_after_session_start() 
         db.conn.execute("UPDATE mcp_server SET is_enabled=0 WHERE id=?1",[agent.id]).unwrap();
         assert!(error(resolve_target(&db,agent,name,&arguments(),7,&Restrictions::default())).contains("已停用"));
     }
+}
+
+#[test]
+fn test_butler_context_tool_guidance_uses_published_catalog() {
+    let role = "成员角色\n- 要把其他成员的答复原样交给用户时，用 `preview_message` 展示";
+    let tools = json!([{"server_id":1,"tools":[
+        {"tool_id":1,"tool_name":"load_mcp_tool"},{"tool_id":2,"tool_name":"call_mcp_tool"},
+        {"tool_id":3,"tool_name":"report_progress"}
+    ]}]);
+    let plain = crate::acp_mcp_bridge::native_butler_instructions(role, &tools.to_string()).unwrap();
+    assert!(plain.starts_with("成员角色"));
+    assert!(plain.contains("aipp_t3_report_progress"));
+    assert!(!plain.contains("preview_message"));
+    assert!(!plain.contains("call_mcp_tool"));
+    let mut dynamic = tools;
+    dynamic[0]["dynamic_loading_enabled"] = json!(true);
+    let instructions = crate::acp_mcp_bridge::native_butler_instructions(role, &dynamic.to_string()).unwrap();
+    assert!(instructions.contains("aipp_t2_call_mcp_tool"));
+    assert!(instructions.contains("server_name 取加载结果的 server，tool_name 取 tool"));
 }

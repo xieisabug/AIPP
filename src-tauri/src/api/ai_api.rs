@@ -1568,6 +1568,13 @@ pub async fn ask_ai(
     );
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
+    // The native Codex bridge publishes its own tool schemas. Keep the role
+    // separate from the model-provider XML/dynamic-loading prompt below.
+    let mut native_butler_role = existing_conversation.as_ref()
+        .filter(|c| assistant_detail.assistant.assistant_type == Some(4)
+            && crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&c.conversation_kind))
+        .map(|_| override_prompt.as_ref().unwrap_or(&assistant_prompt_result).clone());
+
     // 动态加载模式：即使原生 toolcall 也需要注入 MCP 动态加载规范
     // 非动态加载模式：仅非原生时拼接 XML 约束
     let assistant_prompt_result = if mcp_info.enabled_servers.len() > 0 {
@@ -1613,7 +1620,11 @@ pub async fn ask_ai(
         .await?
     };
     let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
-        let prompt = format_skills_prompt(&app_handle, assistant_prompt_result, &skills_info).await;
+        let skills_suffix = format_skills_prompt(&app_handle, String::new(), &skills_info).await;
+        if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
+            role.push_str(&skills_suffix);
+        }
+        let prompt = assistant_prompt_result + &skills_suffix;
         info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");
         debug!(formatted_prompt = prompt.as_str(), "Skills formatted prompt");
         prompt
@@ -1630,7 +1641,13 @@ pub async fn ask_ai(
         )
         .await
         {
-            Some(member_prompt) => format!("{}\n\n{}", assistant_prompt_result, member_prompt),
+            Some(member_prompt) => {
+                if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
+                    role.push_str("\n\n");
+                    role.push_str(&member_prompt);
+                }
+                format!("{}\n\n{}", assistant_prompt_result, member_prompt)
+            },
             None => assistant_prompt_result,
         },
         None => assistant_prompt_result,
@@ -1791,7 +1808,7 @@ pub async fn ask_ai(
         return crate::api::ai::agent_driver::send_turn(
             app_handle.clone(),
             window.clone(),
-            crate::api::ai::agent_driver::AgentTurnRequest { source_message_id: Some(user_message_id),
+            crate::api::ai::agent_driver::AgentTurnRequest { source_message_id: Some(user_message_id), native_butler_role,
                 assistant: &assistant_detail,
                 conversation_id,
                 // 与存进会话的用户消息一致：原话后接本轮附加上下文（附件由驱动另行处理）。

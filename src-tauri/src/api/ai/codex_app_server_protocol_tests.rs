@@ -72,7 +72,7 @@ for step in steps:
 
     async fn open(&mut self, stored_thread: Option<&str>, notifications: &mut VecDeque<Value>) -> Result<Value, String> {
         tokio::time::timeout(Duration::from_secs(5), open_codex_thread(
-            &NoDesktopRequests, 41, &wire_config(), stored_thread, None, 2,
+            &NoDesktopRequests, 41, &CodexAppServerConfig { developer_instructions: Some("Butler role".into()), ..wire_config() }, stored_thread, None, 2,
             &mut self.stdin, &mut self.lines, notifications,
         )).await.expect("thread open fixture timed out")
     }

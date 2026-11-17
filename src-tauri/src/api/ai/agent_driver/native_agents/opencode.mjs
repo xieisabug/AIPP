@@ -154,6 +154,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         turn = id; errorMessage = undefined; sawActivity = false; pendingIdle = false;
         parts.clear(); partTypes.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
         await api(`/session/${session}/prompt_async`, 'POST', {
+          ...(config.butlerInstructions ? { system: config.butlerInstructions } : {}),
           ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text }],
         });
       },

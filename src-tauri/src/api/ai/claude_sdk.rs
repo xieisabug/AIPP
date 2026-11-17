@@ -45,17 +45,17 @@ use tokio::{
 pub const CLAUDE_SDK_API_TYPE: &str = "claude_sdk";
 
 #[derive(Debug)]
-struct ClaudeMcpConfigFile {
+struct ClaudeInputFile {
     path: PathBuf,
 }
 
-impl ClaudeMcpConfigFile {
+impl ClaudeInputFile {
     fn path(&self) -> &Path {
         &self.path
     }
 }
 
-impl Drop for ClaudeMcpConfigFile {
+impl Drop for ClaudeInputFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
@@ -99,8 +99,10 @@ pub struct ClaudeSdkConfig {
     pub permission_mode: Option<String>,
     pub effort: Option<String>,
     pub model_choices: Vec<AcpSessionConfigChoicePayload>,
+    pub butler_instructions: Option<String>,
+    instructions_file: Option<Arc<ClaudeInputFile>>,
     pub selected_mcp_tools_payload: String,
-    mcp_config_file: Option<Arc<ClaudeMcpConfigFile>>,
+    mcp_config_file: Option<Arc<ClaudeInputFile>>,
     mcp_scope: Option<crate::acp_mcp_bridge::provenance::NativeMcpScope>,
     pub session_signature: String,
 }
@@ -344,6 +346,8 @@ pub fn extract_claude_sdk_config(
         model_choices,
         selected_mcp_tools_payload: String::new(),
         mcp_config_file: None,
+        instructions_file: None,
+        butler_instructions: None,
         mcp_scope: None,
         session_signature,
     })
@@ -354,6 +358,7 @@ pub fn refresh_claude_session_signature(config: &mut ClaudeSdkConfig) {
         "instance_id": config.instance_id, "cli": config.cli_command, "cwd": config.working_directory, "model": config.model,
         "permission_mode": config.permission_mode, "effort": config.effort, "env": config.env_vars,
         "selected_mcp": config.selected_mcp_tools_payload,
+        "instructions": config.butler_instructions,
     })).unwrap_or_default();
 }
 
@@ -384,9 +389,9 @@ fn build_claude_mcp_config(
     .map_err(|error| format!("Failed to serialize Claude Code MCP config: {error}"))
 }
 
-fn write_claude_mcp_config_file(content: &str) -> Result<Arc<ClaudeMcpConfigFile>, String> {
+fn write_claude_input_file(kind: &str, content: &str) -> Result<Arc<ClaudeInputFile>, String> {
     let path = std::env::temp_dir().join(format!(
-        "aipp-claude-mcp-{}.json",
+        "aipp-claude-{}-{kind}",
         uuid::Uuid::new_v4()
     ));
     let mut options = OpenOptions::new();
@@ -398,12 +403,12 @@ fn write_claude_mcp_config_file(content: &str) -> Result<Arc<ClaudeMcpConfigFile
     }
     let mut file = options
         .open(&path)
-        .map_err(|error| format!("Failed to create Claude Code MCP config file: {error}"))?;
-    let config_file = Arc::new(ClaudeMcpConfigFile { path });
+        .map_err(|error| format!("Failed to create Claude Code {kind} file: {error}"))?;
+    let config_file = Arc::new(ClaudeInputFile { path });
     file.write_all(content.as_bytes())
-        .map_err(|error| format!("Failed to write Claude Code MCP config file: {error}"))?;
+        .map_err(|error| format!("Failed to write Claude Code {kind} file: {error}"))?;
     file.flush()
-        .map_err(|error| format!("Failed to flush Claude Code MCP config file: {error}"))?;
+        .map_err(|error| format!("Failed to flush Claude Code {kind} file: {error}"))?;
     Ok(config_file)
 }
 
@@ -412,6 +417,7 @@ pub async fn prepare_claude_mcp_bridge(
     conversation_id: i64,
     config: &mut ClaudeSdkConfig,
 ) -> Result<(), String> {
+    config.instructions_file = config.butler_instructions.as_deref().map(|text| write_claude_input_file("instructions.txt", text)).transpose()?;
     let payload = config.selected_mcp_tools_payload.trim();
     if payload.is_empty() || payload == "[]" {
         config.mcp_config_file = None;
@@ -432,7 +438,7 @@ pub async fn prepare_claude_mcp_bridge(
         &proxy,
         &config.selected_mcp_tools_payload,
     )?;
-    config.mcp_config_file = Some(write_claude_mcp_config_file(&mcp_config)?);
+    config.mcp_config_file = Some(write_claude_input_file("mcp.json", &mcp_config)?);
     config.mcp_scope = Some(mcp_scope);
     Ok(())
 }
@@ -1022,6 +1028,7 @@ fn build_claude_command(
     let (program, prefix_args): (PathBuf, Vec<String>) = (resolved.clone(), Vec::new());
     let mut command = Command::new(program);
     command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
+    if let Some(file) = &config.instructions_file { command.arg("--append-system-prompt-file").arg(file.path()); }
     if let Some(mcp_config_file) = &config.mcp_config_file {
         command.arg("--mcp-config").arg(mcp_config_file.path());
     }
@@ -1797,7 +1804,7 @@ mod tests {
             Some(payload)
         );
 
-        let config_file = write_claude_mcp_config_file(&mcp_config).unwrap();
+        let config_file = write_claude_input_file("mcp.json", &mcp_config).unwrap();
         let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
         config.mcp_config_file = Some(config_file.clone());
         let (command, _) = build_claude_command(&config, None);

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { jsonLines } from './common.mjs';
 import { Type } from 'typebox';
@@ -9,6 +10,16 @@ export const READ_ONLY_TOOLS = new Set(['read', 'grep', 'find', 'ls']);
 // admission in the parent bridge instead of producing a session missing tools.
 export default async function aippExtension(pi) {
   try {
+    const contextFile = process.env.AIPP_PI_CONTEXT_FILE;
+    const instructions = contextFile ? readFileSync(contextFile, 'utf8') : '';
+    if (instructions) pi.on('before_agent_start', event => {
+      const options = event.systemPromptOptions;
+      if (options?.sections && options.forceSystemPrompt === undefined) {
+        options.sections.aipp_butler = instructions;
+      } else {
+        return { systemPrompt: event.systemPrompt + '\n\n' + instructions };
+      }
+    });
     const approval = process.env.AIPP_PI_APPROVAL || 'all';
     if (!['all', 'read_only', 'none'].includes(approval)) throw new Error(`Unsupported Pi approval scope '${approval}'`);
     if (approval !== 'none') pi.on('tool_call', async (event, context) => {
