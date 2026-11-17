@@ -1778,6 +1778,9 @@ pub async fn ask_ai(
     if contact_id.is_none() {
         activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
     }
+    if butler_mode_conversation {
+        crate::api::butler_progress::begin_turn(&app_handle, conversation_id, user_message_id, &processed_request.prompt).await;
+    }
     if let Err(error) = maybe_schedule_butler_feishu_relay_for_aipp_turn(
         &app_handle,
         conversation_id,
@@ -3356,6 +3359,12 @@ pub async fn regenerate_ai(
         activity_manager.set_user_pending(&app_handle, conversation_id, message_id).await;
     } else {
         activity_manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await;
+    }
+
+    if crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind) {
+        if let Some((user, _)) = filtered_messages.iter().rev().find(|(msg, _)| msg.message_type == "user") {
+            crate::api::butler_progress::begin_turn(&app_handle, conversation_id, user.id, &user.content).await;
+        }
     }
 
     let execution_cancel_token = Some(message_token_manager.reset_cancel_token(conversation_id).await);

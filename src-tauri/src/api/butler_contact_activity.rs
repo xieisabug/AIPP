@@ -13,6 +13,7 @@ pub struct ContactActivity {
     status: Option<String>,
     waiting_peer: bool,
     runtime: Option<ConversationRuntimeState>,
+    progress: Option<super::butler_progress::ButlerProgressSummary>,
     permission: bool,
     question: bool,
 }
@@ -28,7 +29,7 @@ fn read_activity(conn: &Connection, main: i64) -> rusqlite::Result<Vec<ContactAc
             AND COALESCE(d.executor_assistant_id,c.assistant_id) IS NOT NULL)")?;
     let rows = stmt.query_map([main], |r| Ok(ContactActivity {
         assistant_id: r.get(0)?, conversation_id: r.get(1)?, status: r.get(2)?, waiting_peer: r.get(3)?,
-        runtime: None, permission: false, question: false,
+        runtime: None, progress: None, permission: false, question: false,
     }))?;
     rows.collect()
 }
@@ -46,7 +47,9 @@ pub async fn list_butler_contact_activity(app_handle: AppHandle, main_conversati
     let approvals = crate::api::approval_attention::pending_approval_conversation_ids(&app_handle).await;
     for row in &mut rows {
         let id = row.conversation_id;
-        row.runtime = Some(app_handle.state::<ConversationActivityManager>().get_runtime_state(id).await);
+        let runtime = app_handle.state::<ConversationActivityManager>().get_runtime_state(id).await;
+        row.progress = super::butler_progress::cached_progress(&runtime);
+        row.runtime = Some(runtime);
         row.permission = approvals.contains(&id);
         row.question = !app_handle.state::<InteractionState>().list_requests_for_conversation(id).await.is_empty()
             || app_handle.state::<AcpElicitationState>().has_pending_request_for_conversation(id).await;

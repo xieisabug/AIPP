@@ -75,10 +75,12 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
         };
         // 辅助模型生成的进度摘要：只采用与会话当前运行轮次一致的那条。
         const progress = new Map<number, ButlerProgressSummary>();
-        const progressLabel = (group: ContactActivity[]) => group
-            .filter(row => row.runtime.is_running || row.status === "running" || row.status === "accepted")
-            .map(row => progress.get(row.conversation_id))
-            .find(summary => summary && group.some(row => row.conversation_id === summary.conversation_id && row.runtime.epoch === summary.epoch))?.text;
+        const progressLabel = (group: ContactActivity[]) => {
+            for (const row of group) {
+                const summary = progress.get(row.conversation_id);
+                if (row.runtime.is_running && summary?.epoch === row.runtime.epoch) return summary.text;
+            }
+        };
         const emit = () => {
             if (disposed) return;
             const groups = new Map<number, ContactActivity[]>();
@@ -109,7 +111,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
                 // 干活状态之间切换时，上一个状态没演够最短时长就先保持；需要用户行动的提示与收尾反馈不受限制。
                 if (previous && previous.visual.state !== visual.state && BUSY_STATES.has(previous.visual.state) && BUSY_STATES.has(visual.state)) {
                     const left = MIN_DWELL_MS - (now - previous.since);
-                    if (left > 0) { wake(left); return [id, previous.visual]; }
+                    if (left > 0) { wake(left); return [id, { ...previous.visual, label: progressLabel(group) ?? previous.visual.label }]; }
                 }
                 shown.set(id, { visual, since: previous?.visual.state === visual.state ? previous.since : now });
                 return [id, visual];
@@ -207,6 +209,9 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
                         if (next.status === "failed") pulse(next.assistant_id, "failed");
                         if (next.status === "interrupted") pulse(next.assistant_id, "blocked");
                     }
+                    if (next.progress && (progress.get(next.conversation_id)?.epoch ?? -1) < next.progress.epoch) {
+                        progress.set(next.conversation_id, next.progress);
+                    }
                     rows.set(next.conversation_id, next);
                     subscribe(next);
                 }
@@ -223,6 +228,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
         };
         const progressListener = listen<ButlerProgressSummary>(BUTLER_PROGRESS_EVENT, ({ payload }) => {
             if (disposed) return;
+            if ((progress.get(payload.conversation_id)?.epoch ?? -1) > payload.epoch) return;
             progress.set(payload.conversation_id, payload);
             emit();
         });

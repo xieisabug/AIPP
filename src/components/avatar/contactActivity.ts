@@ -1,4 +1,5 @@
 import type { ConversationRuntimeState } from "@/data/Conversation";
+import type { ButlerProgressSummary } from "@/components/butler/butlerProgress";
 import type { AvatarState } from "./avatarDefinition";
 
 /** 前端从会话事件里推断出的细节：当前执行的工具、是否在自动审核、正在流式输出的消息类型。 */
@@ -15,6 +16,7 @@ export interface ContactActivity {
     status: string | null;
     waiting_peer: boolean;
     runtime: ConversationRuntimeState;
+    progress?: ButlerProgressSummary | null;
     permission: boolean;
     question: boolean;
     detail?: ContactDetail;

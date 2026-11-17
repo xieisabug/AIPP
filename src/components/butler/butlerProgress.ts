@@ -14,8 +14,28 @@ export function useButlerProgress(conversationId: number): ButlerProgressSummary
         setSummary(undefined);
         if (!conversationId) return;
         let disposed = false;
+        let epoch = -1;
+        let revision = -1;
+        let running = true;
+        const runtimeListener = listen<{ type: string; data: { state?: { epoch: number; revision: number; is_running: boolean } } }>(
+            `conversation_event_${conversationId}`, ({ payload }) => {
+                const state = payload.data.state;
+                if (disposed || payload.type !== "runtime_state_snapshot" || !state || state.epoch < epoch) return;
+                if (state.epoch === epoch && state.revision < revision) return;
+                epoch = state.epoch;
+                revision = state.revision;
+                running = state.is_running;
+                setSummary(previous => state.is_running && previous?.epoch === epoch ? previous : undefined);
+            },
+        );
         const accept = (next: ButlerProgressSummary | null | undefined) => {
-            if (disposed || !next || next.conversation_id !== conversationId) return;
+            if (disposed || !next || next.conversation_id !== conversationId || next.epoch < epoch) return;
+            if (next.epoch === epoch && !running) return;
+            if (next.epoch > epoch) {
+                epoch = next.epoch;
+                revision = -1;
+                running = true;
+            }
             setSummary(previous => previous?.conversation_id === conversationId && previous.epoch > next.epoch ? previous : next);
         };
         let receivedEvent = false;
@@ -29,6 +49,7 @@ export function useButlerProgress(conversationId: number): ButlerProgressSummary
             .catch(error => console.warn(`[Butler progress] snapshot failed (${conversationId}):`, error));
         return () => {
             disposed = true;
+            void runtimeListener.then(stop => stop()).catch(() => {});
             void unlisten.then(stop => stop()).catch(() => {});
         };
     }, [conversationId]);

@@ -1,4 +1,5 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import { emit } from "@tauri-apps/api/event";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
@@ -11,6 +12,32 @@ const summary = (conversation_id: number, epoch: number, text: string) => ({
 
 describe("ButlerProgressRow", () => {
     afterEach(() => clearAllMockHandlers());
+
+    it("should show the same cached and live progress in chat and contacts when a turn is running", async () => {
+        const runtime = { conversation_id: 3, is_running: true, phase: "assistant_streaming", epoch: 2, revision: 1 };
+        const progress = { conversation_id: 3, epoch: 2, text: "正在核对供应商报价", steps: [] };
+        mockInvokeHandler("get_butler_progress_summary", () => progress);
+        mockInvokeHandler("get_conversation_runtime_state", () => runtime);
+        mockInvokeHandler("list_butler_contact_activity", () => [{ conversation_id: 3, assistant_id: 7, runtime, progress, status: null }]);
+        const contacts = renderHook(() => useContactAvatarActivity("1", []));
+        render(<ButlerProgressRow conversationId={3} />);
+        const checkBoth = async (text: string) => {
+            expect(await screen.findByText(text)).toBeTruthy();
+            await waitFor(() => expect(contacts.result.current.visuals.get(7)?.label).toBe(text));
+        };
+        await checkBoth(progress.text);
+        await act(async () => {
+            await emit(BUTLER_PROGRESS_EVENT, summary(3, 2, "已核对三份报价"));
+            await emit(BUTLER_PROGRESS_EVENT, summary(3, 1, "上一轮进展"));
+        });
+        await checkBoth("已核对三份报价");
+        await act(async () => {
+            await emit("conversation_event_3", { type: "runtime_state_snapshot", data: { state: { ...runtime, epoch: 3, revision: 2 } } });
+            await emit(BUTLER_PROGRESS_EVENT, summary(3, 2, "上一轮迟到的结果"));
+        });
+        expect(screen.queryByText("上一轮迟到的结果")).toBeNull();
+        expect(contacts.result.current.visuals.get(7)?.label).not.toContain("报价");
+    });
 
     it("should follow Pi activities and resume the remaining tool when concurrent work finishes", async () => {
         mockInvokeHandler("get_butler_progress_summary", () => null);
