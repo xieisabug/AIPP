@@ -1,5 +1,23 @@
 use super::*;
 
+#[test]
+fn test_agent_output_focus_native_first_response() {
+    for frame in [
+        json!({"type":"text","text":"answer"}),
+        json!({"type":"activity","id":"thinking:1","kind":"reasoning","output":"thought"}),
+        json!({"type":"activity","id":"call:1","kind":"tool","status":"running"}),
+    ] {
+        assert!(is_native_output(&frame), "{frame}");
+    }
+    for frame in [
+        json!({"type":"response","ok":true}), json!({"type":"config_options"}),
+        json!({"type":"text","text":""}), json!({"type":"activity"}),
+        json!({"type":"done"}),
+    ] {
+        assert!(!is_native_output(&frame), "{frame}");
+    }
+}
+
 /// T3 Cursor lifecycle: a completed agent turn does not prove unfinished tools succeeded.
 #[test]
 fn test_native_agents_unfinished_tools_never_become_success_on_turn_completion() {

@@ -284,6 +284,14 @@ async fn bridge_files() -> Result<BridgeFiles, String> {
     Ok(files)
 }
 
+fn is_native_output(frame: &Value) -> bool {
+    match frame["type"].as_str() {
+        Some("text") => frame["text"].as_str().is_some_and(|s| !s.is_empty()),
+        Some("activity") => frame["id"].is_string(),
+        _ => false,
+    }
+}
+
 struct ActiveTurn { id: i64, text: String, window: tauri::Window, activities: HashMap<String, Value>, _mcp_prompt: Option<crate::acp_mcp_bridge::provenance::NativeMcpPrompt>, questions: Vec<tauri::async_runtime::JoinHandle<()>> }
 impl Drop for ActiveTurn { fn drop(&mut self) { for task in &self.questions { task.abort(); } } }
 
@@ -415,6 +423,10 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     }
                     let Some(turn) = active.as_mut() else { continue; };
                     if frame["turn"].as_str() != Some(turn.id.to_string().as_str()) { continue; }
+                    if turn.text.is_empty() && turn.activities.is_empty() && is_native_output(&frame) {
+                        app.state::<crate::state::activity_state::ConversationActivityManager>()
+                            .set_agent_streaming(&app, &identity, turn.id).await;
+                    }
                     match frame["type"].as_str() {
                         Some("text") => { turn.text.push_str(frame["text"].as_str().ok_or("Native text frame omitted text")?); publish_text(&identity, turn, false); }
                         Some("activity") => {

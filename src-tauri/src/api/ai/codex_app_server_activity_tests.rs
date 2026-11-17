@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn test_agent_output_focus_codex_uses_the_bubble_receiving_content() {
+    let params = json!({"delta":"content","itemId":"plan-1"});
+    let target = |method, params: &Value| codex_delta_focus(method, params, 100, Some(101),
+        |item| (item == "plan-1").then_some(102));
+    for method in ["item/reasoning/summaryTextDelta", "item/reasoning/textDelta"] {
+        assert_eq!(target(method, &params), Some(101));
+    }
+    assert_eq!(target("item/plan/delta", &params), Some(102));
+    assert_eq!(target("item/agentMessage/delta", &params), Some(100));
+    assert_eq!(target("turn/started", &params), None);
+    assert_eq!(target("item/plan/delta", &json!({"delta":"", "itemId":"plan-1"})), None);
+    assert_eq!(target("item/plan/delta", &json!({"delta":"text", "itemId":"other"})), None);
+}
+
+#[test]
 fn test_codex_activity_order_does_not_change_with_progress_or_completion() {
     let mut orders = HashMap::new();
     let a = json!({"id":"a","type":"commandExecution"});

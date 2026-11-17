@@ -1839,6 +1839,18 @@ fn has_dedicated_message(kind: &str) -> bool {
     matches!(kind, "userMessage" | "agentMessage" | "plan" | "reasoning") || kind.starts_with("reasoning/")
 }
 
+/// Deltas may belong to three different bubbles in a single Codex turn.
+fn codex_delta_focus(method: &str, params: &Value, response_id: i64, reasoning_id: Option<i64>,
+    plan_id: impl FnOnce(&str) -> Option<i64>) -> Option<i64> {
+    if params.get("delta")?.as_str()?.is_empty() { return None; }
+    match method {
+        "item/agentMessage/delta" => Some(response_id),
+        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => reasoning_id,
+        "item/plan/delta" => plan_id(params.get("itemId")?.as_str()?),
+        _ => None,
+    }
+}
+
 fn emit_activity(
     identity: &AgentEventIdentity,
     window: &tauri::Window,
@@ -1850,11 +1862,11 @@ fn emit_activity(
     fallback_status: &str,
     content_offset: Option<u64>,
     order: Option<u64>,
-) {
+) -> Option<i64> {
     let (item_id, kind, title, input) = item_identity(item);
     // 用户输入、agent 正文和 Plan 都有专属展示，不再生成通用活动卡片
     if has_dedicated_message(&kind) {
-        return;
+        return None;
     }
     let activity = AgentActivityEvent {
         conversation_id,
@@ -1882,6 +1894,7 @@ fn emit_activity(
     };
     persist_activity(window.app_handle(), response_message_id, &activity);
     let _ = emit_to_window(window, identity.clone(), event);
+    Some(response_message_id)
 }
 
 fn persist_activity(app_handle: &tauri::AppHandle, message_id: i64, activity: &AgentActivityEvent) {
@@ -2491,6 +2504,7 @@ async fn run_session(
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
+                let mut focused_message_id = None;
                 let mut usage_tracker = CodexTurnUsageTracker::default();
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
@@ -2586,6 +2600,7 @@ async fn run_session(
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
                     usage_tracker.note_notification(method, &params);
+                    let mut output_message_id = None;
                     match method {
                                 "turn/started" => {
                                     turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string).or(turn_id);
@@ -2601,7 +2616,6 @@ async fn run_session(
                                         persist_response(&app_handle, message_id, &content, false, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
                                         let _ = emit_to_window(&window, event_identity.clone(), event);
-                                        if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_agent_streaming(&app_handle, &event_identity, message_id).await; }
                                     }
                                 }
                                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
@@ -2675,6 +2689,7 @@ async fn run_session(
                                                         plan_messages.insert(item_id.clone(), plan_message);
                                                     }
                                                     if let Some(plan_message) = plan_messages.get_mut(&item_id) {
+                                                        output_message_id = Some(plan_message.message_id);
                                                         plan_message.replace_content(
                                                             &app_handle,
                                                             &window,
@@ -2688,7 +2703,7 @@ async fn run_session(
                                         } else {
                                             let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
                                             let order = activity_order(&mut item_orders, &item);
-                                            emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset, order);
+                                            output_message_id = emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset, order);
                                         }
                                     }
                                 }
@@ -2719,7 +2734,7 @@ async fn run_session(
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
                                         let order = activity_order(&mut item_orders, &item);
-                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset, order);
+                                        output_message_id = emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset, order);
                                     }
                                 }
                                 "turn/plan/updated" => {
@@ -2772,11 +2787,19 @@ async fn run_session(
                                         sequence += 1;
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
                                         let order = activity_order(&mut item_orders, &item);
-                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset, order);
+                                        output_message_id = emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset, order);
                                     } else if !method.is_empty() {
                                         warn!(conversation_id, method, "Unhandled Codex notification");
                                     }
                                 }
+                    }
+                    let output_message_id = output_message_id.or_else(|| codex_delta_focus(
+                        method, &params, message_id, reasoning_message_id,
+                        |item_id| plan_messages.get(item_id).map(|plan| plan.message_id),
+                    ));
+                    if let Some(id) = output_message_id.filter(|id| Some(*id) != focused_message_id) {
+                        app_handle.state::<ConversationActivityManager>().set_agent_streaming(&app_handle, event_identity, id).await;
+                        focused_message_id = Some(id);
                     }
                     }
                 let turn_usage = usage_tracker.turn_usage();

@@ -18,6 +18,21 @@ fn busy_activity() -> ConversationActivity {
     activity
 }
 
+#[test]
+fn test_agent_output_focus_moves_shine_and_runtime_together() {
+    let mut activity = ConversationActivity { pending_user_message_id: Some(101), ..Default::default() };
+    for (message_id, phase, reason) in [
+        (101, ConversationRuntimePhase::UserPending, "user_pending"),
+        (102, ConversationRuntimePhase::AssistantStreaming, "assistant_streaming"),
+    ] {
+        if message_id == 102 { activity.set_streaming_message(message_id); }
+        activity.current = ConversationActivityManager::recompute_focus(&activity);
+        assert_eq!(ConversationActivityManager::build_runtime_state(42, &activity).phase, phase);
+        assert_eq!(ConversationActivityManager::build_shine_state(42, &activity).primary_target,
+            ShineTarget::Message { message_id, reason: reason.into() });
+    }
+}
+
 /// Exercise the production binding guard and actual field mutation together.
 /// Only desktop delivery and MCP database reads are omitted in this test.
 #[test]
