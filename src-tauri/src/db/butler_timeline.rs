@@ -96,7 +96,11 @@ pub fn task_posts(
                 coalesce((SELECT max(id) FROM message WHERE conversation_id=current.id
                     AND julianday(created_time)<=julianday(d.created_time)),0),
                 coalesce(d.result_handling_mode,'')='direct_report',
-                CASE WHEN current.id=d.butler_conversation_id THEN current.created_time END
+                current.created_time,
+                (SELECT next.created_time FROM conversation next
+                 WHERE current.conversation_kind='butler_contact_archive' AND next.assistant_id=current.assistant_id
+                   AND next.conversation_kind IN ('butler_contact', 'butler_contact_archive') AND next.id>current.id
+                 ORDER BY next.id LIMIT 1)
          FROM butler_task_definition d
          JOIN conversation t ON t.id=d.task_conversation_id
          JOIN conversation parent ON parent.id=d.butler_conversation_id
@@ -104,7 +108,7 @@ pub fn task_posts(
          LEFT JOIN butler_task_result r ON r.task_conversation_id=t.id
          LEFT JOIN message final ON final.id=r.final_message_id
          WHERE current.id=d.butler_conversation_id OR
-             (current.conversation_kind='butler_contact' AND current.assistant_id=d.executor_assistant_id)
+             (current.conversation_kind IN ('butler_contact','butler_contact_archive') AND current.assistant_id=d.executor_assistant_id)
          ORDER BY d.created_time,d.id"
     )?;
     let rows = stmt.query_map([conversation], |row| {
@@ -116,7 +120,8 @@ pub fn task_posts(
         let direct_report: bool = row.get(12)?;
         // 重开主会话会把旧任务改挂到新会话以便继续回送结果；新会话只展示它创建之后发生的委派与回复。
         let since: Option<DateTime<Utc>> = row.get(13)?;
-        let after_since = |at: &DateTime<Utc>| since.map_or(true, |since| *at >= since);
+        let until: Option<DateTime<Utc>> = row.get(14)?;
+        let in_conversation = |at: &DateTime<Utc>| since.map_or(true, |s| *at >= s) && until.map_or(true, |u| *at < u);
         let peer_assistant = if owner_view { Some(executor) } else { chief };
         let peer = peer_assistant.and_then(|id| names.get(&id).cloned())
             .unwrap_or_else(|| format!("助手 #{}", peer_assistant.unwrap_or(0)));
@@ -155,8 +160,8 @@ pub fn task_posts(
             exchange_id: None,
         };
         let mut posts = Vec::new();
-        if after_since(&request.occurred_at) { posts.push(request); }
-        if let Some(at) = finished.filter(after_since) {
+        if in_conversation(&request.occurred_at) { posts.push(request); }
+        if let Some(at) = finished.filter(in_conversation) {
             posts.push(Post {
                 id: (1_i64 << 40) + task * 2 + 1,
                 anchor: if owner_view { row.get(9)? } else { 0 },

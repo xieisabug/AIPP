@@ -99,6 +99,21 @@ fn test_butler_task_timeline_keeps_sender_only_results_collapsed() {
 }
 
 #[test]
+fn test_butler_task_timeline_reset_contact_separates_request_and_late_reply() {
+    let conn = task_fixture();
+    conn.execute_batch("UPDATE conversation SET conversation_kind='butler_contact_archive' WHERE id=20;
+        INSERT INTO conversation VALUES(50,2,'butler_contact',NULL,NULL,NULL,'2026-11-05 02:00:00');").unwrap();
+    assert!(posts(&conn,50).as_array().unwrap().is_empty());
+    conn.execute_batch("UPDATE conversation SET butler_task_status='succeeded',
+        butler_task_finalized_at='2026-11-05 02:01:00',butler_task_summary='done' WHERE id=30;").unwrap();
+    for (id, reply) in [(20,false),(50,true)] {
+        let items = posts(&conn,id);
+        assert_eq!(items.as_array().unwrap().len(),1);
+        assert_eq!(items[0]["task_reply"],reply);
+    }
+}
+
+#[test]
 fn test_butler_task_timeline_hides_history_from_reset_main_conversation() {
     let conn = task_fixture();
     // 重开主会话：旧任务改挂到新会话 50，新会话不应展示它创建前的委派和回复。
