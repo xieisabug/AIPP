@@ -85,3 +85,9 @@ Windows Credential Manager / macOS Keychain / Linux Secret Service 使用 keyrin
 - `GET /api/apps?lang=zh-CN` 返回版本和分类。每类含稳定标识、名称、总数及最多 6 张卡片。默认中文；支持英文。首页支持 ETag 和 304，客户端先显示本地缓存，5 分钟后后台验证。
 - `GET /api/apps/page?category=development&cursor=0&version=…` 每页最多 18 张卡片。使用返回的 `next_cursor` 继续；为空表示结束。可传 `q` 跨全目录搜索，或传 `scope=native` 只浏览可连接应用。版本变化返回 409，客户端刷新后从第一页加载。
 - `GET /api/apps/:id?lang=zh-CN` 返回单个应用的连接定义和 `tool_summaries`。摘要按应用和语言存为静态资源，首页及分页无需读取。工具权限和实际能力仍由连接返回。旧桌面客户端请求裸路径时保留有界的兼容清单。
+
+## 声明式 HTTP 连接
+
+目录详情可声明 `connection.transport = "http_api"`、`auth = "fields"` 及 `connection.http_api`。协议版本 1 包含可选的 HTTPS 密钥创建链接 `key_url`、无参数 GET 工具名 `probe` 和 `tools`。每项声明 name、description、input_schema、method 和 path。路径模板只接受完整片段参数；query 绑定标量查询参数，headers 绑定经过编码的自定义元数据头；body 可为 json 或 base64，后者发送原始二进制。可用 result_pointer 提取 JSON 字段。
+
+安装将校验后的定义存入 app_connection.definition，凭据按连接 ID 和固定 HTTPS 目标绑定。验证时执行 probe 并将快照中的工具交给现有 MCP 目录。调用使用同一助手授权、工具审核、取消、代理、凭据注入与结果遮盖机制。HTTP 请求禁止跟随重定向或自动重试。重新获取在线目录不改变已安装定义；详情菜单的“更新接口定义”要求在表单确认当前服务地址、重新填写凭据，并以事务替换快照。

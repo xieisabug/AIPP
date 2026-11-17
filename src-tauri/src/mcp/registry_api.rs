@@ -433,6 +433,7 @@ pub(super) async fn probe_connection(app_handle: &tauri::AppHandle, server: &MCP
             }
         }
         "sse" => test_sse_connection(server).await,
+        "http_api" => super::apps::declarative::probe(app_handle, server).await.map(|_| ()),
         "http" => test_http_connection(app_handle, server).await,
         _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
     }
@@ -589,6 +590,13 @@ pub async fn refresh_mcp_server_capabilities(
             }
         }
         "sse" => get_sse_capabilities(app_handle.clone(), server_id, server.clone()).await,
+        "http_api" => {
+            let api = super::apps::declarative::probe(&app_handle, &server).await?;
+            let tools = api.tools.into_iter().map(|t| SimpleTool {
+                name: t.name, description: Some(t.description), params_json: t.input_schema.to_string(),
+            }).collect();
+            persist_capability_sets(&db, &server, "http_api", Some(tools), Some(vec![]), Some(vec![]))
+        }
         "http" => get_http_capabilities(app_handle.clone(), server_id, server.clone()).await,
         _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
     };

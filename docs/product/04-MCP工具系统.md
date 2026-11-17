@@ -269,3 +269,9 @@ HTTP 搜索默认未启用，须明确选择服务；不会在失败时自动换
 桌面端原有 `search_web` 继续使用浏览器，移动端只展示 `search_http` 和 `fetch_url`，MCP 工具列表、助手工具配置和数量统计均隐藏依赖桌面浏览器的 `search_web`；已有桌面工具配置仍保留。移动端发送前检查、模型工具列表及动态工具发现也排除该工具，因此桌面保存的启用状态不会阻止手机聊天；显式调用旧的浏览器工具仍会被拒绝。升级后刷新内置搜索工具列表，并在助手 MCP 工具授权中选用 `search_http`。
 
 协议参考：[Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/api-reference/web/search/get)、[SearXNG](https://docs.searxng.org/dev/search_api.html)。
+
+### 使用 API Key 连接 HTTP 应用
+
+在设置的「应用与工具」打开应用详情，点击「连接」。应用提供「创建 API Key」时，可一键打开服务商页面。回到 AIPP，核对接收密钥的服务地址，填写密钥后点击「保存并验证」，再选择可以使用该连接的助手。检测使用应用声明的只读接口。安装后的工具与 MCP 工具共用权限、审核和调用记录。
+
+目录刷新会保留当前连接的接口版本。要采用提供商的新接口，在连接详情菜单点「更新接口定义」，核对服务地址并重新输入密钥。异步工具返回任务 ID 时，使用对应的状态查询工具取得结果。

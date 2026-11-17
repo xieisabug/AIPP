@@ -132,7 +132,7 @@ pub(crate) fn destination(server: &MCPServer, tool_name: &str, args: &Value) -> 
         return Ok(Destination::site(format!("网页请求 {method} {shown}"), &url));
     }
     match server.transport_type.as_str() {
-        "http" | "sse" => {
+        "http" | "sse" | "http_api" => {
             let url = parse_site(server.url.as_deref().unwrap_or_default())?;
             Ok(Destination::site(format!("MCP「{}」· {}", server.name, url.origin().ascii_serialization()), &url))
         }

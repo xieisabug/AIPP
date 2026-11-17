@@ -31,8 +31,8 @@ function Intro({ app, connection }: { app: AppDefinition; connection?: AppConnec
     </div>;
 }
 
-export default function AppConnectForm({ app, connection, onConnected, onCancel }: {
-    app: AppDefinition; connection?: AppConnection; onConnected: (serverId: number) => void; onCancel?: () => void;
+export default function AppConnectForm({ app, connection, updateDefinition, onConnected, onCancel }: {
+    app: AppDefinition; connection?: AppConnection; updateDefinition?: boolean; onConnected: (serverId: number) => void; onCancel?: () => void;
 }) {
     const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(app.fields.map(f => [f.key, f.secret ? '' : connection?.config[f.key] ?? f.default ?? ''])));
     const [label, setLabel] = useState(connection?.label ?? app.name);
@@ -42,6 +42,7 @@ export default function AppConnectForm({ app, connection, onConnected, onCancel 
     const [error, setError] = useState('');
     const [authorizationUrl, setAuthorizationUrl] = useState('');
     const [createdId, setCreatedId] = useState<number>();
+    const keyUrl = app.connection.http_api?.key_url;
     const locked = busy || createdId !== undefined;
     const update = (key: string, value: string) => setValues(old => ({ ...old, [key]: value }));
 
@@ -49,7 +50,10 @@ export default function AppConnectForm({ app, connection, onConnected, onCancel 
         setBusy(true); setError('');
         try {
             const result = await invoke<{ server_id: number; authorization_url: string | null }>('connect_catalog_app', {
-                request: { app_id: app.id, request_id: requestId, label, values, server_id: connection?.server_id ?? null },
+                request: { app_id: app.id, request_id: requestId, label, values, server_id: connection?.server_id ?? null,
+                    ...(app.connection.transport === 'http_api' && {
+                        http_definition_version: app.version, http_destination: app.connection.url, update_http_definition: !!updateDefinition,
+                    }) },
             });
             setValues(old => Object.fromEntries(Object.entries(old).map(([key, value]) => [key, app.fields.find(f => f.key === key)?.secret ? '' : value])));
             setCreatedId(result.server_id);
@@ -66,6 +70,11 @@ export default function AppConnectForm({ app, connection, onConnected, onCancel 
     const submitLabel = busy ? '正在准备连接…' : app.connection.auth === 'oauth' ? '登录并连接' : '保存并验证';
     return <form className="space-y-5" onSubmit={e => { e.preventDefault(); void connect(); }}>
         <Intro app={app} connection={connection} />
+        {app.connection.transport === 'http_api' && <p className="text-sm">API Key 发送至 {app.connection.url}</p>}
+        {keyUrl && <Button type="button" variant="outline"
+            onClick={() => void openUrl(keyUrl).catch(e => setError(String(e)))}>
+            <ExternalLink className="h-4 w-4" />创建 API Key
+        </Button>}
         <div className="space-y-2">
             <Label htmlFor="app-connection-label">连接名称</Label>
             <Input id="app-connection-label" value={label} onChange={e => setLabel(e.target.value)} required maxLength={80} disabled={locked} />

@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod declarative;
 pub mod directory;
 mod startup;
 pub use startup::recheck_available_connections;
@@ -218,6 +219,10 @@ pub struct ConnectRequest {
     #[serde(default)]
     pub values: HashMap<String, String>,
     pub server_id: Option<i64>,
+    pub http_definition_version: Option<String>,
+    pub http_destination: Option<String>,
+    #[serde(default)]
+    pub update_http_definition: bool,
 }
 
 #[derive(Serialize)]
@@ -226,7 +231,9 @@ pub struct ConnectResult { pub server_id: i64, pub authorization_url: Option<Str
 fn definition(conn: &Connection, request: &ConnectRequest) -> Result<AppDefinition, String> {
     if let Some(id) = request.server_id {
         let raw: String = conn.query_row("SELECT definition FROM app_connection WHERE server_id=?1 AND app_id=?2", params![id, request.app_id], |r| r.get(0)).map_err(|_| "找不到对应的应用连接")?;
-        return serde_json::from_str(&raw).map_err(|_| "已保存的应用描述损坏".into());
+        let saved: AppDefinition = serde_json::from_str(&raw).map_err(|_| "已保存的应用描述损坏")?;
+        if !request.update_http_definition { return Ok(saved); }
+        if saved.connection.transport != "http_api" { return Err("仅声明式 HTTP 连接支持更新接口定义".into()); }
     }
     if request.app_id.starts_with("agent-plugin:") {
         let raw: String = conn.query_row("SELECT payload FROM agent_plugin_connection_definition WHERE app_id=?1", [&request.app_id], |r| r.get(0)).map_err(|e| format!("读取插件连接定义失败：{e}"))?;
@@ -268,6 +275,13 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
     } else { None };
     let platform = if cfg!(target_os="windows") { "windows" } else if cfg!(target_os="macos") { "macos" } else if cfg!(target_os="android") { "android" } else { "linux" };
     if !app.platforms.iter().any(|p| p == platform) { return Err("应用尚不支持当前平台".into()); }
+    if app.connection.transport == "http_api" || request.update_http_definition {
+        catalog::validate_app(&app)?;
+        if app.connection.transport != "http_api" || request.http_definition_version.as_ref() != Some(&app.version)
+            || request.http_destination.as_ref() != Some(&app.connection.url) {
+            return Err("HTTP 应用定义已变化，请重新打开详情并确认凭据目标".into());
+        }
+    }
     let (config, headers) = app.configuration(&request.values)?;
     let reference = uuid::Uuid::new_v4().to_string();
     let needs_credentials = app.connection.auth != "none" || !headers.is_empty();
@@ -285,11 +299,11 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         let header_json = if needs_credentials { serde_json::json!({credentials::REFERENCE_HEADER: reference}).to_string() } else { "{}".into() };
         let name = format!("{} · {}", request.label.trim(), &request.request_id[..8]);
         let id = if let Some(id) = request.server_id {
-            transaction.execute("UPDATE mcp_server SET headers=?2,is_enabled=0,name=?3 WHERE id=?1", params![id, header_json, name]).map_err(|e| e.to_string())?;
+            transaction.execute("UPDATE mcp_server SET headers=?2,is_enabled=0,name=?3,url=?4,transport_type=?5 WHERE id=?1", params![id, header_json, name, app.connection.url, app.connection.transport]).map_err(|e| e.to_string())?;
             id
         } else {
-            transaction.execute("INSERT INTO mcp_server(name,description,transport_type,url,headers,timeout,is_long_running,is_enabled,is_builtin,is_deletable,proxy_enabled) VALUES(?1,?2,'http',?3,?4,30000,0,0,0,1,0)",
-                params![name, app.description, app.connection.url, header_json]).map_err(|e| e.to_string())?;
+            transaction.execute("INSERT INTO mcp_server(name,description,transport_type,url,headers,timeout,is_long_running,is_enabled,is_builtin,is_deletable,proxy_enabled) VALUES(?1,?2,?5,?3,?4,30000,0,0,0,1,0)",
+                params![name, app.description, app.connection.url, header_json, app.connection.transport]).map_err(|e| e.to_string())?;
             transaction.last_insert_rowid()
         };
         transaction.execute("INSERT INTO app_connection(server_id,request_id,app_id,definition,label,config,credential_ref,status,verified_session) VALUES(?1,?2,?3,?4,?5,?6,?7,'connecting',?8) ON CONFLICT(server_id) DO UPDATE SET request_id=excluded.request_id,definition=excluded.definition,label=excluded.label,config=excluded.config,credential_ref=excluded.credential_ref,status='connecting',error=NULL,verified_session=excluded.verified_session",

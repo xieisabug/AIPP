@@ -23,7 +23,7 @@ export interface AppDefinition {
     homepage?: string | null;
     notice: string;
     platforms: string[];
-    connection: { transport: 'http' | 'stdio'; url: string; auth: 'none' | 'fields' | 'oauth'; client_id?: string | null; scopes?: string[] };
+    connection: { transport: 'http' | 'stdio' | 'http_api'; http_api?: { key_url?: string }; url: string; auth: 'none' | 'fields' | 'oauth'; client_id?: string | null; scopes?: string[] };
     fields: AppField[];
     skill_ids?: string[];
     plugin_source?: { repo: string; git_ref: string; path: string } | null;

@@ -15,6 +15,14 @@ const app: AppDefinition = {
 
 describe('AppConnectForm', () => {
     beforeEach(() => vi.clearAllMocks());
+    it('should open the published key settings when the user requests a key', () => {
+        vi.mocked(openUrl).mockResolvedValueOnce();
+        const keyUrl = 'https://accounts.example.com/settings/keys';
+        render(<AppConnectForm app={{ ...app, connection: { ...app.connection, transport: 'http_api', http_api: { key_url: keyUrl } } }} onConnected={vi.fn()} />);
+        fireEvent.click(screen.getByRole('button', { name: '创建 API Key' }));
+        expect(openUrl).toHaveBeenCalledWith(keyUrl);
+        expect(invoke).not.toHaveBeenCalled();
+    });
     it('should keep failure visible when connection fails', async () => {
         vi.mocked(invoke).mockRejectedValue('安全存储不可用');
         const completed = vi.fn();

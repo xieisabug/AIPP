@@ -195,3 +195,5 @@ cargo test --manifest-path src-tauri/Cargo.toml [test_name]
 - Keep `docs/product/README.md` aligned with the actual set of product docs and major user-visible features.
 - 架构、开发任务、测试规范的细节分别维护在 `docs/architecture.md`、`docs/development-guide.md`、`docs/testing-guidelines.md`；改动对应内容时同步更新这些文件，`AGENTS.md` 只保留规范红线与索引。
 - Keep this `AGENTS.md` aligned with major architecture/product-surface changes that affect future engineering tasks, especially Butler, Feishu, export formats, scheduling model, and Skills behavior.
+
+声明式 HTTP 应用沿用目录、连接凭据、工具审核与 MCP 工具表。具体服务商的接口、输入 schema 和创建密钥链接由 helper 发布。客户端只在 `mcp/apps/declarative.rs` 解释安装快照；协议与升级见 [应用目录协议](./docs/connected-apps-protocol.md)。

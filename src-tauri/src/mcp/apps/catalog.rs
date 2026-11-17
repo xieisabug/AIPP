@@ -41,6 +41,8 @@ pub struct AppDefinition {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionRecipe {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_api: Option<super::declarative::HttpApi>,
     pub transport: String,
     pub url: String,
     pub auth: String,
@@ -141,10 +143,15 @@ impl AppCatalog {
 /// Everything about one entry except its identity, which is checked across the whole catalog.
 pub fn validate_app(app: &AppDefinition) -> Result<(), String> {
     if app.version.is_empty() || app.name.is_empty() { return Err("应用缺少名称或版本".into()); }
-    if app.connection.transport != "http" || !["none", "fields", "oauth"].contains(&app.connection.auth.as_str()) {
+    if !matches!(app.connection.transport.as_str(), "http" | "http_api") || !["none", "fields", "oauth"].contains(&app.connection.auth.as_str()) {
         return Err(format!("{} 的连接方式不受当前客户端支持", app.name));
     }
     public_https(&app.connection.url)?;
+    match (&app.connection.http_api, app.connection.transport.as_str()) {
+        (Some(api), "http_api") if app.connection.auth == "fields" => api.validate(app)?,
+        (None, "http") => (),
+        _ => return Err("应用接口声明与连接方式不匹配".into()),
+    }
     if let Some(method)=&app.connection.oauth_client_auth {
         if !["none","client_secret_post","client_secret_basic"].contains(&method.as_str()) {return Err("不支持的 OAuth 客户端认证方式".into());}
     }

@@ -1124,7 +1124,7 @@ mod tool_result_message_tests {
 // =============================
 
 /// 解析工具参数字符串为 JSON 对象 Map。允许带有 ``` 包裹并做容错。
-fn parse_tool_arguments(parameters: &str) -> Result<JsonMap<String, serde_json::Value>> {
+pub(super) fn parse_tool_arguments(parameters: &str) -> Result<JsonMap<String, serde_json::Value>> {
     let params_clean = normalize_parameters_json(parameters);
     let params_value: serde_json::Value =
         serde_json::from_str(&params_clean).with_context(|| "解析参数 JSON 失败")?;
@@ -3437,6 +3437,10 @@ pub async fn execute_tool_by_transport(
         )
         .await
         .map_err(|e| e.to_string()),
+        "http_api" => tokio::select! {
+            result = crate::mcp::apps::declarative::execute(app_handle, server, tool_name, parameters, conversation_id) => result,
+            _ = cancel_token.cancelled() => Err("HTTP 工具调用已取消".into()),
+        },
         "http" => execute_http_tool(
             app_handle,
             feature_config_state,

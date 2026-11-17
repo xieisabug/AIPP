@@ -832,7 +832,7 @@ impl MCPDatabase {
     fn guard_app_connection_config(&self, id: i64, transport: &str, command: Option<&str>, headers: Option<&str>, url: Option<&str>, builtin: bool) -> Result<()> {
         if self.app_connection_status(id)?.is_some() {
             let old = self.get_mcp_server(id)?;
-            if transport != "http" || command.is_some() || builtin || old.url.as_deref() != url || old.headers.as_deref() != headers {
+            if !matches!(transport, "http" | "http_api") || transport != old.transport_type || command.is_some() || builtin || old.url.as_deref() != url || old.headers.as_deref() != headers {
                 return Err(DbError::InvalidParameterName("应用连接的服务地址和认证只能从连接管理修改".into()));
             }
         }

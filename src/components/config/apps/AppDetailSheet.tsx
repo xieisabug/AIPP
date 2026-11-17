@@ -77,7 +77,7 @@ function Panel({ title, description, children, danger = false }: { title: string
 export default function AppDetailSheet({ selection, onSelect, apps, servers, connections, tools, pluginCatalog, mobile, refresh, onOpenPluginManager }: Props) {
     const [tab, setTab] = useState('overview');
     // Connect view replaces the tabs: `connection` set = re-login/reconfigure of that instance.
-    const [connectView, setConnectView] = useState<{ connection?: AppConnection; generation: number }>();
+    const [connectView, setConnectView] = useState<{ connection?: AppConnection; update?: AppDefinition; generation: number }>();
     const [busy, setBusy] = useState('');
     const [removing, setRemoving] = useState<MCPServer>();
     const [justConnected, setJustConnected] = useState<number>();
@@ -207,6 +207,13 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
         if (connectView) return null;
         const menu: ReactNode[] = [];
         if (connection && connection.definition.connection.transport !== 'stdio') menu.push(<DropdownMenuItem key="reconfigure" onSelect={() => startConnect(connection)}>重新配置</DropdownMenuItem>);
+        if (connection?.definition.connection.transport === 'http_api') {
+            menu.push(<DropdownMenuItem key="update-definition" onSelect={() => void run('正在读取接口定义…', async () => {
+                const latest = await invoke<AppDefinition>('get_app_directory_detail', { id: connection.app_id });
+                if (latest.version === connection.definition.version) return '已安装最新接口定义';
+                setConnectView(old => ({ connection, update: latest, generation: (old?.generation ?? 0) + 1 }));
+            })}>更新接口定义</DropdownMenuItem>);
+        }
         if (app && connection && appSupported(app) && app.connection.transport !== 'stdio') menu.push(<DropdownMenuItem key="another" onSelect={() => startConnect()}>添加另一个连接</DropdownMenuItem>);
         if (server?.is_deletable) {
             if (menu.length) menu.push(<DropdownMenuSeparator key="sep" />);
@@ -259,7 +266,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
                 </button>;
             })}</div>
         </section>}
-        {app && <CatalogEndpoints entries={[{ name: app.name, description: app.connection.transport === 'http' ? app.connection.url : '本地程序' }]} />}
+        {app && <CatalogEndpoints entries={[{ name: app.name, description: app.connection.transport === 'stdio' ? '本地程序' : app.connection.url }]} />}
         {pluginOverview && <AgentPluginsConfig key={JSON.stringify(pluginSource)} embedded directoryCatalog={pluginCatalog} hasConnection={!!connection || matching.length > 0} initialSource={pluginSource!} app={app}
             onChanged={() => void refresh().catch(() => {})} />}
         {!pluginOverview && app?.skill_ids && app.skill_ids.length > 0 && <AppRelatedSkills key={app.id} ids={app.skill_ids} />}
@@ -274,7 +281,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
             {!connectView.connection && matching.length > 0 && <p className="text-sm text-muted-foreground">将新建一个独立连接，不影响已有的 {matching.length} 个连接。</p>}
         </div>
         {appSupported(app)
-            ? <AppConnectForm key={`${app.id}-${connectView.connection?.server_id ?? 'new'}-${connectView.generation}`} app={connectView.connection?.definition ?? app} connection={connectView.connection} onConnected={onConnected} onCancel={() => setConnectView(undefined)} />
+            ? <AppConnectForm key={`${app.id}-${connectView.connection?.server_id ?? 'new'}-${connectView.generation}`} app={connectView.update ?? connectView.connection?.definition ?? catalogApp ?? app} updateDefinition={!!connectView.update} connection={connectView.connection} onConnected={onConnected} onCancel={() => setConnectView(undefined)} />
             : <p className="text-sm text-muted-foreground">当前平台不支持此应用的认证连接。</p>}
     </div>;
 
@@ -318,7 +325,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
                                         : <Button size="sm" variant="outline" onClick={() => void openPluginConnection(connection.definition)}>管理插件本地连接</Button>}
                                 </div>
                             </Panel>
-                            {server.transport_type === 'http' && <Panel title="网络" description="调整超时和代理不需要重新授权。">
+                            {['http', 'http_api'].includes(server.transport_type) && <Panel title="网络" description="调整超时和代理不需要重新授权。">
                                 <AppTransportSettings key={`${server.id}-${server.timeout}-${server.proxy_enabled}`} server={server} onSaved={() => { toast.success('网络设置已保存'); void refresh().catch(() => {}); }} />
                             </Panel>}
                             <Panel danger title="断开连接" description={connection.credential_on_device === false

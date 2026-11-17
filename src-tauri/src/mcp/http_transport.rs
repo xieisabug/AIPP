@@ -152,6 +152,14 @@ pub(crate) async fn create_authenticated_http_transport(
     server: &MCPServer,
     builder: reqwest::ClientBuilder,
 ) -> Result<(AppHttpTransport, ResponseRedactor, AuthSignal), String> {
+    let (client, url, redactor) = authenticated_client(app, server, builder).await?;
+    let (client, signal) = AuthAwareClient::new(client);
+    Ok((StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)), redactor, signal))
+}
+
+pub(crate) async fn authenticated_client(
+    app: &tauri::AppHandle, server: &MCPServer, builder: reqwest::ClientBuilder,
+) -> Result<(reqwest::Client, String, ResponseRedactor), String> {
     let mut headers: std::collections::HashMap<String, String> = match server.headers.as_deref().filter(|v| !v.trim().is_empty()) {
         Some(raw) => serde_json::from_str(raw).map_err(|_| "Invalid MCP HTTP headers: expected string values")?,
         None => Default::default(),
@@ -162,9 +170,8 @@ pub(crate) async fn create_authenticated_http_transport(
         let resolved = crate::vault::config_ref::resolve_http_server(app, server).await?;
         let (server, secrets) = match &resolved { Some((server, secrets)) => (server, secrets.as_slice()), None => (server, &[][..]) };
         let (client, url) = build_plain_client(server, builder, secrets)?;
-        let (client, signal) = AuthAwareClient::new(client);
         let redactor = crate::vault::executor::redactor_for(secrets.iter().cloned());
-        return Ok((StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)), redactor, signal));
+        return Ok((client, url, redactor));
     }
     if keys.len() != 1 { return Err("连接包含重复凭据引用".into()); }
     let reference = headers.remove(&keys[0]).unwrap();
@@ -193,9 +200,7 @@ pub(crate) async fn create_authenticated_http_transport(
     }
     let client = builder.redirect(reqwest::redirect::Policy::none()).default_headers(header_map).build()
         .map_err(|_| "无法创建应用 HTTP 客户端")?;
-    let (client, signal) = AuthAwareClient::new(client);
-    Ok((StreamableHttpClientTransport::with_client(client,
-        StreamableHttpClientTransportConfig::with_uri(server.url.as_deref().ok_or("连接缺少服务地址")?)), redactor, signal))
+    Ok((client, server.url.clone().ok_or("连接缺少服务地址")?, redactor))
 }
 
 #[derive(Clone, Default)]

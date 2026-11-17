@@ -215,7 +215,7 @@ pub(crate) fn plugin_connection_definition(preview: &Preview, key: &str, server_
         name: format!("{} · {}", preview.name, server_name), description: preview.description.clone(),
         publisher: preview.publisher.clone(), category: "Agent 插件".into(), icon: None, homepage: None,
         notice: "配套技能已安装；连接完成后选择可使用此插件的助手。".into(), platforms: vec!["windows".into(), "macos".into(), "linux".into()],
-        connection: ConnectionRecipe { transport: "http".into(), oauth_client_auth, oauth_redirect_uri, url: server.config["url"].as_str().ok_or("MCP 地址缺失")?.into(), auth,
+        connection: ConnectionRecipe { http_api: None, transport: "http".into(), oauth_client_auth, oauth_redirect_uri, url: server.config["url"].as_str().ok_or("MCP 地址缺失")?.into(), auth,
             client_id: client_id.filter(|s| !s.trim().is_empty()).or_else(|| server.config["oauth"]["client_id"].as_str().filter(|s| !s.starts_with('<') && server.config["oauth"].get("client_secret").is_none()).map(str::to_string)),
             oauth_resource: server.config["oauth_resource"].as_str().map(str::to_string),
             scopes: server.config["scopes"].as_array().or_else(|| server.config["oauth"]["scopes"].as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default() }, fields, skill_ids: vec![] };
@@ -308,7 +308,7 @@ pub async fn connect_agent_plugin_stdio(app_handle: tauri::AppHandle, key: Strin
     let definition = AppDefinition { tool_summaries: Default::default(), plugin_source: Some(r.preview.source.clone()), id: app_id.clone(), version:r.preview.version, name:r.preview.name, description:r.preview.description,
         publisher:r.preview.publisher, category:"Agent 插件".into(), icon:None, homepage:None, notice:"本地 stdio 服务；环境变量保存在加密凭据库。".into(),
         platforms:vec!["windows".into(),"macos".into(),"linux".into()], fields:vec![],skill_ids:vec![],
-        connection:ConnectionRecipe { transport:"stdio".into(),oauth_client_auth:None,oauth_redirect_uri:None,url:endpoint.clone(),auth:"none".into(),client_id:None,oauth_resource:None,scopes:vec![] } };
+        connection:ConnectionRecipe { http_api: None, transport:"stdio".into(),oauth_client_auth:None,oauth_redirect_uri:None,url:endpoint.clone(),auth:"none".into(),client_id:None,oauth_resource:None,scopes:vec![] } };
     let transaction = db.conn.unchecked_transaction().map_err(|e|e.to_string())?;
     let id = if let Some(id) = server_id {
         db.conn.execute("INSERT OR IGNORE INTO app_credential_cleanup(reference,server_id) SELECT credential_ref,server_id FROM app_connection WHERE server_id=?1 AND credential_ref IS NOT NULL",[id]).map_err(|e|e.to_string())?;
