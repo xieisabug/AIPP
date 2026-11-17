@@ -22,7 +22,8 @@ fn read_activity(conn: &Connection, main: i64) -> rusqlite::Result<Vec<ContactAc
     // Independent of the task panel's pagination; private contacts and task executors
     // share the same assistant identity. Old main conversations are not displayed.
     let mut stmt = conn.prepare("SELECT CASE WHEN c.id=?1 THEN 0 ELSE COALESCE(d.executor_assistant_id,c.assistant_id) END,
-        c.id,c.butler_task_status,
+        c.id,CASE WHEN c.conversation_kind='butler_task' AND d.task_conversation_id IS NULL
+            THEN NULL ELSE c.butler_task_status END,
         EXISTS(SELECT 1 FROM butler_peer_exchange p WHERE p.owner=c.id AND p.report_to_user=0 AND p.stop_requested=0 AND p.state IN ('queued','sending','waiting','returning','reply_sending'))
         FROM conversation c LEFT JOIN butler_task_definition d ON d.task_conversation_id=c.id
         WHERE c.id=?1 OR (c.conversation_kind IN ('butler_contact','butler_task')

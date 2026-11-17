@@ -7,7 +7,7 @@ fn test_contact_activity_includes_all_tasks_and_preserves_owner() {
         CREATE TABLE butler_task_definition(task_conversation_id INTEGER,executor_assistant_id INTEGER);
         CREATE TABLE butler_peer_exchange(owner INTEGER,state TEXT,report_to_user INTEGER,stop_requested INTEGER);
         INSERT INTO conversation VALUES(1,NULL,'butler_main',NULL),(2,99,'butler_main',NULL),(3,8,'butler_contact',NULL),(4,8,'normal',NULL),
-            (5,NULL,'butler_contact',NULL),(6,NULL,'butler_task','running'),(7,NULL,'butler_task','running');
+            (5,NULL,'butler_contact',NULL),(6,NULL,'butler_task','running'),(7,NULL,'butler_task','running'),(8,8,'butler_task','running');
         INSERT INTO butler_task_definition VALUES(7,8);
         INSERT INTO butler_peer_exchange VALUES(3,'waiting',0,0),(1,'waiting',1,0),(7,'waiting',0,1);").unwrap();
     for id in 10..130 {
@@ -15,9 +15,14 @@ fn test_contact_activity_includes_all_tasks_and_preserves_owner() {
         conn.execute("INSERT INTO butler_task_definition VALUES(?1,8)", [id]).unwrap();
     }
     let rows = read_activity(&conn, 1).unwrap();
-    assert_eq!(rows.len(), 123);
+    assert_eq!(rows.len(), 124);
     assert!(!rows.iter().any(|r| r.conversation_id == 5 || r.conversation_id == 6));
-    assert_eq!(rows.iter().find(|r| r.conversation_id == 7).unwrap().assistant_id, 8);
+    let legacy = rows.iter().find(|r| r.conversation_id == 8).unwrap();
+    assert_eq!(legacy.assistant_id, 8);
+    assert!(legacy.status.is_none());
+    let dispatched = rows.iter().find(|r| r.conversation_id == 7).unwrap();
+    assert_eq!(dispatched.assistant_id, 8);
+    assert_eq!(dispatched.status.as_deref(), Some("running"));
     assert_eq!(rows.iter().find(|r| r.conversation_id == 1).unwrap().assistant_id, 0);
     assert!(!rows.iter().any(|r| matches!(r.conversation_id, 1 | 7) && r.waiting_peer));
     assert!(rows.iter().find(|r| r.conversation_id == 3).unwrap().waiting_peer);
