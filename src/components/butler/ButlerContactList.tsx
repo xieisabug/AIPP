@@ -67,7 +67,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                     disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
                 <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="发起群聊" title="发起群聊"
                     disabled={!ready} onClick={onCreateGroup} data-aipp-slot="butler-create-group"><UsersRound/></Button>
-                <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh}
+                <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh} pluginList={plugins}
                     triggerButtonProps={{variant:"outline",size:"icon",className:"size-8 rounded-full",title:"添加助手","aria-label":"添加助手"}}/>
             </div>
         </div>

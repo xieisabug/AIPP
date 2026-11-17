@@ -121,6 +121,9 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# 与 tauri 使用的 WebView2 绑定同版本，用于调整 WebView2 设置（webview_autofill.rs）
+webview2-com = "0.38"
+windows-core = "0.61"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

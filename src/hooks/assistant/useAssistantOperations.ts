@@ -140,8 +140,9 @@ export const useAssistantOperations = () => {
 
     // 添加新助手
     const addAssistant = useCallback((assistantDetail: AssistantDetail) => {
+        // 新增助手时列表刷新事件可能已先把它加进来，按 id 去重
         setAssistants((prev) => [
-            ...prev,
+            ...prev.filter((assistant) => assistant.id !== assistantDetail.assistant.id),
             {
                 id: assistantDetail.assistant.id,
                 name: assistantDetail.assistant.name,

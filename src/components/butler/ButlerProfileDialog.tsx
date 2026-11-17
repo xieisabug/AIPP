@@ -112,11 +112,11 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
             {!appearanceOnly && <>
                 <div className="space-y-2">
                     <label htmlFor="butler-profile-name" className="text-sm font-medium">名称</label>
-                    <Input id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
+                    <Input autoComplete="off" id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
                 </div>
                 {withDescription && <div className="space-y-2">
                     <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
-                    <Input id="assistant-profile-description" value={description} placeholder="简单介绍助手的用途"
+                    <Input autoComplete="off" id="assistant-profile-description" value={description} placeholder="简单介绍助手的用途"
                         onChange={event => setDescription(event.target.value)} />
                 </div>}
                 {modelField && <>

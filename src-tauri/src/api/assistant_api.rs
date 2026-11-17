@@ -846,17 +846,22 @@ fn resolve_new_assistant_model(
 mod assistant_creation_tests;
 
 #[tauri::command]
-#[instrument(skip(app_handle, name, description), fields(assistant_type))]
+#[instrument(skip(app_handle, name, description, prompt), fields(assistant_type))]
 pub fn add_assistant(
     app_handle: tauri::AppHandle,
     name: String,
     description: String,
     assistant_type: i64,
     model_selection: Option<String>,
+    prompt: Option<String>,
 ) -> Result<AssistantDetail, String> {
     management::kind(&serde_json::json!(assistant_type))?;
     let llm = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let mut args = serde_json::json!({"name":name,"description":description,"assistant_type":assistant_type});
+    // 未提供时由创建流程写入默认提示词
+    if let Some(prompt) = prompt {
+        args["prompt"] = serde_json::json!(prompt);
+    }
     if let Some(selection) = model_selection {
         let models = llm.get_filtered_models_for_select(assistant_type)?;
         let (provider, code) = resolve_new_assistant_model(models, &selection, assistant_type)?;

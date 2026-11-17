@@ -431,7 +431,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
 
                         <div className="space-y-1.5">
                             <label htmlFor="new-provider-name" className="text-sm font-medium text-foreground">提供商名称</label>
-                            <Input
+                            <Input autoComplete="off"
                                 id="new-provider-name"
                                 autoFocus
                                 autoCapitalize="none"
@@ -458,7 +458,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                         {isHttp && !apiType.noEndpoint && (
                             <div className="space-y-1.5">
                                 <label htmlFor="new-provider-endpoint" className="text-sm font-medium text-foreground">接口地址</label>
-                                <Input
+                                <Input autoComplete="off"
                                     id="new-provider-endpoint"
                                     inputMode="url"
                                     autoCapitalize="none"
@@ -552,7 +552,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                 {step === 3 && (
                     <div className="flex min-h-0 flex-1 flex-col gap-3">
                         <div className="flex gap-2">
-                            <Input
+                            <Input autoComplete="off"
                                 aria-label="自定义模型"
                                 placeholder="输入模型 ID 添加自定义模型"
                                 enterKeyHint="done"
@@ -624,7 +624,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                                     <div className="flex items-center gap-2">
                                         <div className="relative flex-1">
                                             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                                            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索模型..." className="h-8 pl-8 text-sm" />
+                                            <Input autoComplete="off" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索模型..." className="h-8 pl-8 text-sm" />
                                         </div>
                                         <Button
                                             type="button"

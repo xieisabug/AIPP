@@ -21,6 +21,7 @@ pub use sync::prepare_assistant_recovery;
 mod template_engine;
 mod utils;
 mod vault;
+mod webview_autofill;
 mod window;
 
 pub use crate::feishu::{
@@ -707,6 +708,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(mobile_files::init())
         .plugin(mobile_system_ui::init())
+        .plugin(webview_autofill::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())

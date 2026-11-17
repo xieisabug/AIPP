@@ -20,15 +20,22 @@ import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState, ConfigPageLo
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
 import { useAssistantOperations } from "@/hooks/assistant/useAssistantOperations";
 import { useAssistantFormConfig } from "@/hooks/assistant/useAssistantFormConfig";
-import { isAgentAssistantField } from "@/hooks/assistant/nativeAgentApprovalFields";
 import { useDialogStates } from "@/hooks/assistant/useDialogStates";
 import { AssistantFormRenderer } from "./assistant/AssistantFormRenderer";
 import { AssistantDialogs } from "./assistant/AssistantDialogs";
 import { AssistantConfigApi } from "@/types/forms";
-import type { LoadedPlugin, PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
+import type { LoadedPlugin } from "@/services/PluginRuntime";
 import { getErrorMessage } from "@/utils/error";
 import { registerConfigBeforeLeave } from "@/lib/configLeaveGuard";
 import { isAssistantFormDirty } from "./assistant/assistantFormDirty";
+import {
+    AGENT_MODEL_OPTION_KINDS,
+    buildAssistantFormValues,
+    buildAssistantSaveDetail,
+    collectPluginAssistantFormFields,
+    fetchPluginAssistantConfigValues,
+    savePluginAssistantConfigValues,
+} from "./assistant/assistantEditorModel";
 import {
     AlertDialog,
     AlertDialogContent,
@@ -44,38 +51,6 @@ interface AssistantConfigProps {
     pluginList: LoadedPlugin[];
     navigateTo: (menuKey: string) => void;
 }
-
-interface PluginAssistantConfigItem {
-    configId: number;
-    pluginId: number;
-    assistantId: number;
-    configKey: string;
-    configValue?: string | null;
-}
-
-const buildPluginAssistantFieldFormKey = (pluginId: number, fieldKey: string) =>
-    `plugin::${pluginId}::${fieldKey}`;
-
-const normalizePluginAssistantFieldValue = (
-    field: PluginAssistantFormFieldContribution,
-    rawValue: string | null | undefined,
-) => {
-    if (field.type === "checkbox" || field.type === "switch") {
-        if (rawValue == null) {
-            return field.defaultValue === true || field.defaultValue === "true";
-        }
-        return rawValue === "true";
-    }
-
-    if (rawValue == null) {
-        if (field.defaultValue === undefined || field.defaultValue === null) {
-            return "";
-        }
-        return String(field.defaultValue);
-    }
-
-    return rawValue;
-};
 
 /** Clone form values so later edits cannot mutate the discard snapshot. */
 const cloneFormSnapshot = <T extends Record<string, any>>(values: T): T =>
@@ -172,48 +147,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         closeImportDialog,
     } = useDialogStates();
 
-    const pluginAssistantFormFields = useMemo(
-        () =>
-            pluginList.flatMap((plugin) =>
-                (plugin.contributions?.assistantFormFields ?? []).map((field) => ({
-                    ...field,
-                    pluginId: plugin.pluginId,
-                    pluginCode: plugin.code,
-                    pluginName: plugin.name,
-                    formKey: buildPluginAssistantFieldFormKey(plugin.pluginId, field.key),
-                }))
-            ),
-        [pluginList]
-    );
+    const pluginAssistantFormFields = useMemo(() => collectPluginAssistantFormFields(pluginList), [pluginList]);
 
     const loadPluginAssistantConfigValues = useCallback(
         async (assistantId: number, isCurrent: () => boolean = () => true) => {
-            if (pluginAssistantFormFields.length === 0) {
-                if (isCurrent()) setPluginAssistantConfigValues({});
-                return {};
-            }
-
-            const pluginIds = [...new Set(pluginAssistantFormFields.map((field) => field.pluginId))];
-            const configGroups = await Promise.all(
-                pluginIds.map(async (pluginId) => ({
-                    pluginId,
-                    configs: await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
-                        pluginId,
-                        assistantId,
-                    }),
-                }))
-            );
-            const configMap = new Map<number, PluginAssistantConfigItem[]>(
-                configGroups.map((entry) => [entry.pluginId, entry.configs])
-            );
-            const nextValues: Record<string, string | boolean> = {};
-            pluginAssistantFormFields.forEach((field) => {
-                const rawValue = configMap
-                    .get(field.pluginId)
-                    ?.find((item) => item.configKey === field.key)
-                    ?.configValue;
-                nextValues[field.formKey] = normalizePluginAssistantFieldValue(field, rawValue);
-            });
+            const nextValues = await fetchPluginAssistantConfigValues(pluginAssistantFormFields, assistantId);
             if (isCurrent()) setPluginAssistantConfigValues(nextValues);
             return nextValues;
         },
@@ -397,50 +335,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         assistantDetail.assistant.id, isSelectionCurrent
                     );
                     if (!isSelectionCurrent()) return;
-                    form.reset({
-                        assistantType: assistantDetail.assistant.assistant_type,
-                        model:
-                            assistantDetail.model.length > 0
-                                ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
-                                : "-1",
-                        agent_model:
-                            assistantDetail.model[0]?.model_code && assistantDetail.model[0]?.provider_id > 0
-                                ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
-                                : "",
-                        prompt: assistantDetail.prompts[0]?.prompt ?? "",
-                        tool_review_mode: "off",
-                        ...assistantDetail.model_configs.reduce((acc, config) => {
-                            acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
-                            return acc;
-                        }, {} as Record<string, any>),
-                        // assistant_model.provider_id 是 Agent 提供商绑定的权威来源。
-                        // 放在旧 model_configs 之后，避免遗留 acp_provider 覆盖当前绑定。
-                        acp_provider:
-                            assistantDetail.assistant.assistant_type === 4 &&
-                            assistantDetail.model.length > 0 &&
-                            assistantDetail.model[0].provider_id > 0
-                                ? assistantDetail.model[0].provider_id.toString()
-                                : "-1",
-                        codex_approval_policy:
-                            assistantDetail.model_configs.find((config) => config.name === "codex_approval_policy")
-                                ?.value || "default",
-                        codex_sandbox:
-                            assistantDetail.model_configs.find((config) => config.name === "codex_sandbox")
-                                ?.value || "default",
-                        codex_approvals_reviewer:
-                            assistantDetail.model_configs.find((config) => config.name === "codex_approvals_reviewer")
-                                ?.value || "default",
-                        ...assistantTypeCustomField.reduce((acc, field) => {
-                            acc[field.key] =
-                                field.value.type === "checkbox"
-                                    ? assistantDetail.model_configs.find((config) => config.name === field.key)
-                                        ?.value === "true"
-                                    : assistantDetail.model_configs.find((config) => config.name === field.key)
-                                        ?.value ?? "";
-                            return acc;
-                        }, {} as Record<string, any>),
-                        ...pluginConfigValues,
-                    });
+                    form.reset(buildAssistantFormValues(assistantDetail, assistantTypeCustomField, pluginConfigValues));
                     commitFormBaseline(form.getValues());
                     setFormAssistantId(assistantDetail.assistant.id);
                     if (
@@ -452,7 +347,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                 assistantId: assistantDetail.assistant.id,
                             });
                             if (!isSelectionCurrent()) return;
-                            if (["codex_app_server", "pi", "cursor", "opencode", "kiro", "antigravity"].includes(runtime.agent_kind)) {
+                            if (AGENT_MODEL_OPTION_KINDS.includes(runtime.agent_kind)) {
                                 await loadAgentModelOptions(assistantDetail, null, isSelectionCurrent);
                             } else {
                                 setAgentModelOptions([]);
@@ -629,166 +524,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         const canRefreshSavedValues = () => isSameSelection() && !isAssistantFormDirty(form.getValues(), values);
 
         try {
-            await saveAssistant({
-            ...currentAssistant,
-            assistant: {
-                ...currentAssistant.assistant,
-                assistant_type: values.assistantType,
-                name: currentAssistant.assistant.name,
-                description: currentAssistant.assistant.description,
-            },
-            model: (() => {
-                if (Number(values.assistantType) === 4) {
-                    const providerId = parseInt(String(values.acp_provider ?? ""), 10);
-                    if (Number.isFinite(providerId) && providerId > 0) {
-                        const existingModel = currentAssistant.model[0];
-                        const selectedAgentModel = String(values.agent_model ?? "").split("%%")[0];
-                        return [{
-                            id: existingModel?.id ?? 0,
-                            assistant_id: existingModel?.assistant_id ?? currentAssistant.assistant.id,
-                            model_code: selectedAgentModel || existingModel?.model_code || "",
-                            provider_id: providerId,
-                            alias: "",
-                        }];
-                    }
-
-                    return currentAssistant.model;
-                }
-
-                // 如果模型选择是 "-1" 或无效，保留原有模型信息
-                const modelValue = values.model;
-                const modelParts = modelValue?.split("%%") || [];
-                const hasValidModel = modelParts.length === 2 && modelValue !== "-1";
-
-                if (hasValidModel) {
-                    return [{
-                        ...currentAssistant.model[0],
-                        model_code: modelParts[0],
-                        provider_id: parseInt(modelParts[1]) || 0,
-                        alias: "",
-                    }];
-                } else if (currentAssistant.model.length > 0) {
-                    // 保留原有模型配置
-                    return currentAssistant.model;
-                } else {
-                    // 没有模型配置，返回空数组
-                    return [];
-                }
-            })(),
-            model_configs: Object.entries(values)
-                .filter(
-                    ([key]) =>
-                        !key.startsWith("plugin::")
-                        && !key.startsWith("acp_session_")
-                        && key !== "assistantType"
-                        && key !== "model"
-                        && key !== "agent_model"
-                        && key !== "acp_provider"
-                        && key !== "prompt"
-                        && key !== "mcp_config"
-                        && key !== "skills_config"
-                )
-                .filter(([key]) => {
-                    const config = currentAssistant.model_configs.find((config) => config.name === key);
-                    const customField = assistantTypeCustomField.find((field) => field.key === key);
-
-                    // ACP/Codex 助手专用字段（assistant_type === 4）
-                    const isAcpField =
-                        isAgentAssistantField(key) &&
-                        currentAssistant.assistant.assistant_type === 4;
-                    if (isAcpField) {
-                        return true;
-                    }
-
-                    // 内置字段（如 reasoning_effort）允许保存
-                    if (key === "reasoning_effort") {
-                        return true;
-                    }
-
-                    if (key === "use_native_toolcall" || key === "tool_review_mode") {
-                        return true;
-                    }
-
-                    // 如果是插件自定义字段，直接允许保存
-                    if (customField) {
-                        return true;
-                    }
-
-                    // 原有的过滤逻辑
-                    return (
-                        config &&
-                        config.value_type &&
-                        config?.value_type !== "static" &&
-                        config?.value_type !== "button" &&
-                        config?.value_type !== "custom"
-                    );
-                })
-                .map(([key, value]) => {
-                    const config = currentAssistant.model_configs.find((config) => config.name === key);
-                    const customField = assistantTypeCustomField.find((field) => field.key === key);
-
-                    // 为插件自定义字段和内置字段确定正确的 value_type
-                    let valueType = config?.value_type ?? "string";
-
-                    // ACP/Codex 助手专用字段
-                    const isAcpField =
-                        isAgentAssistantField(key) &&
-                        currentAssistant.assistant.assistant_type === 4;
-                    if (isAcpField) {
-                        valueType = "string";
-                    } else if (key === "use_native_toolcall") {
-                        valueType = "boolean";
-                    } else if (key === "tool_review_mode") {
-                        valueType = "string";
-                    } else if (customField) {
-                        // 根据插件字段的类型映射到数据库的 value_type
-                        const fieldType = customField.value.type;
-                        if (fieldType === "checkbox" || fieldType === "switch") {
-                            valueType = "boolean";
-                        } else if (fieldType === "select" || fieldType === "radio") {
-                            valueType = "string";
-                        } else {
-                            valueType = "string";
-                        }
-                    } else if (key === "reasoning_effort") {
-                        // 内置 reasoning_effort 字段
-                        valueType = "string";
-                    }
-
-                    // Codex 字段的 "default" 表示跟随提供商配置，落库时归一化为空字符串
-                    const normalizedValue = key.startsWith("codex_") && value === "default" ? "" : value;
-
-                    return {
-                        name: key,
-                        value: normalizedValue != null ? normalizedValue.toString() : null,
-                        value_type: valueType,
-                        id: config?.id ?? 0,
-                        assistant_id: currentAssistant.assistant.id,
-                        assistant_model_id: currentAssistant.model[0]?.id ?? 0,
-                    };
-                }),
-            prompts: [
-                {
-                    ...currentAssistant.prompts[0],
-                    prompt: values.prompt,
-                },
-            ],
-        });
-            await Promise.all(
-                pluginAssistantFormFields.map((field) =>
-                    invoke("set_plugin_assistant_config", {
-                        pluginId: field.pluginId,
-                        assistantId: currentAssistant.assistant.id,
-                        key: field.key,
-                        value:
-                            values[field.formKey] == null
-                                ? null
-                                : typeof values[field.formKey] === "boolean"
-                                    ? String(values[field.formKey])
-                                    : String(values[field.formKey]),
-                    })
-                )
-            );
+            await saveAssistant(buildAssistantSaveDetail(currentAssistant, values, assistantTypeCustomField));
+            await savePluginAssistantConfigValues(pluginAssistantFormFields, currentAssistant.assistant.id, values);
             toast.success("保存成功");
             // Only the submitted values were persisted. Later edits stay dirty and must
             // not be replaced by a delayed detail/plugin refresh.
@@ -837,46 +574,14 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         await handleChooseAssistant(copied.assistant, true);
     }, [copyAssistant, handleChooseAssistant, invalidateSelection]);
 
-    // 添加新助手处理
+    // 添加新助手处理：向导可能已保存高级/扩展配置，按正常选择流程加载助手详情与插件配置
     const handleAssistantAdded = useCallback(
         (assistantDetail: AssistantDetail) => {
             invalidateSelection();
             addAssistant(assistantDetail);
-            setPluginAssistantConfigValues({});
-            setAgentModelOptions([]);
-            setAgentModelError(null);
-
-            // 重置表单状态为新助手的配置
-            form.reset({
-                assistantType: assistantDetail.assistant.assistant_type,
-                model:
-                    assistantDetail.model.length > 0
-                        ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
-                        : "-1",
-                agent_model: "",
-                prompt: assistantDetail.prompts[0]?.prompt || "",
-                tool_review_mode: "off",
-                ...assistantDetail.model_configs.reduce((acc, config) => {
-                    acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
-                    return acc;
-                }, {} as Record<string, any>),
-                acp_provider:
-                    assistantDetail.assistant.assistant_type === 4 &&
-                    assistantDetail.model.length > 0 &&
-                    assistantDetail.model[0].provider_id > 0
-                        ? assistantDetail.model[0].provider_id.toString()
-                        : "-1",
-                codex_approval_policy: "default",
-                codex_sandbox: "default",
-                codex_approvals_reviewer: "default",
-            });
-            commitFormBaseline(form.getValues());
-            setFormAssistantId(assistantDetail.assistant.id);
-            if (assistantDetail.assistant.assistant_type === 4) {
-                void handleChooseAssistant(assistantDetail.assistant, true);
-            }
+            void handleChooseAssistant(assistantDetail.assistant, true);
         },
-        [addAssistant, form, invalidateSelection, commitFormBaseline, handleChooseAssistant]
+        [addAssistant, invalidateSelection, handleChooseAssistant]
     );
 
     // 分享助手
@@ -944,6 +649,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 <AddAssistantDialog
                     assistantTypes={assistantTypes}
                     onAssistantAdded={handleAssistantAdded}
+                    pluginList={pluginList}
+                    navigateTo={navigateTo}
                     triggerButtonProps={{
                         className:
                             "gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all",
@@ -963,7 +670,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 </Tooltip>
             </div>
         ),
-        [assistantTypes, handleAssistantAdded, openImportDialog]
+        [assistantTypes, handleAssistantAdded, openImportDialog, pluginList, navigateTo]
     );
 
     // 按搜索词过滤助手（支持拼音）
@@ -1073,6 +780,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                         <AddAssistantDialog
                                             assistantTypes={assistantTypes}
                                             onAssistantAdded={handleAssistantAdded}
+                                            pluginList={pluginList}
+                                            navigateTo={navigateTo}
                                         />
                                         <Tooltip delayDuration={500}>
                                             <TooltipTrigger asChild>

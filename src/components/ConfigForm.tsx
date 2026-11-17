@@ -94,7 +94,7 @@ interface ConfigFormProps {
     beforePrompt?: React.ReactNode;
 }
 
-interface FieldOptionsData {
+export interface FieldOptionsData {
     models: any[] | undefined;
     modelsLoading: boolean;
     modelsError: unknown;
@@ -115,7 +115,7 @@ interface ConfigFormFieldProps {
 }
 
 /** One form row. Declared at module level so its identity is stable across renders. */
-const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: ConfigFormFieldProps) => {
+export const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: ConfigFormFieldProps) => {
     // 触屏上 Tooltip 无法打开：移动平台把说明文字直接显示为提示行
     const isMobilePlatform = useIsMobilePlatform();
     const {
@@ -260,7 +260,7 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
             case "password":
                 if (field.type === "password" && isMobilePlatform) {
                     return (
-                        <PasswordInput
+                        <PasswordInput autoComplete="off"
                             className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
                             disabled={field.disabled}
                             placeholder={field.placeholder}
@@ -271,7 +271,7 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                     );
                 }
                 return (
-                    <Input
+                    <Input autoComplete="off"
                         className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
                         type={field.type === "password" ? "password" : "text"}
                         disabled={field.disabled}

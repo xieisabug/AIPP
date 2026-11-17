@@ -1012,7 +1012,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         </DialogDescription>
                     </DialogHeader>
                     <div className="flex flex-col gap-4 py-4">
-                        <Input enterKeyHint="done"
+                        <Input autoComplete="off" enterKeyHint="done"
                             placeholder="ghu_xxxxxxxxx 或 gho_xxxxxxxxx..."
                             value={manualToken}
                             onChange={(e) => setManualToken(e.target.value)}
@@ -1120,7 +1120,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         </DialogDescription>
                     </DialogHeader>
                     <div className="flex flex-col gap-4 py-4">
-                        <Input enterKeyHint="done"
+                        <Input autoComplete="off" enterKeyHint="done"
                             placeholder="请输入提供商名称"
                             value={newProviderName}
                             onChange={(e) => setNewProviderName(e.target.value)}

@@ -64,7 +64,7 @@ export default function VaultRefField({
         return (
             <div className="flex min-w-0 items-center gap-2" data-aipp-slot="vault-ref-field">
                 {allowPrefix && (
-                    <Input
+                    <Input autoComplete="off"
                         aria-label="前缀"
                         value={parsed.prefix}
                         placeholder="前缀"
