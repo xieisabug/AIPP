@@ -8,6 +8,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import AddAssistantDialog from "@/components/config/AddAssistantDialog";
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
 import { usePendingApprovalConversations } from "@/hooks/useApprovalAttention";
+import ButlerSortableList from "./ButlerSortableList";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview, groupReadKey } from "./butlerGroupModel";
@@ -58,6 +59,43 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
     // 只有真实活动（任务、回复、审批、完成/失败反馈）才驱动动画；空闲时头像保持静止。
     const state = (id: number) => visuals.get(id)?.state ?? "idle";
     const {assistantTypes} = useAssistantTypePlugin(plugins);
+    const groupRows = groups.map(group => {
+        const active = selectedGroup === group.id;
+        const typing = group.members.filter(member => group.typing.includes(member.id)).map(member => member.name);
+        return { id: `group:${group.id}`, label: group.name, content: <ContextMenu>
+            <ContextMenuTrigger asChild><div className="w-full">
+                <button onClick={() => onSelectGroup(group)} disabled={!ready} aria-pressed={active} className="butler-contact" data-aipp-slot="butler-group-contact">
+                    <ButlerGroupAvatar members={group.members} size={48} />
+                    <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium">{group.name}</span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                            {typing.length ? `${typing.join("、")} 正在输入…` : groupPreview(group.last_message) || "尚无消息"}
+                        </span>
+                    </span>
+                    {group.members.some(member => pendingApprovals.has(member.conversation_id)) ? <ApprovalDot/>
+                        : groupUnread(group, active) ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
+                </button>
+            </div></ContextMenuTrigger>
+            <ContextMenuContent>
+                <ContextMenuItem variant="destructive" onSelect={() => onDeleteGroup(group)}>删除群聊</ContextMenuItem>
+            </ContextMenuContent>
+        </ContextMenu> };
+    });
+    const assistantRows = contacts.map(assistant => {
+        const preview = previews.find(p => p.assistantId === assistant.id);
+        const unread = preview?.messageId && selected !== assistant.id &&
+            preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
+        return { id: `assistant:${assistant.id}`, label: assistant.name, content: <AssistantItemContextMenu assistant={assistant} onAction={onAssistantAction} canReset><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
+            aria-pressed={selected === assistant.id} className="butler-contact">
+            <ButlerAvatar id={assistant.id} size={48} compact figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
+            <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">{assistant.name}</span>
+                <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
+            </span>
+            {approvals.has(assistant.id) ? <ApprovalDot/>
+                : unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
+        </button></AssistantItemContextMenu> };
+    });
     return <>
         <div className="flex h-12 shrink-0 items-center justify-between gap-1.5 px-3">
             <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="总管家设置" title="总管家设置"
@@ -81,43 +119,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
         </div>
         <nav aria-label="助手联系人" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
             {error && <button onClick={onRefresh} className="px-2 py-1 text-xs text-destructive">刷新联系人</button>}
-            {groups.map(group => {
-                const active = selectedGroup === group.id;
-                const typing = group.members.filter(member => group.typing.includes(member.id)).map(member => member.name);
-                return <ContextMenu key={`group-${group.id}`}>
-                    <ContextMenuTrigger asChild><div className="w-full">
-                        <button onClick={() => onSelectGroup(group)} disabled={!ready} aria-pressed={active} className="butler-contact" data-aipp-slot="butler-group-contact">
-                            <ButlerGroupAvatar members={group.members} size={48} />
-                            <span className="min-w-0 flex-1">
-                                <span className="block truncate text-sm font-medium">{group.name}</span>
-                                <span className="block truncate text-xs text-muted-foreground">
-                                    {typing.length ? `${typing.join("、")} 正在输入…` : groupPreview(group.last_message) || "尚无消息"}
-                                </span>
-                            </span>
-                            {group.members.some(member => pendingApprovals.has(member.conversation_id)) ? <ApprovalDot/>
-                                : groupUnread(group, active) ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
-                        </button>
-                    </div></ContextMenuTrigger>
-                    <ContextMenuContent>
-                        <ContextMenuItem variant="destructive" onSelect={() => onDeleteGroup(group)}>删除群聊</ContextMenuItem>
-                    </ContextMenuContent>
-                </ContextMenu>;
-            })}
-            {contacts.map(assistant => {
-                const preview = previews.find(p => p.assistantId === assistant.id);
-                const unread = preview?.messageId && selected !== assistant.id &&
-                    preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
-                return <AssistantItemContextMenu key={assistant.id} assistant={assistant} onAction={onAssistantAction} canReset><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
-                    aria-pressed={selected === assistant.id} className="butler-contact">
-                    <ButlerAvatar id={assistant.id} size={48} compact figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
-                    <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-medium">{assistant.name}</span>
-                        <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
-                    </span>
-                    {approvals.has(assistant.id) ? <ApprovalDot/>
-                        : unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
-                </button></AssistantItemContextMenu>;
-            })}
+            <ButlerSortableList storageKey="butler-contact-order" rows={[...groupRows, ...assistantRows]}/>
         </nav>
     </>;
 }

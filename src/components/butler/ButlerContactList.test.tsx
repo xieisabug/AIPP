@@ -70,7 +70,7 @@ describe("ButlerContactList", () => {
         const groupAvatar = container.querySelector('[data-aipp-slot="butler-group-avatar"]') as HTMLElement;
         expect(groupAvatar).toHaveStyle({ width: "48px", height: "48px" });
 
-        const contactButton = screen.getByRole("button", { name: /写作助手/ });
+        const contactButton = screen.getByRole("button", { name: /^写作助手/ });
         const contactAvatar = contactButton.querySelector('[data-avatar-shape="pebble"]') as HTMLElement;
         expect(contactAvatar).toHaveStyle({ width: "48px", height: "48px" });
         expect(contactAvatar.querySelector("svg")).toHaveAttribute("viewBox", "-12 -12 534 534");
