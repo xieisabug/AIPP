@@ -2349,6 +2349,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <ButlerResultsOnlyContext.Provider value={resultOnly}>
                             <ButlerQuoteJumpContext.Provider value={jumpToQuotedMessage}>
                             <ConversationContent
+                                butlerBubbleMotion={windowLabel === "butler_experiment"}
                                 historyLoaded={!isLoadingShow && String(conversation?.id) === conversationId}
                                 isMobile={isMobile}
                                 conversationId={conversationId}

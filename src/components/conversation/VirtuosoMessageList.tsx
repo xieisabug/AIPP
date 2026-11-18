@@ -1,3 +1,4 @@
+import { useButlerReplyEntry } from "./useButlerReplyEntry";
 import { SendLayoutSnapshot, type SendLayout } from "./SendLayoutSnapshot";
 import React, {
     useCallback,
@@ -39,6 +40,7 @@ interface VirtuosoMessageListProps extends UseMessageListElementsProps {
     conversationId: string;
     /** True only after the host has loaded this conversation, even if it is empty. */
     historyLoaded?: boolean;
+    butlerBubbleMotion?: boolean;
     /**
      * 列表数据的身份。默认按每条消息的 conversation_id 判断数据是否已属于当前会话
      * （切会话时旧数据还没换掉，不能拿它做打开贴底）。群聊等聚合视图的消息分属多个执行会话，
@@ -262,6 +264,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     conversationId,
     transcriptKey,
     historyLoaded = false,
+    butlerBubbleMotion = false,
     scrollContainerRef,
     pendingScrollMessageId,
     pendingScrollAlign = "center",
@@ -270,6 +273,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     onScrollStateChange,
     ...messageListProps
 }) => {
+    useButlerReplyEntry(scrollContainerRef, conversationId, historyLoaded, butlerBubbleMotion, messageListProps.allDisplayMessages);
     const [listWidth, setListWidth] = useState<number | null>(null);
     const { renderItems } = useMessageListElements({
         ...messageListProps,
@@ -727,6 +731,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             content: listWrapperRef.current,
             previousLayout: layout,
             messageId: pinningMessageId,
+            butlerBubbleMotion,
             onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
             onComplete: () => {
                 finishPin();
@@ -765,6 +770,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         effectiveScrollParent,
         stopSendScroll,
         latestUserMessageId,
+        butlerBubbleMotion,
     ]);
 
     // 记录「本会话已经带消息渲染过」：之后出现新的 user 消息才算发送

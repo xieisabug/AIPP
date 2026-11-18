@@ -269,7 +269,7 @@ function MergedAssistantGroup(props: MergedAssistantGroupProps) {
             data-message-type="merged"
         >
             <MessageContextMenu actions={actions}>
-            <div className={`group relative inline-block ${bubbleMaxWidthClass} self-start rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}>
+            <div data-bubble-entry-members={groupMessages.map(message => message.id).join(",")} data-bubble-entry-id={(groupMessages.find(message => ["response", "assistant"].includes(message.message_type)) ?? groupMessages[0]).id} className={`group relative inline-block ${bubbleMaxWidthClass} self-start rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}>
                 {anyShining && (
                     <ShineBorder
                         shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}

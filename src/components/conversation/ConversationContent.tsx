@@ -9,6 +9,7 @@ import type { InlineInteractionItem } from "../ConversationUI";
 export interface ConversationContentProps {
     conversationId: string;
     historyLoaded?: boolean;
+    butlerBubbleMotion?: boolean;
     isMobile?: boolean;
     // MessageList props
     allDisplayMessages: Message[];
@@ -58,6 +59,7 @@ export interface ConversationContentProps {
 const ConversationContent: React.FC<ConversationContentProps> = memo(({
     conversationId,
     historyLoaded = false,
+    butlerBubbleMotion = false,
     isMobile = false,
     // MessageList props
     allDisplayMessages,
@@ -143,6 +145,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         {...sharedMessageListProps}
                         conversationId={conversationId}
                         historyLoaded={historyLoaded}
+                        butlerBubbleMotion={butlerBubbleMotion}
                         scrollContainerRef={scrollContainerRef}
                         pendingScrollMessageId={pendingScrollMessageId}
                         pendingScrollAlign={pendingScrollAlign}
