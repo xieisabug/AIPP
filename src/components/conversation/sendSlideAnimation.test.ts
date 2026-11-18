@@ -75,6 +75,22 @@ describe("startSendSlide", () => {
         expect(clipHost.style.overflowY).toBe("clip");
     });
 
+    it("should preserve the visible position when the user takes over scrolling", () => {
+        const { clipHost, target } = setup();
+        const scroller = document.createElement("div");
+        scroller.scrollTop = 600;
+        vi.spyOn(window, "getComputedStyle").mockReturnValue({
+            transform: "matrix(1, 0, 0, 1, 0, 150)",
+        } as CSSStyleDeclaration);
+        const slide = startSendSlide(clipHost, target, 320);
+        slide.cancel(scroller);
+        expect(scroller.scrollTop).toBe(450);
+        expect(slide.isActive()).toBe(false);
+        expect(clipHost.style.overflowY).toBe("");
+        slide.cancel(scroller);
+        expect(scroller.scrollTop).toBe(450);
+    });
+
     it("is a no-op for reduced motion or negligible offsets", () => {
         const { clipHost, target, animations } = setup();
         expect(startSendSlide(clipHost, target, 0.4).isActive()).toBe(false);

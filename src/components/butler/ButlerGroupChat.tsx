@@ -220,7 +220,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
 
         <ButlerQuoteContext.Provider value={quoteState}>
         {/* 消息列表与私聊同一套（见 ButlerGroupTranscript）：输入框悬浮在列表底部之上，尾部空间由列表留出。 */}
-        <ButlerGroupTranscript groupId={groupId} messages={messages} members={members} running={running} />
+        <ButlerGroupTranscript historyLoaded={detail.id === groupId && historyLoaded.current} groupId={groupId} messages={messages} members={members} running={running} />
 
         {/* 群聊消息只有正文和引用，暂不支持附件，所以不传附件能力。 */}
         <InputArea

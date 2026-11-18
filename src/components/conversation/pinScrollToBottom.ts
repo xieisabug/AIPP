@@ -313,6 +313,7 @@ export function pinScrollContainerToBottom({
         if (completed) {
             return;
         }
+        completed = true;
         cleanup();
     };
 }

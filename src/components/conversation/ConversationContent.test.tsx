@@ -8,7 +8,7 @@ import type { InlineInteractionItem } from "../ConversationUI";
 import ConversationContent from "./ConversationContent";
 
 vi.mock("./VirtuosoMessageList", () => ({
-    default: () => <div data-testid="virtuoso-message-list" />,
+    default: ({ historyLoaded }: { historyLoaded: boolean }) => <div data-testid="virtuoso-message-list" data-history-loaded={String(historyLoaded)} />,
 }));
 
 vi.mock("../NewChatComponent", () => ({
@@ -85,6 +85,14 @@ function makeProps(
 }
 
 describe("ConversationContent virtualization engine", () => {
+    it("should forward history readiness separately from an empty message array", () => {
+        const props = makeProps({ allDisplayMessages: [], historyLoaded: false });
+        const { rerender } = render(<ConversationContent {...props} />);
+        expect(screen.getByTestId("virtuoso-message-list")).toHaveAttribute("data-history-loaded", "false");
+        rerender(<ConversationContent {...props} historyLoaded />);
+        expect(screen.getByTestId("virtuoso-message-list")).toHaveAttribute("data-history-loaded", "true");
+    });
+
     it("renders the Virtuoso list for an open conversation", () => {
         render(<ConversationContent {...makeProps()} />);
 

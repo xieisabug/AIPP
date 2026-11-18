@@ -8,6 +8,7 @@ import type { InlineInteractionItem } from "../ConversationUI";
 
 export interface ConversationContentProps {
     conversationId: string;
+    historyLoaded?: boolean;
     isMobile?: boolean;
     // MessageList props
     allDisplayMessages: Message[];
@@ -56,6 +57,7 @@ export interface ConversationContentProps {
 
 const ConversationContent: React.FC<ConversationContentProps> = memo(({
     conversationId,
+    historyLoaded = false,
     isMobile = false,
     // MessageList props
     allDisplayMessages,
@@ -140,6 +142,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                     <VirtuosoMessageList
                         {...sharedMessageListProps}
                         conversationId={conversationId}
+                        historyLoaded={historyLoaded}
                         scrollContainerRef={scrollContainerRef}
                         pendingScrollMessageId={pendingScrollMessageId}
                         pendingScrollAlign={pendingScrollAlign}

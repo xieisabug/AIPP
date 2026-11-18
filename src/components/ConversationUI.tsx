@@ -2329,6 +2329,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <ButlerResultsOnlyContext.Provider value={resultOnly}>
                             <ButlerQuoteJumpContext.Provider value={jumpToQuotedMessage}>
                             <ConversationContent
+                                historyLoaded={!isLoadingShow && String(conversation?.id) === conversationId}
                                 isMobile={isMobile}
                                 conversationId={conversationId}
                                 // MessageList props
