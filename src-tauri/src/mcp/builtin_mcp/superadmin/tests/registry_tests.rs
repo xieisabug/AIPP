@@ -28,6 +28,17 @@ fn get_existing_action() {
 }
 
 #[test]
+fn test_assistant_reset_conversation_discoverable_by_purpose() {
+    let registry = build_registry();
+    let results = registry.search(Some("重开"), Some("assistant"), None, None);
+    let reset = results.iter().find(|m| m.action_id == "assistant.reset_conversation").unwrap();
+    assert_eq!(reset.args_schema["required"], serde_json::json!(["assistant_id"]));
+    assert_eq!(reset.allowed_scopes.len(), 1);
+    assert!(matches!(reset.allowed_scopes[0], ActionScope::Assistant));
+    assert!(reset.supports_dry_run);
+}
+
+#[test]
 fn get_nonexistent_action() {
     let registry = build_registry();
     assert!(registry.get_meta("does_not_exist").is_none());

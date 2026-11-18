@@ -18,6 +18,9 @@ impl Handler {
         if matches!(self.0,"update"|"copy") { return profile_action(app,self.0,args,dry_run).await; }
         if self.0.starts_with("group_") { return group_action(app,self.0,args,dry_run).await; }
         let id = args["assistant_id"].as_i64().ok_or("需要 assistant_id")?;
+        if self.0 == "reset_conversation" {
+            return reset_conversation(app, id, dry_run).await;
+        }
         let result = {
             let db = AssistantDatabase::new(app).map_err(|e|e.to_string())?;
             let llm = LLMDatabase::new(app).map_err(|e|e.to_string())?;
@@ -61,6 +64,28 @@ impl Handler {
             return Ok(result);
         }
         Ok(result)
+    }
+}
+
+async fn reset_conversation(app: &AppHandle, assistant_id: i64, dry_run: bool) -> Result<Value, String> {
+    use crate::api::butler_api;
+    let assistant = AssistantDatabase::new(app).and_then(|db| db.get_assistant(assistant_id))
+        .map_err(|e| format!("读取助手 {assistant_id} 失败：{e}"))?;
+    let chief = butler_api::is_butler_system_assistant(&assistant);
+    let kind = if chief { "butler_main" } else { "butler_contact" };
+    if dry_run {
+        return Ok(json!({"dry_run": true, "assistant_id": assistant_id, "name": assistant.name,
+            "would_reopen": kind}));
+    }
+    if chief {
+        let (conversation, archived) = butler_api::reopen_butler_main_conversation(app.clone()).await?;
+        Ok(json!({"assistant_id": assistant_id, "conversation_kind": kind,
+            "conversation_id": conversation.id, "archived_conversation_ids": archived.as_slice()}))
+    } else {
+        let result = butler_api::reset_butler_contact_conversation(app.clone(), assistant_id).await?;
+        Ok(json!({"assistant_id": assistant_id, "conversation_kind": kind,
+            "conversation_id": result.conversation_id, "archived_conversation_ids": result.archived_conversation_ids,
+            "stop_notes": result.stop_notes}))
     }
 }
 
@@ -138,6 +163,11 @@ pub fn register(registry: &mut ActionRegistry) {
     profile["properties"]["assistant_id"]["description"] = json!("来源助手 ID；复制全部配置，不复制聊天、记忆或工作状态");
     register_action(registry,"assistant.copy","copy","复制助手配置","保留来源模型参数、MCP、Skills、工作区及提示词参数，可覆盖基础资料；不应用新建默认值。",profile,true,ActionScope::Assistant);
     let assistant = json!({"type":"object","required":["assistant_id"],"properties":{"assistant_id":{"type":"integer"}}});
+    register_action(
+        registry, "assistant.reset_conversation", "reset_conversation", "为指定助手重开新会话",
+        "按 assistant_id 重开管家联系人私聊或总管家主会话，让后续消息从新上下文开始。旧会话归档可检索，长期记忆保留。重开联系人私聊会停止旧私聊进行中的工作并清除排队消息。",
+        assistant.clone(), true, ActionScope::Assistant,
+    );
     register_action(registry,"assistant.get_channel_config","channel_get","查询通道配置与合法值","返回适用字段、合法值、助手覆盖、provider 默认、最终值与来源；不启动 Agent。",assistant.clone(),false,ActionScope::Assistant);
     register_action(registry,"assistant.patch_channel_config","channel_patch","修改或清除助手通道参数","先查询支持字段；普通修改与收紧可直接保存，扩大权限须使用 assistant.patch_agent_permissions 请求用户批准。remove 恢复继承也校验权限变化。",json!({"type":"object","required":["assistant_id","set","remove"],"properties":{"assistant_id":{"type":"integer"},"set":{"type":"object"},"remove":{"type":"array","items":{"type":"string"}}}}),true,ActionScope::Assistant);
     register_action(registry,"assistant.get_mcp_config","mcp_get","查询助手 MCP 可用项与设置","返回服务与工具显式绑定，区分管家自动注入与助手设置。",assistant.clone(),false,ActionScope::Assistant);

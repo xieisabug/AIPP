@@ -3956,6 +3956,9 @@ pub async fn reset_butler_contact_conversation(
         .map_err(|e| format!("打开会话数据库出错（助手 {assistant_id}）：{e}"))?
         .archive_butler_contact(assistant_id, &assistant.name, &archived_name)
         .map_err(|e| format!("归档助手 {assistant_id} 的旧私聊出错：{e}"))?;
+    let _ = app_handle.emit("butler_contact_reset", json!({
+        "assistantId": assistant_id, "conversationId": conversation_id, "archivedConversationIds": archived,
+    }));
     // 先归档再停止：新的协作请求从此落到新私聊，停止只处理旧私聊上已有的工作。
     let mut stop_notes = Vec::new();
     for old in &archived {
@@ -3995,10 +3998,13 @@ pub async fn load_butler_main_conversation(
     })
 }
 
-#[tauri::command]
-pub async fn reset_butler_main_conversation(
+pub(crate) async fn reopen_butler_main_conversation(
     app_handle: tauri::AppHandle,
-) -> Result<ButlerMainLoadResponse, String> {
+) -> Result<(Conversation, Option<i64>), String> {
+    // The window and multiple assistants can request a reset concurrently. Finish moving
+    // the previous main conversation's task ownership before starting another reset.
+    static RESET: Mutex<()> = Mutex::const_new(());
+    let _reset = RESET.lock().await;
     ensure_butler_enabled(&app_handle).await?;
     let butler_assistant = ensure_butler_system_assistant(&app_handle).await?;
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
@@ -4053,6 +4059,15 @@ pub async fn reset_butler_main_conversation(
         .map_err(|e| e.to_string())?;
     butler_repo.touch_main_state(BUTLER_MAIN_SLOT).map_err(|e| e.to_string())?;
 
+    let _ = app_handle.emit("butler_main_reset", json!({ "conversation_id": new_conversation.id }));
+    Ok((new_conversation, previous_main_conversation_id))
+}
+
+#[tauri::command]
+pub async fn reset_butler_main_conversation(
+    app_handle: tauri::AppHandle,
+) -> Result<ButlerMainLoadResponse, String> {
+    let (new_conversation, _) = reopen_butler_main_conversation(app_handle.clone()).await?;
     let model_selection = get_butler_model_selection(&app_handle).await?;
     let paginated = list_butler_tasks_paginated_internal(
         &app_handle,
@@ -4061,8 +4076,6 @@ pub async fn reset_butler_main_conversation(
         0,
     )
     .await?;
-    let _ = app_handle.emit("butler_main_reset", json!({ "conversation_id": new_conversation.id }));
-
     Ok(ButlerMainLoadResponse {
         conversation: new_conversation,
         model_id: model_selection.raw_value,

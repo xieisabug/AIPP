@@ -1,5 +1,5 @@
 import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
-import { resetButlerContactConversation } from "@/services/butlerContactService";
+import { resetButlerContactConversation, type ButlerContactResetResult } from "@/services/butlerContactService";
 import ButlerGroupChat from "@/components/butler/ButlerGroupChat";
 import ButlerGroupMemberPicker from "@/components/butler/ButlerGroupMemberPicker";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
@@ -642,20 +642,31 @@ function ButlerExperimentWindow() {
 
     // 重开联系人私聊（与总管家「重开新会话」一致）：旧私聊归档，仍停留在该助手时切到新私聊。
     const [resettingContactId, setResettingContactId] = useState<number | null>(null);
+    const showResetContact = useCallback((assistantId: number, result: Omit<ButlerContactResetResult, "stopNotes">) => {
+        result.archivedConversationIds.forEach(id => localStorage.removeItem(`butler-read-${id}`));
+        setContact(active => active?.assistantId === assistantId && active.conversationId < result.conversationId
+            ? { assistantId, conversationId: result.conversationId }
+            : active);
+    }, []);
+    useEffect(() => {
+        const listener = listen<Omit<ButlerContactResetResult, "stopNotes"> & { assistantId: number }>(
+            "butler_contact_reset", ({ payload }) => {
+                showResetContact(payload.assistantId, payload);
+                void loadPreviews();
+            }
+        );
+        return () => { void listener.then(stop => stop()).catch(console.warn); };
+    }, [loadPreviews, showResetContact]);
     const resetContactConversation = useCallback(async (assistantId: number) => {
         setResettingContactId(assistantId);
         try {
             const result = await resetButlerContactConversation(assistantId);
-            result.archivedConversationIds.forEach(id => localStorage.removeItem(`butler-read-${id}`));
-            setContact(active => active?.assistantId === assistantId
-                ? { assistantId, conversationId: result.conversationId }
-                : active);
+            showResetContact(assistantId, result);
             if (result.stopNotes.length) toast.info(`已停止旧私聊上进行中的工作：${result.stopNotes.join("；")}`);
-            await loadPreviews();
         } finally {
             setResettingContactId(null);
         }
-    }, [loadPreviews]);
+    }, [showResetContact]);
     const handleResetContactConversation = useCallback(async (assistantId: number) => {
         try {
             await resetContactConversation(assistantId);
