@@ -319,6 +319,8 @@ export function pinScrollContainerToBottom({
 }
 
 export interface FollowScrollToBottomOptions {
+    /** Preserve the small top-alignment gap handed off by a send animation. */
+    bottomOffsetPx?: number;
     container: HTMLDivElement;
     /** 额外观察尺寸变化的内容元素（如虚拟列表外层），其长高不一定触发容器自身 resize */
     contentElements?: Array<Element | null | undefined>;
@@ -358,6 +360,7 @@ const USER_INTENT_EVENTS = ["wheel", "touchstart", "pointerdown", "mousedown", "
  */
 export function followScrollContainerBottom({
     container,
+    bottomOffsetPx = 0,
     contentElements = [],
     onScrollStateChange,
     shouldContinue,
@@ -387,7 +390,7 @@ export function followScrollContainerBottom({
     let resumeLockedUntil = 0;
 
     const getDistanceToBottom = () =>
-        container.scrollHeight - container.scrollTop - container.clientHeight;
+        container.scrollHeight - container.scrollTop - container.clientHeight - bottomOffsetPx;
 
     const isAtBottom = () => getDistanceToBottom() <= bottomThresholdPx;
     const isNearBottomForResume = () =>
@@ -407,7 +410,7 @@ export function followScrollContainerBottom({
 
         const maxScrollTop = Math.max(
             0,
-            container.scrollHeight - container.clientHeight,
+            container.scrollHeight - container.clientHeight - bottomOffsetPx,
         );
         if (Math.abs(container.scrollTop - maxScrollTop) <= 1) {
             lastScrollTop = container.scrollTop;

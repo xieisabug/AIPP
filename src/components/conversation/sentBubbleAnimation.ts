@@ -1,5 +1,5 @@
 /** 新发送的 user 气泡入场动画时长；略短于视口滑动，让气泡先站稳 */
-export const SENT_BUBBLE_ANIMATION_MS = 380;
+export const SENT_BUBBLE_ANIMATION_MS = 140;
 const MAX_LOOKUP_FRAMES = 10;
 
 function prefersReducedMotion(): boolean {

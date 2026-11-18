@@ -11,6 +11,13 @@ export const server = createServer(async (req,res) => {
     try {
         if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
         const url = new URL(req.url, `http://127.0.0.1:${port}`);
+        if (url.pathname === '/send-motion-delayed.svg') {
+            setTimeout(() => {
+                res.writeHead(200, { 'Content-Type':'image/svg+xml', 'Cache-Control':'no-store' });
+                res.end('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="skyblue"/></svg>');
+            }, 650);
+            return;
+        }
         const file = path.resolve(root, '.' + decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
         if (!file.startsWith(root + path.sep)) { res.writeHead(403).end(); return; }
         const info = await stat(file);
