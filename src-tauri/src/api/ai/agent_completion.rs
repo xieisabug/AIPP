@@ -70,7 +70,15 @@ pub(crate) fn notify_butler_reply(app: &tauri::AppHandle, name: &str, content: &
         return;
     }
     let body = truncate_notification_body(crate::utils::reply_quote::strip(content));
-    if let Err(error) = app.notification().builder().title(format!("{name} 回复了消息")).body(body).show() {
+    let notification = app.notification().builder().title(format!("{name} 回复了消息")).body(body);
+    // WinRT treats a missing sound as an explicitly silent toast.
+    #[cfg(target_os = "windows")]
+    let notification = notification.sound("Default");
+    #[cfg(target_os = "macos")]
+    let notification = notification.sound("Ping");
+    #[cfg(target_os = "linux")]
+    let notification = notification.sound("message-new-instant");
+    if let Err(error) = notification.show() {
         warn!(%error, "failed to send Butler reply notification");
     }
 }
