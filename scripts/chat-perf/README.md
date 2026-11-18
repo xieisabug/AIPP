@@ -152,7 +152,24 @@ with the OS reduced-motion preference. The newest short turn should settle about
 performance tools, checking bubble opacity/transform and row bounds, not just
 `scrollTop` (the slide intentionally uses a compensating transform).
 
-This entry is a frontend reproduction, not an end-to-end Tauri validation. It does
-not simulate image loading or backend timing automatically. Real delayed images,
-streaming responses, native WebView behavior and compositor smoothness still need
-application validation on the target platform.
+This entry is a frontend reproduction, not an end-to-end Tauri validation. The
+automated matrix below supplies controlled layout/timing changes. Real network
+images, streaming responses, native WebView behavior and compositor smoothness
+still need application validation on the target platform.
+
+### Automated browser matrix
+
+“运行覆盖矩阵” runs 14 scenarios with real DOM layout and Web Animations:
+empty/short/120-row history, rapid sends, immediate/delayed replies, synthetic wheel
+and touch interruption, delayed image insertion/decoding, container resize, switching,
+async history, history deletion, and emulated reduced-motion. “下载结果” exports every
+rAF sample (time, row top, scroll position, height, opacity), animation call count,
+functional assertions, p95/max frame intervals, and browser metadata. Keep the tab
+visible and avoid input during the run. The scroller uses production overflow-anchor:none.
+
+Pass/fail asserts position and animation ownership, **not** a frame-time budget.
+The wheel/touch events, history/model timing and media-query override are simulated;
+image loading uses a local data URL after a delay, not a remote network transfer.
+Resize changes the actual container's height, not the native window manager. These
+checks supplement manual device interaction and do not replace native WebView,
+physical touch, OS reduced-motion, network-delayed images or compositor profiling.
