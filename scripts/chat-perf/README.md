@@ -204,3 +204,60 @@ F11, maximize and boundary-drag attempts did not yield a confirmed native viewpo
 size change in this desktop; Xfce Accessibility exposed no reduced-motion setting.
 Those platform checks remain unverified; container resizing and matchMedia override
 coverage must not be reported as native OS validation.
+
+
+### Production versus development control (2026-11-18)
+
+Use `&scenario=async-history&repeat=6` for six fixed trials (maximum ten).
+The default history delivery now uses ordinary batched setters, matching
+ConversationUI's async response. Add `&flushHistory=1` to reproduce the original
+synchronous stress fixture. Exports identify build/update mode and include mounted
+message counts and development-only React Profiler commits. `historyCommitMs` is
+null for batched updates: measuring setter calls does not measure React commit time.
+Profiler commit arrays are snapshotted so the next scenario cannot change an earlier
+result. Production React does not run Profiler callbacks; use frame/task metrics.
+
+Controls used the same desktop Chromium, 1165x676 scroll viewport, 120 synthetic
+plain-text messages, six sequential trials per case, unchanged production source.
+Build with `vite build --config scripts/chat-perf/vite.config.ts` and serve the output
+with `node scripts/chat-perf/serve.mjs tmp/chat-perf/site 4180` from the desktop
+terminal (the command environment and desktop can have separate loopback networks).
+Keep the tab visible. Builds and tests were not run concurrently with measurements.
+
+| Case | Median of per-run max gap | Range of max gaps | Per-run p95 range |
+| --- | ---: | ---: | ---: |
+| Production, flushSync stress | 33.8ms | 28.5–36.6ms | 17.4–26.4ms |
+| Development, flushSync stress | 104.9ms | 89.7–131.4ms | 18.1–20.2ms |
+| Production, batched delivery | 33.4ms | 31.8–112.9ms | 18.5–26.5ms |
+| Production, batched warm repeat | 30.2ms | 24.7–33.9ms | 17.5–19.9ms |
+
+The consistent loading gap coincided with 3→20 mounted rows and height correction;
+development React render work in that update was about 54–83ms. Production trials
+reported no Long Task. The two batched outliers (83.6/112.9ms) occurred after node
+count, height and scroll position had settled, without a reported Long Task. This
+does not prove an environment cause or eliminate rendering/scheduling cost.
+DevTools CPU-stack capture was explicitly blocked by the browser's organization
+policy; no alternate access was attempted. Exact function-level attribution remains
+unverified. The original 171.6ms development observation is not a production SLA.
+
+Two reversible product experiments were rejected: reducing overscan reduced mounted
+rows 20→17 but max-gap median was 31.8ms (30.2–33.2ms), overlapping baseline; removing
+the initial footer offset yielded median 37.2ms (27.7–46.3ms). Neither establishes a
+reliable performance improvement, so neither change is retained. The final production
+14-scenario matrix passed all functional assertions; per-scenario maxima were
+17.5–32.4ms, with async history 25.9ms. This is useful coverage, not a guarantee of
+60fps on real datasets, native WebViews, or all devices. Native backend loading,
+rich attachments and full CPU/compositor attribution still need target-platform
+measurement before claiming the long-frame issue is resolved.
+
+
+The user subsequently accepted loading-covered history pauses; no further history
+optimization is planned for this change. Focused production send checks also passed:
+12 rapid-send trials (two messages 70ms apart) and six 120-message history sends all
+settled at top=8px. Long-send p95 was 17.4–19.7ms; rapid warm-repeat p95 was
+17.7–20.8ms. One initial rapid trial had a 61.7ms moving-frame interval (p95 39.4ms),
+the warm repeat had a 72.1ms moving gap and a 76.7ms gap after motion had already
+settled; one long-send trial had a 46.9ms moving gap. These outliers
+are retained in the evidence; no claim of zero dropped frames or universal 60fps.
+Only the diagnostic harness/documentation changed in this follow-up; all product
+experiments were reverted before delivery.
