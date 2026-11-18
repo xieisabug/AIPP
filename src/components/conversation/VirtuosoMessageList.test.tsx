@@ -3,7 +3,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VirtuosoMessageList, { getVirtuosoRowMinHeight } from "./VirtuosoMessageList";
-import * as sendSlide from "./sendSlideAnimation";
+import * as sendSlide from "./sendScrollSequence";
 import * as sentBubble from "./sentBubbleAnimation";
 import type { Message } from "@/data/Conversation";
 
@@ -40,7 +40,7 @@ vi.mock("@/hooks/useFeishuDebugResend", () => ({
 
 vi.mock("../MessageItem", () => ({
     default: ({ message }: { message: Message }) => (
-        <div data-testid={`message-${message.id}`}>{message.content}</div>
+        <div data-message-item data-message-id={message.id} data-testid={`message-${message.id}`}><div>{message.content}</div></div>
     ),
 }));
 
@@ -296,6 +296,16 @@ describe("VirtuosoMessageList row height reservation", () => {
 
     it("pins to bottom after a new user message is appended", async () => {
         const scrollContainer = document.createElement("div");
+        document.body.appendChild(scrollContainer);
+        const query = scrollContainer.querySelector.bind(scrollContainer);
+        vi.spyOn(scrollContainer, "querySelector").mockImplementation((selector: string) => {
+            const row = query(selector);
+            if (row instanceof HTMLElement) row.getBoundingClientRect = () => ({
+                top: 608 - scrollContainer.scrollTop, bottom: 648 - scrollContainer.scrollTop,
+                left: 0, right: 400, width: 400, height: 40, x: 0, y: 0, toJSON() {},
+            });
+            return row;
+        });
         Object.defineProperty(scrollContainer, "scrollHeight", {
             configurable: true,
             value: 1000,
@@ -333,6 +343,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                 smartScroll={smartScroll}
                 onScrollStateChange={onScrollStateChange}
             />,
+            { container: scrollContainer },
         );
 
         await waitFor(() => {
@@ -372,6 +383,16 @@ describe("VirtuosoMessageList row height reservation", () => {
 
     it("keeps the send pin alive when an assistant reply is appended right after sending", async () => {
         const scrollContainer = document.createElement("div");
+        document.body.appendChild(scrollContainer);
+        const query = scrollContainer.querySelector.bind(scrollContainer);
+        vi.spyOn(scrollContainer, "querySelector").mockImplementation((selector: string) => {
+            const row = query(selector);
+            if (row instanceof HTMLElement) row.getBoundingClientRect = () => ({
+                top: 608 - scrollContainer.scrollTop, bottom: 648 - scrollContainer.scrollTop,
+                left: 0, right: 400, width: 400, height: 40, x: 0, y: 0, toJSON() {},
+            });
+            return row;
+        });
         Object.defineProperty(scrollContainer, "scrollHeight", {
             configurable: true,
             value: 1000,
@@ -391,7 +412,7 @@ describe("VirtuosoMessageList row height reservation", () => {
             />
         );
 
-        const { rerender } = render(renderWith(baseMessages));
+        const { rerender } = render(renderWith(baseMessages), { container: scrollContainer });
         await waitFor(() => {
             expect(scrollContainer.scrollTop).toBe(600);
         });
@@ -403,8 +424,8 @@ describe("VirtuosoMessageList row height reservation", () => {
         ];
         rerender(renderWith(withUser));
 
-        // 滚动位置直接落到最终位置（视觉滑动由 transform 完成，不依赖逐帧 scrollTop）
-        expect(scrollContainer.scrollTop).toBe(600);
+        // Bubble entry preserves the native scroll position before movement begins.
+        expect(scrollContainer.scrollTop).toBe(100);
 
         // 后端紧接着追加 assistant 占位：tail 不再是 user，effect 重跑
         rerender(renderWith([
@@ -891,6 +912,12 @@ describe("VirtuosoMessageList send ownership", () => {
     beforeEach(() => {
         vi.useFakeTimers();
         vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+        vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+            const container = this.closest("[data-sequence-test]") as HTMLElement | null;
+            const top = container && this.hasAttribute("data-message-item")
+                ? container.scrollHeight - container.clientHeight + 8 - container.scrollTop : 0;
+            return { top, bottom: top + 40, left: 0, right: 400, width: 400, height: 40, x: 0, y: top, toJSON() {} };
+        });
     });
     afterEach(() => {
         vi.useRealTimers();
@@ -900,6 +927,7 @@ describe("VirtuosoMessageList send ownership", () => {
 
     function setup(initial: Message[] = [], historyLoaded = true) {
         const container = document.createElement("div");
+        container.dataset.sequenceTest = "true";
         document.body.appendChild(container);
         let height = 400;
         Object.defineProperty(container, "scrollHeight", { get: () => height });
@@ -919,7 +947,7 @@ describe("VirtuosoMessageList send ownership", () => {
 
     it("should preserve reading position when sync deletion reveals a previously rendered user turn", () => {
         const bubble = vi.spyOn(sentBubble, "playSentBubbleAnimation");
-        const slide = vi.spyOn(sendSlide, "startSendSlide");
+        const slide = vi.spyOn(sendSlide, "startSendScrollSequence");
         const history = [
             makeMessage({ id: 1, message_type: "user" }),
             makeMessage({ id: 2, message_type: "response" }),
@@ -943,13 +971,15 @@ describe("VirtuosoMessageList send ownership", () => {
         fixture.update([...history.slice(0, 2), makeMessage({ id: 5, message_type: "user" }),
             makeMessage({ id: 6, message_type: "butler_processing" })]);
         expect(bubble.mock.calls.map(call => call[1])).toEqual([5]);
+        expect(fixture.container.scrollTop).toBe(240);
+        act(() => { vi.advanceTimersByTime(700); });
         expect(fixture.container.scrollTop).toBe(1600);
         fixture.unmount();
     });
 
     it("should position asynchronously loaded history without treating it as a first send", () => {
         const bubble = vi.spyOn(sentBubble, "playSentBubbleAnimation");
-        const slide = vi.spyOn(sendSlide, "startSendSlide");
+        const slide = vi.spyOn(sendSlide, "startSendScrollSequence");
         const fixture = setup([], false);
         fixture.setHeight(1600);
         fixture.update([
@@ -988,13 +1018,15 @@ describe("VirtuosoMessageList send ownership", () => {
             makeMessage({ id: 2, message_type: "butler_processing" }),
         ], { historyLoaded: true });
         expect(bubble.mock.calls.map(call => call[1])).toEqual([1]);
+        expect(fixture.container.scrollTop).toBe(0);
+        act(() => { vi.advanceTimersByTime(700); });
         expect(fixture.container.scrollTop).toBe(600);
         fixture.unmount();
     });
 
     it.each(["butler_processing", "response"])("should animate the first send when %s is batched after it", (type) => {
         const bubble = vi.spyOn(sentBubble, "playSentBubbleAnimation");
-        const slide = vi.spyOn(sendSlide, "startSendSlide");
+        const slide = vi.spyOn(sendSlide, "startSendScrollSequence");
         const fixture = setup();
         fixture.setHeight(1000);
         fixture.update([
@@ -1003,26 +1035,31 @@ describe("VirtuosoMessageList send ownership", () => {
         ]);
         expect(bubble).toHaveBeenCalledTimes(1);
         expect(bubble).toHaveBeenCalledWith(fixture.container, 1);
-        expect(slide).toHaveBeenCalledWith(expect.any(HTMLElement), expect.any(HTMLElement), 600);
+        expect(slide).toHaveBeenCalledWith(expect.objectContaining({ container: fixture.container, messageId: 1 }));
+        expect(fixture.container.scrollTop).toBe(0);
+        act(() => { vi.advanceTimersByTime(700); });
         expect(fixture.container.scrollTop).toBe(600);
         fixture.unmount();
     });
 
     it("should start a slide when a subpixel correction is followed by a large layout correction", () => {
-        const slide = vi.spyOn(sendSlide, "startSendSlide");
+        const slide = vi.spyOn(sendSlide, "startSendScrollSequence");
         const fixture = setup();
         fixture.setHeight(400.75);
         fixture.update([makeMessage({ id: 1, message_type: "user" })]);
         expect(slide).toHaveBeenCalledTimes(1);
         fixture.setHeight(1000);
         act(() => { vi.advanceTimersByTime(32); });
-        expect(slide).toHaveBeenLastCalledWith(expect.any(HTMLElement), expect.any(HTMLElement), 599.25);
+        expect(fixture.container.scrollTop).toBe(0);
+        act(() => { vi.advanceTimersByTime(700); });
+        expect(fixture.container.scrollTop).toBe(600);
+        expect(slide).toHaveBeenCalledTimes(1);
         fixture.unmount();
     });
 
     it.each(["wheel", "touchmove"])("should cancel visual motion when the user interrupts with %s", (type) => {
         const cancel = vi.fn();
-        vi.spyOn(sendSlide, "startSendSlide").mockReturnValue({ addOffset: vi.fn(), isActive: () => true, cancel });
+        vi.spyOn(sentBubble, "playSentBubbleAnimation").mockReturnValue(cancel);
         const fixture = setup();
         fixture.setHeight(1000);
         const messages = [makeMessage({ id: 1, message_type: "user" })];
@@ -1051,6 +1088,7 @@ describe("VirtuosoMessageList send ownership", () => {
         expect(bubble.mock.calls.map(call => call[1])).toEqual([121]);
         fixture.update([...messages.slice(0, -1), makeMessage({ id: 123, message_type: "response" })]);
         expect(bubble).toHaveBeenCalledTimes(1);
+        act(() => { vi.advanceTimersByTime(700); });
         expect(fixture.container.scrollTop).toBe(1200);
         fixture.unmount();
     });
@@ -1084,7 +1122,7 @@ describe("VirtuosoMessageList send ownership", () => {
     it("should animate each new user once and cancel the previous send on conversation change", () => {
         const bubble = vi.spyOn(sentBubble, "playSentBubbleAnimation");
         const cancel = vi.fn();
-        vi.spyOn(sendSlide, "startSendSlide").mockReturnValue({ addOffset: vi.fn(), isActive: () => true, cancel });
+        vi.spyOn(sentBubble, "playSentBubbleAnimation").mockReturnValue(cancel);
         const fixture = setup();
         fixture.setHeight(1000);
         const first = makeMessage({ id: 1, message_type: "user" });
@@ -1092,9 +1130,9 @@ describe("VirtuosoMessageList send ownership", () => {
         fixture.setHeight(1600);
         fixture.update([first, makeMessage({ id: 2, message_type: "user" }), makeMessage({ id: 3, message_type: "butler_processing" })]);
         expect(bubble.mock.calls.map(call => call[1])).toEqual([1, 2]);
-        expect(cancel).toHaveBeenCalledWith(fixture.container);
+        expect(cancel).toHaveBeenCalledTimes(1);
         fixture.update([makeMessage({ id: 10, conversation_id: 2, message_type: "user" })], { conversationId: "2" });
-        expect(cancel).toHaveBeenCalledTimes(3);
+        expect(cancel).toHaveBeenCalledTimes(2);
         expect(bubble).toHaveBeenCalledTimes(2);
         fixture.unmount();
     });

@@ -90,6 +90,22 @@ describe("followScrollContainerBottom", () => {
         vi.unstubAllGlobals();
     });
 
+    it("preserves the send alignment gap through follower handoff and later growth", () => {
+        const container = document.createElement("div");
+        let height = 1000;
+        Object.defineProperties(container, {
+            scrollHeight: { get: () => height },
+            clientHeight: { value: 400 },
+        });
+        container.scrollTop = 595;
+        const stop = followScrollContainerBottom({ container, bottomOffsetPx: 5, shouldContinue: () => true });
+        expect(container.scrollTop).toBe(595);
+        height = 1200;
+        resizeCallbacks.forEach(callback => callback());
+        expect(container.scrollTop).toBe(795);
+        stop();
+    });
+
     it.each([false, true])("preserves follow intent across a zero-size hidden preview (paused=%s)", (paused) => {
         vi.useFakeTimers();
         const shell = document.createElement("div");

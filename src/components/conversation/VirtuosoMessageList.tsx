@@ -1,3 +1,4 @@
+import { SendLayoutSnapshot, type SendLayout } from "./SendLayoutSnapshot";
 import React, {
     useCallback,
     useEffect,
@@ -26,8 +27,7 @@ import {
     followScrollContainerBottom,
     pinScrollContainerToBottom,
 } from "./pinScrollToBottom";
-import { playSentBubbleAnimation } from "./sentBubbleAnimation";
-import { startSendSlide, type SendSlide } from "./sendSlideAnimation";
+import { startSendScrollSequence } from "./sendScrollSequence";
 import {
     findFirstLiveSuffixIndex,
     useMessageListElements,
@@ -283,6 +283,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         ) <= 500_000;
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
     const listWrapperRef = useRef<HTMLDivElement | null>(null);
+    const sendLayoutSnapshotRef = useRef<SendLayout | null>(null);
     const scrollSyncFrameRef = useRef<number | null>(null);
     const initialBottomConversationRef = useRef<string | null>(null);
     const initialBottomPinConversationRef = useRef<string | null>(null);
@@ -299,7 +300,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         messageId: number;
         releasedByUser: boolean;
         pinning: boolean;
-        slide: SendSlide | null;
+        layout: SendLayout | null;
     } | null>(null);
     /** live-only 分支已把本会话贴底展示过；之后长出 history 属于「发送」，不是重新打开 */
     const liveOnlyShownConversationRef = useRef<string | null>(null);
@@ -699,8 +700,13 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
-        // A rapid second send starts from the visible position of the first slide.
-        sendScrollStateRef.current?.slide?.cancel(container);
+        // During rapid entry-phase sends, keep the original visible history
+        // anchor rather than switching to the first newly inserted bubble.
+        let layout = sendLayoutSnapshotRef.current;
+        const previousLayout = sendScrollStateRef.current?.layout;
+        if (container.dataset.sendPhase === "entry" && layout && previousLayout?.anchorId) {
+            layout = { ...layout, anchorId: previousLayout.anchorId, anchorTop: previousLayout.anchorTop };
+        }
         stopSendScroll();
         const pinningMessageId = latestUserMessageId;
         lastPinnedUserMessageIdRef.current = pinningMessageId;
@@ -708,52 +714,25 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             messageId: pinningMessageId,
             releasedByUser: false,
             pinning: true,
-            slide: null as SendSlide | null,
+            layout,
         };
         sendScrollStateRef.current = sendState;
 
-        // 每次钉底跳动都在绘制前同步回调：首次创建反向 transform，之后叠加补偿
-        const handleScrollDelta = (delta: number) => {
-            if (sendState.releasedByUser) {
-                return;
-            }
-            if (sendState.slide?.isActive()) {
-                sendState.slide.addOffset(delta);
-                return;
-            }
-            const wrapper = listWrapperRef.current;
-            const content = wrapper?.firstElementChild;
-            if (!wrapper || !(content instanceof HTMLElement)) {
-                return;
-            }
-            // A finished/no-op slide must not swallow a later correction or
-            // restore its clipping after the replacement animation has started.
-            sendState.slide?.cancel();
-            sendState.slide = startSendSlide(wrapper, content, delta);
-        };
-
-        const stopBubble = playSentBubbleAnimation(container, pinningMessageId);
-        let stopPin: (() => void) | null = null;
         const finishPin = () => {
             lastPinnedUserMessageIdRef.current = pinningMessageId;
             sendState.pinning = false;
         };
-        const stop = () => {
-            sendState.pinning = false;
-            stopPin?.();
-            stopBubble();
-            sendState.slide?.cancel();
-        };
-        sendScrollStopRef.current = stop;
-
-        stopPin = pinScrollContainerToBottom({
+        const cancelSequence = startSendScrollSequence({
             container,
+            content: listWrapperRef.current,
+            previousLayout: layout,
+            messageId: pinningMessageId,
             onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
-            shouldContinue: () => true,
             onComplete: () => {
                 finishPin();
                 sendFollowStopRef.current = followScrollContainerBottom({
                     container,
+                    bottomOffsetPx: Math.min(8, Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop)),
                     contentElements: [listWrapperRef.current],
                     shouldContinue: () => sendScrollStateRef.current === sendState,
                     onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
@@ -771,14 +750,13 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             onUserRelease: () => {
                 sendState.releasedByUser = true;
                 userReleasedInitialScrollRef.current = conversationId;
-                sendState.slide?.cancel(container);
-                stopBubble();
                 finishPin();
             },
-            observeMode: "tail",
-            onScrollDelta: handleScrollDelta,
-            holdWhile: () => sendState.slide?.isActive() ?? false,
         });
+        sendScrollStopRef.current = () => {
+            sendState.pinning = false;
+            cancelSequence();
+        };
     }, [
         conversationId,
         hasCurrentConversationMessages,
@@ -965,21 +943,21 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     // 不会整棵重挂载所有消息（那一下的主线程卡顿正好落在发送动画上），发送滑动也需要 wrapper。
     if (historyItems.length === 0) {
         return (
-            <div ref={listWrapperRef}>
+            <SendLayoutSnapshot wrapperRef={listWrapperRef} container={effectiveScrollParent} snapshotRef={sendLayoutSnapshotRef} snapshotKey={`${conversationId}:${latestUserMessageId}`}>
                 <VirtuosoLiveFooter context={{ liveItems }} />
-            </div>
+            </SendLayoutSnapshot>
         );
     }
 
     if (retainHistory) {
         return (
-            <div
-                ref={listWrapperRef}
+            <SendLayoutSnapshot
+                wrapperRef={listWrapperRef} container={effectiveScrollParent} snapshotRef={sendLayoutSnapshotRef} snapshotKey={`${conversationId}:${latestUserMessageId}`}
                 data-aipp-initial-bottom-positioning={shouldHideInitialBottomPositioning ? "true" : undefined}
                 style={initialBottomPositioningStyle}
             >
                 <VirtuosoLiveFooter context={{ liveItems: renderItems }} />
-            </div>
+            </SendLayoutSnapshot>
         );
     }
 
@@ -995,12 +973,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     // Virtuoso 只在 sizeTree 为空时采纳第一份非空 heightEstimates，之后的更新全部忽略；
     // 必须等拿到真实列表宽度再挂载，否则按默认宽度估算的高度会被永久固化。
     if (listWidth === null) {
-        return <div ref={listWrapperRef} style={initialBottomPositioningStyle} />;
+        return <SendLayoutSnapshot wrapperRef={listWrapperRef} container={effectiveScrollParent} snapshotRef={sendLayoutSnapshotRef} snapshotKey={`${conversationId}:${latestUserMessageId}`} style={initialBottomPositioningStyle} />;
     }
 
     return (
-        <div
-            ref={listWrapperRef}
+        <SendLayoutSnapshot
+            wrapperRef={listWrapperRef} container={effectiveScrollParent} snapshotRef={sendLayoutSnapshotRef} snapshotKey={`${conversationId}:${latestUserMessageId}`}
             data-aipp-initial-bottom-positioning={
                 shouldHideInitialBottomPositioning ? "true" : undefined
             }
@@ -1029,7 +1007,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 alignToBottom
                 style={{ width: "100%" }}
             />
-        </div>
+        </SendLayoutSnapshot>
     );
 };
 

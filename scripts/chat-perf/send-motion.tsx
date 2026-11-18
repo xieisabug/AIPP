@@ -1,6 +1,7 @@
 // Synthetic send harness: real list, bubbles, virtualization and viewport sizing;
 // no backend/model calls. Open the production-built send-motion.html.
-import { Profiler, useRef, useState } from 'react';
+import { analyzeTrajectory } from './send-trajectory';
+import { Profiler, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import VirtuosoMessageList from '../../src/components/conversation/VirtuosoMessageList';
@@ -22,8 +23,8 @@ function message(id: number, type: string, content: string): Message {
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const history = (count: number) => Array.from({ length: count }, (_, i) => message(i + 1,
     i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`));
-interface Frame { nodes: number; ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
-interface Result { scenario: string; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean; commits: {phase:string; actualDuration:number; startTime:number; commitTime:number}[] }
+interface Frame { phase: string; clientHeight: number; anchorTop: number | null; bubbleTop: number | null; thumbPosition: number; thumbSize: number; nodes: number; ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
+interface Result { trajectory: ReturnType<typeof analyzeTrajectory>; scenario: string; actionMs: number; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean; commits: {phase:string; actualDuration:number; startTime:number; commitTime:number}[] }
 function Chat() {
     const count = Number(new URLSearchParams(location.search).get('history') || 0);
     const [messages, update] = useState(() => Array.from({ length: count }, (_, i) => message(i + 1, i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`)));
@@ -46,7 +47,7 @@ function Chat() {
         setBusy(true); setResults([]);
         const output: Result[] = [];
         const availableScenarios = ['empty', 'short', 'long', 'rapid', 'instant-reply', 'delayed-reply',
-            'wheel-synthetic', 'touch-synthetic', 'late-image', 'resize', 'switch', 'async-history', 'delete-history', 'reduced-motion-emulated'];
+            'wheel-synthetic', 'touch-synthetic', 'wheel-during-scroll', 'rapid-during-scroll', 'rapid-long', 'streaming-reply', 'input-collapse', 'late-image', 'resize', 'switch', 'async-history', 'delete-history', 'reduced-motion-emulated'];
         const params = new URLSearchParams(location.search);
         const selected = params.get('scenario');
         const repeats = Math.max(1, Math.min(10, Number(params.get('repeat')) || 1));
@@ -58,14 +59,20 @@ function Chat() {
                 setProgress(scenario);
                 let animationCalls = 0;
                 let expectedScroll: number | null = null;
-                const base = history(scenario === 'empty' ? 0 : scenario === 'long' ? 120 : 8);
+                const base = history(scenario === 'empty' ? 0 : ['long','rapid-long'].includes(scenario) ? 120 : 8);
                 flushSync(() => {
                     switchConversation(String(++epoch.current)); update(base); setHistoryLoaded(true);
-                    setHeight('100dvh'); setImageSrc('');
+                    setHeight(scenario === 'input-collapse' ? '80dvh' : '100dvh'); setImageSrc('');
                 });
                 await delay(700);
                 const container = scroll.scrollContainerRef.current!;
                 const samples: Frame[] = [];
+                const viewport = container.getBoundingClientRect();
+                const anchorId = [...container.querySelectorAll<HTMLElement>('[data-message-item]')].filter(el => {
+                    if (el.parentElement?.closest('[data-message-item]')) return false;
+                    const rect = el.getBoundingClientRect(); return rect.bottom > viewport.top && rect.top < viewport.bottom;
+                }).at(-1)?.dataset.messageId;
+                let actionMs = 0;
                 let recording = true;
                 profile.current = [];
                 const started = performance.now();
@@ -77,11 +84,17 @@ function Chat() {
                 const collect = () => {
                     const row = [...container.querySelectorAll<HTMLElement>('[data-message-item]')]
                         .filter(el => el.textContent?.includes('请帮我检查')).at(-1);
-                    samples.push({ nodes: container.querySelectorAll('[data-message-item]').length, ms: performance.now() - started,
+                    const anchor = anchorId ? container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${anchorId}']`) : null;
+                    const origin = container.getBoundingClientRect().top;
+                    samples.push({ phase: container.dataset.sendPhase ?? 'idle', clientHeight: container.clientHeight,
+                        anchorTop: anchor ? anchor.getBoundingClientRect().top - origin : null,
+                        bubbleTop: row?.lastElementChild ? row.lastElementChild.getBoundingClientRect().top - origin : null,
+                        thumbPosition: container.scrollTop / Math.max(1, container.scrollHeight - container.clientHeight),
+                        thumbSize: Math.min(1,container.clientHeight / Math.max(1,container.scrollHeight)), nodes: container.querySelectorAll('[data-message-item]').length, ms: performance.now() - started,
                         top: row ? row.getBoundingClientRect().top - container.getBoundingClientRect().top : null,
                         scroll: container.scrollTop, height: container.scrollHeight,
                         opacity: row?.lastElementChild ? Number(getComputedStyle(row.lastElementChild).opacity) : null });
-                    if (recording) requestAnimationFrame(collect);
+                    if (recording) requestAnimationFrame(() => setTimeout(collect, 0));
                 };
                 Element.prototype.animate = function (...args) { animationCalls++; return realAnimate.apply(this, args); };
                 if (scenario === 'reduced-motion-emulated') {
@@ -93,7 +106,10 @@ function Chat() {
                         } })
                         : realMatchMedia.call(window, query);
                 }
-                requestAnimationFrame(collect);
+                requestAnimationFrame(() => setTimeout(collect, 0));
+                // Capture the old viewport before any message/layout mutation.
+                while (samples.length < 5) await delay(16);
+                actionMs = performance.now() - started;
                 if (scenario === 'async-history') {
                     flushSync(() => { switchConversation(String(++epoch.current)); setHistoryLoaded(false); update([]); });
                     await delay(100);
@@ -115,12 +131,28 @@ function Chat() {
                     expectedScroll = container.scrollTop;
                 } else {
                     flushSync(send);
-                    if (scenario === 'rapid') { await delay(70); flushSync(send); }
+                    if (params.has('fault')) {
+                        await delay(params.get('fault') === 'reverse' ? 280 : 48);
+                        const content = container.firstElementChild as HTMLElement;
+                        content.style.translate = '0 80px';
+                        await delay(80);
+                        content.style.translate = '';
+                    }
+                    if (['rapid','rapid-long','rapid-during-scroll'].includes(scenario)) { await delay(scenario === 'rapid-during-scroll' ? 250 : 70); flushSync(send); }
+                    if (scenario === 'input-collapse') flushSync(() => setHeight('100dvh'));
+                    if (scenario === 'streaming-reply') {
+                        flushSync(respond);
+                        for (let i = 0; i < 8; i++) {
+                            await delay(40);
+                            flushSync(() => update(prev => prev.map((m, index) => index === prev.length - 1
+                                ? {...m, content:m.content + ' 流式追加文字。'} : m)));
+                        }
+                    }
                     if (scenario === 'instant-reply') flushSync(respond);
                     if (scenario === 'delayed-reply') { await delay(650); flushSync(respond); }
-                    if (scenario === 'wheel-synthetic' || scenario === 'touch-synthetic') {
-                        await delay(90);
-                        container.dispatchEvent(scenario === 'wheel-synthetic'
+                    if (['wheel-synthetic','touch-synthetic','wheel-during-scroll'].includes(scenario)) {
+                        await delay(scenario === 'wheel-during-scroll' ? 250 : 90);
+                        container.dispatchEvent(scenario !== 'touch-synthetic'
                             ? new WheelEvent('wheel', { deltaY: -120 }) : new Event('touchmove'));
                         container.scrollTop = Math.max(0, container.scrollTop - 120);
                         expectedScroll = container.scrollTop;
@@ -153,14 +185,19 @@ function Chat() {
                     : last.top !== null && Math.abs(last.top - 8) <= 1)
                     && (noEntry ? animationCalls === 0 : animationCalls > 0)
                     && (scenario !== 'late-image' || imageLoaded);
-                output.push({ scenario, finalTop: last.top, scrollDrift, animationCalls,
+                const trajectory = analyzeTrajectory(samples, actionMs);
+                output.push({ trajectory, scenario, actionMs, finalTop: last.top, scrollDrift, animationCalls,
                     frames: samples.length, maxFrameMs: Math.max(...gaps),
-                    p95FrameMs: gaps[Math.floor(gaps.length * .95)] || 0, passed, samples, historyCommitMs, longTasks, imageLoaded, commits: [...profile.current] });
+                    p95FrameMs: gaps[Math.floor(gaps.length * .95)] || 0, passed: passed && (scenario !== 'input-collapse' || (trajectory.entryScrollDrift! <= 1 && (trajectory.entryAnchorDrift ?? 0) <= 1 && trajectory.bubbleBeforeScroll)) && (!['short','long','empty','instant-reply','delayed-reply','rapid','rapid-long','streaming-reply'].includes(scenario) || trajectory.passed), samples, historyCommitMs, longTasks, imageLoaded, commits: [...profile.current] });
                 setResults([...output]);
             }
         } catch (error) { setProgress(String(error)); }
         finally { Element.prototype.animate = realAnimate; window.matchMedia = realMatchMedia; setBusy(false); }
     }
+    // Do not stringify every previous frame again on every send/stream update:
+    // diagnostic rendering itself would contaminate the measured interaction.
+    const summaryJson = useMemo(() => JSON.stringify(results.map(({samples,commits,...result}) => result),null,2), [results]);
+    const samplesJson = useMemo(() => JSON.stringify(results, null, 2), [results]);
     function downloadResults() {
         const blob = new Blob([JSON.stringify({ userAgent: navigator.userAgent,
             devicePixelRatio: window.devicePixelRatio, buildMode: import.meta.env.MODE,
@@ -184,8 +221,9 @@ function Chat() {
                 onScrollStateChange={scroll.syncScrollState} /></Profiler>
             <div ref={scroll.messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
         </div>
+        <pre data-testid="motion-summary" style={{maxHeight:160,overflow:"auto"}}>{summaryJson}</pre>
         <details style={{maxHeight:140,overflow:'auto'}}><summary>逐帧结果（合成事件；不是原生 WebView 性能）</summary>
-            <pre data-testid="motion-results">{JSON.stringify(results, null, 2)}</pre></details>
+            <pre data-testid="motion-results">{samplesJson}</pre></details>
     </main>;
 }
 createRoot(document.getElementById('root')!).render(<AntiLeakageProvider enabled={false}><Chat /></AntiLeakageProvider>);
