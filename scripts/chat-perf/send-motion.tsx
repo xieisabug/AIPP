@@ -23,7 +23,7 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 const history = (count: number) => Array.from({ length: count }, (_, i) => message(i + 1,
     i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`));
 interface Frame { ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
-interface Result { scenario: string; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[] }
+interface Result { scenario: string; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean }
 function Chat() {
     const count = Number(new URLSearchParams(location.search).get('history') || 0);
     const [messages, update] = useState(() => Array.from({ length: count }, (_, i) => message(i + 1, i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`)));
@@ -63,6 +63,11 @@ function Chat() {
                 const samples: Frame[] = [];
                 let recording = true;
                 const started = performance.now();
+                let historyCommitMs: number | null = null;
+                const longTasks: {ms:number; duration:number}[] = [];
+                const observer = PerformanceObserver.supportedEntryTypes.includes('longtask')
+                    ? new PerformanceObserver(list => list.getEntries().forEach(entry => longTasks.push({ms:entry.startTime-started,duration:entry.duration}))) : null;
+                observer?.observe({type:'longtask'});
                 const collect = () => {
                     const row = [...container.querySelectorAll<HTMLElement>('[data-message-item]')]
                         .filter(el => el.textContent?.includes('请帮我检查')).at(-1);
@@ -86,7 +91,9 @@ function Chat() {
                 if (scenario === 'async-history') {
                     flushSync(() => { switchConversation(String(++epoch.current)); setHistoryLoaded(false); update([]); });
                     await delay(100);
+                    const commitStarted = performance.now();
                     flushSync(() => { update(history(120)); setHistoryLoaded(true); });
+                    historyCommitMs = performance.now() - commitStarted;
                 } else if (scenario === 'delete-history') {
                     container.dispatchEvent(new WheelEvent('wheel', { deltaY: -120 }));
                     container.scrollTop = 160;
@@ -107,7 +114,7 @@ function Chat() {
                     }
                     if (scenario === 'late-image') {
                         await delay(650);
-                        flushSync(() => setImageSrc('data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="skyblue"/></svg>')));
+                        flushSync(() => setImageSrc(new URLSearchParams(location.search).has('networkImage') ? '/send-motion-delayed.svg?run=' + epoch.current : 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="skyblue"/></svg>')));
                     }
                     if (scenario === 'resize') { await delay(120); flushSync(() => setHeight('70dvh')); }
                     if (scenario === 'switch') {
@@ -121,6 +128,9 @@ function Chat() {
                 await delay(40);
                 Element.prototype.animate = realAnimate;
                 window.matchMedia = realMatchMedia;
+                observer?.disconnect();
+                const img = container.querySelector('img[alt="迟加载测试图"]');
+                const imageLoaded = img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
                 const last = samples.at(-1)!;
                 const gaps = samples.slice(1).map((frame, i) => frame.ms - samples[i].ms).sort((a, b) => a - b);
                 const scrollDrift = expectedScroll === null ? null : last.scroll - expectedScroll;
@@ -128,10 +138,11 @@ function Chat() {
                 const passed = (expectedScroll !== null ? Math.abs(scrollDrift!) <= 1
                     : scenario === 'async-history' ? Math.abs(container.scrollHeight - container.clientHeight - container.scrollTop) <= 1
                     : last.top !== null && Math.abs(last.top - 8) <= 1)
-                    && (noEntry ? animationCalls === 0 : animationCalls > 0);
+                    && (noEntry ? animationCalls === 0 : animationCalls > 0)
+                    && (scenario !== 'late-image' || imageLoaded);
                 output.push({ scenario, finalTop: last.top, scrollDrift, animationCalls,
                     frames: samples.length, maxFrameMs: Math.max(...gaps),
-                    p95FrameMs: gaps[Math.floor(gaps.length * .95)] || 0, passed, samples });
+                    p95FrameMs: gaps[Math.floor(gaps.length * .95)] || 0, passed, samples, historyCommitMs, longTasks, imageLoaded });
                 setResults([...output]);
             }
         } catch (error) { setProgress(String(error)); }

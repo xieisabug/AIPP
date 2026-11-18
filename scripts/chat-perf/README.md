@@ -173,3 +173,34 @@ image loading uses a local data URL after a delay, not a remote network transfer
 Resize changes the actual container's height, not the native window manager. These
 checks supplement manual device interaction and do not replace native WebView,
 physical touch, OS reduced-motion, network-delayed images or compositor profiling.
+
+
+### Long-frame and delayed HTTP image diagnostics
+
+With the Vite **development server**, append `&networkImage=1` to the URL above.
+The late-image scenario then requests a no-store SVG over HTTP; the server delays
+its response by 650ms. The assertion requires a successfully decoded image and
+checks the final message position. This endpoint is not included in static builds.
+Without that query parameter, the existing delayed data-URL case remains available.
+
+Downloads also include `historyCommitMs` (the synchronous async-history update),
+Long Tasks when supported, and `imageLoaded`. Long Task times are relative to the
+scenario start; a slightly negative start can describe the enclosing timer task.
+rAF gaps exclude work before the first sample, so inspect first-sample latency and
+Long Tasks as well. These development-mode measurements include instrumentation
+and React/layout work and cannot identify a responsible function by themselves.
+
+On 2026-11-18, the prior 171.6ms async-history gap repeated at 130.2ms and 128.4ms
+after warmup, with the same height correction (14794 to 15178) and no send animation.
+Two instrumented runs measured 173.7ms / 123.7ms gaps, history commits of 143.7ms /
+36.1ms, and subsequent long tasks of 148ms / 98ms. All four runs passed 14/14
+functional assertions; both HTTP image runs decoded successfully and settled at
+8px. The history-layout stall is reproducible here, but its exact attribution and
+production/WebView impact remain unresolved. Do not infer that warmup fixed it or
+that the send animation caused it. Use a production CPU/compositor trace before
+choosing an optimization.
+
+F11, maximize and boundary-drag attempts did not yield a confirmed native viewport
+size change in this desktop; Xfce Accessibility exposed no reduced-motion setting.
+Those platform checks remain unverified; container resizing and matchMedia override
+coverage must not be reported as native OS validation.

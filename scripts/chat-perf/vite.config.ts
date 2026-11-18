@@ -7,7 +7,18 @@ const root = path.resolve(import.meta.dirname, '../..');
 export default defineConfig({
     root: path.join(root, 'scripts/chat-perf'),
     publicDir: path.join(root, 'tmp/chat-perf/fixtures'),
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), {
+        name: 'send-motion-delayed-image',
+        configureServer(server) {
+            server.middlewares.use('/send-motion-delayed.svg', (_req, res) => {
+                setTimeout(() => {
+                    res.setHeader('Content-Type', 'image/svg+xml');
+                    res.setHeader('Cache-Control', 'no-store');
+                    res.end('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="skyblue"/></svg>');
+                }, 650);
+            });
+        },
+    }],
     resolve: { alias: [
         { find: /^@tauri-apps\/.*$/, replacement: path.join(root, 'scripts/chat-perf/tauri.ts') },
         { find: '@', replacement: path.join(root, 'src') },
