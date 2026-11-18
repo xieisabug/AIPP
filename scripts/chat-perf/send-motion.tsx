@@ -4,6 +4,7 @@ import { analyzeTrajectory } from './send-trajectory';
 import { Profiler, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import InputArea from '../../src/components/conversation/InputArea';
 import VirtuosoMessageList from '../../src/components/conversation/VirtuosoMessageList';
 import { useScrollManagement } from '../../src/hooks/useScrollManagement';
 import { AntiLeakageProvider } from '../../src/contexts/AntiLeakageContext';
@@ -26,6 +27,8 @@ const history = (count: number) => Array.from({ length: count }, (_, i) => messa
 interface Frame { phase: string; clientHeight: number; anchorTop: number | null; bubbleTop: number | null; thumbPosition: number; thumbSize: number; nodes: number; ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
 interface Result { trajectory: ReturnType<typeof analyzeTrajectory>; scenario: string; actionMs: number; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean; commits: {phase:string; actualDuration:number; startTime:number; commitTime:number}[] }
 function Chat() {
+    const realComposer = new URLSearchParams(location.search).has('composer');
+    const [inputText, setInputText] = useState('');
     const count = Number(new URLSearchParams(location.search).get('history') || 0);
     const [messages, update] = useState(() => Array.from({ length: count }, (_, i) => message(i + 1, i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`)));
     const [conversationId, switchConversation] = useState('1');
@@ -40,8 +43,9 @@ function Chat() {
     const scroll = useScrollManagement({ disableTailObservation: true });
     const send = () => {
         const id = ++serial;
-        update(prev => [...prev.filter(m => m.message_type !== 'butler_processing'), message(id, 'user', `请帮我检查这次发送 ${id}`), message(++serial, 'butler_processing', '正在处理')]);
+        update(prev => [...prev.filter(m => m.message_type !== 'butler_processing'), message(id, 'user', inputText || `请帮我检查这次发送 ${id}`), message(++serial, 'butler_processing', '正在处理')]);
     };
+    const sendFromComposer = () => { send(); setInputText(''); };
     const respond = () => update(prev => [...prev.filter(m => m.message_type !== 'butler_processing'), message(++serial, 'response', '好的，我已经收到，接下来继续处理。')]);
     async function runSuite() {
         setBusy(true); setResults([]);
@@ -221,6 +225,7 @@ function Chat() {
                 onScrollStateChange={scroll.syncScrollState} /></Profiler>
             <div ref={scroll.messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
         </div>
+        {realComposer && <InputArea inputText={inputText} setInputText={setInputText} handleSend={sendFromComposer} aiIsResponsing={false} ariaLabel="实际输入组件" />}
         <pre data-testid="motion-summary" style={{maxHeight:160,overflow:"auto"}}>{summaryJson}</pre>
         <details style={{maxHeight:140,overflow:'auto'}}><summary>逐帧结果（合成事件；不是原生 WebView 性能）</summary>
             <pre data-testid="motion-results">{samplesJson}</pre></details>

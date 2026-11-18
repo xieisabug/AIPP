@@ -62,7 +62,10 @@ concurrent with repository tests recorded a 3234ms maximum sample interval and
 failed ordering; the two following warmed runs had no long tasks and passed.
 That outlier is retained in the local worklog artifacts; its cause is not established.
 
-## Limits
+## Limits of the initial run
+
+See [supplemental acceptance](./chat-send-sequence-supplement.md) for subsequent
+real desktop video, real InputArea and delayed HTTP image checks.
 
 This is the production-built shared list with synthetic content and Tauri API stubs,
 not the complete native application. Windows WebView2, real touch hardware, system
@@ -77,7 +80,7 @@ smoothness or a universal frame-time guarantee.
 
 The final production matrix passed 38/38 scenarios across two sequential runs.
 Short/long/rapid-long/streaming case p95 sampling intervals were 18.5–22.4ms;
-the largest interval across the matrix was 221.7ms in delayed-image insertion.
+the largest interval across the matrix was 221.7ms in the delayed-image scenario, before image insertion (see supplement).
 These are sampling intervals, not GPU frame presentation times.
 The final fixture caches serialized diagnostics rather than repeating serialization
 on every send, and its SHA-256 matches the baseline fixture.
