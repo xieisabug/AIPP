@@ -32,7 +32,6 @@ use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
 use tauri::Manager;
-use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -510,48 +509,6 @@ async fn cleanup_last_error_message(
 }
 
 /// 发送消息完成通知
-async fn send_completion_notification(
-    app_handle: &tauri::AppHandle,
-    content: &str,
-    assistant_name: Option<String>,
-    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
-) {
-    // 检查通知是否启用
-    if let Some(display_config) = config_feature_map.get("display") {
-        if let Some(FeatureConfig { value, .. }) = display_config.get("notification_on_completion")
-        {
-            if value == "true" {
-                // 检查 chat 和 ask 窗口是否有任何一个聚焦
-                // 如果有窗口聚焦，则不发送通知
-                if crate::utils::window_utils::is_chat_or_ask_window_focused(app_handle) {
-                    debug!("notification skipped because chat or ask window focused");
-                    return;
-                }
-
-                // 准备通知内容
-                let title = if let Some(name) = assistant_name {
-                    format!("AI 消息完成 - {}", name)
-                } else {
-                    "AI 消息完成".to_string()
-                };
-
-                let body = if content.chars().count() > 60 {
-                    let truncated: String = content.chars().take(57).collect();
-                    format!("{}...", truncated)
-                } else {
-                    content.to_string()
-                };
-
-                // 发送系统通知
-                if let Err(e) = app_handle.notification().builder().title(&title).body(&body).show()
-                {
-                    warn!(error = %e, "failed to send notification");
-                }
-            }
-        }
-    }
-}
-
 /// 输出消息类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputType {
@@ -3617,33 +3574,9 @@ async fn attempt_stream_chat(
                             );
                         }
 
-                        // 获取助手名称并发送完成通知
-                        let assistant_name = if let Ok(Some(conv)) =
-                            conversation_db.conversation_repo().unwrap().read(conversation_id)
-                        {
-                            if let Some(assistant_id) = conv.assistant_id {
-                                if let Ok(assistant) = crate::api::assistant_api::get_assistant(
-                                    app_handle.clone(),
-                                    assistant_id,
-                                ) {
-                                    Some(assistant.assistant.name.clone())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        if super::events::output_goal_current(app_handle,conversation_id,response_message_id) { send_completion_notification(
-                            app_handle,
-                            &response_content,
-                            assistant_name,
-                            &config_feature_map,
-                        )
-                        .await; }
+                        if super::events::output_goal_current(app_handle, conversation_id, response_message_id) {
+                            super::agent_completion::notify_completion(app_handle, conversation_id, response_message_id, &response_content, &config_feature_map, None);
+                        }
 
                         // 清理消息焦点（保留 MCP 执行焦点）
                         let app_handle = window.app_handle();
@@ -4312,27 +4245,8 @@ pub async fn handle_non_stream_chat(
                 );
             }
 
-            // 获取助手名称并发送完成通知
-            let assistant_name = if let Ok(Some(conv)) =
-                conversation_db.conversation_repo().unwrap().read(conversation_id)
-            {
-                if let Some(assistant_id) = conv.assistant_id {
-                    if let Ok(assistant) =
-                        crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
-                    {
-                        Some(assistant.assistant.name.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            if super::events::output_goal_current(app_handle,conversation_id,Some(response_message_id)) {
-                send_completion_notification(app_handle, &content, assistant_name, &config_feature_map).await;
+            if super::events::output_goal_current(app_handle, conversation_id, Some(response_message_id)) {
+                super::agent_completion::notify_completion(app_handle, conversation_id, Some(response_message_id), &content, &config_feature_map, None);
             }
 
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {

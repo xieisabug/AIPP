@@ -261,6 +261,24 @@ fn test_butler_peer_timeline_both_chats_survive_backfill_and_retry() {
 }
 
 #[test]
+fn test_butler_previews_track_only_public_replies_in_current_conversations() {
+    let conn = database();
+    let reply = message(&conn, 10, "response", "收到");
+    message(&conn, 10, "user", "再看一下");
+    message(&conn, 20, "response", "[[NO_REPLY]]");
+    let hidden_input = message(&conn, 20, "user", "内部协作");
+    conn.execute("UPDATE message SET metadata_json=?1 WHERE id=?2", params![r#"{"origin":"butler_peer","audience":"peer"}"#, hidden_input]).unwrap();
+    let hidden = message(&conn, 20, "response", "仅供助手参考");
+    let repo = crate::db::conversation_db::ConversationRepository::new(conn);
+    assert!(!repo.is_public_butler_reply(20, hidden).unwrap());
+    assert!(repo.is_public_butler_reply(10, reply).unwrap());
+    let rows = repo.butler_contact_previews().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.iter().find(|r| r["assistantId"] == 0).unwrap()["replyId"], reply);
+    assert!(rows.iter().find(|r| r["assistantId"] == 2).unwrap()["replyId"].is_null());
+}
+
+#[test]
 fn test_butler_peer_separate_recipients_can_receive_same_delegation() {
     let mut db = database();
     message(&db, 20, "user", "请同时联系两位助手");

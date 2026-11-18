@@ -3863,7 +3863,8 @@ pub async fn list_butler_contact_previews(
         {
             if preview["messageId"].as_i64().unwrap_or(0) <= row["messageId"].as_i64().unwrap_or(0)
             {
-                *preview = row;
+                preview["messageId"] = row["messageId"].clone();
+                preview["preview"] = row["preview"].clone();
             }
         }
     }

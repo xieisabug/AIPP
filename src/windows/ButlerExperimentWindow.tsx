@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
+import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
@@ -345,18 +346,23 @@ function ButlerExperimentWindow() {
         const activity = listen<{ kind: string }>("conversation_list_activity", ({ payload }) => {
             if (payload.kind === "stream_complete") schedule();
         });
+        const reply = listen("butler_reply_received", schedule);
         const scheduled = listen("scheduled_task_delivered", schedule);
         const peer = listen("butler_peer_changed", schedule);
         const task = listen("butler_task_updated", schedule);
         return () => {
             disposed = true;
             clearTimeout(timer);
-            for (const listener of [activity, scheduled, peer, task]) void listener.then(stop => stop()).catch(console.warn);
+            for (const listener of [activity, reply, scheduled, peer, task]) void listener.then(stop => stop()).catch(console.warn);
         };
     }, [loadPreviews]);
-    const activePreview = previews.find(row => row.assistantId === contact?.assistantId);
+    const focused = useFocusedWindow();
+    const readingConversation = focused && !historyView && groupId === null ? Number(activeConversationId) : null;
+    const activePreview = previews.find(row => row.conversationId === readingConversation);
     useEffect(() => {
-        if (activePreview?.messageId) localStorage.setItem(`butler-read-${activePreview.conversationId}`, String(activePreview.messageId));
+        if (activePreview?.replyId && document.hasFocus() && !document.hidden) {
+            localStorage.setItem(`butler-read-${activePreview.conversationId}`, String(activePreview.replyId));
+        }
     }, [activePreview]);
     const selectContact = useCallback(async (assistant?: AssistantListItem) => {
         restoreContact.current = false;
@@ -1090,7 +1096,7 @@ function ButlerExperimentWindow() {
     const existingTrustedWorkspaces = butlerWorkspaceConfig.trustedWorkspaces;
 
     // 顶部头像和联系人列表共用这一份状态，同一助手播同一套动作。
-    const contactActivity = useContactAvatarActivity(mainConversationId, previews, groupId === null ? contact?.assistantId : -1);
+    const contactActivity = useContactAvatarActivity(mainConversationId, previews, readingConversation ? contact?.assistantId ?? 0 : -1);
     const headerAssistantId = contact?.assistantId ?? 0;
     const headerState = contactActivity.visuals.get(headerAssistantId)?.state ?? "idle";
     const contactRail = useContactRailWidth();
@@ -1129,7 +1135,7 @@ function ButlerExperimentWindow() {
                     data-aipp-slot="butler-task-rail"
                 >
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
-                        ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
+                        focused={focused} ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
                         onSearch={() => setSearchOpen(true)} onOpenSettings={handleOpenSettings}
                         onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}

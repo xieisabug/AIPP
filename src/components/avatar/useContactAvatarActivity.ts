@@ -39,7 +39,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
     const [approvals, setApprovals] = useState<Set<number>>(new Set());
     const [error, setError] = useState("");
     useEffect(() => { if (error) console.warn(`[Contact avatar activity] ${error}`); }, [error]);
-    const [controller, setController] = useState<{ unread: (id: number) => void; acknowledge: (id: number) => void }>();
+    const [controller, setController] = useState<{ acknowledge: (id: number) => void }>();
     useEffect(() => {
         if (!main) return;
         let disposed = false, busy = false, initialized = false;
@@ -121,15 +121,13 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
             setApprovals(old => old.size === pending.size && [...pending].every(id => old.has(id)) ? old : pending);
         };
         const pulse = (id: number, state: ContactFeedback["state"]) => {
-            // A new unread preview must not replace an unhandled error.
-            if (state === "notifying" && (feedback.get(id)?.until ?? 0) > Date.now()) return;
             if (state === "finished" && celebrations.delete(id)) state = "celebrate";
             if (state === "failed" || state === "blocked") celebrations.delete(id);
             feedback.set(id, { state, until: Date.now() + 3500 });
             if (state === "failed") failures.add(id);
             emit();
         };
-        setController({ unread: id => pulse(id, "notifying"), acknowledge: id => {
+        setController({ acknowledge: id => {
             failures.delete(id); lastBusy.delete(id);
             if (feedback.get(id)?.state === "failed") feedback.delete(id);
             emit();
@@ -245,15 +243,13 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
         };
     }, [main]);
     useEffect(() => { controller?.acknowledge(selected ?? 0); }, [selected, controller]);
-    const [seen] = useState(() => new Map<number, number>());
-    useEffect(() => {
-        if (!controller) return;
-        for (const preview of previews) {
-            const message = preview.messageId ?? 0;
-            const previous = seen.get(preview.assistantId);
-            seen.set(preview.assistantId, message);
-            if (previous !== undefined && message > previous && preview.assistantId !== selected && message > Number(localStorage.getItem(`butler-read-${preview.conversationId}`))) controller.unread(preview.assistantId);
+    const displayed = new Map(visuals);
+    for (const preview of previews) {
+        if (!preview.replyId || preview.assistantId === selected ||
+            preview.replyId <= Number(localStorage.getItem(`butler-read-${preview.conversationId}`))) continue;
+        if (!approvals.has(preview.assistantId)) {
+            displayed.set(preview.assistantId, { state: "alerting", label: "有未读消息" });
         }
-    }, [previews, selected, controller, seen]);
-    return { visuals, approvals, error, acknowledge: controller?.acknowledge };
+    }
+    return { visuals: displayed, approvals, error, acknowledge: controller?.acknowledge };
 }

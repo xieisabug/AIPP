@@ -299,15 +299,33 @@ impl ConversationRepository {
         ConversationRepository { conn, write_lock }
     }
 
+    // 与简洁聊天一致，协作输入决定这一轮的最终答复是否面向用户。
+    const PUBLIC_BUTLER_REPLY: &'static str = "r.finish_time IS NOT NULL
+        AND r.message_type IN ('assistant','response') AND trim(r.content) NOT IN ('','[[NO_REPLY]]')
+        AND r.content NOT LIKE '%<!-- MCP_TOOL_CALL%' AND r.content NOT LIKE '%<mcp_tool_call%'
+        AND coalesce(r.tool_calls_json,'') IN ('','[]','null')
+        AND CASE WHEN json_valid(r.metadata_json) THEN coalesce(json_extract(r.metadata_json,'$.origin'),'') NOT IN ('internal','butler_peer') ELSE 1 END
+        AND coalesce((SELECT CASE WHEN json_valid(u.metadata_json) THEN
+            CASE WHEN json_extract(u.metadata_json,'$.origin')='butler_peer' THEN
+                coalesce(json_extract(u.metadata_json,'$.audience')='user', json_extract(u.metadata_json,'$.leg') IN ('reply','receipt'),0)
+            ELSE 1 END ELSE 1 END FROM message u
+            WHERE u.conversation_id=r.conversation_id AND u.message_type='user' AND u.id<r.id ORDER BY u.id DESC LIMIT 1),1)";
+
+    pub fn is_public_butler_reply(&self, conversation: i64, message: i64) -> Result<bool> {
+        self.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM message r WHERE r.id=?1 AND r.conversation_id=?2 AND {})", Self::PUBLIC_BUTLER_REPLY),
+            params![message, conversation], |r| r.get(0))
+    }
+
     pub fn butler_contact_previews(&self) -> Result<Vec<serde_json::Value>> {
         // 用户消息只取原话，不带本轮附加上下文。
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT c.assistant_id, c.id, nullif(max(coalesce(p.anchor,0),coalesce(m.id,0)),0),
+            "SELECT CASE WHEN c.conversation_kind='butler_main' THEN 0 ELSE c.assistant_id END, c.id, nullif(max(coalesce(p.anchor,0),coalesce(m.id,0)),0),
                     CASE WHEN p.anchor IS NOT NULL AND p.anchor >= coalesce(m.id,0) THEN substr(
                         CASE WHEN p.outgoing THEN '发给 ' ELSE '来自 ' END ||
                         CASE WHEN c.id=e.owner THEN e.recipient ELSE e.sender END || '：' ||
                         CASE WHEN p.leg='request' THEN e.body ELSE e.reply END,1,140)
-                    ELSE substr({visible},1,140) END
+                    ELSE substr({visible},1,140) END,
+                    (SELECT max(r.id) FROM message r WHERE r.conversation_id=c.id AND {reply})
              FROM conversation c LEFT JOIN message m ON m.id=(
                  SELECT id FROM message WHERE conversation_id=c.id
                    AND message_type IN ('user','assistant','response') AND trim(content) NOT IN ('','[[NO_REPLY]]')
@@ -317,12 +335,14 @@ impl ConversationRepository {
                  ORDER BY id DESC LIMIT 1)
              LEFT JOIN butler_peer_post p ON p.id=(SELECT id FROM butler_peer_post WHERE conversation_id=c.id ORDER BY anchor DESC,id DESC LIMIT 1)
              LEFT JOIN butler_peer_exchange e ON e.id=p.exchange_id
-             WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id",
+             WHERE (c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL) OR
+                 (c.conversation_kind='butler_main' AND c.id IN (SELECT butler_conversation_id FROM butler_main_state)) ORDER BY c.id",
+            reply = Self::PUBLIC_BUTLER_REPLY,
             visible = crate::utils::turn_context::visible_sql("m.content"),
         ))?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({
             "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
-            "messageId":row.get::<_,Option<i64>>(2)?,
+            "messageId":row.get::<_,Option<i64>>(2)?, "replyId":row.get::<_,Option<i64>>(4)?,
             // 助手引用回复的标记只在聊天里显示成引用，摘要只显示正文。
             "preview":row.get::<_,Option<String>>(3)?.map(|text| crate::utils::reply_quote::strip(&text).to_string()),
         })))?;

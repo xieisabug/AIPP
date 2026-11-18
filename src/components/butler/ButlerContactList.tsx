@@ -13,13 +13,18 @@ import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview, groupReadKey } from "./butlerGroupModel";
 
-/** 待审批与未读同样式，颜色区分；待审批需要用户行动，两者同时存在时只显示待审批。 */
+/** 待审批和头像未读标记分别展示。 */
 function ApprovalDot() {
     return <span aria-label="待审批" title="等待审批" className="size-2 shrink-0 rounded-full bg-amber-500"/>;
 }
 
-export interface ContactPreview { assistantId: number; conversationId: number; messageId: number | null; preview: string | null }
+function UnreadDot() {
+    return <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/>;
+}
+
+export interface ContactPreview { assistantId: number; conversationId: number; messageId: number | null; replyId?: number | null; preview: string | null }
 interface Props {
+    focused?: boolean;
     chief: string;
     contacts: AssistantListItem[];
     selected?: number;
@@ -45,13 +50,10 @@ interface Props {
 }
 
 function groupUnread(group: ButlerGroupSummary, selected: boolean) {
-    const last = group.last_message;
-    if (!last || selected) return false;
-    if (last.kind === "message" && last.sender_member === null) return false;
-    return last.seq > Number(localStorage.getItem(groupReadKey(group.id)) ?? 0);
+    return !selected && !!group.last_reply_seq && group.last_reply_seq > Number(localStorage.getItem(groupReadKey(group.id)) ?? 0);
 }
 
-export default function ButlerContactList({chief, contacts, selected, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onAssistantAction,
+export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
     const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
@@ -61,11 +63,13 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
     const {assistantTypes} = useAssistantTypePlugin(plugins);
     const groupRows = groups.map(group => {
         const active = selectedGroup === group.id;
+        const unread = groupUnread(group, !!focused && active);
+        const speaker = group.last_message?.sender_member;
         const typing = group.members.filter(member => group.typing.includes(member.id)).map(member => member.name);
         return { id: `group:${group.id}`, label: group.name, content: <ContextMenu>
             <ContextMenuTrigger asChild><div className="w-full">
                 <button onClick={() => onSelectGroup(group)} disabled={!ready} aria-pressed={active} className="butler-contact" data-aipp-slot="butler-group-contact">
-                    <ButlerGroupAvatar members={group.members} size={48} />
+                    <ButlerGroupAvatar members={group.members} size={48} unreadMember={unread ? speaker : null} />
                     <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium">{group.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">
@@ -73,7 +77,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                         </span>
                     </span>
                     {group.members.some(member => pendingApprovals.has(member.conversation_id)) ? <ApprovalDot/>
-                        : groupUnread(group, active) ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
+                        : unread ? <UnreadDot/> : null}
                 </button>
             </div></ContextMenuTrigger>
             <ContextMenuContent>
@@ -83,8 +87,6 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
     });
     const assistantRows = contacts.map(assistant => {
         const preview = previews.find(p => p.assistantId === assistant.id);
-        const unread = preview?.messageId && selected !== assistant.id &&
-            preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
         return { id: `assistant:${assistant.id}`, label: assistant.name, content: <AssistantItemContextMenu assistant={assistant} onAction={onAssistantAction} canReset><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
             aria-pressed={selected === assistant.id} className="butler-contact">
             <ButlerAvatar id={assistant.id} size={48} compact figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
@@ -93,7 +95,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                 <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
             </span>
             {approvals.has(assistant.id) ? <ApprovalDot/>
-                : unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
+                : state(assistant.id) === "alerting" ? <UnreadDot/> : null}
         </button></AssistantItemContextMenu> };
     });
     return <>

@@ -21,6 +21,7 @@ import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
 import ButlerGroupTranscript from "./ButlerGroupTranscript";
 import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
+import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import { groupReadKey, mentionTargets, mergeMessages } from "./butlerGroupModel";
 
 interface Props {
@@ -90,10 +91,11 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     }, [groupId, refresh]);
 
     const messages = useMemo(() => mergeMessages(older, detail?.messages ?? []), [older, detail?.messages]);
+    const focused = useFocusedWindow();
     const lastSeq = messages.length ? messages[messages.length - 1].seq : 0;
     useEffect(() => {
-        if (lastSeq) localStorage.setItem(groupReadKey(groupId), String(lastSeq));
-    }, [groupId, lastSeq]);
+        if (lastSeq && focused && document.hasFocus()) localStorage.setItem(groupReadKey(groupId), String(lastSeq));
+    }, [groupId, lastSeq, focused]);
 
     const members = useMemo(() => detail?.members ?? [], [detail?.members]);
     const running = useMemo(() => {

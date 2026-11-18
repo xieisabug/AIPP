@@ -209,6 +209,8 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
 
         // 检查通知设置是否从 false 变为 true（完成通知与审批通知共用系统通知权限）
         const justEnabled = [
+            form.formState.defaultValues?.notification_on_butler_reply === false && values.notification_on_butler_reply
+                ? { key: "notification_on_butler_reply" as const, body: "管家模式收到回复时将发送系统通知" } : null,
             previousNotificationValue.current === false && currentNotificationValue === true
                 ? { key: "notification_on_completion" as const, body: "AI 消息或 Agent 任务完成时将发送系统通知" }
                 : null,
@@ -330,6 +332,10 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 label: "用户消息Markdown渲染",
                 options: markdownRenderOptions,
             },
+        },
+        {
+            key: "notification_on_butler_reply",
+            config: { type: "switch" as const, label: "管家模式收到回复时发送系统通知", tooltip: "AIPP 在后台时，显示回复消息的总管家或助手名称" },
         },
         {
             key: "notification_on_completion",

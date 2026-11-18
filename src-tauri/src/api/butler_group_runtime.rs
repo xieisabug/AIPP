@@ -94,8 +94,14 @@ async fn settle(app: &AppHandle, state: &Shared, turn: group::Turn) -> anyhow::R
     lock(state).idle.remove(&turn.id);
     let id = turn.id;
     let finished = database(app, "公开回复", move |conn| group::finish_turn(conn, id, outcome)).await.map_err(anyhow::Error::msg)?;
-    if finished.is_some() {
+    if let Some(finished) = finished {
         changed(app, turn.group_id);
+        if let Some(message) = finished.reply {
+            use tauri::Manager;
+            let state = app.state::<crate::FeatureConfigState>();
+            let config = state.config_feature_map.lock().await;
+            super::ai::agent_completion::notify_butler_reply(app, &message.sender_name, &message.body, &config);
+        }
     }
     Ok(())
 }

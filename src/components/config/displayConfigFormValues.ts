@@ -3,6 +3,7 @@ export interface DisplayFormValues {
     theme: string;
     color_mode: string;
     user_message_markdown_render: string;
+    notification_on_butler_reply: boolean;
     notification_on_completion: boolean;
     notification_on_permission: boolean;
     code_theme_light: string;
@@ -30,6 +31,7 @@ export function buildDisplayFormValues(
         color_mode: displayConfig?.get("color_mode") || "system",
         user_message_markdown_render:
             displayConfig?.get("user_message_markdown_render") || "disabled",
+        notification_on_butler_reply: displayConfig?.get("notification_on_butler_reply") !== "false",
         notification_on_completion:
             displayConfig?.get("notification_on_completion") === "true",
         // 等待审批的提醒默认开启，只有显式关闭才不发。
@@ -52,6 +54,7 @@ export function serializeDisplayFormValues(values: DisplayFormValues) {
         theme: values.theme,
         color_mode: values.color_mode,
         user_message_markdown_render: values.user_message_markdown_render,
+        notification_on_butler_reply: values.notification_on_butler_reply.toString(),
         notification_on_completion: values.notification_on_completion.toString(),
         notification_on_permission: values.notification_on_permission.toString(),
         code_theme_light: values.code_theme_light,

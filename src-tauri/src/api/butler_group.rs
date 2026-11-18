@@ -119,6 +119,7 @@ pub struct GroupSummary {
     pub name: String,
     pub members: Vec<MemberView>,
     pub last_message: Option<group::Message>,
+    pub last_reply_seq: Option<i64>,
     pub updated_at: String,
     /// 正在回复的成员。
     pub typing: Vec<i64>,
@@ -144,11 +145,12 @@ fn member_views(members: Vec<group::Member>, roster: &HashMap<i64, RosterEntry>)
 }
 
 async fn summary(app: &AppHandle, group_id: i64, roster: &HashMap<i64, RosterEntry>) -> Result<GroupSummary, String> {
-    let (room, members, last, turns) = database(app, "读取", move |conn| {
-        Ok((group::get(conn, group_id)?, group::members(conn, group_id)?, group::last_message(conn, group_id)?, group::open_turns(conn, group_id)?))
+    let (room, members, last, last_reply_seq, turns) = database(app, "读取", move |conn| {
+        Ok((group::get(conn, group_id)?, group::members(conn, group_id)?, group::last_message(conn, group_id)?,
+            conn.query_row("SELECT max(seq) FROM butler_chat_group_message WHERE group_id=?1 AND kind='message' AND sender_member IS NOT NULL", [group_id], |r| r.get(0))?, group::open_turns(conn, group_id)?))
     }).await?;
     Ok(GroupSummary {
-        id: room.id, name: room.name, members: member_views(members, roster), last_message: last, updated_at: room.updated_at,
+        id: room.id, name: room.name, members: member_views(members, roster), last_message: last, last_reply_seq, updated_at: room.updated_at,
         typing: turns.into_iter().filter(|t| t.state == "running").map(|t| t.member_id).collect(),
     })
 }

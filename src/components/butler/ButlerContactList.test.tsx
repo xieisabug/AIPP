@@ -60,10 +60,11 @@ describe("ButlerContactList", () => {
             onSelectGroup={() => {}}
             onCreateGroup={() => {}}
             onDeleteGroup={() => {}}
-            activity={{ visuals: new Map(), approvals: new Set(), error: "", acknowledge: undefined }}
+            activity={{ visuals: new Map([[0, { state: "alerting", label: "有未读消息" }], [8, { state: "alerting", label: "有未读消息" }]]), approvals: new Set(), error: "", acknowledge: undefined }}
         />);
 
         const chiefAvatar = container.querySelector('[data-avatar-shape="aipp"]') as HTMLElement;
+        expect(chiefAvatar).toHaveAttribute("data-avatar-state", "alerting");
         expect(chiefAvatar).toHaveStyle({ width: "66px", height: "66px" });
         expect(chiefAvatar.querySelector("svg")).toHaveAttribute("viewBox", "-12 -12 534 534");
 
@@ -72,6 +73,8 @@ describe("ButlerContactList", () => {
 
         const contactButton = screen.getByRole("button", { name: /^写作助手/ });
         const contactAvatar = contactButton.querySelector('[data-avatar-shape="pebble"]') as HTMLElement;
+        expect(contactButton.querySelectorAll('[aria-label="未读"]')).toHaveLength(1);
+        expect(contactAvatar).toHaveAttribute("data-avatar-state", "alerting");
         expect(contactAvatar).toHaveStyle({ width: "48px", height: "48px" });
         expect(contactAvatar.querySelector("svg")).toHaveAttribute("viewBox", "-12 -12 534 534");
     });

@@ -4,9 +4,9 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::system_db::FeatureConfig;
 use crate::FeatureConfigState;
 use std::collections::HashMap;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
-use tracing::{debug, warn};
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
@@ -52,11 +52,70 @@ fn truncate_notification_body(content: &str) -> String {
     }
 }
 
-fn assistant_name(app_handle: &tauri::AppHandle, conversation_id: i64) -> Option<String> {
-    let conversation_db = ConversationDatabase::new(app_handle).ok()?;
-    let conversation = conversation_db.conversation_repo().ok()?.read(conversation_id).ok()??;
-    let assistant_id = conversation.assistant_id?;
-    AssistantDatabase::new(app_handle).ok()?.get_assistant(assistant_id).ok().map(|item| item.name)
+type ConfigMap = HashMap<String, HashMap<String, FeatureConfig>>;
+
+fn butler_reply_notifications_enabled(config: &ConfigMap) -> bool {
+    config.get("display").and_then(|c| c.get("notification_on_butler_reply"))
+        .is_none_or(|c| !matches!(c.value.as_str(), "false" | "0"))
+}
+
+pub(crate) fn notify_butler_reply(app: &tauri::AppHandle, name: &str, content: &str, config: &ConfigMap) {
+    if !butler_reply_notifications_enabled(config) || matches!(content.trim(), "" | "[[NO_REPLY]]") {
+        return;
+    }
+    let app_focused = app.webview_windows().values().any(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    });
+    if app_focused {
+        return;
+    }
+    let body = truncate_notification_body(crate::utils::reply_quote::strip(content));
+    if let Err(error) = app.notification().builder().title(format!("{name} 回复了消息")).body(body).show() {
+        warn!(%error, "failed to send Butler reply notification");
+    }
+}
+
+pub(super) fn notify_completion(app: &tauri::AppHandle, conversation_id: i64, message_id: Option<i64>, content: &str, config: &ConfigMap, agent: Option<AgentKind>) {
+    let lookup = ConversationDatabase::new(app).map_err(crate::errors::AppError::from)
+        .and_then(|db| db.conversation_repo());
+    let repo = match lookup {
+        Ok(repo) => repo,
+        Err(error) => {
+            warn!(conversation_id, %error, "failed to open conversation repository for reply notification");
+            return;
+        }
+    };
+    let Ok(Some(conversation)) = repo.read(conversation_id) else { return };
+    let kind = conversation.conversation_kind.as_str();
+    if kind == crate::db::butler_group::MEMBER_KIND {
+        return; // 群成员只有在回复正式公开后才通知。
+    }
+    if matches!(kind, "butler_main" | "butler_contact") {
+        if !message_id.is_some_and(|id| repo.is_public_butler_reply(conversation_id, id).unwrap_or(false)) {
+            return;
+        }
+        let _ = app.emit("butler_reply_received", conversation_id);
+    }
+    if kind == "butler_main" {
+        let name = config.get("experimental").and_then(|c| c.get("butler_display_name"))
+            .map(|c| c.value.trim()).filter(|s| !s.is_empty()).unwrap_or("总管家");
+        notify_butler_reply(app, name, content, config);
+        return;
+    }
+    let name = || conversation.assistant_id
+        .and_then(|id| AssistantDatabase::new(app).ok()?.get_assistant(id).ok()).map(|a| a.name);
+    if kind == "butler_contact" {
+        notify_butler_reply(app, &name().unwrap_or_else(|| "助手".into()), content, config);
+        return;
+    }
+    if !notification_enabled(config) || crate::utils::window_utils::is_chat_or_ask_window_focused(app) {
+        return;
+    }
+    let label = agent.map(|a| format!("{} 已完成", a.display_name())).unwrap_or_else(|| "AI 消息完成".into());
+    let title = name().map(|n| format!("{label} - {n}")).unwrap_or(label);
+    if let Err(error) = app.notification().builder().title(title).body(truncate_notification_body(content)).show() {
+        warn!(conversation_id, %error, "failed to send completion notification");
+    }
 }
 
 pub async fn handle_agent_success(
@@ -87,21 +146,7 @@ pub async fn handle_agent_success(
         warn!(conversation_id, agent = agent_kind.display_name(), error = %error, "failed to schedule Agent title generation");
     }
 
-    if !notification_enabled(&config_feature_map) {
-        return;
-    }
-    if crate::utils::window_utils::is_chat_or_ask_window_focused(app_handle) {
-        debug!(conversation_id, agent = agent_kind.display_name(), "Agent completion notification skipped because chat or ask window is focused");
-        return;
-    }
-
-    let title = assistant_name(app_handle, conversation_id)
-        .map(|name| format!("{} 已完成 - {}", agent_kind.display_name(), name))
-        .unwrap_or_else(|| format!("{} 已完成", agent_kind.display_name()));
-    let body = truncate_notification_body(content);
-    if let Err(error) = app_handle.notification().builder().title(&title).body(&body).show() {
-        warn!(conversation_id, agent = agent_kind.display_name(), error = %error, "failed to send Agent completion notification");
-    }
+    notify_completion(app_handle, conversation_id, Some(message_id), content, &config_feature_map, Some(agent_kind));
 }
 
 #[cfg(test)]
@@ -117,6 +162,16 @@ mod tests {
             data_type: "boolean".to_string(),
             description: None,
         }
+    }
+
+    #[test]
+    fn test_butler_reply_notification_defaults_on_and_respects_its_own_switch() {
+        let mut config = ConfigMap::new();
+        assert!(butler_reply_notifications_enabled(&config));
+        let display = config.entry("display".into()).or_default();
+        display.insert("notification_on_completion".into(), feature_config("notification_on_completion", "true"));
+        display.insert("notification_on_butler_reply".into(), feature_config("notification_on_butler_reply", "false"));
+        assert!(!butler_reply_notifications_enabled(&config));
     }
 
     #[test]
