@@ -775,6 +775,21 @@ describe("pinScrollContainerToBottom", () => {
         };
     }
 
+    it("should ignore already queued callbacks after the pin is cancelled", () => {
+        const flushRaf = queueAnimationFrames();
+        const { container, setScrollHeight } = makeContainer(1000);
+        const onComplete = vi.fn();
+        const stop = pinScrollContainerToBottom({ container, shouldContinue: () => true, onComplete });
+        const queuedResize = [...resizeCallbacks];
+        stop();
+        setScrollHeight(2000);
+        container.scrollTop = 120;
+        flushRaf();
+        queuedResize.forEach(callback => callback());
+        expect(container.scrollTop).toBe(120);
+        expect(onComplete).not.toHaveBeenCalled();
+    });
+
     it("should release the pin when the user scrolls up without a height change", () => {
         const flushRaf = queueAnimationFrames();
         const { container } = makeContainer(1000);

@@ -133,3 +133,26 @@ scrolls. `--repeats=3` records first-scroll and subsequent warm samples separate
 Each execution creates a timestamped result directory including the actual
 installed browser version. An absent browser produces an error, never a download.
 Browser profile data is temporary; personal browser tabs and profiles are not used.
+
+## Send-motion regression entry
+
+The same production build also emits `send-motion.html`. It uses synthetic messages
+with the real `VirtuosoMessageList`, `MessageItem`, and `useScrollManagement` viewport
+sizing. It does not call a model. Open:
+
+- `http://127.0.0.1:4179/send-motion.html?history=0` (first send)
+- `http://127.0.0.1:4179/send-motion.html?history=8` (retained history)
+- `http://127.0.0.1:4179/send-motion.html?history=120` (virtualized history)
+
+“发送” appends a user message and Butler processing row in one commit. “回复” replaces
+the processing row; click immediately or after the slide. Send twice rapidly, scroll
+up or touch-drag during motion, switch conversations, resize the window, and repeat
+with the OS reduced-motion preference. The newest short turn should settle about
+8px from the scroll viewport top, with blank room below. Record frames in browser
+performance tools, checking bubble opacity/transform and row bounds, not just
+`scrollTop` (the slide intentionally uses a compensating transform).
+
+This entry is a frontend reproduction, not an end-to-end Tauri validation. It does
+not simulate image loading or backend timing automatically. Real delayed images,
+streaming responses, native WebView behavior and compositor smoothness still need
+application validation on the target platform.

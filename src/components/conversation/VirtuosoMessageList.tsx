@@ -37,6 +37,8 @@ import {
 
 interface VirtuosoMessageListProps extends UseMessageListElementsProps {
     conversationId: string;
+    /** True only after the host has loaded this conversation, even if it is empty. */
+    historyLoaded?: boolean;
     /**
      * 列表数据的身份。默认按每条消息的 conversation_id 判断数据是否已属于当前会话
      * （切会话时旧数据还没换掉，不能拿它做打开贴底）。群聊等聚合视图的消息分属多个执行会话，
@@ -259,6 +261,7 @@ function scheduleHighlightAttempt({
 const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     conversationId,
     transcriptKey,
+    historyLoaded = false,
     scrollContainerRef,
     pendingScrollMessageId,
     pendingScrollAlign = "center",
@@ -286,10 +289,16 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     /** 打开后用户已用滚轮或滚动条上翻；效果重跑时不再钉底或跟滚。 */
     const userReleasedInitialScrollRef = useRef<string | null>(null);
     const lastPinnedUserMessageIdRef = useRef<number | null>(null);
+    const committedUserMessagesRef = useRef<{
+        conversationId: string;
+        messages: UseMessageListElementsProps["allDisplayMessages"];
+        latestId: number | null;
+    } | null>(null);
     /** 当前这次发送：视觉滑动 + 用户是否已接手；effect 重跑时沿用 */
     const sendScrollStateRef = useRef<{
         messageId: number;
         releasedByUser: boolean;
+        pinning: boolean;
         slide: SendSlide | null;
     } | null>(null);
     /** live-only 分支已把本会话贴底展示过；之后长出 history 属于「发送」，不是重新打开 */
@@ -298,18 +307,21 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const renderedConversationRef = useRef<string | null>(null);
     /** 正在进行的发送钉底 + 动画；不随 effect cleanup 停止 */
     const sendScrollStopRef = useRef<(() => void) | null>(null);
+    const sendFollowStopRef = useRef<(() => void) | null>(null);
     const onScrollStateChangeRef = useRef(onScrollStateChange);
     onScrollStateChangeRef.current = onScrollStateChange;
     const stopSendScroll = useCallback(() => {
         const stop = sendScrollStopRef.current;
         sendScrollStopRef.current = null;
         stop?.();
+        sendFollowStopRef.current?.();
+        sendFollowStopRef.current = null;
     }, []);
     const isSendScrollAnimating = useCallback(
-        () => sendScrollStateRef.current?.slide?.isActive() ?? false,
+        () => sendScrollStateRef.current?.pinning ?? false,
         [],
     );
-    const tailUserMessageIdRef = useRef<number | null>(null);
+    const latestUserMessageIdRef = useRef<number | null>(null);
     const streamingActiveRef = useRef(false);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
     const [viewportHeight, setViewportHeight] = useState(0);
@@ -348,15 +360,16 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         () => ({ liveItems }),
         [liveItems],
     );
-    const tailUserMessageId = useMemo(() => {
-        const lastMessage = messageListProps.allDisplayMessages.at(-1);
-        if (!lastMessage || lastMessage.message_type !== "user") {
-            return null;
+    const latestUserMessageId = useMemo(() => {
+        // A send and its processing/response row can arrive in the same React commit.
+        // The last user turn, rather than the last row, identifies the send.
+        const messages = messageListProps.allDisplayMessages;
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+            if (messages[index].message_type === "user") return messages[index].id;
         }
-
-        return lastMessage.id;
+        return null;
     }, [messageListProps.allDisplayMessages]);
-    tailUserMessageIdRef.current = tailUserMessageId;
+    latestUserMessageIdRef.current = latestUserMessageId;
     const liveItemKeys = useMemo(
         () => liveItems.map((item) => item.key).join("|"),
         [liveItems],
@@ -416,6 +429,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         stopSendScroll();
         renderedConversationRef.current = null;
         lastPinnedUserMessageIdRef.current = null;
+        committedUserMessagesRef.current = null;
         sendScrollStateRef.current = null;
         liveOnlyShownConversationRef.current = null;
         initialBottomConversationRef.current = null;
@@ -425,6 +439,31 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     }, [conversationId]);
 
     const effectiveScrollParent = scrollParent ?? scrollContainerRef.current;
+
+    useLayoutEffect(() => {
+        if (!hasCurrentConversationMessages && messageListProps.allDisplayMessages.length > 0) return;
+        const previous = committedUserMessagesRef.current;
+        // Sync deletion can reveal an older user turn. ID change alone does not
+        // establish a send; preserve the host's restored reading position instead.
+        if (
+            previous?.conversationId === conversationId
+            && previous.latestId !== latestUserMessageId
+            && (latestUserMessageId === null || previous.messages.some(
+                (message) => message.message_type === "user" && message.id === latestUserMessageId,
+            ))
+        ) {
+            stopSendScroll();
+            lastPinnedUserMessageIdRef.current = latestUserMessageId;
+            userReleasedInitialScrollRef.current = conversationId;
+            setInitialBottomVisibleConversationId(conversationId);
+        }
+        committedUserMessagesRef.current = {
+            conversationId,
+            latestId: latestUserMessageId,
+            messages: messageListProps.allDisplayMessages,
+        };
+    }, [conversationId, hasCurrentConversationMessages, latestUserMessageId,
+        messageListProps.allDisplayMessages, stopSendScroll]);
 
     useEffect(() => {
         const container = effectiveScrollParent;
@@ -475,6 +514,19 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                     ? currentConversationId
                     : conversationId,
             );
+            return;
+        }
+
+        // Once the empty/current conversation has been shown, a newly committed
+        // user turn belongs to the send controller. Opening must not snap first.
+        if (
+            renderedConversationRef.current === conversationId
+            && latestUserMessageId !== null
+            && lastPinnedUserMessageIdRef.current !== latestUserMessageId
+        ) {
+            liveOnlyShownConversationRef.current = conversationId;
+            initialBottomConversationRef.current = conversationId;
+            setInitialBottomVisibleConversationId(conversationId);
             return;
         }
 
@@ -575,8 +627,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             onComplete: () => {
                 initialBottomConversationRef.current = conversationId;
                 initialBottomPinConversationRef.current = null;
-                if (tailUserMessageIdRef.current !== null) {
-                    lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
+                if (latestUserMessageIdRef.current !== null) {
+                    lastPinnedUserMessageIdRef.current = latestUserMessageIdRef.current;
                 }
                 setInitialBottomVisibleConversationId(conversationId);
                 stopFollow = startFollow(container);
@@ -585,8 +637,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 userReleasedInitialScrollRef.current = conversationId;
                 initialBottomConversationRef.current = conversationId;
                 initialBottomPinConversationRef.current = null;
-                if (tailUserMessageIdRef.current !== null) {
-                    lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
+                if (latestUserMessageIdRef.current !== null) {
+                    lastPinnedUserMessageIdRef.current = latestUserMessageIdRef.current;
                 }
                 setInitialBottomVisibleConversationId(conversationId);
             },
@@ -613,22 +665,29 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         onScrollStateChange,
         pendingScrollMessageId,
         effectiveScrollParent,
+        latestUserMessageId,
     ]);
 
     // 发消息后：缓动滑到底部（user 气泡贴近顶部），再用 ResizeObserver 钉底等布局稳定。
     //
     // 钉底的生命周期刻意不挂在 effect cleanup 上：发送后后端很快追加 assistant 消息，
-    // tailUserMessageId 立刻变回 null、liveItemKeys 也在变，effect 会反复重跑。
+    // liveItemKeys 仍在变化，effect 会反复重跑。
     // 若随 cleanup 停止，动画会停在半路。这里只在用户接手 / 切会话 / 跳转 / 卸载时停止。
     useLayoutEffect(() => {
         const container = effectiveScrollParent;
-        if (!container || !hasCurrentConversationMessages || tailUserMessageId === null) {
+        if (!container || !hasCurrentConversationMessages || latestUserMessageId === null) {
             return;
         }
 
         if (pendingScrollMessageId !== null) {
             stopSendScroll();
-            lastPinnedUserMessageIdRef.current = tailUserMessageId;
+            lastPinnedUserMessageIdRef.current = latestUserMessageId;
+            return;
+        }
+
+        // 本会话首次带消息渲染 = 打开会话，不是发送：交给初始贴底流程，不播动画
+        if (renderedConversationRef.current !== conversationId) {
+            lastPinnedUserMessageIdRef.current = latestUserMessageId;
             return;
         }
 
@@ -636,28 +695,19 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
-        if (lastPinnedUserMessageIdRef.current === tailUserMessageId) {
+        if (lastPinnedUserMessageIdRef.current === latestUserMessageId) {
             return;
         }
 
-        // 本会话首次带消息渲染 = 打开会话，不是发送：交给初始贴底流程，不播动画
-        if (renderedConversationRef.current !== conversationId) {
-            lastPinnedUserMessageIdRef.current = tailUserMessageId;
-            return;
-        }
-
-        if (
-            sendScrollStateRef.current?.messageId === tailUserMessageId
-            && sendScrollStopRef.current
-        ) {
-            return;
-        }
-
+        // A rapid second send starts from the visible position of the first slide.
+        sendScrollStateRef.current?.slide?.cancel(container);
         stopSendScroll();
-        const pinningMessageId = tailUserMessageId;
+        const pinningMessageId = latestUserMessageId;
+        lastPinnedUserMessageIdRef.current = pinningMessageId;
         const sendState = {
             messageId: pinningMessageId,
             releasedByUser: false,
+            pinning: true,
             slide: null as SendSlide | null,
         };
         sendScrollStateRef.current = sendState;
@@ -667,7 +717,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             if (sendState.releasedByUser) {
                 return;
             }
-            if (sendState.slide) {
+            if (sendState.slide?.isActive()) {
                 sendState.slide.addOffset(delta);
                 return;
             }
@@ -676,6 +726,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             if (!wrapper || !(content instanceof HTMLElement)) {
                 return;
             }
+            // A finished/no-op slide must not swallow a later correction or
+            // restore its clipping after the replacement animation has started.
+            sendState.slide?.cancel();
             sendState.slide = startSendSlide(wrapper, content, delta);
         };
 
@@ -683,11 +736,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         let stopPin: (() => void) | null = null;
         const finishPin = () => {
             lastPinnedUserMessageIdRef.current = pinningMessageId;
-            if (sendScrollStopRef.current === stop) {
-                sendScrollStopRef.current = null;
-            }
+            sendState.pinning = false;
         };
         const stop = () => {
+            sendState.pinning = false;
             stopPin?.();
             stopBubble();
             sendState.slide?.cancel();
@@ -698,9 +750,29 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             container,
             onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
             shouldContinue: () => true,
-            onComplete: finishPin,
+            onComplete: () => {
+                finishPin();
+                sendFollowStopRef.current = followScrollContainerBottom({
+                    container,
+                    contentElements: [listWrapperRef.current],
+                    shouldContinue: () => sendScrollStateRef.current === sendState,
+                    onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
+                    maxDurationMs: STREAM_FOLLOW_MAX_DURATION_MS,
+                    onUserPause: () => {
+                        sendState.releasedByUser = true;
+                        userReleasedInitialScrollRef.current = conversationId;
+                    },
+                    onUserResume: () => {
+                        sendState.releasedByUser = false;
+                        userReleasedInitialScrollRef.current = null;
+                    },
+                });
+            },
             onUserRelease: () => {
                 sendState.releasedByUser = true;
+                userReleasedInitialScrollRef.current = conversationId;
+                sendState.slide?.cancel(container);
+                stopBubble();
                 finishPin();
             },
             observeMode: "tail",
@@ -714,19 +786,23 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         pendingScrollMessageId,
         effectiveScrollParent,
         stopSendScroll,
-        tailUserMessageId,
+        latestUserMessageId,
     ]);
 
-    // 记录「本会话已经带消息渲染过」：之后出现新的 tail user 消息才算发送
+    // 记录「本会话已经带消息渲染过」：之后出现新的 user 消息才算发送
     useEffect(() => {
         if (
-            hasCurrentConversationMessages
-            || messageListProps.allDisplayMessages.length === 0
+            historyLoaded
+            && (hasCurrentConversationMessages || messageListProps.allDisplayMessages.length === 0)
         ) {
             renderedConversationRef.current = conversationId;
+        } else {
+            // An empty loading placeholder is not an opened empty conversation.
+            renderedConversationRef.current = null;
         }
     }, [
         conversationId,
+        historyLoaded,
         hasCurrentConversationMessages,
         messageListProps.allDisplayMessages.length,
     ]);

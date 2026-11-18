@@ -142,6 +142,7 @@ function groupPreview(call: MCPToolCall, live = false) {
 
 interface Props {
     groupId: number;
+    historyLoaded?: boolean;
     messages: ButlerGroupMessage[];
     members: ButlerGroupMember[];
     running: ButlerGroupMember[];
@@ -152,7 +153,7 @@ interface Props {
  * 发送滑动、引用/轮次跳转与高亮、左侧轮次导航、最后一轮布局都来自共享列表；
  * 群聊特有的发言人、时间分隔、系统提示通过自定义行接入，列表的改进会同时作用于私聊和群聊。
  */
-export default function ButlerGroupTranscript({ groupId, messages, members, running }: Props) {
+export default function ButlerGroupTranscript({ groupId, historyLoaded = false, messages, members, running }: Props) {
     const { messagesEndRef, scrollContainerRef, handleUserScrollIntent, syncScrollState, smartScroll } =
         useScrollManagement({ disableTailObservation: true });
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
@@ -284,6 +285,7 @@ export default function ButlerGroupTranscript({ groupId, messages, members, runn
             <ButlerQuoteJumpContext.Provider value={jumpToQuoted}>
                 <VirtuosoMessageList
                     conversationId={transcriptKey}
+                    historyLoaded={historyLoaded}
                     transcriptKey={transcriptKey}
                     allDisplayMessages={chatMessages}
                     streamingMessages={NO_STREAMS}

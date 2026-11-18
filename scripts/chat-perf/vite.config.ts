@@ -12,7 +12,7 @@ export default defineConfig({
         { find: /^@tauri-apps\/.*$/, replacement: path.join(root, 'scripts/chat-perf/tauri.ts') },
         { find: '@', replacement: path.join(root, 'src') },
     ] },
-    build: { outDir: path.join(root, 'tmp/chat-perf/site'), emptyOutDir: true },
+    build: { outDir: path.join(root, 'tmp/chat-perf/site'), emptyOutDir: true, rollupOptions: { input: { index: path.join(root, "scripts/chat-perf/index.html"), send: path.join(root, "scripts/chat-perf/send-motion.html") } } },
     server: { host: '127.0.0.1', port: 4179, strictPort: true, fs: { allow: [root] } },
     preview: { host: '127.0.0.1', port: 4179, strictPort: true },
 });

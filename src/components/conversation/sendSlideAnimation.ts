@@ -9,7 +9,8 @@ export interface SendSlide {
     /** 滚动位置又跳了 delta（新 − 旧）：叠加到当前视觉偏移上继续滑 */
     addOffset: (delta: number) => void;
     isActive: () => boolean;
-    cancel: () => void;
+    /** Passing the scroller preserves the currently visible position on user takeover. */
+    cancel: (scrollContainer?: HTMLElement) => void;
 }
 
 const INACTIVE_SLIDE: SendSlide = {
@@ -112,6 +113,12 @@ export function startSendSlide(
             play(readTranslateY(target) + delta, endsAt - now);
         },
         isActive: () => !done && performance.now() < endsAt,
-        cancel: finish,
+        cancel: (scrollContainer) => {
+            const offset = !done && scrollContainer ? readTranslateY(target) : 0;
+            finish();
+            if (scrollContainer && offset !== 0) {
+                scrollContainer.scrollTop -= offset;
+            }
+        },
     };
 }
