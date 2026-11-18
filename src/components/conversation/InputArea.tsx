@@ -72,6 +72,7 @@ import PinyinFilter, { AssistantItem, FilteredAssistant, usePinyinReady } from "
 import { ArtifactCollectionItem, FilteredArtifact } from "../../data/ArtifactCollection";
 import {
     DEFAULT_SLASH_NAMESPACES,
+    type ContextCommand,
     FilteredSlashSkill,
     SlashNamespaceItem,
     SlashSkillCompletionItem,
@@ -106,6 +107,8 @@ interface InputAreaProps {
     sidebarVisible?: boolean;
     sendButtonIcon?: ReactNode;
     sendButtonVisual?: ReactNode;
+    commandMode?: "chat" | "butler";
+    onContextCommand?: (command: ContextCommand) => Promise<void>;
     acpAvailableCommands?: AcpAvailableCommand[];
     /**
      * Plan 模式开关：只有支持 Plan 的 Agent 助手才传 onPlanModeToggle，
@@ -150,6 +153,8 @@ const InputArea = React.memo(
                 sidebarVisible = false,
                 sendButtonIcon,
                 sendButtonVisual,
+                commandMode,
+                onContextCommand,
                 acpAvailableCommands = EMPTY_ACP_COMMANDS,
                 planMode = false,
                 planModeSwitching = false,
@@ -265,7 +270,7 @@ const InputArea = React.memo(
                     const paddingBottom = parseFloat(style.paddingBottom);
                     const textareaHeight = parseFloat(style.height);
                     const inputAreaRect =
-                        document.querySelector(".input-area")!.getBoundingClientRect();
+                        rootRef.current!.getBoundingClientRect();
 
                     const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
@@ -302,9 +307,15 @@ const InputArea = React.memo(
 
             const filterSlashNamespaces = useCallback((query: string) => {
                 const queryLower = query.trim().toLowerCase();
+                const actions: SlashNamespaceItem[] = [];
+                if (commandMode && /^\s*\/[\w-]*\s*$/.test(textareaRef.current?.value ?? "")) {
+                    actions.push({ name: "compact", action: "compact", description: "压缩当前会话的上下文", isEnabled: true });
+                    if (commandMode === "butler") actions.push({ name: "reload", action: "reload", description: "重新加载系统提示词、工具和 Skills", isEnabled: true });
+                }
                 const allNamespaces = [
                     ...DEFAULT_SLASH_NAMESPACES,
-                    ...acpSlashNamespaces(),
+                    ...actions,
+                    ...acpSlashNamespaces().filter(item => !actions.some(action => action.name === item.name)),
                 ];
                 if (!queryLower) {
                     return allNamespaces;
@@ -315,7 +326,7 @@ const InputArea = React.memo(
                         namespace.description.toLowerCase().includes(queryLower)
                     );
                 });
-            }, [acpSlashNamespaces]);
+            }, [acpSlashNamespaces, commandMode]);
 
             const loadBangList = useCallback(async () => {
                 try {
@@ -400,6 +411,37 @@ const InputArea = React.memo(
                 ],
             );
 
+            const commandPending = useRef(false);
+            const executeCommand = useCallback(async (command: ContextCommand) => {
+                if (!onContextCommand || commandPending.current) return;
+                if (aiIsResponsing || fileInfoList?.length) {
+                    toast.error(aiIsResponsing ? "会话正在回复，请结束后再试" : "请移除附件后再执行会话命令");
+                    return;
+                }
+                commandPending.current = true;
+                const pendingToast = toast.loading(command === "compact" ? "正在压缩上下文…" : "正在重新加载会话配置…");
+                const submitted = textareaRef.current?.value;
+                hideSlashCompletion();
+                try {
+                    await onContextCommand(command);
+                    setInputText(current => current === submitted ? "" : current);
+                } catch (error) {
+                    toast.error(`/${command} 执行失败`, { description: String(error) });
+                } finally {
+                    toast.dismiss(pendingToast);
+                    commandPending.current = false;
+                }
+            }, [onContextCommand, aiIsResponsing, fileInfoList, hideSlashCompletion, setInputText]);
+
+            const submit = (emptyPrompt?: string) => {
+                const text = inputText.trim();
+                if (commandMode && (text === "/compact" || (commandMode === "butler" && text === "/reload"))) {
+                    void executeCommand(text === "/reload" ? "reload" : "compact");
+                } else {
+                    handleSend(emptyPrompt);
+                }
+            };
+
             const handleSlashNamespaceSelect = useCallback(
                 (namespace: SlashNamespaceItem) => {
                     if (
@@ -411,6 +453,10 @@ const InputArea = React.memo(
                         return;
                     }
 
+                    if (namespace.action) {
+                        void executeCommand(namespace.action);
+                        return;
+                    }
                     const textarea = textareaRef.current;
                     const beforeSlash = textarea.value.substring(
                         0,
@@ -450,7 +496,7 @@ const InputArea = React.memo(
                         }
                     }, 0);
                 },
-                [hideSlashCompletion, setInputText, showSlashCompletion, slashContext],
+                [executeCommand, hideSlashCompletion, setInputText, showSlashCompletion, slashContext],
             );
 
             const handleSlashSkillSelect = useCallback(
@@ -683,7 +729,7 @@ const InputArea = React.memo(
                                 const paddingBottom = parseFloat(style.paddingBottom);
                                 const textareaHeight = parseFloat(style.height);
 
-                                const inputAreaRect = document.querySelector(".input-area")!.getBoundingClientRect();
+                                const inputAreaRect = rootRef.current!.getBoundingClientRect();
                                 const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
                                 if (placement === "top") {
@@ -729,7 +775,7 @@ const InputArea = React.memo(
                                 const paddingBottom = parseFloat(style.paddingBottom);
                                 const textareaHeight = parseFloat(style.height);
 
-                                const inputAreaRect = document.querySelector(".input-area")!.getBoundingClientRect();
+                                const inputAreaRect = rootRef.current!.getBoundingClientRect();
                                 const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
                                 if (placement === "top") {
@@ -775,7 +821,7 @@ const InputArea = React.memo(
                                 const paddingBottom = parseFloat(style.paddingBottom);
                                 const textareaHeight = parseFloat(style.height);
 
-                                const inputAreaRect = document.querySelector(".input-area")!.getBoundingClientRect();
+                                const inputAreaRect = rootRef.current!.getBoundingClientRect();
                                 const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
                                 if (placement === "top") {
@@ -930,7 +976,7 @@ const InputArea = React.memo(
                         const paddingTop = parseFloat(style.paddingTop);
                         const paddingBottom = parseFloat(style.paddingBottom);
                         const textareaHeight = parseFloat(style.height);
-                        const inputAreaRect = document.querySelector(".input-area")!.getBoundingClientRect();
+                        const inputAreaRect = rootRef.current!.getBoundingClientRect();
 
                         const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
@@ -979,7 +1025,7 @@ const InputArea = React.memo(
                         const paddingTop = parseFloat(style.paddingTop);
                         const paddingBottom = parseFloat(style.paddingBottom);
                         const textareaHeight = parseFloat(style.height);
-                        const inputAreaRect = document.querySelector(".input-area")!.getBoundingClientRect();
+                        const inputAreaRect = rootRef.current!.getBoundingClientRect();
 
                         const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
@@ -1026,7 +1072,7 @@ const InputArea = React.memo(
                         const paddingTop = parseFloat(style.paddingTop);
                         const paddingBottom = parseFloat(style.paddingBottom);
                         const textareaHeight = parseFloat(style.height);
-                        const inputAreaRect = document.querySelector(".input-area")!.getBoundingClientRect();
+                        const inputAreaRect = rootRef.current!.getBoundingClientRect();
 
                         const left = rect.left - inputAreaRect.left + cursorCoords.cursorLeft;
 
@@ -1168,7 +1214,7 @@ const InputArea = React.memo(
                     } else {
                         // Enter for submit (only if not in IME composition)
                         e.preventDefault();
-                        handleSend();
+                        submit();
                     }
                 } else if (e.key === "Tab" && slashListVisible) {
                     e.preventDefault();
@@ -1485,7 +1531,7 @@ const InputArea = React.memo(
                     ) : null}
                     <CircleButton
                         size={isMobile ? "medium" : placement === "bottom" ? "large" : "medium"}
-                        onClick={() => handleSend(!aiIsResponsing && !inputText.trim() ? "继续你的工作" : undefined)}
+                        onClick={() => submit(!aiIsResponsing && !inputText.trim() ? "继续你的工作" : undefined)}
                         icon={sendButtonVisual ?? sendButtonIcon ?? defaultSendButtonIcon}
                         primary
                         className={`input-area-send-button ${placement} ${sendButtonVisual ? "has-custom-visual" : ""}`}
@@ -1503,6 +1549,7 @@ const InputArea = React.memo(
 
                     <SlashCompletionList
                         visible={slashListVisible}
+                        desktopAnchor={isMobile ? null : rootRef.current}
                         placement={placement}
                         cursorPosition={cursorPosition}
                         mode={slashMode}

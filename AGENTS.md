@@ -29,6 +29,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **聊天界面只有一套**（Ask 是单轮弹窗，只共用输入框）：
 - 输入框：ChatUI、管家私聊/总管家（经 `ConversationUI`）、Ask、管家群聊都直接用 `src/components/conversation/InputArea.tsx`，输入相关新功能加在这里即全部生效；各场景差异用能力 props 表达（不传 `handleChooseFile` = 不支持附件，如群聊；`mentionCandidates` 替换 @ 候选，群聊传本群成员与“所有人”；`topChip` 引用条），不要再为某个场景手写输入框。发送语义各场景自理，但发送键约定一致：有内容即发送（回复中可插话/排队），空输入且在回复时为停止，空闲时点击空输入框的发送按钮会发送「继续你的工作」。
+- 会话命令共用输入框的菜单和发送处理。普通聊天与管家支持 `/compact`，管家另有 `/reload`。普通模型复用摘要检查点，Agent 走原生压缩；群聊按成员执行会话处理。提示词构建与普通回合共用，入口在 `api/ai_api/context_commands.rs`。
 - 消息列表：私聊与群聊共用 `VirtuosoMessageList` + `useMessageListElements`（虚拟化、打开贴底与晚到布局跟随、发送滑动、跳转高亮、最后一轮布局）与 `useScrollManagement`、`ConversationTurnRail`；气泡统一是 `MessageItem`。群聊（`ButlerGroupTranscript.tsx`）通过 `transcriptKey`（消息分属多个成员执行会话）、`mergeAssistantMessages={false}`（不同成员不并气泡）、`renderMessageRow`（发言人/时间分隔/系统提示）、`inlineInteractionItems`（正在输入/成员提问）接入；列表层改进直接作用于两者，不要再为某个场景手写列表或滚动逻辑。
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。

@@ -2427,6 +2427,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
                             sendButtonIcon={sendButtonIconSlot}
                             sendButtonVisual={sendButtonVisualSlot}
+                            commandMode={windowLabel === "butler_experiment" ? "butler" : "chat"}
+                            onContextCommand={async command => {
+                                if (!conversationId) throw new Error("请先打开已有会话");
+                                if (command === "compact" && isAgentConversation) {
+                                    if (!manualCompactSupported) throw new Error("当前 Agent 未提供原生压缩命令");
+                                    await handleCompactAgentContext();
+                                    return;
+                                }
+                                await invoke("run_conversation_context_command", { conversationId: Number(conversationId), command });
+                                toast.success(command === "reload" ? "已重新加载系统提示词、工具和 Skills" : "上下文已压缩");
+                            }}
                             acpAvailableCommands={acpSessionState?.available_commands ?? []}
                             planMode={isPlanMode}
                             planModeSwitching={planModeSwitching}

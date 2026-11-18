@@ -300,7 +300,11 @@ async fn fit_chat_context(
     context: CompactionContext<'_>,
 ) -> Result<context_manager::FitResult, AppError> {
     let conversation_id = context.conversation_id;
-    let result = context_manager::fit_to_budget_with_compaction(messages, budget, token_counts, context).await;
+    let result = async {
+        let mut result = context_manager::fit_to_budget_with_compaction(messages, budget, token_counts, context).await?;
+        context_commands::refresh_after_compaction(app_handle, conversation_id, &mut result).await?;
+        Ok::<_, AppError>(result)
+    }.await;
     if let Err(error) = &result {
         report_pre_request_error_in_conversation(app_handle, conversation_id, &error.to_string()).await;
     }
@@ -1349,6 +1353,84 @@ fn build_tool_config(
     Some(ToolConfig { tools, tool_name_mapping })
 }
 
+pub mod context_commands;
+
+async fn compose_conversation_instructions(
+    app_handle: &tauri::AppHandle, assistant_detail: &AssistantDetail, assistant_prompt_result: String,
+    mcp_info: &MCPInfoForAssistant, conversation: Option<&crate::db::conversation_db::Conversation>,
+    conversation_id: &str, override_prompt: Option<&str>,
+) -> Result<(String, Option<String>, bool), AppError> {
+    let butler_mode_conversation = conversation.is_some_and(|c| {
+        crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&c.conversation_kind)
+    });
+    let mut assistant_prompt_result = assistant_prompt_result;
+    if butler_mode_conversation {
+        assistant_prompt_result.push_str("\n\n用户可以在后续更新或撤销助手的角色、风格和工作要求。收到 AIPP 的助手指令更新时，按最新配置执行。平台工具权限与审批规则始终有效。");
+    }
+    // Native drivers publish their own MCP schemas.
+    let mut native_butler_role = (butler_mode_conversation && assistant_detail.assistant.assistant_type == Some(4))
+        .then(|| override_prompt.unwrap_or(&assistant_prompt_result).to_owned());
+    if !mcp_info.enabled_servers.is_empty() && (mcp_info.dynamic_loading_enabled || !mcp_info.use_native_toolcall) {
+        assistant_prompt_result = format_mcp_prompt(assistant_prompt_result, mcp_info).await;
+    }
+
+    // Collect and format Skills prompt
+    let temporary_skill_identifiers = get_butler_task_temporary_skill_identifiers(
+        app_handle,
+        conversation_id,
+    )?;
+    let skills_info = if butler_mode_conversation {
+        crate::skills::collect_all_skills_for_assistant(
+            app_handle,
+            assistant_detail.assistant.id,
+            &temporary_skill_identifiers,
+        )
+        .await?
+    } else {
+        collect_skills_info_for_assistant_with_additions(
+            app_handle,
+            assistant_detail.assistant.id,
+            &temporary_skill_identifiers,
+        )
+        .await?
+    };
+    let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
+        let skills_suffix = format_skills_prompt(app_handle, String::new(), &skills_info).await;
+        if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
+            role.push_str(&skills_suffix);
+        }
+        let prompt = assistant_prompt_result + &skills_suffix;
+        info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");
+        debug!(formatted_prompt = prompt.as_str(), "Skills formatted prompt");
+        prompt
+    } else {
+        assistant_prompt_result
+    };
+
+    // 管家模式：为联系人/任务成员追加团队协作约定（仅按会话判断，不修改助手原配置）
+    let assistant_prompt_result = match conversation {
+        Some(conversation) => match crate::api::butler_api::build_butler_member_prompt(
+            app_handle,
+            &conversation.conversation_kind,
+            &assistant_detail.assistant,
+        )
+        .await
+        {
+            Some(member_prompt) => {
+                if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
+                    role.push_str("\n\n");
+                    role.push_str(&member_prompt);
+                }
+                format!("{}\n\n{}", assistant_prompt_result, member_prompt)
+            },
+            None => assistant_prompt_result,
+        },
+        None => assistant_prompt_result,
+    };
+
+    Ok((assistant_prompt_result, native_butler_role, butler_mode_conversation))
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle, state, _acp_session_state, feature_config_state, message_token_manager, activity_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
 pub async fn ask_ai(
@@ -1577,90 +1659,10 @@ pub async fn ask_ai(
     );
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
-    // The native Codex bridge publishes its own tool schemas. Keep the role
-    // separate from the model-provider XML/dynamic-loading prompt below.
-    let mut native_butler_role = existing_conversation.as_ref()
-        .filter(|c| assistant_detail.assistant.assistant_type == Some(4)
-            && crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&c.conversation_kind))
-        .map(|_| override_prompt.as_ref().unwrap_or(&assistant_prompt_result).clone());
-
-    // 动态加载模式：即使原生 toolcall 也需要注入 MCP 动态加载规范
-    // 非动态加载模式：仅非原生时拼接 XML 约束
-    let assistant_prompt_result = if mcp_info.enabled_servers.len() > 0 {
-        if mcp_info.dynamic_loading_enabled {
-            // 动态加载模式：总是注入 prompt（根据是否原生 toolcall 提供不同内容）
-            let prompt = format_mcp_prompt(assistant_prompt_result, &mcp_info).await;
-            debug!(formatted_prompt = prompt.as_str(), "MCP formatted prompt (dynamic loading)");
-            prompt
-        } else if !mcp_info.use_native_toolcall {
-            // 非动态加载模式 + 非原生 toolcall：注入 XML 约束
-            let prompt = format_mcp_prompt(assistant_prompt_result, &mcp_info).await;
-            debug!(formatted_prompt = prompt.as_str(), "MCP formatted prompt");
-            prompt
-        } else {
-            // 非动态加载模式 + 原生 toolcall：不注入 XML 约束
-            assistant_prompt_result
-        }
-    } else {
-        assistant_prompt_result
-    };
-
-    // Collect and format Skills prompt
-    let temporary_skill_identifiers = get_butler_task_temporary_skill_identifiers(
-        &app_handle,
-        &processed_request.conversation_id,
-    )?;
-    let butler_mode_conversation = existing_conversation.as_ref().is_some_and(|conversation| {
-        crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind)
-    });
-    let skills_info = if butler_mode_conversation {
-        crate::skills::collect_all_skills_for_assistant(
-            &app_handle,
-            processed_request.assistant_id,
-            &temporary_skill_identifiers,
-        )
-        .await?
-    } else {
-        collect_skills_info_for_assistant_with_additions(
-            &app_handle,
-            processed_request.assistant_id,
-            &temporary_skill_identifiers,
-        )
-        .await?
-    };
-    let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
-        let skills_suffix = format_skills_prompt(&app_handle, String::new(), &skills_info).await;
-        if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
-            role.push_str(&skills_suffix);
-        }
-        let prompt = assistant_prompt_result + &skills_suffix;
-        info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");
-        debug!(formatted_prompt = prompt.as_str(), "Skills formatted prompt");
-        prompt
-    } else {
-        assistant_prompt_result
-    };
-
-    // 管家模式：为联系人/任务成员追加团队协作约定（仅按会话判断，不修改助手原配置）
-    let assistant_prompt_result = match existing_conversation.as_ref() {
-        Some(conversation) => match crate::api::butler_api::build_butler_member_prompt(
-            &app_handle,
-            &conversation.conversation_kind,
-            &assistant_detail.assistant,
-        )
-        .await
-        {
-            Some(member_prompt) => {
-                if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
-                    role.push_str("\n\n");
-                    role.push_str(&member_prompt);
-                }
-                format!("{}\n\n{}", assistant_prompt_result, member_prompt)
-            },
-            None => assistant_prompt_result,
-        },
-        None => assistant_prompt_result,
-    };
+    let (assistant_prompt_result, native_butler_role, butler_mode_conversation) = compose_conversation_instructions(
+        &app_handle, &assistant_detail, assistant_prompt_result, &mcp_info, existing_conversation.as_ref(),
+        &processed_request.conversation_id, override_prompt.as_deref(),
+    ).await?;
 
     let _need_generate_title = processed_request.conversation_id.is_empty();
     let request_prompt_result = if group_turn.is_some() {
@@ -3601,7 +3603,8 @@ pub async fn regenerate_ai(
             &init_message_list,
         )
         .await;
-        let fit_result = context_manager::fit_to_budget_with_compaction(
+        let fit_result = fit_chat_context(
+            &app_handle_clone,
             init_message_list,
             &budget,
             &init_metadata.db_token_counts,

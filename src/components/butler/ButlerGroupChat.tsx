@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
@@ -232,6 +233,20 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             aiIsResponsing={replying}
             placement="bottom"
             sendButtonIcon={sending || stopping ? <Loader2 size={20} className="animate-spin text-action-foreground" /> : undefined}
+            commandMode="butler"
+            onContextCommand={async command => {
+                if (!members.length) throw new Error("群聊没有成员");
+                const failures: string[] = [];
+                for (const member of members) {
+                    try {
+                        await invoke("run_conversation_context_command", { conversationId: member.conversation_id, command });
+                    } catch (error) {
+                        failures.push(`${member.name}：${String(error)}`);
+                    }
+                }
+                if (failures.length) throw new Error(failures.join("；"));
+                toast.success(command === "reload" ? "群成员会话已重新加载" : "已向群成员会话执行压缩命令");
+            }}
             mentionCandidates={mentionCandidates}
             placeholder="发消息，输入 @ 可以点名"
             ariaLabel="群聊消息"
