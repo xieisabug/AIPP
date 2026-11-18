@@ -34,13 +34,13 @@ export interface PeerPost {
 
 export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number,
     interactions: InteractionRow[] = [], liveItems: InlineInteractionItem[] = [],
-    calls?: ReadonlyMap<number, { tool_name?: string; result?: string }>): Message[] {
+    calls?: ReadonlyMap<number, { tool_name?: string; result?: string }>, reports?: ReadonlyMap<number, string>): Message[] {
     const questionIds = new Set(interactions.filter(row => row.kind === "question").map(row => row.request_id));
-    const visible = butlerTranscript(messages, unpublished, questionIds, calls);
+    const visible = butlerTranscript(messages, unpublished, questionIds, calls, reports);
     if (!posts.length && !interactions.length) return visible;
     const positions = new Map(messages.map((m, i) => [m.id, i]));
     const entries: Array<{ position: number; message?: Message; post?: PeerPost; time?: number }> =
-        visible.map(message => ({ position: positions.get(message.id)!, message }));
+        visible.map(message => ({ position: message.message_type === "butler_report" ? positions.get(message.parent_id!)! - 0.25 : positions.get(message.id)!, message }));
     const owners = new Map(entries.map(entry => [entry.message!.id, entry]));
     const live = new Map(liveItems.map(item => [item.requestId, item]));
     const fileCalls = new Map<string, number>();

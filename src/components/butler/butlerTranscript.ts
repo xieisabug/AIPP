@@ -10,7 +10,7 @@ export const BUTLER_SILENT_REPLY = "[[NO_REPLY]]";
 
 // Rendering only. Conversation history, runtime and export retain the original messages.
 export function butlerTranscript(messages: Message[], unpublished = new Set<number>(), questionIds = new Set<string>(),
-    calls?: ReadonlyMap<number, { tool_name?: string }>): Message[] {
+    calls?: ReadonlyMap<number, { tool_name?: string }>, reports?: ReadonlyMap<number, string>): Message[] {
     const result: Message[] = [];
     let internalTurn = false;
     for (const message of messages) {
@@ -54,6 +54,11 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
         if (message.content.trim() === BUTLER_SILENT_REPLY) continue;
         if (parseStreamRetryMeta(message)?.status === "interrupted") continue;
         const pending = (!scheduledResult && unpublished.has(message.id)) || message.finish_time === null;
+        const report = reports?.get(message.id);
+        if (report && !pending) {
+            result.push({ ...message, id: -5_000_000_000_000 - message.id, parent_id: message.id,
+                message_type: "butler_report", content: report });
+        }
         // 交互卡可以在当前轮结束前显示，正文仍等到正式交付。
         const shownPreviews: string[] = [];
         const content = /MCP_TOOL_CALL/i.test(message.content) ? message.content.replace(

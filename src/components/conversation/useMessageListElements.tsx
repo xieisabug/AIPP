@@ -89,6 +89,10 @@ export interface MessageElementEntry {
 }
 
 function exchangeEntry(message: Message): MessageElementEntry {
+    if (message.message_type === "butler_report") return {
+        messageId: message.id, groupControl: null,
+        messageElement: <div className="butler-peer-bubble w-fit max-w-full break-words whitespace-pre-line">{message.content}</div>,
+    };
     if (message.butler_interaction) return { messageId: message.id, groupControl: null, messageElement: <div className="w-full">{message.butler_interaction}</div> };
     if (message.message_type === "butler_processing") {
         return {
@@ -514,7 +518,7 @@ export function useMessageListElements({
         if (!isMergeAssistantMessages) {
             // 非合并模式：每条消息单独渲染
             const entries = allDisplayMessages.map((message) => {
-                if (message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
+                if (message.message_type === "butler_report" || message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
                 const custom = customEntry(message);
                 if (custom) return custom;
                 const streamEvent = streamingMessages.get(message.id);
@@ -660,7 +664,7 @@ export function useMessageListElements({
         };
 
         for (const message of allDisplayMessages) {
-            if (message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") {
+            if (message.message_type === "butler_report" || message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") {
                 flushGroup({ keepExpanded: false });
                 result.push(exchangeEntry(message));
                 continue;

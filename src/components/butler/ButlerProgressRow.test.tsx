@@ -7,7 +7,7 @@ import ButlerProgressRow from "./ButlerProgressRow";
 import { BUTLER_PROGRESS_EVENT } from "./butlerProgress";
 
 const summary = (conversation_id: number, epoch: number, text: string) => ({
-    conversation_id, epoch, text, steps: [{ label: "web_search 竞品定价", status: "success" }, { label: "read_file 报价.xlsx", status: "executing" }],
+    source: "helper_summary", conversation_id, epoch, text, steps: [{ label: "web_search 竞品定价", status: "success" }, { label: "read_file 报价.xlsx", status: "executing" }],
 });
 
 describe("ButlerProgressRow", () => {
@@ -87,9 +87,22 @@ describe("ButlerProgressRow", () => {
         mockInvokeHandler("get_conversation_runtime_state", () => null);
         render(<ButlerProgressRow conversationId={7} />);
         await act(async () => {
-            await emit(BUTLER_PROGRESS_EVENT, { conversation_id: 7, epoch: 3, text: "我先核对两份配置。", steps: [] });
+            await emit(BUTLER_PROGRESS_EVENT, { source: "report_progress", conversation_id: 7, epoch: 3, text: "我先核对两份配置。", steps: [] });
         });
-        expect(await screen.findByText("我先核对两份配置。")).toBeTruthy();
+        expect(await screen.findByText("我先核对两份配置。")).toHaveClass("butler-peer-bubble");
+        expect(screen.queryByRole("button")).toBeNull();
+    });
+
+    it("should center a helper summary without tool steps when it replaces a report", async () => {
+        mockInvokeHandler("get_butler_progress_summary", () => ({ source: "report_progress", conversation_id: 7, epoch: 3, text: "我先核对。", steps: [] }));
+        mockInvokeHandler("get_conversation_runtime_state", () => null);
+        render(<ButlerProgressRow conversationId={7} />);
+        expect(await screen.findByText("我先核对。")).toHaveClass("butler-peer-bubble");
+        await act(async () => {
+            await emit(BUTLER_PROGRESS_EVENT, { source: "helper_summary", conversation_id: 7, epoch: 3, text: "已核对两份配置", steps: [] });
+        });
+        expect(screen.getByRole("status")).toHaveClass("items-center");
+        expect(screen.getByText("已核对两份配置").closest(".butler-peer-bubble")).toBeNull();
         expect(screen.queryByRole("button")).toBeNull();
     });
 

@@ -66,6 +66,8 @@ import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
 import { ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteJumpContext, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
+import { restoreTranscriptPosition } from "./conversation/restoreTranscriptPosition";
+import { reportedProgressByMessage } from "@/components/butler/reportedProgress";
 import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
 import { useLinger } from "@/hooks/useStablePresence";
 import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
@@ -110,6 +112,7 @@ import { useMobileConversationDetails } from "@/hooks/useMobileConversationDetai
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
+    captureTranscriptPosition: () => void;
     focus: () => void;
     scrollToMessage: (messageId: number) => void;
     openStats: () => void;
@@ -1018,11 +1021,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     unpublished.add(message.id);
                 }
             }
-            const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId), interactions, inlineInteractionItems, mcpToolCallStates);
+            const reports = reportedProgressByMessage(Number(conversationId), displayAgentActivities.values(), mcpToolCallStates.values());
+            const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId), interactions, inlineInteractionItems, mcpToolCallStates, reports);
             // 工具轮次之间运行态会短暂回落为空闲；保留"处理中"直到真正的回复发布，避免提示行闪烁。
             return withButlerProcessing(visible, Number(conversationId),
                 effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)));
-        }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId, interactions, inlineInteractionItems, mcpToolCallStates]);
+        }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId, interactions, inlineInteractionItems, mcpToolCallStates, displayAgentActivities]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -1034,6 +1038,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             disableTailObservation: true,
         });
         smartScrollRef.current = smartScroll;
+        const transcriptPosition = useRef<{ conversationId: string; fraction: number } | null>(null);
+        useLayoutEffect(() => {
+            const saved = transcriptPosition.current;
+            transcriptPosition.current = null;
+            const container = scrollContainerRef.current;
+            if (!saved || saved.conversationId !== conversationId || !container) return;
+            // 虚拟列表会在切换后的几帧用实测行高替换估算值。
+            return restoreTranscriptPosition(container, saved.fraction, syncScrollState);
+        }, [conversationId, resultOnly, scrollContainerRef, syncScrollState]);
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
         const [pendingScrollAlign, setPendingScrollAlign] = useState<MessageScrollAlign>("center");
         // 点击引用标签：滚到被引用的那条消息并闪烁提示（与消息定位共用同一条滚动链路）。
@@ -1267,6 +1280,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         useImperativeHandle(
             ref,
             () => ({
+                captureTranscriptPosition: () => {
+                    const container = scrollContainerRef.current;
+                    if (!container) return;
+                    const range = container.scrollHeight - container.clientHeight;
+                    transcriptPosition.current = { conversationId, fraction: range > 0 ? Math.min(1, Math.max(0, container.scrollTop / range)) : 1 };
+                    handleUserScrollIntent();
+                },
                 focus: () => {
                     inputAreaRef.current?.focus();
                 },

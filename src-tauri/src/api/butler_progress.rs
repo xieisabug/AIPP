@@ -31,7 +31,15 @@ pub struct ProgressStep {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressSource {
+    ReportProgress,
+    HelperSummary,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ButlerProgressSummary {
+    pub source: ProgressSource,
     pub conversation_id: i64,
     /// 生成时的运行轮次；前端/查询据此丢弃上一轮遗留的摘要。
     pub epoch: u64,
@@ -274,7 +282,7 @@ pub(super) async fn report(app: &AppHandle, conversation_id: i64, args: &Value) 
     anyhow::ensure!(!crate::vault::placeholder::audit_requires_opaque_values(), "进度提示不能包含保险箱凭据");
     let text = crate::vault::placeholder::clean_persisted_text(&report_text(args)?);
     let epoch = app.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await.epoch;
-    let summary = ButlerProgressSummary { conversation_id, epoch, text, steps: Vec::new() };
+    let summary = ButlerProgressSummary { source: ProgressSource::ReportProgress, conversation_id, epoch, text, steps: Vec::new() };
     cache().lock().unwrap_or_else(|e| e.into_inner()).insert(conversation_id, summary.clone());
     app.emit(PROGRESS_EVENT, &summary)?;
     Ok(serde_json::json!({"reported":true,"next":"继续执行原任务，完成后交付结果。"}))
@@ -339,7 +347,7 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
 
     let runtime = app.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await;
     if !runtime.is_running || runtime.epoch != epoch || turn.cancel.is_cancelled() { return Ok(()); }
-    let summary = ButlerProgressSummary { conversation_id, epoch, text, steps };
+    let summary = ButlerProgressSummary { source: ProgressSource::HelperSummary, conversation_id, epoch, text, steps };
     let mut summaries = cache().lock().unwrap_or_else(|e| e.into_inner());
     if summaries.get(&conversation_id).is_some_and(|s| s.epoch > epoch ||
         (s.epoch == epoch && s.steps.is_empty() && before.as_ref() != Some(s))) {

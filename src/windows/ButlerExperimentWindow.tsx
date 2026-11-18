@@ -1038,6 +1038,11 @@ function ButlerExperimentWindow() {
         await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues());
     }, [butlerSettingsForm, saveFeatureConfig]);
 
+    const toggleExecutionDetails = () => {
+        conversationUIRef.current?.captureTranscriptPosition();
+        setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId);
+    };
+
     const handleToggleSidebar = useCallback(() => {
         conversationUIRef.current?.toggleSidebar();
     }, []);
@@ -1274,7 +1279,7 @@ function ButlerExperimentWindow() {
                                         icon={detailsConversation === activeConversationId
                                             ? <MessageSquareText className="h-4 w-4 text-icon" />
                                             : <ScrollText className="h-4 w-4 text-icon" />}
-                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}
+                                        onClick={toggleExecutionDetails}
                                         border
                                         title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
                                     />
@@ -1304,7 +1309,7 @@ function ButlerExperimentWindow() {
                                         icon={detailsConversation === activeConversationId
                                             ? <MessageSquareText className="h-4 w-4 text-icon" />
                                             : <ScrollText className="h-4 w-4 text-icon" />}
-                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}
+                                        onClick={toggleExecutionDetails}
                                         border
                                         title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
                                         dataAippSlot="butler-main-toggle-details"

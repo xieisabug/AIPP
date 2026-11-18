@@ -27,20 +27,24 @@ export default function ButlerProgressRow({ conversationId }: { conversationId: 
             className="butler-exchange flex justify-center text-xs text-muted-foreground">{live}</div>;
     }
 
-    if (!summary.steps.length) {
+    if (summary.source === "report_progress") {
         return <div role="status" data-aipp-slot="butler-processing"
             className="butler-peer-bubble w-fit max-w-full break-words">{summary.text}</div>;
     }
 
-    return <div role="status" data-aipp-slot="butler-processing" className="butler-exchange flex flex-col items-center text-xs text-muted-foreground">
-        <button type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}
-            className="flex max-w-full items-center gap-1.5 rounded-md px-2 py-1 hover:bg-muted hover:text-foreground">
+    const status = <>
             <Loader2 aria-hidden="true" className="size-3 shrink-0 animate-spin" />
             <span className="truncate">{summary.text}</span>
             <span className="shrink-0 tabular-nums opacity-70">· {formatElapsed(elapsed)}</span>
+    </>;
+    const rowClass = "flex max-w-full items-center gap-1.5 px-2 py-1";
+    return <div role="status" data-aipp-slot="butler-processing" className="butler-exchange flex flex-col items-center text-xs text-muted-foreground">
+        {summary.steps.length ? <button type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}
+            className={`${rowClass} rounded-md hover:bg-muted hover:text-foreground`}>
+            {status}
             <ChevronRight aria-hidden="true" className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`} />
-        </button>
-        {expanded && <ol className="mt-1 space-y-0.5" data-aipp-slot="butler-progress-steps">
+        </button> : <div className={rowClass}>{status}</div>}
+        {expanded && summary.steps.length > 0 && <ol className="mt-1 space-y-0.5" data-aipp-slot="butler-progress-steps">
             {summary.steps.map((step, index) => <li key={index} className="flex max-w-md items-center gap-1.5">
                 {step.status === "success" ? <Check aria-label="已完成" className="size-3 shrink-0" />
                     : step.status === "failed" ? <X aria-label="失败" className="size-3 shrink-0" />
