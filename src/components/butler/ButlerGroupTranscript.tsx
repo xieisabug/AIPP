@@ -21,6 +21,7 @@ import { useScrollManagement } from "@/hooks/useScrollManagement";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker, toChatMessage } from "./ButlerGroupMessageRow";
 import { ButlerQuoteJumpContext } from "./ButlerQuote";
+import { HelperSummaryRow } from "./ButlerProgressRow";
 import { useButlerProgress } from "./butlerProgress";
 import { formatDivider, showTimeDivider } from "./butlerGroupModel";
 
@@ -40,15 +41,15 @@ function toTranscriptMessage(groupId: number, message: ButlerGroupMessage, quote
 }
 
 function TypingRow({ member }: { member: ButlerGroupMember }) {
-    const progress = useButlerProgress(member.conversation_id)?.text;
+    const progress = useButlerProgress(member.conversation_id);
     return <div role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
         <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name}>
             <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={20} figure animated state="thinking" />
         </ButlerGroupSpeaker>
-        <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
+        {progress?.reports.map(text => <div key={text} className="butler-peer-bubble break-words">{text}</div>)}
+        {progress?.helper ? <HelperSummaryRow summary={progress.helper} /> : <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
             <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
-            {progress && <span className="break-words text-xs">{progress}</span>}
-        </div>
+        </div>}
     </div>;
 }
 

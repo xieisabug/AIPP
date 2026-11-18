@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, ChevronRight, Loader2, X } from "lucide-react";
-import { useButlerProgress } from "./butlerProgress";
+import { useButlerProgress, type ButlerProgressSummary } from "./butlerProgress";
 import { useButlerLiveStatus } from "./useButlerLiveStatus";
 
 function useElapsedSeconds() {
@@ -17,21 +17,19 @@ const formatElapsed = (seconds: number) => seconds < 60 ? `${seconds}s` : `${Mat
 
 /** 简洁聊天中的状态行。有辅助模型摘要时显示一句进展，可展开查看步骤；否则与联系人列表用同一句短状态。 */
 export default function ButlerProgressRow({ conversationId }: { conversationId: number }) {
-    const summary = useButlerProgress(conversationId);
+    const progress = useButlerProgress(conversationId);
     const live = useButlerLiveStatus(conversationId);
+    return <>
+        {progress?.reports.map(text => <div key={text} className="butler-peer-bubble w-fit max-w-full break-words">{text}</div>)}
+        {progress?.helper ? <HelperSummaryRow summary={progress.helper} />
+            : <div role="status" data-aipp-slot="butler-processing"
+                className="butler-exchange flex justify-center text-xs text-muted-foreground">{live}</div>}
+    </>;
+}
+
+export function HelperSummaryRow({ summary }: { summary: ButlerProgressSummary }) {
     const elapsed = useElapsedSeconds();
     const [expanded, setExpanded] = useState(false);
-
-    if (!summary) {
-        return <div role="status" data-aipp-slot="butler-processing"
-            className="butler-exchange flex justify-center text-xs text-muted-foreground">{live}</div>;
-    }
-
-    if (summary.source === "report_progress") {
-        return <div role="status" data-aipp-slot="butler-processing"
-            className="butler-peer-bubble w-fit max-w-full break-words">{summary.text}</div>;
-    }
-
     const status = <>
             <Loader2 aria-hidden="true" className="size-3 shrink-0 animate-spin" />
             <span className="truncate">{summary.text}</span>

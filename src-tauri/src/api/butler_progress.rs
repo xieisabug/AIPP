@@ -47,6 +47,40 @@ pub struct ButlerProgressSummary {
     pub steps: Vec<ProgressStep>,
 }
 
+#[derive(Clone, Serialize)]
+pub struct ProgressSnapshot {
+    #[serde(flatten)]
+    latest: ButlerProgressSummary,
+    reports: Vec<String>,
+    helper: Option<ButlerProgressSummary>,
+}
+
+impl ProgressSnapshot {
+    fn update(previous: Option<&Self>, latest: ButlerProgressSummary) -> Self {
+        let previous = previous.filter(|s| s.latest.epoch == latest.epoch);
+        let mut reports = previous.map(|s| s.reports.clone()).unwrap_or_default();
+        let helper = match latest.source {
+            ProgressSource::ReportProgress => {
+                if !reports.contains(&latest.text) { reports.push(latest.text.clone()); }
+                previous.and_then(|s| s.helper.clone())
+            }
+            ProgressSource::HelperSummary => Some(latest.clone()),
+        };
+        Self { latest, reports, helper }
+    }
+}
+
+fn publish(app: &AppHandle, latest: ButlerProgressSummary) -> tauri::Result<()> {
+    let mut snapshots = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let id = latest.conversation_id;
+    let previous = snapshots.get(&id);
+    if previous.is_some_and(|s| s.latest.epoch > latest.epoch) { return Ok(()); }
+    let snapshot = ProgressSnapshot::update(previous, latest);
+    app.emit(PROGRESS_EVENT, &snapshot)?;
+    snapshots.insert(id, snapshot);
+    Ok(())
+}
+
 #[derive(Default)]
 struct Batch {
     text: String,
@@ -173,8 +207,8 @@ fn turns() -> &'static Mutex<HashMap<i64, Arc<Turn>>> {
     TURNS.get_or_init(Default::default)
 }
 
-fn cache() -> &'static Mutex<HashMap<i64, ButlerProgressSummary>> {
-    static CACHE: OnceLock<Mutex<HashMap<i64, ButlerProgressSummary>>> = OnceLock::new();
+fn cache() -> &'static Mutex<HashMap<i64, ProgressSnapshot>> {
+    static CACHE: OnceLock<Mutex<HashMap<i64, ProgressSnapshot>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -198,7 +232,6 @@ pub(crate) async fn begin_turn(app: &AppHandle, conversation: i64, user_id: i64,
     if let Some(old) = turns().lock().unwrap_or_else(|e| e.into_inner()).insert(conversation, turn.clone()) {
         old.cancel.cancel();
     }
-    cache().lock().unwrap_or_else(|e| e.into_inner()).remove(&conversation);
     let request = clip(crate::utils::turn_context::visible(request), 400);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -225,7 +258,7 @@ pub(crate) async fn begin_turn(app: &AppHandle, conversation: i64, user_id: i64,
 pub async fn get_butler_progress_summary(
     app_handle: AppHandle,
     conversation_id: i64,
-) -> Option<ButlerProgressSummary> {
+) -> Option<ProgressSnapshot> {
     let runtime = app_handle
         .try_state::<ConversationActivityManager>()?
         .get_runtime_state(conversation_id)
@@ -233,10 +266,10 @@ pub async fn get_butler_progress_summary(
     cached_progress(&runtime)
 }
 
-pub(super) fn cached_progress(runtime: &crate::api::ai::events::ConversationRuntimeState) -> Option<ButlerProgressSummary> {
+pub(super) fn cached_progress(runtime: &crate::api::ai::events::ConversationRuntimeState) -> Option<ProgressSnapshot> {
     if !runtime.is_running { return None; }
     cache().lock().unwrap_or_else(|e| e.into_inner()).get(&runtime.conversation_id)
-        .filter(|s| s.epoch == runtime.epoch).cloned()
+        .filter(|s| s.latest.epoch == runtime.epoch).cloned()
 }
 
 fn parse_model(value: &str) -> Option<(String, i64)> {
@@ -283,8 +316,7 @@ pub(super) async fn report(app: &AppHandle, conversation_id: i64, args: &Value) 
     let text = crate::vault::placeholder::clean_persisted_text(&report_text(args)?);
     let epoch = app.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await.epoch;
     let summary = ButlerProgressSummary { source: ProgressSource::ReportProgress, conversation_id, epoch, text, steps: Vec::new() };
-    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(conversation_id, summary.clone());
-    app.emit(PROGRESS_EVENT, &summary)?;
+    publish(app, summary)?;
     Ok(serde_json::json!({"reported":true,"next":"继续执行原任务，完成后交付结果。"}))
 }
 
@@ -292,9 +324,8 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
     let (model_code, provider_id) = model;
     let epoch = turn.epoch;
     let steps: Vec<_> = batch.steps.into_iter().map(|(_, step)| step).collect();
-    // 若生成摘要期间助手发来了自己的进度，迟到的摘要不能盖住它。
     let before = cache().lock().unwrap_or_else(|e| e.into_inner())
-        .get(&conversation_id).cloned();
+        .get(&conversation_id).map(|s| s.latest.clone());
     let step_lines = steps
         .iter()
         .enumerate()
@@ -348,13 +379,7 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
     let runtime = app.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await;
     if !runtime.is_running || runtime.epoch != epoch || turn.cancel.is_cancelled() { return Ok(()); }
     let summary = ButlerProgressSummary { source: ProgressSource::HelperSummary, conversation_id, epoch, text, steps };
-    let mut summaries = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if summaries.get(&conversation_id).is_some_and(|s| s.epoch > epoch ||
-        (s.epoch == epoch && s.steps.is_empty() && before.as_ref() != Some(s))) {
-        return Ok(());
-    }
-    summaries.insert(conversation_id, summary.clone());
-    let _ = app.emit(PROGRESS_EVENT, &summary);
+    publish(app, summary).map_err(|e| e.to_string())?;
     Ok(())
 }
 

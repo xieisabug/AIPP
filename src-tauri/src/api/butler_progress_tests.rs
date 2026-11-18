@@ -90,3 +90,19 @@ fn test_report_progress_requires_one_short_sentence() {
     }
     assert!(report_text(&serde_json::json!({})).is_err());
 }
+
+#[test]
+fn test_progress_snapshot_keeps_reports_and_helper_for_current_epoch() {
+    let entry = |source, epoch, text: &str| ButlerProgressSummary {
+        source, conversation_id: 42, epoch, text: text.into(), steps: Vec::new(),
+    };
+    let first = ProgressSnapshot::update(None, entry(ProgressSource::ReportProgress, 1, "开工"));
+    let summary = ProgressSnapshot::update(Some(&first), entry(ProgressSource::HelperSummary, 1, "核对中"));
+    let next = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 1, "继续检查"));
+    assert_eq!(summary.reports, ["开工"]);
+    assert_eq!(next.reports, ["开工", "继续检查"]);
+    assert_eq!(next.helper.unwrap().text, "核对中");
+    let fresh = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 2, "新任务"));
+    assert_eq!(fresh.reports, ["新任务"]);
+    assert!(fresh.helper.is_none());
+}

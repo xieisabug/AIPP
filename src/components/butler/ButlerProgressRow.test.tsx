@@ -6,7 +6,12 @@ import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri
 import ButlerProgressRow from "./ButlerProgressRow";
 import { BUTLER_PROGRESS_EVENT } from "./butlerProgress";
 
-const summary = (conversation_id: number, epoch: number, text: string) => ({
+const snapshot = (latest: { source: string; conversation_id: number; epoch: number; text: string; steps: unknown[] }, reports: string[] = []) => ({
+    ...latest, reports: latest.source === "report_progress" ? [...reports, latest.text] : reports,
+    helper: latest.source === "helper_summary" ? latest : null,
+});
+
+const summary = (conversation_id: number, epoch: number, text: string) => snapshot({
     source: "helper_summary", conversation_id, epoch, text, steps: [{ label: "web_search 竞品定价", status: "success" }, { label: "read_file 报价.xlsx", status: "executing" }],
 });
 
@@ -15,7 +20,7 @@ describe("ButlerProgressRow", () => {
 
     it("should show the same cached and live progress in chat and contacts when a turn is running", async () => {
         const runtime = { conversation_id: 3, is_running: true, phase: "assistant_streaming", epoch: 2, revision: 1 };
-        const progress = { conversation_id: 3, epoch: 2, text: "正在核对供应商报价", steps: [] };
+        const progress = summary(3, 2, "正在核对供应商报价");
         mockInvokeHandler("get_butler_progress_summary", () => progress);
         mockInvokeHandler("get_conversation_runtime_state", () => runtime);
         mockInvokeHandler("list_butler_contact_activity", () => [{ conversation_id: 3, assistant_id: 7, runtime, progress, status: null }]);
@@ -87,20 +92,21 @@ describe("ButlerProgressRow", () => {
         mockInvokeHandler("get_conversation_runtime_state", () => null);
         render(<ButlerProgressRow conversationId={7} />);
         await act(async () => {
-            await emit(BUTLER_PROGRESS_EVENT, { source: "report_progress", conversation_id: 7, epoch: 3, text: "我先核对两份配置。", steps: [] });
+            await emit(BUTLER_PROGRESS_EVENT, snapshot({ source: "report_progress", conversation_id: 7, epoch: 3, text: "我先核对两份配置。", steps: [] }));
         });
         expect(await screen.findByText("我先核对两份配置。")).toHaveClass("butler-peer-bubble");
         expect(screen.queryByRole("button")).toBeNull();
     });
 
-    it("should center a helper summary without tool steps when it replaces a report", async () => {
-        mockInvokeHandler("get_butler_progress_summary", () => ({ source: "report_progress", conversation_id: 7, epoch: 3, text: "我先核对。", steps: [] }));
+    it("should center a helper summary without tool steps alongside the report bubble", async () => {
+        mockInvokeHandler("get_butler_progress_summary", () => snapshot({ source: "report_progress", conversation_id: 7, epoch: 3, text: "我先核对。", steps: [] }));
         mockInvokeHandler("get_conversation_runtime_state", () => null);
         render(<ButlerProgressRow conversationId={7} />);
         expect(await screen.findByText("我先核对。")).toHaveClass("butler-peer-bubble");
         await act(async () => {
-            await emit(BUTLER_PROGRESS_EVENT, { source: "helper_summary", conversation_id: 7, epoch: 3, text: "已核对两份配置", steps: [] });
+            await emit(BUTLER_PROGRESS_EVENT, snapshot({ source: "helper_summary", conversation_id: 7, epoch: 3, text: "已核对两份配置", steps: [] }, ["我先核对。"]));
         });
+        expect(screen.getByText("我先核对。")).toHaveClass("butler-peer-bubble");
         expect(screen.getByRole("status")).toHaveClass("items-center");
         expect(screen.getByText("已核对两份配置").closest(".butler-peer-bubble")).toBeNull();
         expect(screen.queryByRole("button")).toBeNull();

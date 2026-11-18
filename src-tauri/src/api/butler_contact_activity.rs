@@ -13,7 +13,7 @@ pub struct ContactActivity {
     status: Option<String>,
     waiting_peer: bool,
     runtime: Option<ConversationRuntimeState>,
-    progress: Option<super::butler_progress::ButlerProgressSummary>,
+    progress: Option<super::butler_progress::ProgressSnapshot>,
     permission: bool,
     question: bool,
 }

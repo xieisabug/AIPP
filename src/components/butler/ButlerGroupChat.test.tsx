@@ -273,11 +273,12 @@ describe("ButlerGroupChat", () => {
             { member_id: 2, state: "running", round: 1, rounds: 1 },
         ] }));
         mockInvokeHandler("get_butler_progress_summary", args => args?.conversationId === 102
-            ? { conversation_id: 102, epoch: 1, text: "我先整理本周的交付。", steps: [] } : null);
+            ? { conversation_id: 102, epoch: 1, reports: ["我先整理本周的交付。"], helper: { text: "正在核对交付记录", steps: [] } } : null);
         renderChat();
         const writer = await screen.findByRole("status", { name: "写作助手 正在输入" });
         expect(await within(writer).findByText("我先整理本周的交付。")).toBeInTheDocument();
         expect(screen.getAllByText("我先整理本周的交付。")).toHaveLength(1);
+        expect(within(writer).getByText("正在核对交付记录").closest("[role=status]")).toHaveClass("items-center");
     });
 
     it("should show discussion progress when members are discussing in rounds", async () => {

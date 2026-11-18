@@ -7,9 +7,11 @@ export const BUTLER_PROGRESS_EVENT = "butler_progress_summary";
 export interface ButlerProgressStep { label: string; status: string }
 export interface ButlerProgressSummary { source: "report_progress" | "helper_summary"; conversation_id: number; epoch: number; text: string; steps: ButlerProgressStep[] }
 
+export interface ProgressSnapshot extends ButlerProgressSummary { reports: string[]; helper: ButlerProgressSummary | null }
+
 /** 当前会话这一轮的进度摘要；只接受不早于已知轮次的结果，避免上一轮遗留的摘要回写。 */
-export function useButlerProgress(conversationId: number): ButlerProgressSummary | undefined {
-    const [summary, setSummary] = useState<ButlerProgressSummary>();
+export function useButlerProgress(conversationId: number): ProgressSnapshot | undefined {
+    const [summary, setSummary] = useState<ProgressSnapshot>();
     useEffect(() => {
         setSummary(undefined);
         if (!conversationId) return;
@@ -25,10 +27,10 @@ export function useButlerProgress(conversationId: number): ButlerProgressSummary
                 epoch = state.epoch;
                 revision = state.revision;
                 running = state.is_running;
-                setSummary(previous => state.is_running && previous?.epoch === epoch ? previous : undefined);
+                setSummary(previous => state.is_running && previous?.epoch === state.epoch ? previous : undefined);
             },
         );
-        const accept = (next: ButlerProgressSummary | null | undefined) => {
+        const accept = (next: ProgressSnapshot | null | undefined) => {
             if (disposed || !next || next.conversation_id !== conversationId || next.epoch < epoch) return;
             if (next.epoch === epoch && !running) return;
             if (next.epoch > epoch) {
@@ -38,14 +40,14 @@ export function useButlerProgress(conversationId: number): ButlerProgressSummary
             }
             setSummary(previous => previous?.conversation_id === conversationId && previous.epoch > next.epoch ? previous : next);
         };
-        let receivedEvent = false;
-        const unlisten = listen<ButlerProgressSummary>(BUTLER_PROGRESS_EVENT, ({ payload }) => {
+        let latestEventEpoch = -1;
+        const unlisten = listen<ProgressSnapshot>(BUTLER_PROGRESS_EVENT, ({ payload }) => {
             if (payload.conversation_id !== conversationId) return;
-            receivedEvent = true;
+            latestEventEpoch = Math.max(latestEventEpoch, payload.epoch);
             accept(payload);
         });
-        void unlisten.then(() => invoke<ButlerProgressSummary | null>("get_butler_progress_summary", { conversationId }))
-            .then(snapshot => { if (!receivedEvent) accept(snapshot); })
+        void unlisten.then(() => invoke<ProgressSnapshot | null>("get_butler_progress_summary", { conversationId }))
+            .then(snapshot => { if (snapshot && snapshot.epoch > latestEventEpoch) accept(snapshot); })
             .catch(error => console.warn(`[Butler progress] snapshot failed (${conversationId}):`, error));
         return () => {
             disposed = true;
