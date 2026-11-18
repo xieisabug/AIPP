@@ -605,6 +605,7 @@ const MessageItem = React.memo<MessageItemProps>(
         const bubbleElement = (
             <MessageContextMenu actions={actionProps}>
             <div
+                data-bubble-entry-id={message.id}
                 className={`group relative inline-block ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2" : "max-w-[65%] px-5 py-4"} rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}
             >
                 {shouldShowShineBorder && (

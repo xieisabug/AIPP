@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startSendScrollSequence } from './sendScrollSequence';
 
-function setup() {
+function setup(butlerBubbleMotion = false) {
     const container = document.createElement('div');
     const row = document.createElement('div');
     row.dataset.messageItem = ''; row.dataset.messageId = '3';
@@ -12,7 +12,7 @@ function setup() {
     container.getBoundingClientRect = () => ({top:0} as DOMRect);
     row.getBoundingClientRect = () => ({top:rowTop-container.scrollTop} as DOMRect);
     const complete = vi.fn(); const release = vi.fn();
-    const stop = startSendScrollSequence({container,messageId:3,onComplete:complete,onUserRelease:release});
+    const stop = startSendScrollSequence({container,messageId:3,butlerBubbleMotion,onComplete:complete,onUserRelease:release});
     return {container, complete, release, stop, moveRow:(top:number)=>{rowTop=top;}};
 }
 beforeEach(() => {
@@ -123,4 +123,11 @@ it('should wait for the actual bubble fade when its animation starts late', () =
     vi.advanceTimersByTime(600);
     expect(container.scrollTop).toBe(592);
     expect(complete).toHaveBeenCalledOnce();
+});
+
+it('should wait for the Butler shell and text before scrolling',()=>{
+    const {container,complete}=setup(true);
+    vi.advanceTimersByTime(399); expect(container.scrollTop).toBe(0);
+    vi.advanceTimersByTime(120); expect(container.scrollTop).toBeGreaterThan(0);
+    vi.advanceTimersByTime(600); expect(container.scrollTop).toBe(592); expect(complete).toHaveBeenCalledOnce();
 });

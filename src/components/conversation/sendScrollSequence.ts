@@ -1,3 +1,4 @@
+import { BUTLER_BUBBLE_ENTRY_MS, playButlerSentBubble } from './butlerBubbleAnimation';
 import type { SendLayout } from './SendLayoutSnapshot';
 import { playSentBubbleAnimation, SENT_BUBBLE_ANIMATION_MS } from './sentBubbleAnimation';
 
@@ -6,11 +7,12 @@ const SETTLE_MS = 120;
 const ease = (t: number) => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
 /** Keep native scroll position and content in the same coordinate system. */
-export function startSendScrollSequence({ container, content, previousLayout, messageId, onComplete, onUserRelease, onScrollStateChange }: {
+export function startSendScrollSequence({ container, content, previousLayout, messageId, butlerBubbleMotion = false, onComplete, onUserRelease, onScrollStateChange }: {
     container: HTMLDivElement;
     content?: HTMLDivElement | null;
     previousLayout?: SendLayout | null;
     messageId: number;
+    butlerBubbleMotion?: boolean;
     onComplete: () => void;
     onUserRelease: () => void;
     onScrollStateChange?: (container: HTMLDivElement) => void;
@@ -73,7 +75,10 @@ export function startSendScrollSequence({ container, content, previousLayout, me
     let duration = SEND_SCROLL_DURATION_MS;
     let stableSince: number | null = null;
     container.dataset.sendPhase = reduced ? 'scroll' : 'entry';
-    const stopBubble = playSentBubbleAnimation(container, messageId);
+    const entryDuration = butlerBubbleMotion ? BUTLER_BUBBLE_ENTRY_MS : SENT_BUBBLE_ANIMATION_MS;
+    const stopBubble = butlerBubbleMotion
+        ? playButlerSentBubble(container, messageId)
+        : playSentBubbleAnimation(container, messageId);
     const synchronizeEntry = () => {
         if (!stopped && scrollStarted === null && !reduced) {
             container.scrollTop = from;
@@ -90,6 +95,7 @@ export function startSendScrollSequence({ container, content, previousLayout, me
     const bubbleReady = () => {
         const bubble = container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${messageId}']`)?.lastElementChild;
         if (!bubble) return true;
+        if (butlerBubbleMotion && Array.from(bubble.children).some(child => Number.parseFloat(getComputedStyle(child).opacity) < .99)) return false;
         const opacity = Number.parseFloat(getComputedStyle(bubble).opacity);
         return !Number.isFinite(opacity) || opacity >= .99;
     };
@@ -143,7 +149,7 @@ export function startSendScrollSequence({ container, content, previousLayout, me
             container.scrollTop = next;
             onScrollStateChange?.(container);
             cleanup(); onComplete(); return;
-        } else if (scrollStarted === null && (now - started < SENT_BUBBLE_ANIMATION_MS || !bubbleReady())) {
+        } else if (scrollStarted === null && (now - started < entryDuration || !bubbleReady())) {
             // Virtual measurements may adjust scrollTop after the send commit.
             // Entry owns this position until the actual scrolling phase starts.
             container.scrollTop = from;
@@ -158,7 +164,7 @@ export function startSendScrollSequence({ container, content, previousLayout, me
                 from = container.scrollTop; destination = next; scrollStarted = now;
                 heightFrom = content?.getBoundingClientRect().height ?? initialHeight;
                 entryOffset = displayedOffset;
-                duration = Math.max(120, SEND_SCROLL_DURATION_MS - (now - started - SENT_BUBBLE_ANIMATION_MS));
+                duration = Math.max(120, SEND_SCROLL_DURATION_MS - (now - started - entryDuration));
                 stableSince = null;
             }
             const progress = Math.min(1, (now - scrollStarted) / duration);

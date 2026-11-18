@@ -25,7 +25,7 @@ const paramsNativeReduced = () => new URLSearchParams(location.search).get('scen
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const history = (count: number) => Array.from({ length: count }, (_, i) => message(i + 1,
     i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`));
-interface Frame { phase: string; clientHeight: number; anchorTop: number | null; bubbleTop: number | null; thumbPosition: number; thumbSize: number; nodes: number; ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
+interface Frame { bubbleWidth: number | null; bubbleHeight: number | null; phase: string; clientHeight: number; anchorTop: number | null; bubbleTop: number | null; thumbPosition: number; thumbSize: number; nodes: number; ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
 interface Result { synchronousWork: {name:string; ms:number; duration:number}[]; longAnimationFrames: Record<string, unknown>[]; trajectory: ReturnType<typeof analyzeTrajectory>; scenario: string; actionMs: number; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean; commits: {phase:string; actualDuration:number; startTime:number; commitTime:number}[] }
 function Chat() {
     const realComposer = new URLSearchParams(location.search).has('composer');
@@ -100,14 +100,18 @@ function Chat() {
                         .filter(el => el.textContent?.includes('请帮我检查')).at(-1);
                     const anchor = anchorId ? container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${anchorId}']`) : null;
                     const origin = container.getBoundingClientRect().top;
-                    samples.push({ phase: container.dataset.sendPhase ?? 'idle', clientHeight: container.clientHeight,
+                    const bubble = row?.lastElementChild as HTMLElement | null;
+                    const contents = bubble ? Array.from(bubble.children) : [];
+                    const textOpacity = contents.length ? Math.min(...contents.map(child => Number(getComputedStyle(child).opacity))) : 1;
+                    samples.push({ bubbleWidth: bubble?.getBoundingClientRect().width ?? null,
+                        bubbleHeight: bubble?.getBoundingClientRect().height ?? null, phase: container.dataset.sendPhase ?? 'idle', clientHeight: container.clientHeight,
                         anchorTop: anchor ? anchor.getBoundingClientRect().top - origin : null,
                         bubbleTop: row?.lastElementChild ? row.lastElementChild.getBoundingClientRect().top - origin : null,
                         thumbPosition: container.scrollTop / Math.max(1, container.scrollHeight - container.clientHeight),
                         thumbSize: Math.min(1,container.clientHeight / Math.max(1,container.scrollHeight)), nodes: container.querySelectorAll('[data-message-item]').length, ms: performance.now() - started,
                         top: row ? row.getBoundingClientRect().top - container.getBoundingClientRect().top : null,
                         scroll: container.scrollTop, height: container.scrollHeight,
-                        opacity: row?.lastElementChild ? Number(getComputedStyle(row.lastElementChild).opacity) : null });
+                        opacity: bubble ? Number(getComputedStyle(bubble).opacity) * textOpacity : null });
                     synchronousWork.push({name:'sample-geometry',ms:workStarted-started,duration:performance.now()-workStarted});
                     if (recording) requestAnimationFrame(() => setTimeout(collect, 0));
                 };
@@ -155,7 +159,7 @@ function Chat() {
                         await delay(80);
                         content.style.translate = '';
                     }
-                    if (['rapid','rapid-long','rapid-during-scroll'].includes(scenario)) { await delay(scenario === 'rapid-during-scroll' ? 250 : 70); flushSync(send); }
+                    if (['rapid','rapid-long','rapid-during-scroll'].includes(scenario)) { await delay(scenario === 'rapid-during-scroll' ? (params.has('butlerMotion') ? 520 : 250) : 70); flushSync(send); }
                     if (scenario === 'input-collapse') flushSync(() => setHeight('100dvh'));
                     if (scenario === 'streaming-reply') {
                         flushSync(respond);
@@ -168,7 +172,7 @@ function Chat() {
                     if (scenario === 'instant-reply') flushSync(respond);
                     if (scenario === 'delayed-reply') { await delay(650); flushSync(respond); }
                     if (['wheel-synthetic','touch-synthetic','wheel-during-scroll'].includes(scenario)) {
-                        await delay(scenario === 'wheel-during-scroll' ? 250 : 90);
+                        await delay(scenario === 'wheel-during-scroll' ? (params.has('butlerMotion') ? 520 : 250) : 90);
                         container.dispatchEvent(scenario !== 'touch-synthetic'
                             ? new WheelEvent('wheel', { deltaY: -120 }) : new Event('touchmove'));
                         container.scrollTop = Math.max(0, container.scrollTop - 120);
@@ -229,8 +233,8 @@ function Chat() {
     return <main className="benchmark" style={{height}}>
         <header><strong>发送动画回归 · 合成数据</strong><button disabled={busy} onClick={send}>发送</button><button disabled={busy} onClick={respond}>回复</button><button disabled={busy} onClick={() => { switchConversation(String(Number(conversationId) + 1)); update([]); }}>切会话</button><button disabled={busy} onClick={() => void runSuite()}>运行覆盖矩阵</button><span role="status">{busy ? progress : `${results.filter(r => r.passed).length}/${results.length} 通过`}</span><button disabled={busy || !results.length} onClick={downloadResults}>下载结果</button></header>
         <div ref={scroll.scrollContainerRef} style={{overflowAnchor:'none'}} className="benchmark-scroll flex flex-col gap-4" data-aipp-slot="chat-conversation-scroll" onScroll={scroll.handleScroll} onWheel={scroll.handleUserScrollIntent} onTouchMove={scroll.handleUserScrollIntent}>
-            <Profiler id="message-list" onRender={(_id, phase, actualDuration, _baseDuration, startTime, commitTime) => profile.current.push({phase, actualDuration, startTime, commitTime})}><VirtuosoMessageList historyLoaded={historyLoaded} inlineInteractionItems={imageSrc ? [{key:"late-image", content:<img alt="迟加载测试图" src={imageSrc} style={{width:120}} />}]:undefined} conversationId={conversationId} transcriptKey={conversationId}
-                allDisplayMessages={messages} streamingMessages={map} shiningMessageIds={set}
+            <Profiler id="message-list" onRender={(_id, phase, actualDuration, _baseDuration, startTime, commitTime) => profile.current.push({phase, actualDuration, startTime, commitTime})}><VirtuosoMessageList butlerBubbleMotion={new URLSearchParams(location.search).has("butlerMotion")} historyLoaded={historyLoaded} inlineInteractionItems={imageSrc ? [{key:"late-image", content:<img alt="迟加载测试图" src={imageSrc} style={{width:120}} />}]:undefined} conversationId={conversationId} transcriptKey={conversationId}
+                mergeAssistantMessages={new URLSearchParams(location.search).has("merged")} allDisplayMessages={messages} streamingMessages={map} shiningMessageIds={set}
                 shiningMcpCallId={null} reasoningExpandStates={map} mcpToolCallStates={map}
                 generationGroups={map} selectedVersions={map} getGenerationGroupControl={() => null}
                 handleGenerationVersionChange={noop} onCodeRun={noop} onMessageRegenerate={noop}
