@@ -156,11 +156,12 @@ function AskWindow() {
         };
     }, [conversationId]);
 
-    const handleSubmit = () => {
+    const handleSubmit = (emptyPrompt?: string) => {
         if (aiIsResponsing) {
             return;
         }
-        if (query.trim() === "") {
+        const prompt = query.trim() ? query : emptyPrompt;
+        if (!prompt) {
             setQuery("");
             return;
         }
@@ -171,7 +172,7 @@ function AskWindow() {
 
         invoke<AiResponse>("ask_ai", {
             request: {
-                prompt: query,
+                prompt,
                 conversation_id: conversationId,
                 assistant_id: 1,
                 attachment_list: fileInfoList?.map((i) => i.id),
@@ -204,7 +205,7 @@ function AskWindow() {
             });
     };
 
-    const onSend = throttle(() => {
+    const onSend = throttle((emptyPrompt?: string) => {
         if (aiIsResponsing) {
             console.log("Cancelling AI");
             invoke("cancel_ai", { conversationId: +conversationId })
@@ -219,7 +220,7 @@ function AskWindow() {
                 });
         } else {
             console.log("Sending query to AI");
-            handleSubmit();
+            handleSubmit(emptyPrompt);
         }
     }, 200);
 

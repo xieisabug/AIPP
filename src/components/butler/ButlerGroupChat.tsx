@@ -114,8 +114,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             : <Users className="size-4 text-muted-foreground" />,
     })), [members]);
 
-    const send = async () => {
-        const body = draft.trim();
+    const send = async (body: string) => {
         if (!body || sending) return;
         const replyTo = quote?.id ?? null;
         const signature = JSON.stringify([body, replyTo]);
@@ -153,8 +152,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     };
 
     // 与私聊同一套发送键语义：有内容就发送（成员回复中也可以插话）；输入为空且有人在回复时，按钮/回车是停止。
-    const handleSend = () => {
-        if (draft.trim()) void send();
+    const handleSend = (emptyPrompt?: string) => {
+        const body = draft.trim() || (!replying && emptyPrompt);
+        if (body) void send(body);
         else if (replying && !stopping) void stop();
     };
 

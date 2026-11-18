@@ -35,6 +35,15 @@ describe("useConversationOperations quote reply", () => {
         vi.mocked(invoke).mockClear();
     });
 
+    it("should send the continuation through the current conversation with its attachments", async () => {
+        mockInvokeHandler("ask_ai", () => ({ conversation_id: 20 }));
+        const { result } = setup(false, { inputText: " ", fileInfoList: [{ id: 12 }] });
+        await act(async () => { result.current.handleSend("继续你的工作"); });
+        expect(invoke).toHaveBeenCalledWith("ask_ai", expect.objectContaining({ request: expect.objectContaining({
+            conversation_id: "20", assistant_id: 2, attachment_list: [12], prompt: "继续你的工作",
+        }) }));
+    });
+
     it("should send the stable quote identity with the message and clear the quote", async () => {
         mockInvokeHandler("ask_ai", () => ({ conversation_id: 20, request_prompt_result_with_context: "" }));
         const { result, props } = setup(false);

@@ -3252,6 +3252,28 @@ pub async fn cancel_ai(
     Ok(())
 }
 
+pub(super) fn agent_recheck_prompt(conn: &rusqlite::Connection, message: &Message) -> Result<String, AppError> {
+    use rusqlite::OptionalExtension;
+    let text = if message.message_type == "user" {
+        crate::utils::turn_context::visible(&message.content).trim().to_owned()
+    } else {
+        let text = crate::utils::reply_quote::strip(&message.content);
+        crate::api::conversation_api::strip_mcp_tool_call_segments(text)
+    };
+    let text = if text.is_empty() || crate::api::butler_api::is_butler_silent_reply(&text) {
+        // 空回复（如只有原生工具活动）用它所属轮次的用户原话。
+        let previous: Option<String> = conn.query_row(
+            "SELECT CASE WHEN json_valid(metadata_json) AND
+                json_extract(metadata_json, '$.origin') IN ('internal','butler_peer','scheduled_task')
+                THEN '' ELSE content END FROM message
+             WHERE conversation_id=?1 AND id<=?2 AND message_type='user' ORDER BY id DESC LIMIT 1",
+            (message.conversation_id, message.id), |row| row.get(0),
+        ).optional()?;
+        crate::utils::turn_context::visible(previous.as_deref().unwrap_or_default()).trim().to_owned()
+    } else { text };
+    Ok(if text.is_empty() { "请重新检查并完成这项工作。".into() } else { format!("重新检查并完成：{text}") })
+}
+
 #[tauri::command]
 #[instrument(
     skip(app_handle, feature_config_state, activity_manager, message_token_manager, window),
@@ -3279,14 +3301,26 @@ pub async fn regenerate_ai(
         .unwrap()
         .read(conversation_id)?
         .ok_or(AppError::DatabaseError("未找到对话".to_string()))?;
-    let messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
-
     // 重新生成开始时，优先让被点击的消息闪亮（可被后续 streaming 覆盖）
     let execution_assistant_id = conversation.assistant_id
         .ok_or_else(|| AppError::UnknownError(format!("regenerate_preflight: conversation_id={conversation_id}; message_id={message_id}; 对话未关联助手")))?;
     crate::api::mobile_capability::ensure_assistant_execution(
         &app_handle, execution_assistant_id, "regenerate_preflight", &conversation_id.to_string(),
     ).await.map_err(AppError::UnknownError)?;
+    let assistant_id = execution_assistant_id;
+    let assistant_detail = get_assistant(app_handle.clone(), assistant_id).map_err(|reason|
+        AppError::UnknownError(format!("regenerate_preflight: conversation_id={conversation_id}; message_id={message_id}; {reason}")))?;
+    if assistant_detail.assistant.assistant_type == Some(4) {
+        let prompt = agent_recheck_prompt(&db.get_connection()?, &message)?;
+        let request = AiRequest {
+            conversation_id: conversation_id.to_string(), assistant_id, prompt,
+            model: None, override_model_id: None, temperature: None, top_p: None, max_tokens: None,
+            stream: None, attachment_list: None, quote: None, butler_intent: None, butler_goal_revision: None,
+        };
+        return ask_ai(app_handle.clone(), app_handle.state(), app_handle.state(), feature_config_state,
+            message_token_manager, activity_manager, window, request, None, None, None, None, None).await;
+    }
+    let messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
     // 根据消息类型决定处理逻辑
     let (filtered_messages, _parent_message_id) = if message.message_type == "user" {
         // 用户消息重发：包含当前用户消息和之前的所有消息，新生成的assistant消息没有parent（新一轮对话）
@@ -3342,10 +3376,6 @@ pub async fn regenerate_ai(
         build_message_list_with_metadata_from_db(&filtered_messages, BranchSelection::LatestBranch);
 
     debug!(?init_message_list, "initial message list for regenerate");
-
-    // 获取助手信息（在构建消息列表之后，以确保对话已确定）
-    let assistant_id = conversation.assistant_id.unwrap();
-    let assistant_detail = get_assistant(app_handle.clone(), assistant_id).unwrap();
 
     if assistant_detail.model.is_empty() {
         return Err(AppError::NoModelFound);

@@ -80,6 +80,13 @@ describe("InputArea slash completion", () => {
         ]);
     });
 
+    it("should request continuation when clicking send with a blank idle draft", async () => {
+        const onSend = vi.fn();
+        render(<InputAreaHarness initialText="   " onSend={onSend} />);
+        await userEvent.click(screen.getByRole("button", { name: "发送" }));
+        expect(onSend).toHaveBeenCalledWith("继续你的工作");
+    });
+
     it("should preserve the stop button when the assistant is running and the draft is empty", async () => {
         const onSend = vi.fn();
         render(<InputAreaHarness aiIsResponsing onSend={onSend} />);

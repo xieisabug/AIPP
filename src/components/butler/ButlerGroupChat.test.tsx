@@ -195,6 +195,13 @@ describe("ButlerGroupChat", () => {
         expect(screen.queryByText("查看更早的消息")).toBeNull();
     });
 
+    it("should post a continuation when clicking send in an idle group with an empty draft", async () => {
+        renderChat();
+        await screen.findByText("初稿如下");
+        fireEvent.click(screen.getByLabelText("发送"));
+        await waitFor(() => expect(api.postButlerGroupMessage).toHaveBeenCalledWith(7, expect.any(String), "继续你的工作", null));
+    });
+
     it("should quote a member reply with the private chat quote button and chip", async () => {
         renderChat();
         const reply = await screen.findByText("初稿如下");

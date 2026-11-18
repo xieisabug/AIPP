@@ -87,6 +87,16 @@ describe.each([
         expect(toastMock.error).not.toHaveBeenCalled();
     });
 
+    it("should display the regeneration rejection even in compact mode", async () => {
+        const reason = "Pi 会话启动失败：找不到运行程序";
+        mockInvokeHandler("regenerate_ai", () => { throw { ProviderError: reason }; });
+        const { result, props } = setup(true);
+        await act(async () => { result.current.handleMessageRegenerate(26602); });
+        expect(toastMock.error).toHaveBeenCalledWith("重新生成失败", { description: reason });
+        expect(props.setAiIsResponsing).toHaveBeenLastCalledWith(false);
+        expect(props.clearShiningMessages).toHaveBeenCalled();
+    });
+
     it("keeps a normal response in the responding state", async () => {
         mockInvokeHandler("ask_ai", () => ({ conversation_id: 7, request_prompt_result_with_context: "" }));
         const { result, props } = setup();

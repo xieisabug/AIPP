@@ -625,3 +625,21 @@ async fn test_message_filtering_for_regenerate() {
     assert_eq!(filtered_for_user[0].message_type, "system");
     assert_eq!(filtered_for_user[1].message_type, "user");
 }
+
+#[test]
+fn test_agent_recheck_prompt_uses_clicked_text_or_its_original_user_turn() {
+    use crate::api::ai_api::agent_recheck_prompt;
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE message (conversation_id INTEGER, id INTEGER, message_type TEXT, content TEXT, metadata_json TEXT)").unwrap();
+    let context = crate::utils::turn_context::wrap(["上下文"]);
+    let user = crate::utils::turn_context::append("整理报告", context.as_deref());
+    conn.execute("INSERT INTO message VALUES(10,1,'user',?1,NULL)", [&user]).unwrap();
+    conn.execute_batch("INSERT INTO message VALUES(10,7,'user','后来的任务',NULL),(11,2,'user','其他会话',NULL)").unwrap();
+    let mut msg = create_test_message(3, None, 10, "response", "初稿<!-- MCP_TOOL_CALL:4 -->", None, None, None, None, Utc::now());
+    assert_eq!(agent_recheck_prompt(&conn, &msg).unwrap(), "重新检查并完成：初稿");
+    msg.content.clear();
+    assert_eq!(agent_recheck_prompt(&conn, &msg).unwrap(), "重新检查并完成：整理报告");
+    msg.message_type = "user".into();
+    msg.content = user;
+    assert_eq!(agent_recheck_prompt(&conn, &msg).unwrap(), "重新检查并完成：整理报告");
+}

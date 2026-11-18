@@ -98,7 +98,7 @@ interface InputAreaProps {
     handleChooseFile?: () => void;
     handlePaste?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
     handleDeleteFile?: (fileId: number) => void;
-    handleSend: () => void;
+    handleSend: (emptyPrompt?: string) => void;
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
     isMobile?: boolean;
@@ -1485,7 +1485,7 @@ const InputArea = React.memo(
                     ) : null}
                     <CircleButton
                         size={isMobile ? "medium" : placement === "bottom" ? "large" : "medium"}
-                        onClick={handleSend}
+                        onClick={() => handleSend(!aiIsResponsing && !inputText.trim() ? "继续你的工作" : undefined)}
                         icon={sendButtonVisual ?? sendButtonIcon ?? defaultSendButtonIcon}
                         primary
                         className={`input-area-send-button ${placement} ${sendButtonVisual ? "has-custom-visual" : ""}`}

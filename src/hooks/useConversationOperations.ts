@@ -11,12 +11,6 @@ import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
 import { splitTurnContext, withTurnContext } from "../utils/turnContext";
 
-// 从 plugin.d.ts 导入的接口类型
-interface AiResponse {
-    conversation_id: number;
-    request_prompt_result_with_context: string;
-}
-
 export interface UseConversationOperationsProps {
     conversation?: Conversation;
     selectedAssistant: number;
@@ -57,7 +51,7 @@ export interface UseConversationOperationsReturn {
     handleMessageFork: (messageId: number) => void;
     handleEditSave: (content: string) => void;
     handleEditSaveAndRegenerate: (content: string) => void;
-    handleSend: () => void;
+    handleSend: (emptyPrompt?: string) => void;
     sendAgentCommand: (prompt: string) => Promise<void>;
     handleArtifact: (lang: string, inputStr: string) => void;
 
@@ -131,16 +125,15 @@ export function useConversationOperations({
             // 点击的消息先闪亮，等待后端 activity_focus 接管
             setManualShineMessage(regenerateMessageId);
 
-            invoke<AiResponse>("regenerate_ai", {
+            invoke<AskAiResponse>("regenerate_ai", {
                 messageId: regenerateMessageId,
             })
                 .then((res) => {
-                    console.log("regenerate ai response", res);
-                    // 重新生成消息的处理逻辑
-                    // setMessageId(res.add_message_id);
+                    if (res.error_message) throw new Error(res.error_message);
                 })
                 .catch((error) => {
                     console.error("Regenerate error:", error);
+                    toast.error("重新生成失败", { description: describeAskAiError(error) });
                     setAiIsResponsing(false);
                     // Regenerate sets optimistic manual shine first; must clear on invoke failure.
                     clearShiningMessages();
@@ -233,7 +226,7 @@ export function useConversationOperations({
                     // 然后触发重新生成
                     handleMessageRegenerate(editingMessage.id);
 
-                    toast.success("消息已更新并开始重新生成");
+                    toast.success("消息已更新");
                 })
                 .catch((error) => {
                     toast.error("更新消息失败: " + error);
@@ -330,7 +323,7 @@ export function useConversationOperations({
     };
 
     // 发送消息的主要处理函数，使用节流防止频繁点击
-    const handleSend = throttle(async () => {
+    const handleSend = throttle(async (emptyPrompt?: string) => {
         if (aiIsResponsing) {
             if (inputText.trim() !== "" && conversation?.id) {
                 let assistantId = conversation.assistant_id ?? selectedAssistant;
@@ -393,7 +386,8 @@ export function useConversationOperations({
                 });
         } else {
             // 正常发送消息流程
-            if (inputText.trim() === "") {
+            const submittedText = inputText.trim() ? inputText : emptyPrompt ?? "";
+            if (!submittedText) {
                 setInputText("");
                 return;
             }
@@ -408,11 +402,11 @@ export function useConversationOperations({
                 assistantId = String(conversation.assistant_id);
             }
             // 解析 @assistant ，不直接修改 props 参数，使用局部最终 prompt 变量
-            let finalPrompt = inputText;
+            let finalPrompt = submittedText;
             let parsedAssistantId = +assistantId;
             let mentionParsed = false;
             try {
-                const parsed = extractAssistantFromMessage(assistants, inputText, +assistantId);
+                const parsed = extractAssistantFromMessage(assistants, submittedText, +assistantId);
                 parsedAssistantId = parsed.assistantId;
                 finalPrompt = parsed.cleanedPrompt;
                 if (parsedAssistantId !== +assistantId) {
@@ -517,7 +511,8 @@ export function useConversationOperations({
                 } else {
                     assistantTypePluginMap
                         .get(assistantData?.assistant_type ?? 0)
-                        ?.onAssistantTypeRun(assistantRunApi);
+                        ?.onAssistantTypeRun(submittedText === inputText ? assistantRunApi
+                            : { ...assistantRunApi, getUserInput: () => finalPrompt });
                 }
             } else {
                 console.log("[ACP DEBUG] Calling ask_ai with:", {

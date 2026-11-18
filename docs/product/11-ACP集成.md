@@ -4,7 +4,7 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ## 统一 Agent 调用
 
-Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。
+Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。点击智能体历史消息的「重新生成」，会在原会话追加「重新检查并完成：」及该条正文，由同一助手继续执行。回复只有工具活动时，改用该轮用户原话。
 
 Pi、Cursor、OpenCode、Kiro、Antigravity 首次返回正文、推理或工具活动时，聊天边框从用户消息移到承载输出的助手消息，管家状态同步结束“投递中”。Codex 的推理和计划有独立消息，边框会跟随当前收到内容的消息；正在执行的 MCP 工具仍优先高亮。
 
