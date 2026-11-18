@@ -21,11 +21,12 @@ function message(id: number, type: string, content: string): Message {
         token_count: 0, input_token_count: 0, output_token_count: 0,
         generation_group_id: null };
 }
+const paramsNativeReduced = () => new URLSearchParams(location.search).get('scenario') === 'reduced-motion-native';
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const history = (count: number) => Array.from({ length: count }, (_, i) => message(i + 1,
     i % 2 ? 'response' : 'user', `历史消息 ${i + 1}。\n\n${'用于检查长历史的虚拟列表定位。'.repeat(i % 5 + 1)}`));
 interface Frame { phase: string; clientHeight: number; anchorTop: number | null; bubbleTop: number | null; thumbPosition: number; thumbSize: number; nodes: number; ms: number; top: number | null; scroll: number; height: number; opacity: number | null }
-interface Result { trajectory: ReturnType<typeof analyzeTrajectory>; scenario: string; actionMs: number; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean; commits: {phase:string; actualDuration:number; startTime:number; commitTime:number}[] }
+interface Result { synchronousWork: {name:string; ms:number; duration:number}[]; longAnimationFrames: Record<string, unknown>[]; trajectory: ReturnType<typeof analyzeTrajectory>; scenario: string; actionMs: number; finalTop: number | null; scrollDrift: number | null; animationCalls: number; frames: number; maxFrameMs: number; p95FrameMs: number; passed: boolean; samples: Frame[]; historyCommitMs: number | null; longTasks: {ms:number; duration:number}[]; imageLoaded: boolean; commits: {phase:string; actualDuration:number; startTime:number; commitTime:number}[] }
 function Chat() {
     const realComposer = new URLSearchParams(location.search).has('composer');
     const [inputText, setInputText] = useState('');
@@ -51,7 +52,7 @@ function Chat() {
         setBusy(true); setResults([]);
         const output: Result[] = [];
         const availableScenarios = ['empty', 'short', 'long', 'rapid', 'instant-reply', 'delayed-reply',
-            'wheel-synthetic', 'touch-synthetic', 'wheel-during-scroll', 'rapid-during-scroll', 'rapid-long', 'streaming-reply', 'input-collapse', 'late-image', 'resize', 'switch', 'async-history', 'delete-history', 'reduced-motion-emulated'];
+            'wheel-synthetic', 'touch-synthetic', 'wheel-during-scroll', 'rapid-during-scroll', 'rapid-long', 'streaming-reply', 'input-collapse', 'late-image', 'resize', 'switch', 'async-history', 'delete-history', 'reduced-motion-emulated', ...(paramsNativeReduced() ? ['reduced-motion-native'] : [])];
         const params = new URLSearchParams(location.search);
         const selected = params.get('scenario');
         const repeats = Math.max(1, Math.min(10, Number(params.get('repeat')) || 1));
@@ -71,6 +72,7 @@ function Chat() {
                 await delay(700);
                 const container = scroll.scrollContainerRef.current!;
                 const samples: Frame[] = [];
+                const synchronousWork: Result['synchronousWork'] = [];
                 const viewport = container.getBoundingClientRect();
                 const anchorId = [...container.querySelectorAll<HTMLElement>('[data-message-item]')].filter(el => {
                     if (el.parentElement?.closest('[data-message-item]')) return false;
@@ -85,7 +87,15 @@ function Chat() {
                 const observer = PerformanceObserver.supportedEntryTypes.includes('longtask')
                     ? new PerformanceObserver(list => list.getEntries().forEach(entry => longTasks.push({ms:entry.startTime-started,duration:entry.duration}))) : null;
                 observer?.observe({type:'longtask'});
+                const longAnimationFrames: Record<string, unknown>[] = [];
+                const animationObserver = PerformanceObserver.supportedEntryTypes.includes('long-animation-frame')
+                    ? new PerformanceObserver(list => list.getEntries().forEach(entry => {
+                        const data = entry.toJSON();
+                        longAnimationFrames.push({...data, ms: entry.startTime - started});
+                    })) : null;
+                animationObserver?.observe({type:'long-animation-frame'});
                 const collect = () => {
+                    const workStarted = performance.now();
                     const row = [...container.querySelectorAll<HTMLElement>('[data-message-item]')]
                         .filter(el => el.textContent?.includes('请帮我检查')).at(-1);
                     const anchor = anchorId ? container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${anchorId}']`) : null;
@@ -98,6 +108,7 @@ function Chat() {
                         top: row ? row.getBoundingClientRect().top - container.getBoundingClientRect().top : null,
                         scroll: container.scrollTop, height: container.scrollHeight,
                         opacity: row?.lastElementChild ? Number(getComputedStyle(row.lastElementChild).opacity) : null });
+                    synchronousWork.push({name:'sample-geometry',ms:workStarted-started,duration:performance.now()-workStarted});
                     if (recording) requestAnimationFrame(() => setTimeout(collect, 0));
                 };
                 Element.prototype.animate = function (...args) { animationCalls++; return realAnimate.apply(this, args); };
@@ -134,7 +145,9 @@ function Chat() {
                     container.scrollTop = 160;
                     expectedScroll = container.scrollTop;
                 } else {
+                    const workStarted = performance.now();
                     flushSync(send);
+                    synchronousWork.push({name:'send-flushSync',ms:workStarted-started,duration:performance.now()-workStarted});
                     if (params.has('fault')) {
                         await delay(params.get('fault') === 'reverse' ? 280 : 48);
                         const content = container.firstElementChild as HTMLElement;
@@ -178,19 +191,21 @@ function Chat() {
                 Element.prototype.animate = realAnimate;
                 window.matchMedia = realMatchMedia;
                 observer?.disconnect();
+                animationObserver?.disconnect();
                 const img = container.querySelector('img[alt="迟加载测试图"]');
                 const imageLoaded = img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
                 const last = samples.at(-1)!;
                 const gaps = samples.slice(1).map((frame, i) => frame.ms - samples[i].ms).sort((a, b) => a - b);
                 const scrollDrift = expectedScroll === null ? null : last.scroll - expectedScroll;
-                const noEntry = scenario === 'async-history' || scenario === 'delete-history' || scenario === 'reduced-motion-emulated';
+                const noEntry = scenario === 'async-history' || scenario === 'delete-history' || scenario === 'reduced-motion-emulated' || scenario === 'reduced-motion-native';
                 const passed = (expectedScroll !== null ? Math.abs(scrollDrift!) <= 1
                     : scenario === 'async-history' ? Math.abs(container.scrollHeight - container.clientHeight - container.scrollTop) <= 1
                     : last.top !== null && Math.abs(last.top - 8) <= 1)
                     && (noEntry ? animationCalls === 0 : animationCalls > 0)
-                    && (scenario !== 'late-image' || imageLoaded);
+                    && (scenario !== 'late-image' || imageLoaded)
+                    && (scenario !== 'reduced-motion-native' || realMatchMedia('(prefers-reduced-motion: reduce)').matches);
                 const trajectory = analyzeTrajectory(samples, actionMs);
-                output.push({ trajectory, scenario, actionMs, finalTop: last.top, scrollDrift, animationCalls,
+                output.push({ synchronousWork, longAnimationFrames, trajectory, scenario, actionMs, finalTop: last.top, scrollDrift, animationCalls,
                     frames: samples.length, maxFrameMs: Math.max(...gaps),
                     p95FrameMs: gaps[Math.floor(gaps.length * .95)] || 0, passed: passed && (scenario !== 'input-collapse' || (trajectory.entryScrollDrift! <= 1 && (trajectory.entryAnchorDrift ?? 0) <= 1 && trajectory.bubbleBeforeScroll)) && (!['short','long','empty','instant-reply','delayed-reply','rapid','rapid-long','streaming-reply'].includes(scenario) || trajectory.passed), samples, historyCommitMs, longTasks, imageLoaded, commits: [...profile.current] });
                 setResults([...output]);
@@ -200,11 +215,11 @@ function Chat() {
     }
     // Do not stringify every previous frame again on every send/stream update:
     // diagnostic rendering itself would contaminate the measured interaction.
-    const summaryJson = useMemo(() => JSON.stringify(results.map(({samples,commits,...result}) => result),null,2), [results]);
+    const summaryJson = useMemo(() => JSON.stringify(results.map(({samples,commits,synchronousWork,...result}) => result),null,2), [results]);
     const samplesJson = useMemo(() => JSON.stringify(results, null, 2), [results]);
     function downloadResults() {
         const blob = new Blob([JSON.stringify({ userAgent: navigator.userAgent,
-            devicePixelRatio: window.devicePixelRatio, buildMode: import.meta.env.MODE,
+            performanceEntryTypes: PerformanceObserver.supportedEntryTypes, nativeReducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches, maxTouchPoints: navigator.maxTouchPoints, devicePixelRatio: window.devicePixelRatio, buildMode: import.meta.env.MODE,
             historyUpdateMode: new URLSearchParams(location.search).get('flushHistory') === '1' ? 'flushSync-stress' : 'async-batched', results }, null, 2)], {type:'application/json'});
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
