@@ -17,27 +17,51 @@ fn fixture() -> (MCPDatabase, Connection, MCPServer, i64) {
 #[test]
 fn test_apps_execution_rechecks_assistant_and_tool_permissions() {
     let (db, assistants, server, tool) = fixture();
-    validate(&db, &assistants, 7, &server, "read_notes").unwrap();
-    assert!(validate(&db, &assistants, 8, &server, "read_notes").is_err());
+    validate(&db, AppToolAccess::Assistant(&assistants, 7), &server, "read_notes").unwrap();
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 8), &server, "read_notes").is_err());
     assistants.execute("INSERT INTO assistant_mcp_tool_config VALUES(7,?1,0)", [tool]).unwrap();
-    assert!(validate(&db, &assistants, 7, &server, "read_notes").is_err());
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 7), &server, "read_notes").is_err());
     assistants.execute("DELETE FROM assistant_mcp_tool_config", []).unwrap();
     db.update_mcp_server_tool(tool, false, false).unwrap();
-    assert!(validate(&db, &assistants, 7, &server, "read_notes").is_err());
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 7), &server, "read_notes").is_err());
 }
 
 #[test]
 fn test_apps_execution_rejects_disabled_reconfigured_and_other_connection() {
     let (db, assistants, server, _) = fixture();
     db.toggle_mcp_server(server.id, false).unwrap();
-    assert!(validate(&db, &assistants, 7, &server, "read_notes").is_err());
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 7), &server, "read_notes").is_err());
     db.toggle_mcp_server(server.id, true).unwrap();
     db.conn.execute("UPDATE mcp_server SET headers='new-reference' WHERE id=?1", [server.id]).unwrap();
-    assert!(validate(&db, &assistants, 7, &server, "read_notes").unwrap_err().contains("旧请求"));
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 7), &server, "read_notes").unwrap_err().contains("旧请求"));
     let other = db.upsert_mcp_server_with_builtin("account-b", None, "http", None, None, Some("{}"), Some("https://example.com/mcp"), None, false, true, false, true, false).unwrap();
     db.conn.execute("INSERT INTO app_connection(server_id,request_id,app_id,definition,label,config,status) VALUES(?1,'generation-b','test','{}','Account B','{}','available')", [other]).unwrap();
     db.upsert_mcp_server_tool(other, "read_notes", Some("Read"), Some("{}")).unwrap();
-    assert!(validate(&db, &assistants, 7, &db.get_mcp_server(other).unwrap(), "read_notes").is_err());
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 7), &db.get_mcp_server(other).unwrap(), "read_notes").is_err());
+}
+
+#[test]
+fn test_apps_execution_butler_uses_global_permissions_and_live_connection() {
+    let (db, assistants, server, tool) = fixture();
+    assistants.execute("DELETE FROM assistant_mcp_config", []).unwrap();
+    assistants.execute("INSERT INTO assistant_mcp_tool_config VALUES(7,?1,0)", [tool]).unwrap();
+    let call = || validate(&db, AppToolAccess::Butler, &server, "read_notes");
+    call().unwrap();
+    assert!(validate(&db, AppToolAccess::Assistant(&assistants, 7), &server, "read_notes").is_err());
+
+    db.update_mcp_server_tool(tool, false, false).unwrap();
+    assert!(call().unwrap_err().contains("工具 read_notes 已停用"));
+    db.update_mcp_server_tool(tool, true, false).unwrap();
+    db.toggle_mcp_server(server.id, false).unwrap();
+    assert!(call().is_err());
+    db.toggle_mcp_server(server.id, true).unwrap();
+    for status in ["auth_required", "disconnected", "connecting"] {
+        db.conn.execute("UPDATE app_connection SET status=?1", [status]).unwrap();
+        assert!(call().is_err());
+    }
+    db.conn.execute("UPDATE app_connection SET status='available'", []).unwrap();
+    db.conn.execute("UPDATE mcp_server SET headers='changed' WHERE id=?1", [server.id]).unwrap();
+    assert!(call().unwrap_err().contains("旧请求"));
 }
 
 #[test]

@@ -2,6 +2,11 @@
 use std::collections::HashSet;
 use crate::db::assistant_db::AssistantDatabase;
 
+pub(crate) fn uses_butler_tool_access(app: &tauri::AppHandle, id: i64, kind: &str) -> bool {
+    cfg!(desktop) && (super::builtin_mcp::templates::is_butler_conversation_kind(kind)
+        || (kind == "scheduled_run" && crate::scheduler::is_butler_mode_run(app, id)))
+}
+
 #[derive(Default)]
 pub(crate) struct Restrictions {
     servers: HashSet<i64>,
@@ -19,7 +24,7 @@ impl Restrictions {
         let db = crate::db::conversation_db::ConversationDatabase::new(app).map_err(|e|e.to_string())?;
         let conn = db.get_connection().map_err(|e|e.to_string())?;
         let (assistant,kind):(Option<i64>,String) = conn.query_row("SELECT assistant_id,conversation_kind FROM conversation WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|format!("读取会话 #{id} 权限失败：{e}"))?;
-        if cfg!(desktop) && super::builtin_mcp::templates::is_butler_conversation_kind(&kind) { return Ok(Self::default()); }
+        if uses_butler_tool_access(app, id, &kind) { return Ok(Self::default()); }
         let Some(assistant) = assistant else {return Ok(Self::default())};
         Self::load(&AssistantDatabase::new(app).map_err(|e|e.to_string())?,assistant)
     }
