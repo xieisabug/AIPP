@@ -1,5 +1,6 @@
+import { useConnectionRefresh } from './useConnectionRefresh';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { shareConfig, reviewRefresh, checkFailure, type ConnectionCheck } from './connectionManagement';
+import { shareConfig, checkFailure, type ConnectionCheck } from './connectionManagement';
 import { CatalogEndpoints } from './CatalogCapabilities';
 import { ReactNode, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -79,6 +80,7 @@ function Panel({ title, description, children, danger = false }: { title: string
 }
 
 export default function AppDetailSheet({ directoryCards, checks, selection, onSelect, apps, servers, connections, tools, pluginCatalog, mobile, refresh, onOpenPluginManager }: Props) {
+    const { refreshConnection, refreshDialog } = useConnectionRefresh();
     const [tab, setTab] = useState('overview');
     // Connect view replaces the tabs: `connection` set = re-login/reconfigure of that instance.
     const [connectView, setConnectView] = useState<{ connection?: AppConnection; update?: AppDefinition; generation: number }>();
@@ -146,7 +148,7 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
         if (!url) { reconnect(target); return; }
         await openUrl(url);
     });
-    const verify = (id: number) => run('正在测试连接…', async () => { if (await reviewRefresh(id)) return '连接可用，工具列表已更新'; });
+    const verify = (id: number) => run('正在测试连接…', async () => { if (await refreshConnection(id)) return '连接可用，工具列表已更新'; });
     const disconnect = (id: number, revokeRemote = true) => run('正在断开连接…', () => invoke<string>('disconnect_app_connection', { serverId: id, revokeRemote }));
     const enable = (id: number) => run('正在启用…', async () => { await invoke('toggle_mcp_server', { id, isEnabled: true }); });
 
@@ -373,5 +375,6 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
                     .catch(e => { setRemoving(undefined); toast.error(String(e)); })
                     .finally(() => setBusy(''));
             }} />
+        {refreshDialog}
     </>;
 }

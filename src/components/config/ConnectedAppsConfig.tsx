@@ -102,8 +102,38 @@ export default function ConnectedAppsConfig() {
     const groups = directory.home?.categories ?? [];
     const featured = groups.flatMap(g => g.items);
     const cards = [...featured,...directory.items];
-    const pluginCatalog:PluginCatalog = {revision: directory.home?.version ?? '', entries: cards.flatMap(c => c.source ?
-        [{...c, category: groups.find(g=>g.id===c.group)?.name ?? '', source:c.source}] : [])};
+    const [installedCatalogs, setInstalledCatalogs] = useState<Record<string, PluginCatalog>>({});
+    // Status refreshes must not fetch the same catalog again.
+    const repositories = new Map<string, {repo: string; gitRef: string}>();
+    for (const {definition} of connections) {
+        const source = definition.plugin_source;
+        if (source) repositories.set(JSON.stringify([source.repo, source.git_ref]), {repo:source.repo, gitRef:source.git_ref});
+    }
+    const catalogSources = JSON.stringify([...repositories.entries()].sort(([a],[b]) => a.localeCompare(b)));
+    useEffect(() => {
+        if (mobile) return;
+        let active = true;
+        setInstalledCatalogs({});
+        const sources: [string, {repo: string; gitRef: string}][] = JSON.parse(catalogSources);
+        for (const [source, args] of sources) {
+            const save = (catalog: PluginCatalog) => {
+                if (active) setInstalledCatalogs(previous => ({...previous, [source]: catalog}));
+            };
+            void (async () => {
+                const cached = await invoke<{catalog: PluginCatalog; fetched_at: string} | null>('get_cached_agent_plugin_catalog', args);
+                if (!active) return;
+                if (cached?.catalog) {
+                    save(cached.catalog);
+                    const age = Date.now() - Date.parse(cached.fetched_at);
+                    if (age >= 0 && age < 86_400_000) return;
+                }
+                save(await invoke<PluginCatalog>('fetch_agent_plugin_catalog', args));
+            })().catch(e => console.warn('读取插件图标目录失败', e));
+        }
+        return () => { active = false; };
+    }, [mobile, catalogSources]);
+    const pluginCatalog:PluginCatalog = {revision: directory.home?.version ?? '', entries: [...cards.flatMap(c => c.source ?
+        [{...c, category: groups.find(g=>g.id===c.group)?.name ?? '', source:c.source}] : []), ...Object.values(installedCatalogs).flatMap(catalog => catalog.entries ?? [])]};
     const catalogBusy = directory.homeBusy;
     useEffect(() => {
         if (page !== 'installed' && !selection) return;

@@ -1,4 +1,5 @@
-import { reviewRefresh, importDisabled } from './apps/connectionManagement';
+import { useConnectionRefresh } from './apps/useConnectionRefresh';
+import { importDisabled } from './apps/connectionManagement';
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
@@ -42,6 +43,7 @@ import { visibleSearchTools, MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpSer
  * `onRefreshManaged` routes refresh through app-connection verification so its status updates too.
  */
 const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; compact?: boolean; onEditManaged?: () => void; onRefreshManaged?: () => Promise<void> }> = ({ initialServerId, detailOnly = false, compact = false, onEditManaged, onRefreshManaged }) => {
+    const { refreshConnection, refreshDialog } = useConnectionRefresh();
     const isMobilePlatform = useIsMobilePlatform();
     // 移动端（移动平台或窄屏）使用列表 → 详情布局与紧凑详情页
     const isNarrow = useIsMobile();
@@ -341,7 +343,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
         }
         try {
             if (!selectedServer?.is_builtin) {
-                if (await reviewRefresh(serverId)) toast.success('工具列表已更新');
+                if (await refreshConnection(serverId)) toast.success('工具列表已更新');
                 return;
             }
             const [tools, resources, prompts] = await invoke<[MCPServerTool[], MCPServerResource[], MCPServerPrompt[]]>(
@@ -357,7 +359,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
         } finally {
             setIsRefreshing(false);
         }
-    }, [onRefreshManaged, selectedServer?.is_builtin]);
+    }, [onRefreshManaged, selectedServer?.is_builtin, refreshConnection]);
 
     // 更新工具配置
     const handleUpdateTool = useCallback(async (toolId: number, isEnabled: boolean, isAutoRun: boolean) => {
@@ -845,6 +847,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
 
     return (
         <>
+            {refreshDialog}
             {detailOnly ? content : <ConfigPageLayout
                 sidebar={sidebar}
                 content={content}

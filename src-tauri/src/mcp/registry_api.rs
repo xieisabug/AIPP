@@ -125,11 +125,6 @@ struct SimpleTool {
     params_json: String,
 }
 
-fn same_tool(old: &MCPServerTool, new: &SimpleTool) -> bool {
-    old.tool_name == new.name && old.tool_description == new.description
-        && old.parameters.as_deref() == Some(new.params_json.as_str())
-}
-
 struct SimpleResource {
     uri: String,
     name: String,

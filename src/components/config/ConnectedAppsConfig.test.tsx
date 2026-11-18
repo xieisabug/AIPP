@@ -77,6 +77,23 @@ describe('ConnectedAppsConfig', () => {
         expect(screen.queryByText('应用19')).toBeNull();
     });
 
+    it('should show the cached official icon when an installed plugin is outside the visible catalog', async () => {
+        const source = {repo:'example/extensions', git_ref:'stable', path:'apps/example'};
+        const icon = 'https://aipp-helper.xiejingyang.com/agent-plugin-icons/example.png';
+        const defaults = vi.mocked(invoke).getMockImplementation()!;
+        vi.mocked(invoke).mockImplementation(async (command, args) => {
+            if (command === 'list_app_connections') return [{server_id:legacy.id, label:'示例连接', status:'available',
+                app_id:'agent-plugin:example:api', definition:{...definition,plugin_source:source}}];
+            if (command === 'get_cached_agent_plugin_catalog') return {fetched_at:new Date().toISOString(),catalog:{entries:[{source,icon}]}};
+            if (command === 'fetch_agent_plugin_catalog') throw new Error('offline');
+            return defaults(command,args);
+        });
+        render(<ConnectedAppsConfig />);
+        await userEvent.click(await screen.findByRole('tab', {name:/我的应用/}));
+        const row = await screen.findByRole('button', {name:/示例连接/});
+        await waitFor(() => expect(row.querySelector('img')).toHaveAttribute('src',icon));
+        expect(invoke).toHaveBeenCalledWith('get_cached_agent_plugin_catalog', {repo:source.repo, gitRef:source.git_ref});
+    });
     it('should retain builtins and existing MCP connections when the remote catalog is unavailable', async () => {
         const user = userEvent.setup();
         render(<ConnectedAppsConfig />);

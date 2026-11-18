@@ -1,5 +1,4 @@
 import { invoke } from '@tauri-apps/api/core';
-import { ask } from '@tauri-apps/plugin-dialog';
 import type { AppConnection } from '@/data/ConnectedApp';
 import type { MCPServer, MCPServerRequest } from '@/data/MCP';
 
@@ -21,15 +20,19 @@ export async function importDisabled(requests: MCPServerRequest[]) {
     await invoke('import_disabled_connections', { requests });
 }
 
-export async function reviewRefresh(serverId: number) {
-    const diff = await invoke<{token: string; added: string[]; changed: string[]; removed: string[]; permissions?: string[]}>('preview_connection_refresh', {serverId});
-    const lines = [
-        ...diff.added.map(name => '新增（停用）　' + name),
-        ...diff.changed.map(name => '定义变化（保留原设置）　' + name),
-        ...diff.removed.map(name => '移除工具及其授权　' + name),
-        ...(diff.permissions ?? []),
-    ];
-    if (lines.length && !await ask(lines.join('\n'), { title: '确认工具及权限变化', okLabel: '应用变化', cancelLabel: '取消' })) return false;
+export interface RefreshPreview {
+    token: string;
+    added: string[];
+    changed: string[];
+    removed: string[];
+    permissions?: string[];
+    details?: Record<string, { field: string; before: string | null; after: string | null }[]>;
+}
+
+export async function reviewRefresh(serverId: number, confirm: (diff: RefreshPreview) => Promise<boolean>) {
+    const diff = await invoke<RefreshPreview>('preview_connection_refresh', {serverId});
+    if ((diff.added.length || diff.changed.length || diff.removed.length || diff.permissions?.length)
+        && !await confirm(diff)) return false;
     await invoke('apply_connection_refresh', {serverId, token: diff.token});
     return true;
 }

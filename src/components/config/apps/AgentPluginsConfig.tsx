@@ -1,4 +1,5 @@
-import { reviewRefresh } from './connectionManagement';
+import { useConnectionRefresh } from './useConnectionRefresh';
+
 import { CatalogEndpoints, CatalogSkills } from './CatalogCapabilities';
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -48,6 +49,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     const [connections, setConnections] = useState<AppConnection[]>([]);
     const [editingConnection, setEditingConnection] = useState<AppConnection>();
     const [serverId, setServerId] = useState<number>();
+    const { refreshConnection, refreshDialog } = useConnectionRefresh();
     const [tools, setTools] = useState<MCPServerTool[]>([]);
     const [auth, setAuth] = useState('oauth');
     const [clientId, setClientId] = useState('');
@@ -113,6 +115,25 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
         setEditingConnection(undefined); setFormGeneration(g => g + 1);
         setDefinition(await invoke<AppDefinition>('get_agent_plugin_connection', { key: preview.key, serverName: server.name, auth, clientId: clientId || null, oauthClientAuth: oauthMethod, oauthRedirectUri: redirectUri || null }));
     });
+    const single = preview?.servers.length === 1 ? preview.servers[0] : undefined;
+    const simpleLogin = !!single?.config.url && !single.config.command && !single.reason
+        && !Object.keys(single.config.headers ?? {}).length;
+    const quickRequest = useRef<string | null>(null);
+    const login = () => run('正在打开授权页面…', async () => {
+        if (!preview || !current || !single || current.preview.digest !== preview.digest) return;
+        const recipe = await invoke<AppDefinition>('get_agent_plugin_connection', {
+            key: preview.key, serverName: single.name, auth: 'oauth', clientId: null,
+            oauthClientAuth: 'none', oauthRedirectUri: null,
+        });
+        quickRequest.current ??= crypto.randomUUID();
+        const result = await invoke<{server_id: number; authorization_url: string | null}>('connect_catalog_app', {
+            request: {app_id: recipe.id, request_id: quickRequest.current, label: preview.name, values: {}, server_id: null},
+        });
+        setServerId(result.server_id);
+        quickRequest.current = null;
+        try { if (result.authorization_url) await openUrl(result.authorization_url); }
+        finally { await reload(); onChanged(); }
+    });
     const matching = current ? servers.filter(s => current.preview.servers.some(p => p.config.url && p.config.url === s.url) || connections.some(c => c.server_id === s.id && c.app_id.startsWith(`agent-plugin:${current.preview.key}:`))) : [];
     useEffect(() => {
         let alive = true;
@@ -162,7 +183,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
         </AlertDialogContent>
     </AlertDialog>;
 
-    const connectionPanel = preview && <section className="space-y-3"><h4 className="font-medium">{embedded ? '应用' : '连接器'} · {preview.servers.length}</h4>
+    const connectionPanel = preview && <section className="space-y-3">{refreshDialog}<h4 className="font-medium">{embedded ? '应用' : '连接器'} · {preview.servers.length}</h4>
                 <p className="text-sm text-muted-foreground">{embedded ? '完成连接后会自动检测可用工具。' : '仓库通常只声明连接器，没有实际工具清单。连接后检测工具，未检测不表示没有工具。'}</p>
                 {preview.servers.map(server => <div key={server.name} className="space-y-2 rounded-lg border p-3"><p className="text-sm font-medium">{server.name}</p><p className="break-all text-xs text-muted-foreground">{server.config.url ?? [server.config.command, ...(server.config.args ?? [])].join(' ') ?? server.config.type}</p>{server.reason && <p className="text-sm text-destructive">{server.reason}</p>}{(!server.reason || server.reason.includes('OAuth')) && <Button size="sm" variant="outline" disabled={!current || current.preview.digest !== preview.digest || !!busy} onClick={() => void connect(server)}>添加连接</Button>}</div>)}
                 {current && <label className="flex items-center gap-2 text-sm">新连接认证方式<select aria-label="新连接认证方式" className="rounded border bg-background p-2" value={auth} onChange={e => setAuth(e.target.value)}><option value="oauth">浏览器 OAuth</option><option value="none">服务不要求认证</option><option value="bearer">自行提供 Bearer Token</option><option value="headers">配置清单中的请求头</option></select></label>}
@@ -188,7 +209,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                     }}>{connection.definition.connection.transport === 'stdio' ? '重新配置并连接' : '重新登录'}</Button>
                     <Button size="sm" variant="outline" disabled={!!busy || connection.status === 'disconnected'} onClick={() => void run('正在断开连接…', async () => { await invoke('disconnect_app_connection', { serverId, revokeRemote: true }); await reload(); onChanged(); })}>断开连接</Button>
                 </div></div>}
-                {serverId && <><div className="rounded-lg border p-3"><div className="flex items-center justify-between"><h4 className="font-medium">{tools.length || connection?.status === 'available' ? `检测到的工具 · ${tools.length}` : '工具尚未检测'}</h4><Button size="sm" variant="outline" disabled={!!busy || (connection && ['connecting', 'disconnected', 'auth_required'].includes(connection.status))} onClick={() => void run('正在刷新工具…', async () => { if (!await reviewRefresh(serverId)) return; setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })); await reload(); onChanged(); })}>刷新工具</Button></div>{tools.map(t => <details key={t.id} className="border-b py-2"><summary className="cursor-pointer text-sm">{t.tool_name}</summary><p className="py-2 text-xs text-muted-foreground">{t.tool_description}</p></details>)}</div>
+                {serverId && <><div className="rounded-lg border p-3"><div className="flex items-center justify-between"><h4 className="font-medium">{tools.length || connection?.status === 'available' ? `检测到的工具 · ${tools.length}` : '工具尚未检测'}</h4><Button size="sm" variant="outline" disabled={!!busy || (connection && ['connecting', 'disconnected', 'auth_required'].includes(connection.status))} onClick={() => void run('正在刷新工具…', async () => { if (!await refreshConnection(serverId)) return; setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })); await reload(); onChanged(); })}>刷新工具</Button></div>{tools.map(t => <details key={t.id} className="border-b py-2"><summary className="cursor-pointer text-sm">{t.tool_name}</summary><p className="py-2 text-xs text-muted-foreground">{t.tool_description}</p></details>)}</div>
                     <AppAssistantAccess key={`${preview.key}:${serverId}`} serverId={serverId} pluginKey={current?.preview.key} />
                 </>}
             </section>;
@@ -292,16 +313,18 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     return <div className="space-y-9 py-2" data-testid="app-plugin-overview">
         <header className="flex flex-wrap items-center justify-end gap-4">
             <div className="flex items-center gap-2">
+                {current && simpleLogin && !onConnect && !hasConnection && <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => setManaging(true)}>高级连接设置</Button>}
                 {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多插件操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={requestUninstall}>卸载应用</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
                 <Button disabled={!!busy || !preview || (!current && preview.locally_modified)} onClick={() => {
+                    if (current && simpleLogin && !hasConnection && !onConnect) { void login(); return; }
                     if (current) { if (onConnect) onConnect(); else setManaging(true); return; }
                     void run('正在安装插件…', async () => {
                         if (!preview) return;
                         await installPlugin(preview);
                         await reload(); onChanged();
-                        if (mounted.current) { if (onConnect) onConnect(); else setManaging(true); }
+                        if (mounted.current && (onConnect || !simpleLogin)) { if (onConnect) onConnect(); else setManaging(true); }
                     });
-                }}>{!current && <Plus className="mr-2 h-4 w-4" />}{current ? hasConnection ? '查看连接' : preview?.servers.length ? '连接应用' : '管理插件' : '安装插件'}</Button>
+                }}>{!current && <Plus className="mr-2 h-4 w-4" />}{current ? hasConnection ? '查看连接' : simpleLogin ? `连接 ${preview?.name}` : preview?.servers.length ? '连接应用' : '管理插件' : '安装插件'}</Button>
             </div>
         </header>
         {error && <div role="alert" className="space-y-2 rounded-lg border border-destructive/30 p-3 text-sm text-destructive"><p>{error}</p><Button variant="outline" size="sm" disabled={!!busy} onClick={() => initialSource && void inspect(initialSource)}>重试加载详情</Button></div>}

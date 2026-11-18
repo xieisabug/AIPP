@@ -12,15 +12,21 @@ fn previous_connection() -> (MCPDatabase, i64) {
 }
 
 #[test]
-fn test_startup_recheck_selects_only_enabled_previously_available_connections() {
+fn test_recheck_selects_enabled_stale_and_recoverable_connections() {
     let (db, id) = previous_connection();
     assert_eq!(candidates(&db.conn).unwrap(), vec![id]);
     let check = PreviousCheck::read(&db, id).unwrap().unwrap();
-    assert!(check.record_failure(&db, "connection timed out").unwrap());
+    assert!(check.record(&db, Some("connection timed out")).unwrap());
     let saved: (String, String) = db.conn.query_row("SELECT status,error FROM app_connection", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!(saved, ("error".into(), "connection timed out".into()));
+    assert_eq!(candidates(&db.conn).unwrap(), vec![id]);
+    db.conn.execute("UPDATE app_connection SET status='unchecked'", []).unwrap();
+    let retry = PreviousCheck::read(&db, id).unwrap().unwrap();
+    assert!(retry.record(&db, None).unwrap());
     assert!(candidates(&db.conn).unwrap().is_empty());
-    for status in ["unchecked", "disconnected", "connecting", "auth_required", "error"] {
+    let saved: (String, Option<String>) = db.conn.query_row("SELECT status,error FROM app_connection", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(saved, ("available".into(), None));
+    for status in ["disconnected", "connecting", "auth_required"] {
         db.conn.execute("UPDATE app_connection SET status=?1,verified_session='previous'", [status]).unwrap();
         assert!(candidates(&db.conn).unwrap().is_empty());
     }
@@ -37,12 +43,12 @@ fn test_startup_recheck_discards_failure_after_new_verification_or_configuration
     let (db, id) = previous_connection();
     let check = PreviousCheck::read(&db, id).unwrap().unwrap();
     db.conn.execute("UPDATE app_connection SET verified_session=?1", [SESSION.as_str()]).unwrap();
-    assert!(!check.record_failure(&db, "late").unwrap());
+    assert!(!check.record(&db, Some("late")).unwrap());
     db.conn.execute("UPDATE app_connection SET verified_session='previous',request_id='updated'", []).unwrap();
-    assert!(!check.record_failure(&db, "late").unwrap());
+    assert!(!check.record(&db, Some("late")).unwrap());
     let current = PreviousCheck::read(&db, id).unwrap().unwrap();
     db.conn.execute("UPDATE mcp_server SET proxy_enabled=1 WHERE id=?1", [id]).unwrap();
-    assert!(!current.record_failure(&db, "late").unwrap());
+    assert!(!current.record(&db, Some("late")).unwrap());
 }
 
 #[test]

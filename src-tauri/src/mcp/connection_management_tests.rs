@@ -155,3 +155,30 @@ fn test_connection_bulk_switch_preserves_auto_run_and_other_connections() {
         assert!(db.get_mcp_server_tools(other).unwrap()[0].is_enabled);
     }
 }
+
+#[test]
+fn test_connection_changes_explain_fields_and_ignore_json_formatting() {
+    let db = database();
+    import_configs(&db, &[request("diff")]).unwrap();
+    let server = db.get_mcp_servers().unwrap().remove(0);
+    db.upsert_mcp_server_tool(server.id, "generate", Some("old"), Some(r#"{"type":"object","properties":{"prompt":{"type":"string"}}}"#)).unwrap();
+    let old = db.get_mcp_server_tools(server.id).unwrap();
+    let mut new = SimpleTool {
+        name: "generate".into(), description: Some("old".into()),
+        params_json: r#"{ "properties": { "prompt": { "type": "string" } }, "type": "object" }"#.into(),
+        signature: "null".into(),
+    };
+    assert!(changes(&HashMap::new(), &old, Some(std::slice::from_ref(&new))).changed.is_empty());
+    new.description = Some("updated".into());
+    new.params_json = r#"{"type":"object","properties":{"prompt":{"type":"string","description":"new hint"}}}"#.into();
+    new.signature = r#"{"readOnlyHint":true}"#.into();
+    let signatures = HashMap::from([(old[0].id, r#"{"readOnlyHint":false}"#.into())]);
+    let diff = changes(&signatures, &old, Some(std::slice::from_ref(&new)));
+    let details = &diff.details["generate"];
+    assert_eq!(details.len(), 3);
+    assert_eq!(details[0].field, "工具说明");
+    assert_eq!(details[1].field, "输入参数.properties.prompt.description");
+    assert_eq!(details[1].before, None);
+    assert_eq!(details[1].after.as_deref(), Some("new hint"));
+    assert_eq!(details[2].field, "服务声明.readOnlyHint");
+}

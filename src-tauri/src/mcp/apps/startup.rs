@@ -5,7 +5,7 @@ use tauri::Emitter;
 
 fn candidates(conn: &Connection) -> Result<Vec<i64>, String> {
     let mut stmt = conn.prepare("SELECT c.server_id FROM app_connection c JOIN mcp_server s ON s.id=c.server_id
-        WHERE c.status='available' AND s.is_enabled=1 AND c.verified_session IS NOT ?1 ORDER BY c.server_id")
+        WHERE s.is_enabled=1 AND (c.status IN ('unchecked','error') OR (c.status='available' AND c.verified_session IS NOT ?1)) ORDER BY c.server_id")
         .map_err(|e| e.to_string())?;
     let ids = stmt.query_map([SESSION.as_str()], |row| row.get(0)).map_err(|e| e.to_string())?;
     ids.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
@@ -16,28 +16,29 @@ struct PreviousCheck {
     request_id: String,
     session: Option<String>,
     credential: Option<String>,
+    status: String,
 }
 
 impl PreviousCheck {
     fn read(database: &MCPDatabase, id: i64) -> Result<Option<Self>, String> {
         let snapshot = database.conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let row = snapshot.query_row("SELECT request_id,verified_session,credential_ref FROM app_connection
-            WHERE server_id=?1 AND status='available' AND verified_session IS NOT ?2",
-            params![id, SESSION.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        let row = snapshot.query_row("SELECT request_id,verified_session,credential_ref,status FROM app_connection
+            WHERE server_id=?1 AND (status IN ('unchecked','error') OR (status='available' AND verified_session IS NOT ?2))",
+            params![id, SESSION.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .optional().map_err(|e| e.to_string())?;
-        let Some((request_id, session, credential)) = row else { return Ok(None); };
+        let Some((request_id, session, credential, status)) = row else { return Ok(None); };
         let server = database.get_mcp_server(id).map_err(|e| e.to_string())?;
-        Ok(server.is_enabled.then_some(Self { server, request_id, session, credential }))
+        Ok(server.is_enabled.then_some(Self { server, request_id, session, credential, status }))
     }
 
-    fn record_failure(&self, database: &MCPDatabase, error: &str) -> Result<bool, String> {
+    fn record(&self, database: &MCPDatabase, error: Option<&str>) -> Result<bool, String> {
         let tx = database.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         if database.get_mcp_server(self.server.id).map_err(|e| e.to_string())? != self.server {
             return Ok(false);
         }
-        let changed = tx.execute("UPDATE app_connection SET status='error', error=?1, verified_session=?2
-            WHERE server_id=?3 AND request_id=?4 AND verified_session IS ?5 AND credential_ref IS ?6 AND status='available'",
-            params![error, SESSION.as_str(), self.server.id, self.request_id, self.session, self.credential])
+        let changed = tx.execute("UPDATE app_connection SET status=?8, error=?1, verified_session=?2
+            WHERE server_id=?3 AND request_id=?4 AND verified_session IS ?5 AND credential_ref IS ?6 AND status=?7",
+            params![error, SESSION.as_str(), self.server.id, self.request_id, self.session, self.credential, self.status, if error.is_some() { "error" } else { "available" }])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(changed > 0)
@@ -61,35 +62,52 @@ async fn recheck(app: &tauri::AppHandle, id: i64) -> Result<(), String> {
             tracing::warn!(server_id=id,%error,"Could not refresh published tool summaries");
         }
     }
-    if let Err(error) = super::super::registry_api::check_after_restart(app, &check.server).await {
-        // Authentication rejection is recorded by the transport. Missing credentials are device-local.
-        if error.contains(credentials::MISSING_ON_DEVICE) { return Ok(()); }
-        let _change = CHANGE_LOCK.lock().await;
-        if check.record_failure(&db(app)?, &error)? {
-            let _ = app.emit("mcp_state_changed", ());
-        }
-    } else {
-        let _change = CHANGE_LOCK.lock().await;
-        let database = db(app)?;
-        if database.get_mcp_server(id).map_err(|e|e.to_string())? == check.server {
-            let changed = database.conn.execute("UPDATE app_connection SET verified_session=?1 WHERE server_id=?2
-                AND request_id=?3 AND verified_session IS ?4 AND credential_ref IS ?5 AND status='available'",
-                params![SESSION.as_str(),id,check.request_id,check.session,check.credential]).map_err(|e|e.to_string())?;
-            if changed>0 { let _ = app.emit("mcp_state_changed", ()); }
-        }
+    let error = super::super::registry_api::check_after_restart(app, &check.server).await.err();
+    if error.as_deref().is_some_and(|e| e.contains(credentials::MISSING_ON_DEVICE)) { return Ok(()); }
+    let _change = CHANGE_LOCK.lock().await;
+    if check.record(&db(app)?, error.as_deref())? {
+        let _ = app.emit("mcp_state_changed", ());
+    }
+    Ok(())
+}
+
+async fn recheck_custom(app: &tauri::AppHandle) -> Result<(), String> {
+    let database = db(app)?;
+    let pending = {
+        let mut stmt = database.conn.prepare("SELECT c.server_id,c.session,c.error FROM connection_check c
+            JOIN mcp_server s ON s.id=c.server_id WHERE s.is_enabled=1 AND s.is_builtin=0
+            AND (c.session IS NOT ?1 OR c.error IS NOT NULL)
+            AND NOT EXISTS(SELECT 1 FROM app_connection a WHERE a.server_id=s.id)").map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([SESSION.as_str()], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    for (id,session,previous) in pending {
+        let Ok(server) = database.get_mcp_server(id) else { continue };
+        if !server.is_enabled || (cfg!(mobile) && server.transport_type == "stdio") { continue; }
+        let error = super::super::registry_api::probe_connection(app, &server).await.err();
+        let tx = database.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        if database.get_mcp_server(id).ok().as_ref() != Some(&server) { continue; }
+        let changed = tx.execute("UPDATE connection_check SET session=?1,error=?2 WHERE server_id=?3 AND session=?4 AND error IS ?5",
+            params![SESSION.as_str(),error,id,session,previous]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        if changed > 0 { let _ = app.emit("mcp_state_changed", ()); }
     }
     Ok(())
 }
 
 pub fn recheck_available_connections(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        match db(&app).and_then(|database| candidates(&database.conn)) {
-            Ok(ids) => for id in ids {
-                if let Err(error) = recheck(&app, id).await {
-                    tracing::warn!(server_id=id, %error, "Could not recheck app connection at startup");
-                }
-            },
-            Err(error) => tracing::warn!(%error, "Could not list previously available app connections"),
+        loop {
+            match db(&app).and_then(|database| candidates(&database.conn)) {
+                Ok(ids) => for id in ids {
+                    if let Err(error) = recheck(&app, id).await {
+                        tracing::warn!(server_id=id, %error, "Could not recheck app connection");
+                    }
+                },
+                Err(error) => tracing::warn!(%error, "Could not list connections for recheck"),
+            }
+            if let Err(error) = recheck_custom(&app).await { tracing::warn!(%error, "Could not check custom connections"); }
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         }
     });
 }

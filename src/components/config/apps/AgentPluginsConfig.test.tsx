@@ -167,10 +167,22 @@ describe('AgentPluginsConfig', () => {
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();
     });
 
+    it('should start browser login with one click for a single remote service', async () => {
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'list_agent_plugins') return [{preview}];
+            if (command === 'get_agent_plugin_connection') return {id:'notion'};
+            if (command === 'connect_catalog_app') return {server_id:42, authorization_url:'https://example.com/login'};
+            return [];
+        });
+        render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} />);
+        await userEvent.click(await screen.findByRole('button', {name:'连接 Notion'}));
+        expect((await import('@tauri-apps/plugin-opener')).openUrl).toHaveBeenCalledWith('https://example.com/login');
+    });
+
     it('should replace the overview with connection settings for an installed catalog plugin', async () => {
         vi.mocked(invoke).mockImplementation(async command => command === 'list_agent_plugins' ? [{preview}] : []);
         render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} />);
-        await userEvent.click(await screen.findByRole('button', {name:'连接应用'}));
+        await userEvent.click(await screen.findByRole('button', {name:'高级连接设置'}));
         expect(screen.getByRole('button', {name:'添加连接'})).toBeEnabled();
         expect(screen.getByLabelText('OAuth 客户端 ID')).toBeInTheDocument();
         expect(screen.queryByText(preview.description)).not.toBeInTheDocument();
@@ -202,7 +214,7 @@ describe('AgentPluginsConfig', () => {
         expect(screen.getByRole('button', {name:'安装插件'})).toBeDisabled();
         expect(screen.getByRole('status')).toHaveTextContent('正在准备安装');
         finish();
-        await waitFor(() => expect(screen.getByRole('button', {name:'连接应用'})).toBeEnabled());
+        await waitFor(() => expect(screen.getByRole('button', {name:'连接 Notion'})).toBeEnabled());
         expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'install_agent_plugin')).toHaveLength(1);
         expect(screen.getByRole('button', {name:'检查更新'})).toBeInTheDocument();
     });

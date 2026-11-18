@@ -11,9 +11,9 @@ const dot: Record<StatusTone, string> = {
 };
 
 export default function AppStatusBadge({ status, className }: { status: DisplayStatus; className?: string }) {
-    return <span data-tone={status.tone} className={cn('inline-flex items-center gap-1.5 whitespace-nowrap text-xs',
+    return <span data-tone={status.tone} className={cn('inline-flex items-center gap-1.5 text-xs',
         status.tone === 'error' ? 'text-destructive' : status.tone === 'idle' ? 'text-muted-foreground' : 'text-foreground', className)}>
         <span aria-hidden className={cn('h-1.5 w-1.5 shrink-0 rounded-full', dot[status.tone])} />
-        {status.label}
+        <span className="min-w-0 break-words">{status.label}</span>
     </span>;
 }

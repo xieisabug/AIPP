@@ -125,6 +125,54 @@ pub struct RefreshPreview {
     changed: Vec<String>,
     removed: Vec<String>,
     permissions: Vec<String>,
+    details: HashMap<String, Vec<ToolChange>>,
+}
+
+#[derive(Serialize)]
+struct ToolChange {
+    field: String,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+fn json_changes(field: &str, before: Option<&serde_json::Value>, after: Option<&serde_json::Value>, changes: &mut Vec<ToolChange>) {
+    if before == after { return; }
+    if let (Some(serde_json::Value::Object(old)), Some(serde_json::Value::Object(new))) = (before, after) {
+        let keys: std::collections::BTreeSet<_> = old.keys().chain(new.keys()).collect();
+        for key in keys {
+            json_changes(&format!("{field}.{key}"), old.get(key), new.get(key), changes);
+        }
+        return;
+    }
+    let display = |value: &serde_json::Value| match value {
+        serde_json::Value::String(text) => text.clone(),
+        value => serde_json::to_string_pretty(value).unwrap_or_default(),
+    };
+    changes.push(ToolChange { field: field.into(), before: before.map(display), after: after.map(display) });
+}
+
+fn tool_changes(old: &MCPServerTool, new: &SimpleTool, signature: Option<&String>) -> Vec<ToolChange> {
+    let mut result = Vec::new();
+    if old.tool_description != new.description {
+        result.push(ToolChange { field: "工具说明".into(), before: old.tool_description.clone(), after: new.description.clone() });
+    }
+    let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text)
+        .unwrap_or_else(|_| serde_json::Value::String(text.into()));
+    let before = old.parameters.as_deref().map(parse);
+    let after = parse(&new.params_json);
+    json_changes("输入参数", before.as_ref(), Some(&after), &mut result);
+    if let Some(signature) = signature {
+        let before = parse(signature);
+        let after = parse(&new.signature);
+        if before.is_array() && after.is_array() {
+            for (index, field) in ["请求方法", "请求路径", "查询参数", "请求头字段", "请求体格式", "结果提取路径"].iter().enumerate() {
+                json_changes(field, before.get(index), after.get(index), &mut result);
+            }
+        } else {
+            json_changes("服务声明", Some(&before), Some(&after), &mut result);
+        }
+    }
+    result
 }
 
 fn operation_scope(signature: Option<&String>) -> String {
@@ -215,19 +263,13 @@ fn changes(
                         operation_scope(Some(&tool.signature))
                     ));
                 }
-                Some(t)
-                    if !same_tool(t, tool)
-                        || signatures.get(&t.id).is_some_and(|saved| saved != &tool.signature) =>
-                {
-                    diff.changed.push(tool.name.clone());
-                    diff.permissions.push(format!(
-                        "{}：{} → {}",
-                        tool.name,
-                        operation_scope(signatures.get(&t.id)),
-                        operation_scope(Some(&tool.signature))
-                    ));
+                Some(t) => {
+                    let details = tool_changes(t, tool, signatures.get(&t.id));
+                    if !details.is_empty() {
+                        diff.changed.push(tool.name.clone());
+                        diff.details.insert(tool.name.clone(), details);
+                    }
                 }
-                _ => {}
             }
         }
         diff.removed = old
@@ -299,7 +341,7 @@ fn restrict_changed_tools(
     {
         return Err("检测期间连接已变化".into());
     }
-    let superseded: bool = tx.query_row("SELECT verified_session IS ?2 OR status!='available' FROM app_connection WHERE server_id=?1",
+    let superseded: bool = tx.query_row("SELECT (status='available' AND verified_session IS ?2) OR status NOT IN ('available','error','unchecked') FROM app_connection WHERE server_id=?1",
         params![server.id, apps::SESSION.as_str()],|r|r.get(0)).map_err(|e|e.to_string())?;
     if superseded
         || db.get_mcp_server_tools(server.id).map_err(|e| e.to_string())? != previous
