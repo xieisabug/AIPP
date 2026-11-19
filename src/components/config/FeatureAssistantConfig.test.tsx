@@ -182,8 +182,11 @@ describe("FeatureAssistantConfig network config", () => {
 
         const user = userEvent.setup();
         await user.click(await screen.findByRole("button", { name: /辅助AI/ }));
-        const saveBtn = await screen.findAllByRole("button", { name: "保存配置" });
-        await user.click(saveBtn[0]);
+        const card = screen.getByText("启用辅助AI").closest('[data-slot="card"]');
+        for (const title of ["总结标题", "表单自动填写", "自动审核模型", "上下文压缩"]) {
+            expect(screen.getByText(title).closest('[data-slot="card"]')).toBe(card);
+        }
+        await user.click(screen.getByRole("button", { name: "保存配置" }));
 
         await waitFor(() => {
             const saveCalls = vi.mocked(invoke).mock.calls.filter(([command, args]) => {
