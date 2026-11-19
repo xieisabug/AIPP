@@ -2,11 +2,11 @@
 
 /** Skill source type - identifies where the skill comes from */
 export type SkillSourceType =
-  | 'claude_code_agents'
-  | 'claude_code_rules'
-  | 'claude_code_memory'
-  | 'codex'
   | 'agents'
+  | 'claude_code_skills'
+  | 'codex'
+  | 'copilot'
+  | 'agent_plugin' // GitHub 插件包里的技能，source_display_name 为「插件 · 包名」
   | string; // Custom sources
 
 /** Configuration for a skill source */
@@ -101,4 +101,34 @@ export function groupSkillsBySource(skills: ScannedSkill[]): Map<SkillSourceType
   }
   
   return groups;
+}
+
+/** 一组来源相同的 Skills（设置页列表的一个分组）。 */
+export interface SkillGroup {
+  key: string;
+  label: string;
+  sourceType: SkillSourceType;
+  skills: ScannedSkill[];
+}
+
+/** 内置来源的显示顺序；其他来源（插件包、自定义）按扫描顺序排在后面。 */
+const SKILL_SOURCE_ORDER: SkillSourceType[] = ['agents', 'claude_code_skills', 'codex', 'copilot'];
+
+/**
+ * 按来源分组并排序。插件包技能的来源类型都是 agent_plugin，
+ * 按显示名（「插件 · 包名」）再分开，每个插件包一组。
+ */
+export function orderedSkillGroups(skills: ScannedSkill[]): SkillGroup[] {
+  const groups = new Map<string, SkillGroup>();
+  for (const skill of skills) {
+    const key = `${skill.source_type}:${skill.source_display_name}`;
+    const group = groups.get(key);
+    if (group) group.skills.push(skill);
+    else groups.set(key, { key, label: skill.source_display_name, sourceType: skill.source_type, skills: [skill] });
+  }
+  const rank = (group: SkillGroup) => {
+    const index = SKILL_SOURCE_ORDER.indexOf(group.sourceType);
+    return index === -1 ? SKILL_SOURCE_ORDER.length : index;
+  };
+  return Array.from(groups.values()).sort((a, b) => rank(a) - rank(b));
 }
