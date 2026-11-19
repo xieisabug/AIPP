@@ -50,8 +50,17 @@ export interface ButlerGroupDetail {
     messages: ButlerGroupMessage[];
     has_more: boolean;
     turns: ButlerGroupTurn[];
+    interaction_turns: ButlerGroupInteractionTurn[];
     /** 有消息正在等待判断由谁回复。 */
     routing: boolean;
+}
+
+export interface ButlerGroupInteractionTurn {
+    conversation_id: number;
+    input_id: number;
+    trigger_seq: number;
+    reply_seq: number | null;
+    ended_at?: string | null;
 }
 
 export interface ButlerGroupStopSummary {
@@ -62,7 +71,4 @@ export interface ButlerGroupStopSummary {
 export const isUserGroupMessage = (message: ButlerGroupMessage) =>
     message.kind === "message" && message.sender_member === null;
 
-/** 数据库时间是 UTC 的 `YYYY-MM-DD HH:MM:SS`。 */
-export function parseGroupTime(value: string): Date {
-    return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value.replace(" ", "T")}Z`);
-}
+export { parseDatabaseTime as parseGroupTime } from "@/utils/messageOrdering";

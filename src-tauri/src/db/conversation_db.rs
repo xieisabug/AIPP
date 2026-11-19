@@ -246,6 +246,8 @@ pub struct MessageDetail {
     pub regenerate: Vec<MessageDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub large_message_preview: Option<LargeMessagePreviewMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub butler_final_text: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

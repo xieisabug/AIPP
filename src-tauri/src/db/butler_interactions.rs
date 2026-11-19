@@ -13,7 +13,26 @@ fn schema(conn: &Connection) -> Result<()> {
         id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
         anchor INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE, request_id TEXT NOT NULL UNIQUE,
         occurred_ms REAL NOT NULL, parameters TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS idx_butler_file_preview_conversation ON butler_file_preview(conversation_id)")?;
+        CREATE INDEX IF NOT EXISTS idx_butler_file_preview_conversation ON butler_file_preview(conversation_id);
+        CREATE TABLE IF NOT EXISTS butler_interaction_event (
+            id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+            anchor INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE, occurred_ms INTEGER NOT NULL,
+            kind TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_butler_interaction_event_conversation ON butler_interaction_event(conversation_id)")?;
+    Ok(())
+}
+
+pub fn is_group_member(conn: &Connection, conversation: i64) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM conversation WHERE id=?1 AND conversation_kind='butler_group_member')",
+        [conversation], |r| r.get(0))?)
+}
+
+/// Display history only. The original execution owns any pending interaction.
+pub fn save_event(conn: &Connection, cid: i64, anchor: i64, kind: &str, request_id: &str, payload: &str) -> Result<()> {
+    schema(conn)?;
+    conn.execute("INSERT INTO butler_interaction_event(conversation_id,anchor,occurred_ms,kind,request_id,payload)
+        SELECT ?1,id,?3,?4,?5,?6 FROM message WHERE id=?2 AND conversation_id=?1",
+        params![cid, anchor, chrono::Utc::now().timestamp_millis(), kind, request_id, payload])?;
     Ok(())
 }
 
@@ -21,6 +40,12 @@ pub fn save_preview(conn: &Connection, cid: i64, anchor: i64, request: &str, occ
     schema(conn)?;
     conn.execute("INSERT INTO butler_file_preview(conversation_id,anchor,request_id,occurred_ms,parameters)
         VALUES(?1,?2,?3,?4,?5)", params![cid,anchor,request,occurred_ms,raw])?;
+    Ok(())
+}
+
+pub fn finish_code(conn: &Connection, cid: i64, request: &str, status: &str) -> Result<()> {
+    conn.execute("UPDATE butler_interaction_event SET payload=json_set(payload,'$.status',?3)
+        WHERE conversation_id=?1 AND request_id=?2 AND kind='code'", params![cid, request, status])?;
     Ok(())
 }
 
@@ -44,7 +69,12 @@ fn list(conn: &Connection, cid: i64) -> Result<Vec<InteractionRow>> {
         AND coalesce(json_extract(a.record_json,'$.cancelled'),0)=0))
         AND (json_extract(q.event_json,'$.call_id') IS NULL OR json_extract(q.event_json,'$.recovered')=1)
         UNION ALL SELECT id,'file',request_id,anchor,occurred_ms,'null',NULL FROM butler_file_preview
-        WHERE conversation_id=?1 ORDER BY 5,1")?;
+        WHERE conversation_id=?1
+        UNION ALL SELECT g.id,g.kind,g.request_id,g.anchor,g.occurred_ms,g.payload,json_extract(a.record_json,'$.answers')
+        FROM butler_interaction_event g LEFT JOIN butler_task_question_answer a ON a.task_conversation_id=g.conversation_id
+        AND a.question_key='request:'||g.request_id AND json_extract(a.record_json,'$.delivery_status')='delivered'
+        WHERE g.conversation_id=?1 AND (g.kind='report' OR coalesce(json_extract(a.record_json,'$.cancelled'),0)=0)
+        ORDER BY 5,1")?;
     let mut rows = stmt.query([cid])?;
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {

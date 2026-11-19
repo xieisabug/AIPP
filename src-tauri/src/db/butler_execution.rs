@@ -42,6 +42,34 @@ pub fn is_completed_content(role:&str,body:&str,finished:bool,tool_calls:Option<
  && !body.contains("<!-- MCP_TOOL_CALL") && !body.contains("<mcp_tool_call>")
  && tool_calls.is_none_or(|s| matches!(s.trim(),""|"[]"|"null"))
 }
+
+/// Preserve the complete execution transcript. Most final messages are a suffix, so only
+/// their Unicode character offset needs storing. Some SDKs return text only at completion.
+pub(crate) fn record_agent_final(metadata: &mut serde_json::Value, body: &str, final_text: &str) {
+    metadata["agent_final"] = match body.strip_suffix(final_text) {
+        Some(prefix) => serde_json::json!({ "start": prefix.chars().count() }),
+        None => serde_json::json!({ "text": final_text }),
+    };
+}
+
+/// Return a display override only when the final answer differs from the raw body.
+pub(crate) fn agent_final_text(body: &str, raw: Option<&str>) -> Option<String> {
+    let raw = raw.filter(|s| s.contains("\"agent_final\"") || s.contains("\"agent_activities\""))?;
+    let metadata: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if let Some(text) = metadata["agent_final"]["text"].as_str() {
+        return (text != body).then(|| text.to_owned());
+    }
+    let start = metadata["agent_final"]["start"].as_u64().or_else(|| {
+        // Older drivers appended all text deltas to one message. Activities keep the
+        // first-seen character offset, even when completion events arrive much later.
+        metadata["agent_activities"].as_array()?.iter()
+            .filter(|a| !matches!(a["kind"].as_str(), Some("status" | "agentMessage" | "userMessage")))
+            .filter_map(|a| a["content_offset"].as_u64()).max()
+    })?;
+    if start == 0 { return None; }
+    let byte = body.char_indices().map(|(i, _)| i).chain(std::iter::once(body.len())).nth(start.try_into().ok()?)?;
+    Some(body[byte..].to_owned())
+}
 #[cfg(test)] #[path="butler_execution_tests.rs"] mod tests;
 
 /// Reserve before dispatch. An interrupted reservation is never automatically replayed.

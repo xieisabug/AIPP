@@ -93,8 +93,12 @@ test('should forward Pi text and approval while accepting abort before the user 
     fixture.emit({ type: 'extension_ui_request', id: 'question', method: 'input', title: 'Which file?' });
     await runtime.answer('question', { 'Which file?': 'README.md' });
     assert.equal(fixture.commands.at(-1).value, 'README.md');
-    fixture.emit({ type: 'agent_end' });
+    fixture.emit({ type: 'agent_end', messages: [
+      {role:'assistant', stopReason:'toolUse', content:[{type:'text', text:'先检查'}]},
+      {role:'assistant', stopReason:'stop', content:[{type:'thinking', thinking:'过程'}, {type:'text', text:'answer'}]},
+    ] });
     assert.equal(events.find(e => e.type === 'text').text, 'answer');
+    assert.equal(events.at(-1).final_text, 'answer');
     assert.equal(events.find(e => e.type === 'permission').turn, 'turn1');
     assert.equal(events.filter(e => e.type === 'done').length, 1);
     await runtime.prompt('next', 'turn2');

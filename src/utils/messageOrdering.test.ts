@@ -2,8 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
     compareMessagesChronologically,
     getMessageOrderValue,
+    parseDatabaseTime,
 } from "@/utils/messageOrdering";
 import { Message } from "@/data/Conversation";
+
+it("should retain UTC when tool calls and messages use different SQLite timestamp formats", () => {
+    expect(parseDatabaseTime("2026-11-17 15:52:21").toISOString()).toBe("2026-11-17T15:52:21.000Z");
+    expect(parseDatabaseTime("2026-11-17 15:52:21.243274800+00:00").toISOString()).toBe("2026-11-17T15:52:21.243Z");
+});
 
 function makeMessage(
     id: number,

@@ -1468,7 +1468,7 @@ impl MCPDatabase {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<()> {
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
 
         match status {
             "executing" => {
@@ -1521,7 +1521,7 @@ impl MCPDatabase {
     /// Returns true if the transition happened, false if another executor already took it.
     #[instrument(level = "trace", skip(self), fields(id))]
     pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> Result<bool> {
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
         // A skipped call has already produced a terminal tool result and must not run later.
         let rows = self.retry_if_busy(|| {
             self.conn.execute(
@@ -1536,7 +1536,7 @@ impl MCPDatabase {
 
     /// Resolve an unstarted call when the user has moved on to a new prompt.
     pub fn skip_unstarted_mcp_tool_call(&self, id: i64, reason: &str) -> Result<bool> {
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
         let rows = self.retry_if_busy(|| {
             self.conn.execute(
                 "UPDATE mcp_tool_call SET status = 'failed', error = ?, finished_time = ? \

@@ -2023,6 +2023,7 @@ fn persist_response(
     content: &str,
     done: bool,
     usage: Option<CodexTurnUsage>,
+    final_text: Option<&str>,
 ) {
     if let Ok(db) = ConversationDatabase::new(app_handle) {
         if let Ok(repo) = db.message_repo() {
@@ -2037,10 +2038,13 @@ fn persist_response(
                     message.token_count = usage
                         .map(|value| value.total_tokens)
                         .unwrap_or(message.output_token_count);
+                    let mut metadata = message.metadata_json.as_deref()
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                        .filter(Value::is_object).unwrap_or_else(|| json!({}));
+                    if let Some(text) = final_text {
+                        crate::db::butler_execution::record_agent_final(&mut metadata, content, text);
+                    }
                     if let Some(usage) = usage {
-                        let mut metadata = message.metadata_json.as_deref()
-                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
                         if let Some(map) = metadata.as_object_mut() {
                             map.insert("usage_source".to_string(), json!("reported"));
                             map.insert("thought_tokens".to_string(), json!(usage.reasoning_tokens));
@@ -2049,17 +2053,11 @@ fn persist_response(
                             map.insert("cached_write_tokens".to_string(), json!(usage.cache_write_input_tokens));
                             map.insert("cache_creation_tokens".to_string(), json!(usage.cache_write_input_tokens));
                         }
-                        message.metadata_json = serde_json::to_string(&metadata).ok();
                     } else {
                         // 没有收到用量通知时输出按字数估算，必须标明是估算，对话信息才会提示。
-                        let mut metadata = message.metadata_json.as_deref()
-                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
-                        if let Some(map) = metadata.as_object_mut() {
-                            map.insert("usage_source".to_string(), json!("estimated"));
-                        }
-                        message.metadata_json = serde_json::to_string(&metadata).ok();
+                        metadata["usage_source"] = json!("estimated");
                     }
+                    message.metadata_json = serde_json::to_string(&metadata).ok();
                     let _ = repo.update(&message);
                 }
             }
@@ -2592,6 +2590,7 @@ async fn run_session(
                 snapshot.has_active_prompt = true;
                 emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                 let mut content = String::new();
+                let mut final_text: Option<String> = None;
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -2734,7 +2733,7 @@ async fn run_session(
                                             first_any_token_time = Some(chrono::Utc::now());
                                         }
                                         content.push_str(delta);
-                                        persist_response(&app_handle, message_id, &content, false, None);
+                                        persist_response(&app_handle, message_id, &content, false, None, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
                                         let _ = emit_to_window(&window, event_identity.clone(), event);
                                     }
@@ -2769,7 +2768,7 @@ async fn run_session(
                                             }
                                         }
                                         if let Some(reasoning_id) = reasoning_message_id {
-                                            persist_response(&app_handle, reasoning_id, &reasoning, false, None);
+                                            persist_response(&app_handle, reasoning_id, &reasoning, false, None, None);
                                             let event = ConversationEvent {
                                                 r#type: "message_update".to_string(),
                                                 data: serde_json::to_value(MessageUpdateEvent {
@@ -2821,6 +2820,11 @@ async fn run_session(
                                                         );
                                                     }
                                                 }
+                                            }
+                                        } else if item_type == Some("agentMessage") {
+                                            if method == "item/completed" {
+                                                final_text = if item["phase"] == "commentary" { Some(String::new()) }
+                                                    else { item["text"].as_str().map(str::to_owned) };
                                             }
                                         } else {
                                             let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
@@ -2926,8 +2930,12 @@ async fn run_session(
                     }
                     }
                 let turn_usage = usage_tracker.turn_usage();
+                if content.is_empty() {
+                    if let Some(text) = &final_text { content.clone_from(text); }
+                }
                 if manual_compact && turn_error.is_none() && content.is_empty() {
                     content = super::agent_driver::manual_compact::compact_done_text(None);
+                    final_text = None;
                 }
                 if turn_error.is_none() && content.is_empty() && reasoning.is_empty() && plan_messages.is_empty() {
                     turn_error = Some("Codex 本轮未返回任何内容".to_string());
@@ -2947,7 +2955,8 @@ async fn run_session(
                         );
                     }
                 }
-                persist_response(&app_handle, message_id, &content, true, turn_usage);
+                let published = if completed_normally { final_text.as_deref() } else { Some("") };
+                persist_response(&app_handle, message_id, &content, true, turn_usage, published);
                 if let Some(reasoning_id) = reasoning_message_id {
                     persist_codex_reasoning(&app_handle, reasoning_id, &reasoning);
                     let _ = emit_to_window(

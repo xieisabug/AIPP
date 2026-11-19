@@ -1,4 +1,24 @@
 use super::*;
+
+#[test]
+fn test_agent_final_retains_only_the_last_output_with_unicode_offsets() {
+    let body = "先查🔎再看。答复";
+    for answer in ["答复", "", "执行完成时单独返回的答复"] {
+        let mut meta = serde_json::json!({});
+        record_agent_final(&mut meta, body, answer);
+        assert_eq!(agent_final_text(body, Some(&meta.to_string())).as_deref(), Some(answer));
+    }
+    let legacy = serde_json::json!({"agent_activities":[
+        {"kind":"tool","content_offset":6}, {"kind":"tool","content_offset":3},
+        {"kind":"status","content_offset":8}
+    ]});
+    assert_eq!(agent_final_text(body, Some(&legacy.to_string())).as_deref(), Some("答复"));
+    let mut meta = serde_json::json!({"agent_activities":legacy["agent_activities"]});
+    record_agent_final(&mut meta, body, body);
+    assert_eq!(agent_final_text(body, Some(&meta.to_string())), None);
+    assert_eq!(agent_final_text(body, Some(r#"{"agent_final":{"start":999}}"#)), None);
+    assert_eq!(agent_final_text(body, None), None);
+}
 #[test] fn test_execution_three_adapters_share_completion_and_cancel_contract(){
  for identity in [Identity::task(3),Identity::peer(7,4),Identity::scheduled(5,"r")] {
   assert_eq!(Outcome::finish(identity.clone(),"success","finished",None,false,"pending").end,End::Unknown);

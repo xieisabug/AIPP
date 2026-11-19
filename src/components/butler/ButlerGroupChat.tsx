@@ -33,11 +33,10 @@ interface Props {
 }
 
 /** 打开群聊时一次取回全部历史（与私聊一样交给虚拟列表），不再分页“查看更早的消息”。 */
-const FULL_HISTORY_LIMIT = 100_000;
+const HISTORY_PAGE_SIZE = 200;
 
 export default function ButlerGroupChat({ groupId, chiefName, assistants, onDeleted }: Props) {
     const [detail, setDetail] = useState<ButlerGroupDetail | null>(null);
-    const [older, setOlder] = useState<ButlerGroupMessage[]>([]);
     const [loadError, setLoadError] = useState("");
     const [draft, setDraft] = useState("");
     // 引用与私聊共用同一套组件：悬浮条/右键菜单的“引用回复”写入这里，输入框上方显示引用标签。id 是群消息序号。
@@ -51,25 +50,28 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const [nameDraft, setNameDraft] = useState("");
     const pendingPost = useRef<{ signature: string; key: string } | null>(null);
     const historyLoaded = useRef(false);
+    const loadedThrough = useRef(0);
     const revision = useRef(0);
 
     const refresh = useCallback(async () => {
         const version = ++revision.current;
         try {
             const next = await groups.getButlerGroup(groupId);
-            // 首次打开时把最新一页之前的历史一并取回，再交给列表一次性展示并贴底，避免先显示再往上插入导致跳动。
-            let earlier: ButlerGroupMessage[] | null = null;
-            if (!historyLoaded.current) {
-                earlier = next.has_more && next.messages.length
-                    ? await groups.listOlderButlerGroupMessages(groupId, next.messages[0].seq, FULL_HISTORY_LIMIT)
-                    : [];
+            const pages: ButlerGroupMessage[][] = [next.messages];
+            let before = next.messages[0]?.seq ?? 0;
+            while (next.has_more && before > 0 && (!historyLoaded.current || before > loadedThrough.current + 1)) {
+                if (version !== revision.current) return;
+                const page = await groups.listOlderButlerGroupMessages(groupId, before, HISTORY_PAGE_SIZE);
+                if (!page.length || page[0].seq >= before) break;
+                pages.push(page);
+                before = page[0].seq;
+                if (page.length < HISTORY_PAGE_SIZE) break;
             }
             if (version !== revision.current) return;
-            if (earlier) {
-                historyLoaded.current = true;
-                setOlder(earlier);
-            }
-            setDetail(next);
+            const incoming = pages.reverse().flat();
+            historyLoaded.current = true;
+            loadedThrough.current = next.messages.at(-1)?.seq ?? loadedThrough.current;
+            setDetail(previous => ({ ...next, messages: mergeMessages(previous?.messages ?? [], incoming) }));
             setLoadError("");
         } catch (error) {
             if (version === revision.current) setLoadError(String(error));
@@ -91,7 +93,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         };
     }, [groupId, refresh]);
 
-    const messages = useMemo(() => mergeMessages(older, detail?.messages ?? []), [older, detail?.messages]);
+    const messages = detail?.messages ?? [];
     const focused = useFocusedWindow();
     const lastSeq = messages.length ? messages[messages.length - 1].seq : 0;
     useEffect(() => {
@@ -223,7 +225,8 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
 
         <ButlerQuoteContext.Provider value={quoteState}>
         {/* 消息列表与私聊同一套（见 ButlerGroupTranscript）：输入框悬浮在列表底部之上，尾部空间由列表留出。 */}
-        <ButlerGroupTranscript historyLoaded={detail.id === groupId && historyLoaded.current} groupId={groupId} messages={messages} members={members} running={running} />
+        <ButlerGroupTranscript historyLoaded={detail.id === groupId && historyLoaded.current} groupId={groupId}
+            messages={messages} members={members} running={running} turns={detail.interaction_turns} />
 
         {/* 群聊消息只有正文和引用，暂不支持附件，所以不传附件能力。 */}
         <InputArea

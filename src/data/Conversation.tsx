@@ -23,9 +23,13 @@ export interface ConversationWithMessages {
 
 export interface Message {
     /** Display-only communication row in the desktop Butler timeline. */
-    butler_inline_interactions?: import("../components/ConversationUI").InlineInteractionItem[];
     butler_interaction?: import("react").ReactNode;
+    butler_event_order?: number;
+    butler_live_item_key?: string;
+    butler_published_reports?: string[];
     butler_posts?: import("../components/butler/butlerTimeline").PeerPost[];
+    /** Native agents can store commentary and the final answer in the same response. */
+    butler_final_text?: string | null;
     id: number;
     conversation_id: number;
     message_type: string;

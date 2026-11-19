@@ -288,10 +288,37 @@ pub fn message(conn: &Connection, group: i64, seq: i64) -> Result<Message> {
 /// 按时间正序返回最新一页；`before` 用于向上翻页。
 pub fn messages(conn: &Connection, group: i64, before: Option<i64>, limit: usize) -> Result<Vec<Message>> {
     ensure!((1..=200).contains(&limit), "群消息分页参数无效：limit={limit}");
-    let mut rows = collect(conn, &format!("SELECT {MESSAGE_COLUMNS} FROM butler_chat_group_message
-        WHERE group_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"), params![group, before.unwrap_or(i64::MAX), limit as i64], message_row)?;
+    let mut rows = collect(conn, &format!("SELECT {MESSAGE_COLUMNS},source.content,source.metadata_json FROM butler_chat_group_message
+        LEFT JOIN message source ON source.id=source_message_id AND source.conversation_id=source_conversation_id
+        WHERE group_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"), params![group, before.unwrap_or(i64::MAX), limit as i64], |r| {
+        let mut row = message_row(r)?;
+        if let (Some(body), Some(meta)) = (r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?) {
+            if row.body == body.trim() {
+                if let Some(text) = super::butler_execution::agent_final_text(&body, Some(&meta)) {
+                    row.body = text.trim().to_owned();
+                }
+            }
+        }
+        Ok(row)
+    })?;
     rows.reverse();
     Ok(rows)
+}
+
+/// Input boundaries identify the owning turn even when a member stops without a reply.
+#[derive(Debug, Clone, Serialize)]
+pub struct InteractionTurn {
+    conversation_id: i64, input_id: i64, trigger_seq: i64, reply_seq: Option<i64>, ended_at: Option<String>,
+}
+
+pub fn interaction_turns(conn: &Connection, group: i64) -> Result<Vec<InteractionTurn>> {
+    collect(conn, "SELECT m.conversation_id,t.input_message_id,t.trigger_seq,t.reply_seq,
+            CASE WHEN t.state!='running' THEN t.updated_at END
+        FROM butler_chat_group_turn t JOIN butler_chat_group_member m ON m.id=t.member_id
+        WHERE t.group_id=?1 AND t.input_message_id IS NOT NULL
+        ORDER BY t.input_message_id DESC", [group], |r| Ok(InteractionTurn {
+            conversation_id: r.get(0)?, input_id: r.get(1)?, trigger_seq: r.get(2)?, reply_seq: r.get(3)?, ended_at: r.get(4)?,
+        }))
 }
 
 fn messages_between(conn: &Connection, group: i64, after: i64, through: i64) -> Result<Vec<Message>> {
@@ -347,7 +374,7 @@ pub(crate) fn validate_name(name: &str) -> Result<String> {
 }
 
 fn now() -> String {
-    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string()
 }
 
 fn insert_member(tx: &Connection, group: &Group, assistant: i64, name: &str) -> Result<i64> {
@@ -447,8 +474,8 @@ pub fn add_members(conn: &mut Connection, group: i64, invited: &[(i64, String)])
 
 fn cancel_member_turns(tx: &Connection, member_id: i64, reason: &str) -> Result<Vec<Turn>> {
     let running = collect(tx, &format!("SELECT {TURN_COLUMNS} FROM butler_chat_group_turn WHERE member_id=?1 AND state='running'"), [member_id], turn_row)?;
-    tx.execute("UPDATE butler_chat_group_turn SET state='cancelled', error=?2, updated_at=CURRENT_TIMESTAMP
-        WHERE member_id=?1 AND state IN ('queued','running')", params![member_id, reason])?;
+    tx.execute("UPDATE butler_chat_group_turn SET state='cancelled', error=?2, updated_at=?3
+        WHERE member_id=?1 AND state IN ('queued','running')", params![member_id, reason, now()])?;
     Ok(running)
 }
 
@@ -689,10 +716,12 @@ pub fn evidence(conn: &Connection, t: &Turn) -> Result<Evidence> {
     if calls.as_deref().is_some_and(|s| !matches!(s.trim(), "" | "[]" | "null")) {
         return Ok(Evidence::Pending);
     }
+    let projected = super::butler_execution::agent_final_text(&body, metadata.as_deref());
+    let body = projected.as_deref().unwrap_or(&body);
     if body.trim() == "[[NO_REPLY]]" {
         return Ok(Evidence::Silent);
     }
-    if super::butler_execution::is_completed_content(&kind, &body, finished, calls.as_deref()) {
+    if super::butler_execution::is_completed_content(&kind, body, finished, calls.as_deref()) {
         return Ok(Evidence::Answer(body.trim().to_string()));
     }
     Ok(Evidence::Pending)
@@ -749,10 +778,10 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
             finished.reply = Some(reply);
         }
         Outcome::Silent => {
-            tx.execute("UPDATE butler_chat_group_turn SET state='done', updated_at=CURRENT_TIMESTAMP WHERE id=?1", [id])?;
+            tx.execute("UPDATE butler_chat_group_turn SET state='done', updated_at=?2 WHERE id=?1", params![id, now()])?;
         }
         Outcome::Failed(reason) => {
-            tx.execute("UPDATE butler_chat_group_turn SET state='failed', error=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, reason])?;
+            tx.execute("UPDATE butler_chat_group_turn SET state='failed', error=?2, updated_at=?3 WHERE id=?1", params![id, reason, now()])?;
             notice(&tx, t.group_id, "error", &format!("{} 没能回复：{reason}", m.name))?;
         }
     }
@@ -844,8 +873,8 @@ pub fn stop(conn: &mut Connection, group: i64) -> Result<Vec<Turn>> {
     get(&tx, group)?;
     let running = collect(&tx, &format!("SELECT {TURN_COLUMNS} FROM butler_chat_group_turn WHERE group_id=?1 AND state='running'"), [group], turn_row)?;
     let routes = tx.execute("UPDATE butler_chat_group_message SET route_state='cancelled' WHERE group_id=?1 AND route_state='pending'", [group])?;
-    let turns = tx.execute("UPDATE butler_chat_group_turn SET state='cancelled', error='用户停止了回复', updated_at=CURRENT_TIMESTAMP
-        WHERE group_id=?1 AND state IN ('queued','running')", [group])?;
+    let turns = tx.execute("UPDATE butler_chat_group_turn SET state='cancelled', error='用户停止了回复', updated_at=?2
+        WHERE group_id=?1 AND state IN ('queued','running')", params![group, now()])?;
     if routes + turns > 0 {
         notice(&tx, group, "notice", "你停止了当前的回复")?;
     }

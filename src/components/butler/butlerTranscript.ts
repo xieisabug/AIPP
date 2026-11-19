@@ -4,14 +4,26 @@ import { isButlerInteractionTool } from "./ButlerPresentationContext";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
 import { visibleText } from "@/utils/turnContext";
+import type { ProgressReport } from "./reportedProgress";
 
 // Kept in sync with BUTLER_SILENT_REPLY in src-tauri/src/api/butler_api.rs.
 export const BUTLER_SILENT_REPLY = "[[NO_REPLY]]";
 
 // Rendering only. Conversation history, runtime and export retain the original messages.
 export function butlerTranscript(messages: Message[], unpublished = new Set<number>(), questionIds = new Set<string>(),
-    calls?: ReadonlyMap<number, { tool_name?: string }>, reports?: ReadonlyMap<number, string>): Message[] {
+    calls?: ReadonlyMap<number, { tool_name?: string }>, reports?: ReadonlyMap<number, ProgressReport[]>,
+    interactionRows?: ReadonlyMap<number, Message[]>, positionedCalls?: ReadonlySet<number>, toolOwners?: ReadonlySet<number>): Message[] {
     const result: Message[] = [];
+    const lastResponses = new Set<Message>();
+    let needLast = true;
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        if (message.message_type === "user" && message.id > 0) needLast = true;
+        if (needLast && (message.message_type === "response" || message.message_type === "assistant")) {
+            lastResponses.add(message);
+            needLast = false;
+        }
+    }
     let internalTurn = false;
     for (const message of messages) {
         if (message.message_type === "user") {
@@ -41,72 +53,84 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
         const scheduled = message.message_type === "response" ? readScheduledTaskMetadata(message.metadata_json) : null;
         if (scheduled) internalTurn = false;
         const scheduledResult = scheduled?.role === "result";
-        if (internalTurn || ["system", "reasoning", "tool_result"].includes(message.message_type)) continue;
+        if (internalTurn) continue;
+        if (message.message_type === "user") result.push(message);
+        for (const [index, report] of (reports?.get(message.id) ?? []).entries()) {
+            result.push({ ...message, id: -5_000_000_000_000 - message.id * 65536 - index, parent_id: message.id,
+                created_time: Number.isFinite(report.time) ? new Date(report.time!) : message.created_time,
+                message_type: "butler_report", content: report.text, butler_event_order: report.order });
+        }
         // 失败和 ChatUI 一样显示成可展开的一行；之后已有回复的旧错误属于重试过程，简洁聊天不再显示。
         if (message.message_type === "error") {
             if (!unpublished.has(message.id) && !message.isSupersededError) result.push(message);
             continue;
         }
         if (message.message_type !== "response" && message.message_type !== "assistant") {
-            result.push(message);
+            if (message.message_type === "agent_plan") result.push(message);
             continue;
         }
-        if (message.content.trim() === BUTLER_SILENT_REPLY) continue;
-        if (parseStreamRetryMeta(message)?.status === "interrupted") continue;
+        result.push(...(interactionRows?.get(message.id) ?? []));
+        const body = message.butler_final_text ?? message.content;
+        if (body.trim() === BUTLER_SILENT_REPLY || parseStreamRetryMeta(message)?.status === "interrupted") continue;
         const pending = (!scheduledResult && unpublished.has(message.id)) || message.finish_time === null;
-        const report = reports?.get(message.id);
-        if (report && !pending) {
-            result.push({ ...message, id: -5_000_000_000_000 - message.id, parent_id: message.id,
-                message_type: "butler_report", content: report });
-        }
+        const publishBody = !pending && (scheduledResult || lastResponses.has(message)) && !isInterrupted(message);
         // 交互卡可以在当前轮结束前显示，正文仍等到正式交付。
         const shownPreviews: string[] = [];
-        const content = /MCP_TOOL_CALL/i.test(message.content) ? message.content.replace(
+        const content = /MCP_TOOL_CALL/i.test(body) ? body.replace(
             /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:(?:"(?:\\.|[^"\\])*(?:"|\\?$)|[^"])*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,
             (segment, backticks, tildes) => {
                 if (backticks || tildes) return segment;
-                const name = completeToolName(segment, calls);
+                const { name, callId } = completeTool(segment, calls);
+                if (callId && positionedCalls?.has(callId)) return "";
                 if (isButlerInteractionTool(name) || (!pending && name === "preview_message" && !segment.startsWith("<!-- MCP_TOOL_CALL_STREAMING"))) {
                     if (scheduledResult && !pending) return segment;
                     shownPreviews.push(segment);
                 }
                 return "";
             },
-        ) : message.content;
-        if (pending && !shownPreviews.length) continue;
-        const hasTool = content !== message.content
+        ) : body;
+        const hasTool = content !== body
+            || (toolOwners?.has(message.id) && message.butler_final_text == null && !/"agent_(?:activities|final)"/.test(message.metadata_json ?? ""))
             || (!!message.tool_calls_json && !["[]", "null"].includes(message.tool_calls_json.trim()))
             || message.large_message_preview?.reason === "mcp_payload";
         if (!content.trim() && !message.attachment_list?.length && !shownPreviews.length) continue;
-        if (scheduledResult && !pending && hasTool) {
+        if (scheduledResult && publishBody && hasTool) {
             result.push(withReplyQuote({ ...message, content: content.trim(), tool_calls_json: null, large_message_preview: null }, result));
-        } else if (hasTool) {
+        } else if (hasTool || !publishBody) {
             if (shownPreviews.length) {
                 // 只留面向用户的卡片：同一条里的过程说明与其他工具调用仍不显示。
                 result.push({ ...message, content: shownPreviews.join("\n\n"), large_message_preview: null });
-            } else if (message.attachment_list?.length) {
+            } else if (!pending && message.attachment_list?.length) {
                 result.push({ ...message, content: "", tool_calls_json: null, large_message_preview: null });
             }
         } else {
-            result.push(withReplyQuote(message, result));
+            result.push(withReplyQuote(body === message.content ? message : { ...message, content: body }, result));
         }
     }
     return result;
 }
 
-function completeToolName(segment: string, calls?: ReadonlyMap<number, { tool_name?: string }>): string | undefined {
+function isInterrupted(message: Message): boolean {
+    if (!message.metadata_json?.includes("end_reason")) return false;
+    try { return ["cancelled", "interrupted", "failed", "goal_superseded"].includes(JSON.parse(message.metadata_json).end_reason); }
+    catch { return false; }
+}
+
+function completeTool(segment: string, calls?: ReadonlyMap<number, { tool_name?: string }>): { name?: string; callId?: number } {
     const comment = segment.match(/^<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:([\s\S]*)-->$/i);
     if (comment) {
         try {
             const marker = JSON.parse(comment[1]);
-            return marker?.display_tool_name ?? marker?.tool_name ?? calls?.get(Number(marker?.call_id ?? marker))?.tool_name;
+            const callId = Number(marker?.call_id ?? marker);
+            return { callId, name: marker?.display_tool_name ?? marker?.tool_name ?? calls?.get(callId)?.tool_name };
         } catch {
-            return undefined;
+            return {};
         }
     }
     if (segment.endsWith("</mcp_tool_call>")) {
-        return segment.match(/<tool_name>\s*([^<]+?)\s*<\/tool_name>/i)?.[1];
+        return { name: segment.match(/<tool_name>\s*([^<]+?)\s*<\/tool_name>/i)?.[1] };
     }
+    return {};
 }
 
 /** 回复开头的 `[[QUOTE:原话]]` 显示成引用标签（指向已显示的那条消息），正文里不再出现标记。 */

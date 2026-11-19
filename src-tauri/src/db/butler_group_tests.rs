@@ -106,13 +106,21 @@ fn test_group_multiple_responders_reply_concurrently_and_catch_up_later() {
     let (second, _, second_input) = run(&mut conn, turns[1]);
     assert_eq!(input, "群聊「产品讨论」的新消息：\n\n〔系统〕用户邀请 张三、李四 加入了群聊\n\n用户：@所有人 这个方案可行吗？");
     assert_eq!(second_input, input);
-    reply(&conn, zhang.conversation_id, "可行，但要先压测。");
+    let source = reply(&conn, zhang.conversation_id, "我看看。可行，但要先压测。");
+    conn.execute("UPDATE message SET metadata_json=?1 WHERE id=?2", params![r#"{"agent_final":{"start":4}}"#, source]).unwrap();
     assert_eq!(evidence(&conn, &first).unwrap(), Evidence::Answer("可行，但要先压测。".into()));
     let published = finish_turn(&mut conn, first.id, Outcome::Reply("可行，但要先压测。".into())).unwrap().unwrap().reply.unwrap();
     // 群里的发言指回成员执行会话中的那条最终回复（界面用它显示消息信息、预览代码）
     let source: i64 = conn.query_row("SELECT max(id) FROM message WHERE conversation_id=?1 AND message_type='response'",
         [zhang.conversation_id], |r| r.get(0)).unwrap();
     assert_eq!((published.source_conversation_id, published.source_message_id), (Some(zhang.conversation_id), Some(source)));
+    let timeline = interaction_turns(&conn, group.id).unwrap();
+    assert!(timeline.iter().any(|t| t.reply_seq == Some(published.seq) && t.trigger_seq == question.seq && t.input_id == first.input_message_id.unwrap()));
+    conn.execute("UPDATE butler_chat_group_message SET body=(SELECT content FROM message WHERE id=?1) WHERE group_id=?2 AND seq=?3",
+        params![source, group.id, published.seq]).unwrap();
+    assert_eq!(messages(&conn, group.id, None, 20).unwrap().last().unwrap().body, "可行，但要先压测。");
+    conn.execute("UPDATE butler_chat_group_message SET body=?1 WHERE group_id=?2 AND seq=?3",
+        params![published.body, group.id, published.seq]).unwrap();
     let finished = finish_turn(&mut conn, second.id, Outcome::Reply("我担心成本。".into())).unwrap().unwrap();
     assert!(finished.relayed.is_empty(), "一轮回复不会自动续聊");
     // 下次轮到张三时补上李四的回复；张三自己的发言不会送回给他

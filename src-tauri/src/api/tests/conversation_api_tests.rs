@@ -171,6 +171,7 @@ fn create_message_detail(
         first_token_time: None,
         ttft_ms: None,
         large_message_preview: None,
+        butler_final_text: None,
     }
 }
 

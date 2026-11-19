@@ -132,7 +132,12 @@ export async function openPi(config, emit, dependencies = {}) {
       void request({ type: 'abort' }).catch(fail);
     }
     if (frame.type === 'agent_end') {
-      emit({ ...base, type: 'done', error: failure });
+      const last = Array.isArray(frame.messages) ? frame.messages.findLast(message => message.role === 'assistant') : undefined;
+      let finalText;
+      if (last?.stopReason === 'toolUse') finalText = '';
+      else if (typeof last?.content === 'string') finalText = last.content;
+      else if (Array.isArray(last?.content)) finalText = last.content.filter(block => block.type === 'text').map(block => block.text).join('');
+      emit({ ...base, type: 'done', error: failure, final_text: finalText });
       turn = null; failure = undefined; questions.clear(); tools.clear(); thinkingId = undefined;
     }
   }, fail);

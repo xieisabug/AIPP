@@ -139,7 +139,7 @@ describe("useMessageListElements merged assistant preview state", () => {
             makeMessage({ id: 7 }), makeMessage({ id: 8 }),
         ];
         const { result } = renderHook(() => useMessageListElements(makeHookProps(butlerTranscript(messages))));
-        expect(result.current.messageElements.map(group => group.messageIds)).toEqual([[1, 2], [4], [6], [7, 8]]);
+        expect(result.current.messageElements.map(group => group.messageIds)).toEqual([[2], [4], [6], [8]]);
     });
 
     it("treats every message in the trailing merged assistant group as the last message", () => {

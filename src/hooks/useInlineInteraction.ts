@@ -528,16 +528,27 @@ interface UseAskUserQuestionOptions {
 
 export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
     const { conversationId } = options;
-    const [pendingRequest, setPendingRequest] = useState<AskUserQuestionRequest | null>(null);
-    const [, setRequestQueue] = useState<AskUserQuestionRequest[]>([]);
-    const [isDialogOpen, setIsDialogOpen] = useState(false);
+    const [requestQueue, setRequestQueue] = useState<AskUserQuestionRequest[]>([]);
+    const pendingRequest = requestQueue[0] ?? null;
+    const isDialogOpen = pendingRequest !== null;
     const [persistedState, setPersistedState] = useState<AskUserQuestionPersistedState | null>(null);
     const [submittedSummary, setSubmittedSummary] = useState<{
         request: AskUserQuestionRequest;
         answers: Record<string, string>;
     } | null>(null);
 
+    const scope = useMemo(() => ({ active: false, revision: 0, resolved: new Set<string>() }), [conversationId]);
+    useLayoutEffect(() => {
+        scope.active = true;
+        setRequestQueue([]);
+        setPersistedState(null);
+        setSubmittedSummary(null);
+        return () => { scope.active = false; scope.revision++; };
+    }, [scope]);
+
     const refreshPersistedState = useCallback(async () => {
+        if (!scope.active) return;
+        const revision = ++scope.revision;
         if (conversationId === undefined) {
             setPersistedState(null);
             return;
@@ -546,44 +557,16 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             const calls = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
                 conversationId,
             });
-            setPersistedState(getLatestAskUserQuestionState(calls, conversationId));
+            if (!scope.active || revision !== scope.revision) return;
+            setPersistedState(getLatestAskUserQuestionState(calls.filter(c => c.conversation_id === conversationId), conversationId));
         } catch (error) {
             console.error("Failed to load persisted ask_user_question state:", getErrorMessage(error));
         }
-    }, [conversationId]);
-
-    const shiftNextRequest = useCallback(() => {
-        setRequestQueue((prev) => {
-            const [, ...rest] = prev;
-            setPendingRequest(rest[0] ?? null);
-            setIsDialogOpen(rest.length > 0);
-            return rest;
-        });
-    }, []);
-
-    useEffect(() => {
-        setPendingRequest(null);
-        setRequestQueue([]);
-        setIsDialogOpen(false);
-        setSubmittedSummary(null);
-    }, [conversationId]);
+    }, [conversationId, scope]);
 
     useEffect(() => {
         void refreshPersistedState();
     }, [refreshPersistedState]);
-
-    // Durable Butler questions retain their stable ID after process restart.
-    useEffect(() => {
-        let active = true;
-        if (conversationId !== undefined) void invoke<AskUserQuestionRequest[]>("list_recoverable_butler_questions", { conversationId })
-            .then((requests) => { if (!active || !Array.isArray(requests)) return;
-                setRequestQueue((previous) => {
-                    const next = [...previous, ...requests.filter((r) => !previous.some((p) => p.request_id === r.request_id))];
-                    setPendingRequest(next[0] ?? null); setIsDialogOpen(next.length > 0); return next;
-                });
-            }).catch((error) => console.error("恢复待答问题失败", error));
-        return () => { active = false; };
-    }, [conversationId]);
 
     // Drop a stale local summary once a newer in-flight ask exists in persistence.
     useEffect(() => {
@@ -610,33 +593,26 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
     }, [persistedState, submittedSummary]);
 
     useEffect(() => {
-        const unsubscribe = listen<AskUserQuestionRequest>("ask-user-question-request", (event) => {
-            const request = event.payload;
-
-            if (
-                conversationId !== undefined &&
-                request.conversation_id !== undefined &&
-                request.conversation_id !== null &&
-                request.conversation_id !== conversationId
-            ) {
-                return;
-            }
-
+        let active = true;
+        const enqueue = (requests: AskUserQuestionRequest[], snapshot = false) => {
+            if (!active || !scope.active) return;
+            const owned = requests.filter(request => (conversationId === undefined || request.conversation_id === conversationId)
+                && !scope.resolved.has(request.request_id));
+            if (!owned.length) return;
             setSubmittedSummary(null);
-            setRequestQueue((prev) => {
-                const next = [...prev, request];
-                if (next.length === 1) {
-                    setPendingRequest(request);
-                    setIsDialogOpen(true);
-                }
-                return next;
+            setRequestQueue(previous => {
+                const items = snapshot ? [...owned, ...previous] : [...previous, ...owned];
+                return [...new Map(items.map(request => [request.request_id, request])).values()];
             });
-        });
-
-        return () => {
-            unsubscribe.then((f) => f());
         };
-    }, [conversationId]);
+        const unsubscribe = listen<AskUserQuestionRequest>("ask-user-question-request", event => enqueue([event.payload]));
+        // Subscribe before reading pending requests. A request may be delivered through both paths.
+        if (conversationId !== undefined) void unsubscribe.then(() => invoke<AskUserQuestionRequest[]>(
+            "list_recoverable_butler_questions", { conversationId },
+        )).then(requests => { if (Array.isArray(requests)) enqueue(requests, true); })
+            .catch(error => console.error("恢复待答问题失败", error));
+        return () => { active = false; void unsubscribe.then(off => off()); };
+    }, [conversationId, scope]);
 
     useEffect(() => {
         if (conversationId === undefined) {
@@ -675,6 +651,7 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
 
     const handleSubmit = useCallback(
         async (requestId: string, answers: Record<string, string>) => {
+            if (!scope.active) return;
             const currentPending = pendingRequest;
             if (!currentPending || currentPending.request_id !== requestId) {
                 // 问卷来自持久化记录，但已没有等待这份回答的请求（原执行因应用重启等中断）：不能静默吞掉。
@@ -700,29 +677,18 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
                 schedulePersistedRefresh();
                 return;
             }
-            // Only keep the local summary when this was the last queued request.
-            // If another ask is already waiting, showing the previous answers would
-            // mask the next questionnaire (bug: 2nd call shows 1st answers).
-            setRequestQueue((prev) => {
-                const [, ...rest] = prev;
-                if (rest.length > 0) {
-                    setSubmittedSummary(null);
-                    setPendingRequest(rest[0] ?? null);
-                    setIsDialogOpen(true);
-                } else {
-                    setSubmittedSummary({ request: currentPending, answers });
-                    setPendingRequest(null);
-                    setIsDialogOpen(false);
-                }
-                return rest;
-            });
+            if (!scope.active) return;
+            scope.resolved.add(requestId);
+            setRequestQueue(prev => prev.filter(request => request.request_id !== requestId));
+            setSubmittedSummary({ request: currentPending, answers });
             schedulePersistedRefresh();
         },
-        [pendingRequest, schedulePersistedRefresh]
+        [pendingRequest, schedulePersistedRefresh, scope]
     );
 
     const handleCancel = useCallback(
         async (requestId: string) => {
+            if (!scope.active) return;
             const persistedCallId = parsePersistedAskCallId(requestId);
             const currentPending = pendingRequest;
             const isRealtimePendingMatch =
@@ -730,15 +696,17 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             if (persistedCallId === null && !isRealtimePendingMatch) {
                 return;
             }
-            const callId = persistedCallId ?? persistedState?.callId ?? null;
+            const callId = persistedCallId ?? currentPending?.call_id ?? null;
+            let stopped = false;
             if (callId !== null) {
                 try {
                     await invoke("stop_mcp_tool_call", { callId });
+                    stopped = true;
                 } catch (error) {
-                    console.error(
-                        "Failed to stop AskUserQuestion MCP tool call:",
-                        getErrorMessage(error)
-                    );
+                    if (persistedCallId !== null) {
+                        toast.error("未能取消提问", { description: getErrorMessage(error) });
+                        return;
+                    }
                 }
             }
             try {
@@ -750,20 +718,18 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
                     });
                 }
             } catch (error) {
-                console.error("Failed to cancel AskUserQuestion response:", getErrorMessage(error));
-            } finally {
-                setSubmittedSummary(null);
-                if (isRealtimePendingMatch) {
-                    shiftNextRequest();
-                } else {
-                    setPendingRequest(null);
-                    setRequestQueue([]);
-                    setIsDialogOpen(false);
+                if (!stopped) {
+                    toast.error("未能取消提问", { description: getErrorMessage(error) });
+                    return;
                 }
-                schedulePersistedRefresh();
             }
+            if (!scope.active) return;
+            scope.resolved.add(requestId);
+            setSubmittedSummary(null);
+            setRequestQueue(prev => prev.filter(request => request.request_id !== requestId));
+            schedulePersistedRefresh();
         },
-        [pendingRequest, persistedState?.callId, schedulePersistedRefresh, shiftNextRequest]
+        [pendingRequest, schedulePersistedRefresh, scope]
     );
 
     const askUserQuestionView = useMemo(

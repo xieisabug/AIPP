@@ -100,6 +100,8 @@ fn test_progress_snapshot_keeps_reports_and_helper_for_current_epoch() {
     let summary = ProgressSnapshot::update(Some(&first), entry(ProgressSource::HelperSummary, 1, "核对中"));
     let next = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 1, "继续检查"));
     assert_eq!(summary.reports, ["开工"]);
+    let repeated = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 1, "开工"));
+    assert_eq!(repeated.reports, ["开工", "开工"]);
     assert_eq!(next.reports, ["开工", "继续检查"]);
     assert_eq!(next.helper.unwrap().text, "核对中");
     let fresh = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 2, "新任务"));

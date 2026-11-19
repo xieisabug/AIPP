@@ -1011,11 +1011,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
             return rows;
         }, [savedInteractions, inlineInteractionItems, resultOnly]);
-        const remainingInlineItems = useMemo(() => {
-            if (!interactions?.length) return inlineInteractionItems;
-            const positioned = new Set(interactions.map(row => row.request_id));
-            return inlineInteractionItems?.filter(item => !item.requestId || !positioned.has(item.requestId));
-        }, [interactions, inlineInteractionItems]);
         const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
         const butlerRunningHeld = useLinger(resultOnly && effectiveAiIsResponsing, BUTLER_IDLE_GAP_MS, conversationId);
         // Replies already on screen before a run starts stay published. "Responding" turns on
@@ -1026,7 +1021,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         if (resultOnly && !effectiveAiIsResponsing && !butlerRunningHeld) {
             const ids = new Set<number>();
             for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
-                if (allDisplayMessages[index].message_type === "user") break;
+                if (allDisplayMessages[index].message_type === "user" && allDisplayMessages[index].id > 0) break;
                 ids.add(allDisplayMessages[index].id);
             }
             settledTailRef.current = { conversationId, ids };
@@ -1036,22 +1031,28 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 ? withButlerProcessing(allDisplayMessages, Number(conversationId), effectiveAiIsResponsing)
                 : allDisplayMessages;
             const unpublished = new Set<number>();
-            if (effectiveAiIsResponsing) {
+            if (effectiveAiIsResponsing || butlerRunningHeld) {
                 const settled = settledTailRef.current.conversationId === conversationId
                     ? settledTailRef.current.ids
                     : new Set<number>();
                 for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
                     const message = allDisplayMessages[index];
-                    if (message.message_type === "user") break;
+                    if (message.message_type === "user" && message.id > 0) break;
                     if (!settled.has(message.id)) unpublished.add(message.id);
                 }
             }
-            const reports = reportedProgressByMessage(Number(conversationId), displayAgentActivities.values(), mcpToolCallStates.values());
+            const reports = reportedProgressByMessage(Number(conversationId), displayAgentActivities.values(), mcpToolCallStates.values(), interactions);
             const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId), interactions, inlineInteractionItems, mcpToolCallStates, reports);
             // 工具轮次之间运行态会短暂回落为空闲；保留"处理中"直到真正的回复发布，避免提示行闪烁。
             return withButlerProcessing(visible, Number(conversationId),
-                effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)));
+                effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)),
+                visible.filter(row => row.message_type === "butler_report" && unpublished.has(row.parent_id!)).map(row => row.content));
         }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId, interactions, inlineInteractionItems, mcpToolCallStates, displayAgentActivities]);
+        const remainingInlineItems = useMemo(() => {
+            if (!resultOnly) return inlineInteractionItems;
+            const positioned = new Set(transcript.map(row => row.butler_live_item_key).filter(Boolean));
+            return inlineInteractionItems?.filter(item => !positioned.has(item.key));
+        }, [transcript, inlineInteractionItems, resultOnly]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,

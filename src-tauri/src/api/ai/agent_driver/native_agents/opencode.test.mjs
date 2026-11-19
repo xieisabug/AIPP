@@ -18,6 +18,10 @@ test('should retain OpenCode tool identity, actual diff and exit code for semant
     assert.equal(events.find(e => e.id === 'edit').metadata.diff, '+real');
     assert.equal(events.find(e => e.id === 'bash').metadata.exitCode, 0);
     assert.equal(events.find(e => e.id === 'read').input.filePath, 'a.rs');
+    f.event('message.part.updated', { part: { id:'final', messageID:'answer', sessionID:'s1', type:'text', text:'答复' } });
+    f.event('session.idle', { sessionID:'s1' });
+    await tick();
+    assert.equal(events.at(-1).final_text, '答复');
   } finally { await runtime.close(); }
 });
 

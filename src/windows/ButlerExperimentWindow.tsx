@@ -610,7 +610,7 @@ function ButlerExperimentWindow() {
     if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
         inlineInteractionItems.push({
             key: `butler-preview-${pendingPreviewFileRequest.request_id}`,
-            requireCallMarker: previewFileCallId != null || (previewFileMessageId != null && detailsConversation !== activeConversationId),
+            requireCallMarker: previewFileCallId != null && detailsConversation === activeConversationId,
             requestId: previewSourceRequestId ?? pendingPreviewFileRequest.request_id,
             callId: previewFileCallId,
             messageId: previewFileMessageId,

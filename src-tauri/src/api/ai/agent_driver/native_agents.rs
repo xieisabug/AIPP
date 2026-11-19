@@ -476,7 +476,11 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                                     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"agent_activity".into(), data:activity.clone() });
                                 }
                             }
-                            persist_success(&app, turn)?;
+                            let final_text = if cancelled || failure.is_some() { Some("") } else { frame["final_text"].as_str() };
+                            if turn.text.is_empty() {
+                                if let Some(text) = final_text { turn.text.push_str(text); }
+                            }
+                            persist_success(&app, turn, final_text)?;
                             if let Some(detail) = failure { return Err(detail.into()); }
                             publish_text(&identity, turn, true);
                             let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"stream_complete".into(), data:json!({"conversation_id":cid,"response_message_id":turn.id,"has_response":!turn.text.is_empty()}) });
@@ -517,7 +521,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"agent_activity".into(), data:activity.clone() });
                 }
             }
-            let _ = persist_success(&app, &turn);
+            let _ = persist_success(&app, &turn, Some(""));
             let failure = AgentFailure::new(identity.clone().with_response_message(turn.id), AgentFailureStage::NativeSession, detail)
                 .with_process_diagnostics(diagnostics.diagnostics(process.as_mut().and_then(|p|p.try_wait().ok().flatten()).map(|s|s.to_string()), None));
             let _ = emit_normalized_failure_to_window(&app, &turn.window, failure, driver.metadata().display_name);
@@ -612,13 +616,14 @@ fn publish_text(identity: &AgentEventIdentity, turn: &ActiveTurn, done: bool) {
     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"message_update".into(),
         data: json!({"message_id":turn.id,"message_type":"response","content":turn.text,"is_done":done}) });
 }
-fn persist_success(app: &tauri::AppHandle, turn: &ActiveTurn) -> Result<(), String> {
+fn persist_success(app: &tauri::AppHandle, turn: &ActiveTurn, final_text: Option<&str>) -> Result<(), String> {
     let db = ConversationDatabase::new(app).map_err(|e|e.to_string())?;
     let repo = db.message_repo().map_err(|e|e.to_string())?;
     let mut message = repo.read(turn.id).map_err(|e|e.to_string())?.ok_or("Native response message disappeared")?;
     message.content = turn.text.clone(); message.finish_time = Some(chrono::Utc::now());
     let mut metadata: Value = message.metadata_json.as_deref().and_then(|raw|serde_json::from_str(raw).ok()).filter(Value::is_object).unwrap_or_else(||json!({}));
     metadata["agent_activities"] = json!(ordered_activities(&turn.activities));
+    if let Some(text) = final_text { crate::db::butler_execution::record_agent_final(&mut metadata, &turn.text, text); }
     message.metadata_json = Some(metadata.to_string());
     repo.update(&message).map_err(|e|e.to_string())?;
     Ok(())

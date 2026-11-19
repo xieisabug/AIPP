@@ -16,6 +16,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **管家开工提示**：总管家、联系人、任务助手与群成员使用 `report_progress` 说明准备做什么，工具回执后沿既有执行链路继续。按执行会话广播 `butler_progress_summary`，私聊与群成员行以气泡显示上报原话，同时居中显示本轮辅助模型的最新总结；最终交付仍由原会话处理。
 
+管家简洁聊天按实际发生时间排列每次成功上报、问答与预览，普通正文只展示本轮完成时的最后答复。原生通道通过 `db/butler_execution.rs` 记录最终正文边界，执行记录保留完整内容。私聊投影在 `butlerTimeline.ts`，群聊通过成员执行轮次的输入、回复与结束时间定位交互（`butlerGroupResults.tsx`）。恢复实时问答按执行会话和原请求 ID 匹配。
+
 **管家引用展示**：`preview_message`（Agent 工具，归入协作工具，只在管家非群聊会话注入、免审核）按 `message_id` 或 `work_ref`（`exchange:`/`task:`/`scheduled_run:`）原样展示另一条助手回复，代替转述；模型拿到的只是小回执。句柄由系统在交给模型的地方附上：协作答复首行「引用：」、`<butler_task_result>`/`<butler_scheduled_task_result>` 的 `final_message_id`。可引用范围与管家历史检索一致，工具与界面取数共用 `db/message_preview.rs` + `api/message_preview.rs`。管家定时任务不通知的运行会话以隐藏 `scheduled_run` 保留（每任务最近 20 次，删任务连带删除）供引用。管家简洁聊天直接显示 `preview_file` 的文件内容、`preview_code` 的代码预览与 `ask_user_question` 的问答卡；三者共用 `ButlerInteractionResult` 展示已保存的结果，实时问答由原会话接收。前端卡片 `MessagePreviewToolCall` 是交付结果，简洁聊天也保留（`butlerTranscript`、`McpToolCallRenderer` 的结果类工具白名单）；飞书投递时展开原文。
 
 **管家长期记忆**：`butler_memory` 工具 + `db/butler_memory.rs` 单表，范围为助手私有 / 群（本群成员共享）/ 全局，私有记忆不进群。只有本轮用户本人的消息（群里为直接回应用户发言的回复）能写入；协作、派工、续接转达、后台续跑不算。每轮附带的 `<long_term_memory>` 随用户消息入库并逐字回放：首次按相关度在 800 字预算内附带一批（`initial="true"`，不保证是全部，放不下的提示条数、模型可 recall），之后对照“这次要发出的历史”里模型已经看到的记忆（附带过的记忆块、压缩检查点里的记忆块、本会话 `butler_memory` 工具返回的保存/更正/忘记/查到的结果）只附带新增/更新/删除与相关未看到的记忆；压缩时摘要输入去掉记忆块（`butler_memory::without_memory`），在摘要检查点后面重新首次附带一次当前版本（`CheckpointStore::memory_snapshot`），不在用户消息里整批重带。界面不显示附带了哪些记忆。删除聊天保留记忆，删群删群记忆，删助手删其私有记忆。界面在联系人资料“记忆”页与群聊信息面板。见 `api/butler_memory.rs`。

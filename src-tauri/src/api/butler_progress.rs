@@ -61,7 +61,7 @@ impl ProgressSnapshot {
         let mut reports = previous.map(|s| s.reports.clone()).unwrap_or_default();
         let helper = match latest.source {
             ProgressSource::ReportProgress => {
-                if !reports.contains(&latest.text) { reports.push(latest.text.clone()); }
+                reports.push(latest.text.clone());
                 previous.and_then(|s| s.helper.clone())
             }
             ProgressSource::HelperSummary => Some(latest.clone()),
@@ -314,6 +314,17 @@ fn report_text(args: &Value) -> anyhow::Result<String> {
 pub(super) async fn report(app: &AppHandle, conversation_id: i64, args: &Value) -> anyhow::Result<Value> {
     anyhow::ensure!(!crate::vault::placeholder::audit_requires_opaque_values(), "进度提示不能包含保险箱凭据");
     let text = crate::vault::placeholder::clean_persisted_text(&report_text(args)?);
+    if let Some(anchor) = super::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten() {
+        let conn = crate::db::conversation_db::ConversationDatabase::new(app)?.get_connection()?;
+        if crate::db::butler_goal::is_butler(&conn, conversation_id)?
+            || crate::db::butler_interactions::is_group_member(&conn, conversation_id)? {
+            let call_id = crate::mcp::execution_api::INTERACTION_CALL_ID.try_with(|id| *id).ok();
+            let payload = serde_json::json!({ "text": text, "call_id": call_id });
+            crate::db::butler_interactions::save_event(&conn, conversation_id, anchor, "report",
+                &uuid::Uuid::new_v4().to_string(), &payload.to_string())?;
+            app.emit("butler_interactions_changed", conversation_id)?;
+        }
+    }
     let epoch = app.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await.epoch;
     let summary = ButlerProgressSummary { source: ProgressSource::ReportProgress, conversation_id, epoch, text, steps: Vec::new() };
     publish(app, summary)?;

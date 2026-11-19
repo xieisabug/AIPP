@@ -1,7 +1,9 @@
-import type { Message } from "@/data/Conversation";
+import type { Message, MCPToolCallUpdateEvent } from "@/data/Conversation";
+import { parseGroupTime } from "@/data/ButlerGroup";
 import { parsePreviewFileRequestId } from "@/hooks/useInlineInteraction";
-import { extractMcpToolCalls } from "@/hooks/useMcpToolCallProcessor";
-import { interactionContent, type InteractionRow } from "./butlerInteractions";
+import { interactionContent, storedCallContent, type InteractionRow } from "./butlerInteractions";
+import { isButlerInteractionTool } from "./ButlerPresentationContext";
+import type { ProgressReport } from "./reportedProgress";
 import type { InlineInteractionItem } from "@/components/ConversationUI";
 import { butlerTranscript } from "./butlerTranscript";
 
@@ -34,57 +36,78 @@ export interface PeerPost {
 
 export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number,
     interactions: InteractionRow[] = [], liveItems: InlineInteractionItem[] = [],
-    calls?: ReadonlyMap<number, { tool_name?: string; result?: string }>, reports?: ReadonlyMap<number, string>): Message[] {
+    calls?: ReadonlyMap<number, MCPToolCallUpdateEvent>, reports?: ReadonlyMap<number, ProgressReport[]>): Message[] {
     const questionIds = new Set(interactions.filter(row => row.kind === "question").map(row => row.request_id));
-    const visible = butlerTranscript(messages, unpublished, questionIds, calls, reports);
-    if (!posts.length && !interactions.length) return visible;
     const positions = new Map(messages.map((m, i) => [m.id, i]));
-    const entries: Array<{ position: number; message?: Message; post?: PeerPost; time?: number }> =
-        visible.map(message => ({ position: message.message_type === "butler_report" ? positions.get(message.parent_id!)! - 0.25 : positions.get(message.id)!, message }));
-    const owners = new Map(entries.map(entry => [entry.message!.id, entry]));
-    const live = new Map(liveItems.map(item => [item.requestId, item]));
-    const fileCalls = new Map<string, number>();
-    if (interactions.some(row => row.kind === "file")) {
-        for (const [id, call] of calls ?? []) {
-            if (call.tool_name !== "preview_file") continue;
-            const requestId = parsePreviewFileRequestId(call.result);
-            if (requestId) fileCalls.set(requestId, id);
+    const byRequest = new Map(liveItems.filter(item => item.requestId).map(item => [item.requestId, item]));
+    const byCall = new Map(liveItems.filter(item => item.callId).map(item => [item.callId, item]));
+    const ownerRows = new Map<number, Message[]>();
+    const otherRows: Message[] = [];
+    const positionedCalls = new Set<number>();
+    const fileCalls = new Map<string, MCPToolCallUpdateEvent>();
+    const conversationCalls = [...(calls?.values() ?? [])].filter(call => call.conversation_id === conversationId);
+    const toolOwners = new Set(conversationCalls.flatMap(call => call.message_id ? [call.message_id] : []));
+    const uiCalls = conversationCalls.filter(call => isButlerInteractionTool(call.tool_name));
+    for (const call of uiCalls) {
+        if (call.tool_name !== "preview_file") continue;
+        const request = parsePreviewFileRequestId(call.result);
+        if (request) fileCalls.set(request, call);
+    }
+    function addCard(id: number, anchor: number | null, time: number, content: Message["butler_interaction"], order: number, live?: InlineInteractionItem) {
+        const index = anchor == null ? undefined : positions.get(anchor);
+        const owner = index == null ? undefined : messages[index];
+        const card: Message = {
+            id, conversation_id: conversationId, parent_id: anchor, message_type: "butler_interaction", content: "",
+            created_time: new Date(Number.isFinite(time) ? time : owner?.created_time ? parseGroupTime(owner.created_time).getTime() : 0),
+            llm_model_id: null, start_time: null, finish_time: null, token_count: 0, input_token_count: 0, output_token_count: 0,
+            regenerate: null, butler_interaction: content, butler_live_item_key: live?.key, butler_event_order: order,
+        };
+        if (owner && (owner.message_type === "response" || owner.message_type === "assistant")) {
+            const list = ownerRows.get(owner.id) ?? [];
+            list.push(card);
+            ownerRows.set(owner.id, list);
+        } else {
+            otherRows.push(card);
         }
     }
     for (const row of interactions) {
-        const content = interactionContent(row, live.get(row.request_id), conversationId);
+        const callId = row.kind === "question" ? row.request.call_id : fileCalls.get(row.request_id)?.call_id;
+        const live = byRequest.get(row.request_id) ?? (callId ? byCall.get(callId) : undefined);
+        const content = interactionContent(row, live, conversationId);
         if (!content) continue;
-        const owner = row.anchor == null ? undefined : owners.get(row.anchor);
-        const callId = row.kind === "question" ? row.request.call_id : fileCalls.get(row.request_id);
-        if (owner?.message && callId && extractMcpToolCalls(owner.message.content).some(marker => marker.data.call_id === callId)) {
-            // Some native drivers also mirror the bridge call into MCP history. The marker
-            // already renders its saved file except while the live hook owns this exact call.
-            if (row.kind === "file" && live.get(row.request_id)?.callId !== callId) continue;
-            const message = owner.message;
-            owner.message = { ...message, butler_inline_interactions: [...(message.butler_inline_interactions ?? []),
-                { key: row.request_id, callId, messageId: message.id, content }] };
-            continue;
-        }
-        const anchor = row.anchor == null ? undefined : positions.get(row.anchor);
-        const next = anchor === undefined ? messages.findIndex(m => new Date(m.created_time).getTime() > row.occurred_ms) : -1;
-        // Native tools execute inside the response, before its published final text.
-        const position = anchor === undefined ? (next < 0 ? messages.length : next) - 0.5
-            : anchor + (messages[anchor].message_type === "user" ? 0.125 : -0.125);
-        entries.push({position, time: row.occurred_ms, message: {
-            id: -4_000_000_000_000 - 2 * row.id - Number(row.kind === "file"), conversation_id: conversationId,
-            message_type: "butler_interaction", content: "", created_time: new Date(row.occurred_ms),
-            llm_model_id: null, start_time: null, finish_time: null, token_count: 0, input_token_count: 0,
-            output_token_count: 0, regenerate: null, butler_interaction: content,
-        }});
+        if (callId) positionedCalls.add(callId);
+        const kindIndex = row.kind === "file" ? 1 : row.kind === "task" ? 2 : row.kind === "code" ? 3 : 0;
+        addCard(-4_000_000_000_000 - 4 * row.id - kindIndex, row.anchor, row.occurred_ms, content, callId ?? row.id, live);
+    }
+    for (const call of uiCalls.sort((a, b) => a.call_id - b.call_id)) {
+        if (positionedCalls.has(call.call_id) || !call.message_id || !positions.has(call.message_id)) continue;
+        const live = byCall.get(call.call_id);
+        if (!live && call.status !== "success" && !(call.tool_name === "preview_code" && call.status === "executing")) continue;
+        positionedCalls.add(call.call_id);
+        addCard(-6_000_000_000_000 - call.call_id, call.message_id, call.started_time ? parseGroupTime(call.started_time).getTime() : NaN,
+            live?.content ?? storedCallContent(call), call.call_id, live);
+    }
+    const visible = butlerTranscript(messages, unpublished, questionIds, calls, reports, ownerRows, positionedCalls, toolOwners);
+    // Replies become public when they finish. Tools and peer posts can occur anywhere between
+    // the start and finish of the same native response. Use its position only to break ties.
+    const entries: Array<{ time: number; position: number; message?: Message; post?: PeerPost }> = [];
+    for (const message of [...visible, ...otherRows]) {
+        const event = message.message_type === "butler_report" || message.message_type === "butler_interaction";
+        const anchor = positions.get(event ? message.parent_id! : message.id);
+        const owner = anchor == null ? undefined : messages[anchor];
+        const reply = message.message_type === "response" || message.message_type === "assistant";
+        const stamp = (reply && message.finish_time) || message.created_time;
+        const time = stamp ? parseGroupTime(stamp).getTime() : NaN;
+        const start = owner?.created_time ? parseGroupTime(owner.created_time).getTime() : NaN;
+        entries.push({ time: Math.max(time || 0, start || 0),
+            position: (anchor ?? messages.length) + (event ? (owner?.message_type === "user" ? 0.5 : -0.5) : 0), message });
     }
     for (const post of posts) {
         const anchor = positions.get(post.anchor);
-        const time = new Date(post.occurred_at).getTime();
-        // A historical branch or a tool-only response can be absent from the displayed list.
-        const next = anchor === undefined ? messages.findIndex(m => new Date(m.created_time).getTime() > time) : -1;
-        entries.push({ position: anchor === undefined ? (next < 0 ? messages.length : next) - 0.5 : anchor + 0.25, post });
+        entries.push({ time: parseGroupTime(post.occurred_at).getTime(), position: (anchor ?? messages.length) + 0.25, post });
     }
-    entries.sort((a, b) => a.position - b.position || (a.time ?? Date.parse(a.post?.occurred_at ?? "")) - (b.time ?? Date.parse(b.post?.occurred_at ?? "")) || (a.post?.id ?? 0) - (b.post?.id ?? 0));
+    entries.sort((a, b) => a.time - b.time || a.position - b.position
+        || (a.message?.butler_event_order ?? a.post?.id ?? 0) - (b.message?.butler_event_order ?? b.post?.id ?? 0));
     const result: Message[] = [];
     for (const { message, post } of entries) {
         if (message) { result.push(message); continue; }
@@ -92,7 +115,7 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         const previous = result.at(-1)?.butler_posts;
         // 直接答复用户的事件单独成行，不并入“N 条消息往来”，以便一眼看出谁已经答复。
         const answersUser = (p: PeerPost) => p.direct || (p.task_reply && p.to_user);
-        if (previous && !post.task_id && !answersUser(post) && previous.every(p => !answersUser(p)) && previous.every(p => !p.task_id && p.root === post.root) && Math.abs(Date.parse(post.occurred_at) - Date.parse(previous[previous.length - 1].occurred_at)) < 600_000 &&
+        if (previous && !post.task_id && !answersUser(post) && previous.every(p => !answersUser(p)) && previous.every(p => !p.task_id && p.root === post.root) && Math.abs(parseGroupTime(post.occurred_at).getTime() - parseGroupTime(previous[previous.length - 1].occurred_at).getTime()) < 600_000 &&
             (previous.every(p => p.peer_conversation === post.peer_conversation) || (post.outgoing && previous.every(p => p.outgoing)))) {
             previous.push(post);
             continue;
@@ -100,7 +123,7 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         result.push({
             // Pending user inputs use small negative queue IDs. Timeline rows have a separate display-only range.
             id: Number.MIN_SAFE_INTEGER + post.id, conversation_id: conversationId,
-            message_type: "butler_exchange", content: "", created_time: new Date(post.occurred_at),
+            message_type: "butler_exchange", content: "", created_time: parseGroupTime(post.occurred_at),
             llm_model_id: null, start_time: null, finish_time: null, token_count: 0, input_token_count: 0, output_token_count: 0,
             regenerate: null, butler_posts: [post],
         });
@@ -110,11 +133,11 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
 
 
 // Presentation-only row. Never inserted into messages or sent to the backend.
-export function withButlerProcessing(messages: Message[], conversationId: number, running: boolean): Message[] {
+export function withButlerProcessing(messages: Message[], conversationId: number, running: boolean, publishedReports?: string[]): Message[] {
     if (!running) return messages;
     return [...messages, {
         id: Number.MIN_SAFE_INTEGER, conversation_id: conversationId,
-        message_type: "butler_processing", content: "", created_time: new Date(),
+        message_type: "butler_processing", content: "", created_time: new Date(), butler_published_reports: publishedReports,
         llm_model_id: null, start_time: null, finish_time: null, token_count: 0,
         input_token_count: 0, output_token_count: 0, regenerate: null,
     }];

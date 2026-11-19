@@ -54,6 +54,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
     if (!response.ok || !response.body) throw new Error(`OpenCode event subscription HTTP ${response.status}`);
     const parts = new Map();
     const partTypes = new Map();
+    const partOwners = new Map();
     const roles = new Map();
     const pendingPermissions = new Set();
     const questions = new Map();
@@ -84,6 +85,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         if (roles.get(part.messageID) !== 'assistant') return;
         sawActivity = true;
         partTypes.set(part.id, part.type);
+        partOwners.set(part.id, part.messageID);
         if (part.type === 'text') {
           const previous = parts.get(part.id) || '';
           if (part.text?.startsWith(previous) && part.text.length > previous.length) emit({ type: 'text', turn, text: part.text.slice(previous.length) });
@@ -129,7 +131,17 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       }
       else if ((sawActivity || cancelling) && (event.type === 'session.idle' || (event.type === 'session.status' && p.status?.type === 'idle'))) {
         if (waitingParts.size) { pendingIdle = true; return; }
-        emit({ type: 'done', turn, error: errorMessage }); turn = null; pendingPermissions.clear(); questions.clear();
+        const last = [...roles].findLast(([, role]) => role === 'assistant');
+        let finalText;
+        if (last) {
+          finalText = '';
+          for (const [id, owner] of partOwners) {
+            if (owner !== last[0]) continue;
+            if (partTypes.get(id) === 'tool') finalText = '';
+            if (partTypes.get(id) === 'text') finalText += parts.get(id) ?? '';
+          }
+        }
+        emit({ type: 'done', turn, error: errorMessage, final_text: finalText }); turn = null; pendingPermissions.clear(); questions.clear();
       }
     };
     const consume = async () => {
@@ -153,7 +165,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       async prompt(text, id) {
         if (turn) throw new Error('OpenCode already has an active turn');
         turn = id; cancelling = false; errorMessage = undefined; sawActivity = false; pendingIdle = false;
-        parts.clear(); partTypes.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
+        parts.clear(); partTypes.clear(); partOwners.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
         await api(`/session/${session}/prompt_async`, 'POST', {
           ...(config.butlerInstructions ? { system: config.butlerInstructions } : {}),
           ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text }],

@@ -1,9 +1,9 @@
-import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import { emit } from "@tauri-apps/api/event";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
-import ButlerProgressRow from "./ButlerProgressRow";
+import ButlerProgressRow, { LiveReportBubbles } from "./ButlerProgressRow";
 import { BUTLER_PROGRESS_EVENT } from "./butlerProgress";
 
 const snapshot = (latest: { source: string; conversation_id: number; epoch: number; text: string; steps: unknown[] }, reports: string[] = []) => ({
@@ -112,7 +112,7 @@ describe("ButlerProgressRow", () => {
         expect(screen.queryByRole("button")).toBeNull();
     });
 
-    it("shows the latest summary for its conversation and expands the steps", async () => {
+    it("should present the latest helper summary without exposing ordinary tool calls", async () => {
         mockInvokeHandler("get_butler_progress_summary", () => null);
         mockInvokeHandler("get_conversation_runtime_state", () => null);
         render(<ButlerProgressRow conversationId={3} />);
@@ -123,7 +123,13 @@ describe("ButlerProgressRow", () => {
         });
         await waitFor(() => expect(screen.getByText("正在对比三家报价")).toBeTruthy());
         expect(screen.queryByText("上一轮遗留")).toBeNull();
-        fireEvent.click(screen.getByRole("button"));
-        expect(screen.getByText("read_file 报价.xlsx")).toBeTruthy();
+        expect(screen.queryByRole("button")).toBeNull();
+        expect(screen.queryByText("read_file 报价.xlsx")).toBeNull();
+    });
+
+    it("should keep a repeated live report when only its first occurrence is already on the timeline", () => {
+        render(<LiveReportBubbles reports={["核对中", "核对中", "即将完成"]} published={["核对中"]} />);
+        expect(screen.getAllByText("核对中")).toHaveLength(1);
+        expect(screen.getByText("即将完成")).toBeInTheDocument();
     });
 });
