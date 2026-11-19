@@ -56,10 +56,15 @@ pub(super) fn prompt_for_driver(metadata: AgentDriverMetadata, request: &AgentTu
     let Some((_, contextual_prompt, attachments)) = request.messages.iter().rev().find(|(kind, _, _)| kind == "user") else {
         return Ok(request.prompt.clone());
     };
-    if let Some(unsupported) = attachments.iter().find(|attachment| !matches!(attachment.attachment_type, crate::db::conversation_db::AttachmentType::Text | crate::db::conversation_db::AttachmentType::Skill)) {
-        return Err(AppError::ProviderError(format!("{} prompt preparation failed [conversation_id={}, attachment_id={}]: this driver accepts text context only; the {:?} attachment cannot be sent without losing user input", metadata.id, request.conversation_id, unsupported.id, unsupported.attachment_type)));
-    }
+    validate_text_attachments(metadata, request.conversation_id, attachments)?;
     Ok(contextual_prompt.clone())
+}
+
+pub(crate) fn validate_text_attachments(metadata: AgentDriverMetadata, conversation_id: i64, attachments: &[MessageAttachment]) -> Result<(), AppError> {
+    if let Some(unsupported) = attachments.iter().find(|attachment| !matches!(attachment.attachment_type, crate::db::conversation_db::AttachmentType::Text | crate::db::conversation_db::AttachmentType::Skill)) {
+        return Err(AppError::ProviderError(format!("{} prompt preparation failed [conversation_id={}, attachment_id={}]: this driver accepts text context only; the {:?} attachment cannot be sent without losing user input", metadata.id, conversation_id, unsupported.id, unsupported.attachment_type)));
+    }
+    Ok(())
 }
 
 struct RegisteredPreparedSession {

@@ -12,7 +12,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeConfig) },
   });
   const abort = new AbortController();
-  let closing = false, turn = null, session, model = config.model, errorMessage, sawActivity = false;
+  let closing = false, turn = null, session, model = config.model, errorMessage, cancelling = false, sawActivity = false;
   child.on('error', error => emit({ type: 'fatal', error: error.message }));
   child.on('exit', (code, signal) => {
     if (!closing) emit({ type: 'fatal', error: `OpenCode server exited (code=${code}, signal=${signal})` });
@@ -123,10 +123,11 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         })) });
       } else if (event.type === 'session.error') {
         errorMessage = JSON.stringify(p.error || { message: 'OpenCode session.error omitted error details' });
-        emit({ type: 'done', turn, error: errorMessage }); turn = null;
+        const cancelled = cancelling && p.error?.name === 'MessageAbortedError';
+        emit({ type: 'done', turn, cancelled, error: cancelled ? undefined : errorMessage }); turn = null;
         pendingPermissions.clear(); questions.clear();
       }
-      else if (sawActivity && (event.type === 'session.idle' || (event.type === 'session.status' && p.status?.type === 'idle'))) {
+      else if ((sawActivity || cancelling) && (event.type === 'session.idle' || (event.type === 'session.status' && p.status?.type === 'idle'))) {
         if (waitingParts.size) { pendingIdle = true; return; }
         emit({ type: 'done', turn, error: errorMessage }); turn = null; pendingPermissions.clear(); questions.clear();
       }
@@ -151,14 +152,19 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       session,
       async prompt(text, id) {
         if (turn) throw new Error('OpenCode already has an active turn');
-        turn = id; errorMessage = undefined; sawActivity = false; pendingIdle = false;
+        turn = id; cancelling = false; errorMessage = undefined; sawActivity = false; pendingIdle = false;
         parts.clear(); partTypes.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
         await api(`/session/${session}/prompt_async`, 'POST', {
           ...(config.butlerInstructions ? { system: config.butlerInstructions } : {}),
           ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text }],
         });
       },
-      async cancel() { if (turn) await api(`/session/${session}/abort`, 'POST'); },
+      async cancel() {
+        if (!turn) return;
+        cancelling = true;
+        try { await api(`/session/${session}/abort`, 'POST'); }
+        catch (error) { cancelling = false; throw error; }
+      },
       async reply(id, value) {
         if (!pendingPermissions.has(id)) throw new Error('Unknown or expired OpenCode permission request');
         if (!['once', 'always', 'reject'].includes(value)) throw new Error('Invalid OpenCode permission reply');

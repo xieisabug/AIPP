@@ -123,6 +123,7 @@ pub struct AgentActivityEvent {
 }
 
 enum CodexSessionCommand {
+    Steer { turn: String, text: String, response: oneshot::Sender<Result<(), String>> },
     Prompt { message_id: i64, prompt: String, window: tauri::Window, cancellation_generation: u64 },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
     SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
@@ -262,6 +263,16 @@ impl CodexSessionHandle {
             ));
         }
         Ok(())
+    }
+
+    pub async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
+        let (response, receipt) = oneshot::channel();
+        self.sender.send(CodexSessionCommand::Steer { turn, text, response })
+            .map_err(|_| AppError::ProviderError(format!("Codex steer channel closed [run={}]", self.run_id)))?;
+        tokio::time::timeout(std::time::Duration::from_secs(35), receipt).await
+            .map_err(|_| AppError::ProviderError(format!("Codex turn/steer acknowledgement timed out [run={}]", self.run_id)))?
+            .map_err(|_| AppError::ProviderError(format!("Codex steer receipt lost [run={}]", self.run_id)))?
+            .map_err(AppError::ProviderError)
     }
 
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
@@ -2510,6 +2521,9 @@ async fn run_session(
 
     while let Some(command) = receiver.recv().await {
         match command {
+            CodexSessionCommand::Steer { response, .. } => {
+                let _ = response.send(Err("Codex steering target already finished".into()));
+            }
             CodexSessionCommand::SetConfigOption { config_id, value, response } => {
                 match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                     Ok(()) => {
@@ -2585,6 +2599,8 @@ async fn run_session(
                 let mut usage_tracker = CodexTurnUsageTracker::default();
                 let mut restore = CodexContextRestore::default();
                 let mut turn_completed = false;
+                let mut steer_receipts = HashMap::new();
+                let mut completed_normally = false;
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
@@ -2606,6 +2622,19 @@ async fn run_session(
                                         let _ = response.send(result);
                                     } else {
                                         let _ = response.send(Ok(()));
+                                    }
+                                }
+                                Some(CodexSessionCommand::Steer { turn, text, response }) => {
+                                    if response.is_closed() { continue; }
+                                    if turn_id.as_deref() != Some(turn.as_str()) || turn_completed {
+                                        let _ = response.send(Err("Codex steering target already finished".into()));
+                                    } else {
+                                        request_id += 1;
+                                        let params = json!({"threadId":thread_id,"expectedTurnId":turn,"input":[{"type":"text","text":text}]});
+                                        match write_frame(&mut stdin, &json_rpc_request(request_id, "turn/steer", params)).await {
+                                            Ok(()) => { steer_receipts.insert(request_id, response); }
+                                            Err(error) => { let _ = response.send(Err(error)); }
+                                        }
                                     }
                                 }
                                 Some(CodexSessionCommand::Prompt { .. }) => warn!(conversation_id, "Codex prompt received while another turn is active; queued prompt is not supported"),
@@ -2673,6 +2702,13 @@ async fn run_session(
                         continue;
                     }
                     if frame.get("method").is_none() {
+                        if let Some(reply) = frame["id"].as_u64().and_then(|id| steer_receipts.remove(&id)) {
+                            let result = if let Some(error) = frame.get("error") { Err(format!("Codex turn/steer: {error}")) }
+                                else if frame.pointer("/result/turnId").and_then(Value::as_str) == turn_id.as_deref() { Ok(()) }
+                                else { Err(format!("Codex turn/steer returned an unexpected turn: {}", frame["result"])) };
+                            let _ = reply.send(result);
+                            continue;
+                        }
                         restore.acknowledge(&thread_id, &frame)?;
                         continue;
                     }
@@ -2848,6 +2884,7 @@ async fn run_session(
                                             .map(str::to_string)
                                             .or_else(|| Some("Codex turn failed".to_string()));
                                     }
+                                    completed_normally = turn.get("status").and_then(Value::as_str) == Some("completed");
                                     turn_completed = true;
                                 },
                                 "mcpServer/startupStatus/updated" => {
@@ -2957,6 +2994,7 @@ async fn run_session(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take();
+                crate::api::ai_api::native_queue::finish_turn(&app_handle, &window, conversation_id, run_id, completed_normally).await;
             }
         }
     }

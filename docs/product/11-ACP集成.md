@@ -225,6 +225,9 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 - ACP 权限请求会通过现有审批流发到前端
 - 后端 `confirm_agent_interaction` 统一处理 Agent 权限、elicitation 和提问回复，并检查请求创建时的 driver、provider 实例、conversation 与 run 归属；已有 pending store 仍是请求的唯一来源
 - 当前前端继续使用 `confirm_acp_permission`、`confirm_codex_permission`、`confirm_acp_elicitation` 等兼容命令，这些入口在后端转到同一回复校验流程；审批卡片格式保持兼容
+- 打开申请所属会话时，输入框旁的权限面板默认展开，可收起后继续查看聊天。群成员的申请归到对应群聊。查看其他助手时，待处理申请使用窗口弹窗；两处共用审批详情与选项。
+- 普通聊天回复中按 Enter 默认排队，管家私聊默认插队。按 Ctrl+Enter（macOS 也可用 ⌘+Enter）使用另一种方式。排队的消息保存在 AIPP，原生回合成功结束后发送下一条。Pi 和 Codex 可以将插队消息直接发给正在执行的回合。其他原生驱动在同一会话中断当前回合后优先发送；工具可能随中断停止。手动停止或执行失败后，待发消息可从队列手动发送。
+
 - Butler/Feishu 场景下也会同步转发
 - 当用户取消当前 ACP prompt 时，未完成的 ACP 权限请求会被一起取消
 

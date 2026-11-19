@@ -55,6 +55,8 @@ use tauri::Manager;
 use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
 
+pub(crate) mod native_queue;
+
 const QUEUE_KIND_NORMAL: &str = "normal";
 const QUEUE_KIND_INTERRUPT: &str = "interrupt";
 
@@ -238,6 +240,13 @@ async fn report_pre_request_error_in_conversation(
     conversation_id: i64,
     error_text: &str,
 ) {
+    record_request_error(app_handle, conversation_id, error_text);
+    if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
+        manager.clear_focus(app_handle, conversation_id).await;
+    }
+}
+
+fn record_request_error(app_handle: &tauri::AppHandle, conversation_id: i64, error_text: &str) {
     let now = chrono::Utc::now();
     let notification = match add_message(
         app_handle,
@@ -280,9 +289,6 @@ async fn report_pre_request_error_in_conversation(
             format!("{error_text}；错误消息写入会话失败：{persist_error}")
         }
     };
-    if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
-        manager.clear_focus(app_handle, conversation_id).await;
-    }
     let _ = app_handle.emit(
         crate::api::ai::events::ERROR_NOTIFICATION_EVENT,
         crate::api::ai::events::ErrorNotificationPayload {
@@ -756,11 +762,13 @@ pub async fn list_queued_conversation_messages(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, request), fields(conversation_id = %request.conversation_id, assistant_id = request.assistant_id, queue_kind = %queue_kind))]
+#[instrument(skip(app_handle, request, window, override_model_config), fields(conversation_id = %request.conversation_id, assistant_id = request.assistant_id, queue_kind = %queue_kind))]
 pub async fn enqueue_conversation_message(
     app_handle: tauri::AppHandle,
+    window: tauri::Window,
     request: AiRequest,
     queue_kind: String,
+    override_model_config: Option<HashMap<String, serde_json::Value>>,
 ) -> Result<QueuedConversationMessage, AppError> {
     let queue_kind = normalize_queue_kind(&queue_kind)?;
     if request.prompt.trim().is_empty() {
@@ -787,18 +795,11 @@ pub async fn enqueue_conversation_message(
             .assistant_id
             .ok_or_else(|| AppError::DatabaseError("对话未关联助手".to_string()))?
     };
-    // Native drivers do not consume the application queue. Reject before any
-    // goal mutation or persistence, including cross-assistant mentions.
     let assistants = get_assistants(app_handle.clone()).map_err(AppError::UnknownError)?;
     let (target_id, _) = extract_assistant_from_message(&assistants, &request.prompt, assistant_id).await?;
     for id in [conversation.assistant_id.unwrap_or(assistant_id), target_id] {
         let detail = get_assistant(app_handle.clone(), id).map_err(AppError::UnknownError)?;
         ensure_queue_supported(detail.assistant.assistant_type)?;
-    }
-    if let Some(session) = crate::api::ai::agent_driver::lifecycle::lookup_session(&app_handle, conversation_id).await? {
-        if native_prompt_is_active(&session.snapshot) {
-            ensure_queue_supported(Some(4))?;
-        }
     }
     let mut queued_request = request;
     crate::api::mobile_capability::ensure_assistant_execution(
@@ -806,20 +807,37 @@ pub async fn enqueue_conversation_message(
     ).await.map_err(AppError::UnknownError)?;
     queued_request.conversation_id = conversation_id.to_string();
     queued_request.assistant_id = assistant_id;
-    let mut conn=db.get_connection()?;
-    crate::db::butler_goal::schema(&conn).map_err(|e|AppError::UnknownError(e.to_string()))?;
-    let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    queued_request.butler_goal_revision = prepare_queued_goal(
-        &tx, conversation_id, queued_request.butler_intent.as_deref(), &queued_request.prompt,
-    )?;
-    let request_json=serde_json::to_string(&queued_request).map_err(|e|AppError::UnknownError(e.to_string()))?;
-    tx.execute("INSERT INTO queued_conversation_message(conversation_id,queue_kind,status,request_json,prompt,assistant_id,created_time,updated_time) VALUES(?1,?2,'queued',?3,?4,?5,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",rusqlite::params![conversation_id,queue_kind,request_json,queued_request.prompt,assistant_id])?;
-    let queued_id=tx.last_insert_rowid();
-    tx.commit()?;
-    let queued=db.queued_message_repo()?.list_queued_by_conversation(conversation_id)?.into_iter().find(|q|q.id==queued_id)
-        .ok_or_else(||AppError::DatabaseError("排队消息已保存但未找到，请刷新会话".into()))?;
-
+    let queued = {
+        let mut conn = db.get_connection()?;
+        crate::db::butler_goal::schema(&conn).map_err(|e| AppError::UnknownError(e.to_string()))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        queued_request.butler_goal_revision = prepare_queued_goal(
+            &tx, conversation_id, queued_request.butler_intent.as_deref(), &queued_request.prompt,
+        )?;
+        let mut payload = serde_json::to_value(&queued_request).map_err(|e| AppError::UnknownError(e.to_string()))?;
+        if let Some(config) = override_model_config {
+            // Only native composer controls may be stored with a queued turn.
+            let settings: serde_json::Map<_, _> = config.into_iter().filter(|(key, _)| matches!(key.as_str(),
+                "reasoning_effort" | "claude_effort" | "approval_policy" | "sandbox" | "collaboration_mode" | "permission_mode")).collect();
+            payload["override_model_config"] = settings.into();
+        }
+        let request_json = payload.to_string();
+        let row = tx.query_row(
+            "INSERT INTO queued_conversation_message(conversation_id,queue_kind,status,request_json,prompt,assistant_id,created_time,updated_time)
+             VALUES(?1,?2,'queued',?3,?4,?5,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+             RETURNING id,conversation_id,queue_kind,status,request_json,prompt,assistant_id,created_time,updated_time",
+            rusqlite::params![conversation_id, queue_kind, request_json, queued_request.prompt, assistant_id],
+            crate::db::conversation_db::QueuedConversationMessageRepository::queued_message_from_row,
+        )?;
+        tx.commit()?;
+        row
+    };
     emit_queued_message_payload(&app_handle, "queued_message_add", &queued);
+    if queued.queue_kind == QUEUE_KIND_INTERRUPT {
+        if let Err(error) = native_queue::interrupt(&app_handle, &window, &queued).await {
+            record_request_error(&app_handle, queued.conversation_id, &format!("插队准备失败 [queue={}]: {error}；原输入已排队。", queued.id));
+        }
+    }
     Ok(queued)
 }
 
@@ -827,6 +845,7 @@ pub async fn enqueue_conversation_message(
 #[instrument(skip(app_handle), fields(queue_id))]
 pub async fn promote_queued_conversation_message(
     app_handle: tauri::AppHandle,
+    window: tauri::Window,
     queue_id: i64,
 ) -> Result<QueuedConversationMessage, AppError> {
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
@@ -835,6 +854,11 @@ pub async fn promote_queued_conversation_message(
         .promote_to_interrupt(queue_id)?
         .ok_or_else(|| AppError::DatabaseError("排队消息不存在或已经被消费".to_string()))?;
     emit_queued_message_payload(&app_handle, "queued_message_update", &queued);
+    if queued.queue_kind == QUEUE_KIND_INTERRUPT {
+        if let Err(error) = native_queue::interrupt(&app_handle, &window, &queued).await {
+            record_request_error(&app_handle, queued.conversation_id, &format!("插队准备失败 [queue={}]: {error}；原输入已排队。", queued.id));
+        }
+    }
     Ok(queued)
 }
 
@@ -882,6 +906,15 @@ fn dispatch_queued_message(
     window: tauri::Window,
     queued: QueuedConversationMessage,
 ) -> Result<bool, AppError> {
+    dispatch_queued_target(app_handle, window, queued, None)
+}
+
+fn dispatch_queued_target(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    queued: QueuedConversationMessage,
+    target: Option<native_queue::SteerTarget>,
+) -> Result<bool, AppError> {
     emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id);
 
     #[derive(serde::Deserialize)]
@@ -889,8 +922,9 @@ fn dispatch_queued_message(
         #[serde(flatten)]
         request: AiRequest,
         recovered_question_id: Option<String>,
+        override_model_config: Option<HashMap<String, serde_json::Value>>,
     }
-    let QueuedInput { request, recovered_question_id } = serde_json::from_str(&queued.request_json)
+    let QueuedInput { request, recovered_question_id, override_model_config } = serde_json::from_str(&queued.request_json)
         .map_err(|error| AppError::UnknownError(format!("解析排队消息失败: {error}")))?;
 
     if let Some(revision)=request.butler_goal_revision {
@@ -902,7 +936,8 @@ fn dispatch_queued_message(
     }
     tokio::spawn(async move {
         let queued_id = queued.id;
-        let response = RECOVERED_QUESTION_ID.scope(recovered_question_id, ask_ai(
+        let steering = target.is_some();
+        let response = native_queue::STEER_TARGET.scope(target, RECOVERED_QUESTION_ID.scope(recovered_question_id, ask_ai(
             app_handle.clone(),
             app_handle.state::<AppState>(),
             app_handle.state::<AcpSessionState>(),
@@ -911,12 +946,12 @@ fn dispatch_queued_message(
             app_handle.state::<ConversationActivityManager>(),
             window,
             request,
+            override_model_config,
             None,
             None,
             None,
             None,
-            None,
-        ))
+        )))
         .await;
 
         let db = match ConversationDatabase::new(&app_handle).map_err(AppError::from) {
@@ -940,7 +975,7 @@ fn dispatch_queued_message(
                     }
                 }
             }
-            Err(error) if cfg!(mobile) => {
+            Err(error) if cfg!(mobile) || steering => {
                 let paused = db.queued_message_repo().and_then(|repo| Ok(repo.pause_dispatch(queued_id)?));
                 let detail = match paused {
                     Ok(Some(row)) => {
@@ -950,8 +985,9 @@ fn dispatch_queued_message(
                     Ok(None) => "队列记录已不存在，未自动重发。".to_string(),
                     Err(persist_error) => format!("暂停队列状态写入失败: {persist_error}"),
                 };
-                report_pre_request_error_in_conversation(&app_handle, queued.conversation_id,
-                    &format!("stage=queued_dispatch; queue_id={queued_id}; conversation_id={}; assistant_id={}; {error}; {detail}", queued.conversation_id, queued.assistant_id)).await;
+                let message = format!("stage=queued_dispatch; queue_id={queued_id}; conversation_id={}; assistant_id={}; {error}; {detail}", queued.conversation_id, queued.assistant_id);
+                if steering { record_request_error(&app_handle, queued.conversation_id, &message); }
+                else { report_pre_request_error_in_conversation(&app_handle, queued.conversation_id, &message).await; }
             }
             Err(error) => match db.queued_message_repo() {
                 Ok(repo) => match repo.reset_dispatch(queued_id) {
@@ -1767,7 +1803,8 @@ pub async fn ask_ai(
         crate::db::butler_goal::assert_current(&conn,conversation_id,revision).map_err(|e|AppError::UnknownError(e.to_string()))?;
         crate::db::butler_goal::bind_turn(&conn,conversation_id,user_message_id,revision).map_err(|e|AppError::UnknownError(e.to_string()))?;
     }
-    if admission.is_some() {
+    let steering = native_queue::STEER_TARGET.try_with(|target| target.is_some()).unwrap_or(false);
+    if admission.is_some() && !steering {
         activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
     }
     drop(admission);
@@ -1786,10 +1823,10 @@ pub async fn ask_ai(
         )
         .await;
 
-    if contact_id.is_none() {
+    if contact_id.is_none() && !steering {
         activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
     }
-    if butler_mode_conversation {
+    if butler_mode_conversation && !steering {
         crate::api::butler_progress::begin_turn(&app_handle, conversation_id, user_message_id, &processed_request.prompt).await;
     }
     if let Err(error) = maybe_schedule_butler_feishu_relay_for_aipp_turn(
@@ -1806,6 +1843,10 @@ pub async fn ask_ai(
             error = %error,
             "failed to schedule butler feishu relay scope"
         );
+    }
+
+    if steering {
+        return Ok(AiResponse { conversation_id, request_prompt_result_with_context, error_message: None });
     }
 
     let execution_cancel_token = Some(message_token_manager.reset_cancel_token(conversation_id).await);
@@ -3176,6 +3217,7 @@ pub async fn cancel_ai(
     window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
+    native_queue::stop(conversation_id);
     let selected = crate::api::ai::agent_driver::lifecycle::lookup_session(&app_handle, conversation_id)
         .await.map_err(|error| error.to_string())?;
     if let Some(session) = selected {
@@ -4075,6 +4117,24 @@ async fn initialize_conversation(
             &build_prompt_with_attachment_context(&display_user_prompt, &context), turn_context);
         let runtime_user_prompt_with_context = crate::utils::turn_context::append(
             &build_prompt_with_attachment_context(&runtime_user_prompt, &context), turn_context);
+        if native_queue::STEER_TARGET.try_with(|target| target.is_some()).unwrap_or(false) {
+            let (handle, turn) = native_queue::STEER_TARGET.with(|target| {
+                let target = target.as_ref().expect("steer target checked above");
+                let binding = target.session.binding.as_ref();
+                let current = crate::api::ai::agent_driver::lifecycle::session_binding(app_handle, conversation_id)?;
+                let selected_provider = match request.override_model_id.as_deref() {
+                    Some(model) => parse_agent_model_override(model).map(|(_, provider)| provider),
+                    None => crate::api::assistant_api::resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs),
+                };
+                if binding.is_none() || binding != current.as_ref() || binding.map(|b| b.provider_id) != selected_provider
+                    || assistant_detail.assistant.assistant_type != Some(4) || target.assistant_id != assistant_detail.assistant.id {
+                    return Err(AppError::ProviderError(format!("插队目标已改变 [conversation={conversation_id}, turn={}]", target.turn)));
+                }
+                Ok((target.session.handle.clone(), target.turn.clone()))
+            })?;
+            crate::api::ai::agent_driver::validate_text_attachments(handle.metadata(), conversation_id, &message_attachment_list)?;
+            handle.steer(turn, runtime_user_prompt_with_context.clone()).await?;
+        }
         // 添加用户消息
         let user_message = if let Some(turn) = origin.and_then(|s| s.strip_prefix("butler_group/")) {
             let turn = turn.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{turn}；{e}")))?;
@@ -5039,11 +5099,8 @@ fn resolve_continuation_source(calls:&[crate::db::mcp_db::MCPToolCall],conversat
 #[path="butler_source_tests.rs"]
 mod butler_source_tests;
 
-// Application-managed model turns use this queue; native agents and plugins have
-// their own execution lifecycle and cannot consume this queue.
 fn ensure_queue_supported(assistant_type: Option<i64>) -> Result<(), AppError> {
     match assistant_type {
-        Some(4) => Err(AppError::UnknownError("此 Agent 暂不支持运行中插队，请等待本轮结束，或停止后再发送；消息尚未发送".into())),
         Some(3) => Err(AppError::UnknownError("插件助手暂不支持运行中排队发送".into())),
         _ => Ok(()),
     }
@@ -5063,12 +5120,6 @@ fn validate_continuation_identity(conn: &rusqlite::Connection, conversation: i64
         return Err(AppError::UnknownError("工具结果缺少原始回合身份".into()));
     }
     Ok(())
-}
-
-fn native_prompt_is_active(snapshot: &serde_json::Value) -> bool {
-    // All three native snapshots expose this field. An unknown driver snapshot
-    // must not silently claim application-queue support.
-    snapshot.get("has_active_prompt").and_then(serde_json::Value::as_bool).unwrap_or(true)
 }
 
 fn prepare_queued_goal(conn: &rusqlite::Connection, conversation: i64, intent: Option<&str>, prompt: &str) -> Result<Option<i64>, AppError> {

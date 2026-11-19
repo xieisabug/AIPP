@@ -323,7 +323,7 @@ export function useConversationOperations({
     };
 
     // 发送消息的主要处理函数，使用节流防止频繁点击
-    const handleSend = throttle(async (emptyPrompt?: string) => {
+    const handleSend = throttle(async (emptyPrompt?: string, busyOverride?: "queue" | "interrupt") => {
         if (aiIsResponsing) {
             if (inputText.trim() !== "" && conversation?.id) {
                 let assistantId = conversation.assistant_id ?? selectedAssistant;
@@ -344,15 +344,18 @@ export function useConversationOperations({
                     return;
                 }
 
+                const overrides = buildAgentOverrides(parsedAssistantId);
                 invoke("enqueue_conversation_message", {
+                    overrideModelConfig: overrides.overrideModelConfig,
                     request: {
                         prompt: finalPrompt,
                         conversation_id: String(conversation.id),
                         assistant_id: parsedAssistantId,
+                        override_model_id: overrides.overrideModelId,
                         attachment_list: fileInfoList?.map((i) => i.id),
                         quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
                     },
-                    queueKind: busySendBehavior === "interrupt" ? "interrupt" : "normal",
+                    queueKind: (busyOverride ?? busySendBehavior) === "interrupt" ? "interrupt" : "normal",
                 })
                     .then(() => {
                         clearQuote?.();
@@ -361,7 +364,7 @@ export function useConversationOperations({
                     })
                     .catch((error) => {
                         console.error("Queue message error:", error);
-                        toast.error("消息排队失败: " + error);
+                        toast.error("消息排队失败: " + describeAskAiError(error));
                     });
                 return;
             }

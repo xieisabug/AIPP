@@ -48,6 +48,7 @@ jsonLines(process.stdin, request => {
       if (!runtime) throw new Error('Native agent bridge is not initialized');
       switch (request.type) {
         case 'prompt': await runtime.prompt(request.text, request.turn); break;
+        case 'steer': await runtime.steer(request.turn, request.text); break;
         case 'cancel': await runtime.cancel(); break;
         case 'config': await runtime.configure(request.key, request.value); break;
         case 'reply': await runtime.reply(request.request_id, request.value); break;

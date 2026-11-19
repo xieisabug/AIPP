@@ -184,3 +184,19 @@ test('should send Butler instructions in the OpenCode system field on resume', a
     assert.deepEqual(f.requests.at(-1).body, {system:'role', parts:[{type:'text', text:'hello'}]});
   } finally { await runtime.close(); }
 });
+
+test('should accept a new prompt in the same OpenCode session after the requested abort finishes', async () => {
+  const f = openCodeFixture(), events = [];
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, e => events.push(e), f);
+  try {
+    await runtime.prompt('original', 'first');
+    await runtime.cancel();
+    f.event('session.error', { sessionID: 's1', error: { name: 'MessageAbortedError' } });
+    await tick();
+    assert.deepEqual(events.find(e => e.type === 'done'), { type: 'done', turn: 'first', cancelled: true, error: undefined });
+    await runtime.prompt('priority input', 'second');
+    assert.deepEqual(f.requests.filter(r => r.path.endsWith('/prompt_async')).map(r => [r.path, r.body.parts[0].text]), [
+      ['/session/s1/prompt_async', 'original'], ['/session/s1/prompt_async', 'priority input'],
+    ]);
+  } finally { await runtime.close(); }
+});

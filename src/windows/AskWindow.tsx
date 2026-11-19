@@ -18,9 +18,9 @@ import { StreamEvent } from "../data/Conversation";
 import { ShineBorder } from "../components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
-import { useOperationPermission } from "../hooks/useOperationPermission";
+import { useAcpPermission, useOperationPermission } from "../hooks/useOperationPermission";
 import { useApprovalSurface } from "../hooks/useApprovalAttention";
-import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
+import { AcpPermissionDialog, OperationPermissionDialog } from "../components/OperationPermissionDialog";
 import { pluginRuntime } from "../services/PluginRuntime";
 import { describeAskAiError } from "../lib/askAiError";
 const appWindow = getCurrentWebviewWindow();
@@ -49,8 +49,9 @@ function AskWindow() {
     // 闪亮边框状态管理
     const [shouldShowShineBorder, setShouldShowShineBorder] = useState<boolean>(false);
     const { pendingRequest, isDialogOpen, decisionError, isSubmitting, handleDecision } = useOperationPermission({
-        conversationId: conversationId ? parseInt(conversationId, 10) : undefined,
+        conversationId: Number(conversationId),
     });
+    const agentPermission = useAcpPermission({ conversationId: Number(conversationId) });
     useApprovalSurface(conversationId ? [parseInt(conversationId, 10)] : []);
 
     // 清除错误信息
@@ -361,6 +362,7 @@ function AskWindow() {
                     />
                 )}
                 <InputArea
+                    permissionConversationIds={Number(conversationId)}
                     ref={inputAreaRef}
                     inputText={query}
                     setInputText={setQuery}
@@ -449,6 +451,13 @@ function AskWindow() {
                     <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} dataAippSlot="ask-footer-open-chat-ui" />
                     <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} dataAippSlot="ask-footer-open-config" />
                 </div>
+                <AcpPermissionDialog
+                    request={agentPermission.pendingRequest}
+                    isOpen={agentPermission.isDialogOpen}
+                    isSubmitting={agentPermission.isSubmitting}
+                    onDecision={agentPermission.handleDecision}
+                    errorMessage={agentPermission.decisionError}
+                />
                 <OperationPermissionDialog
                     request={pendingRequest}
                     isOpen={isDialogOpen}

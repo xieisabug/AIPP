@@ -1587,7 +1587,7 @@ impl QueuedConversationMessageRepository {
         f(&self.conn)
     }
 
-    fn queued_message_from_row(row: &rusqlite::Row<'_>) -> Result<QueuedConversationMessage> {
+    pub(crate) fn queued_message_from_row(row: &rusqlite::Row<'_>) -> Result<QueuedConversationMessage> {
         Ok(QueuedConversationMessage {
             id: row.get(0)?,
             conversation_id: row.get(1)?,

@@ -163,6 +163,10 @@ export async function openPi(config, emit, dependencies = {}) {
           }
         }
       },
+      async steer(expectedTurn, text) {
+        if (!turn || turn !== expectedTurn) throw new Error('Pi steering target is no longer the active turn');
+        await request({ type: 'steer', message: text });
+      },
       async cancel() { await request({ type: 'abort' }); },
       async reply(id, value) { send({ type: 'extension_ui_response', id, confirmed: value === 'allow' }); },
       async answer(id, answers) {

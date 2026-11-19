@@ -227,6 +227,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
 
         {/* 群聊消息只有正文和引用，暂不支持附件，所以不传附件能力。 */}
         <InputArea
+            permissionConversationIds={members.map(member => member.conversation_id)}
             inputText={draft}
             setInputText={setDraft}
             handleSend={handleSend}

@@ -1528,6 +1528,7 @@ pub fn spawn_claude_session_task(
                                 }
                             }
                             "result" => {
+                                if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") { break; }
                                 if let Some(error) = claude_result_error(&frame) {
                                     stream_error = Some(error);
                                     break;
@@ -1553,7 +1554,7 @@ pub fn spawn_claude_session_task(
                         }
                         break;
                     }
-                    if content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
+                    if !was_cancelled && content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
                         emit_claude_run_failure(
                             &app,
                             &event_identity,
@@ -1586,7 +1587,9 @@ pub fn spawn_claude_session_task(
                     } else {
                         content.as_str()
                     };
-                    handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
+                    if !was_cancelled {
+                        handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
+                    }
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                         manager.clear_agent_focus(&app, &event_identity, false).await;
                     }
@@ -1604,6 +1607,7 @@ pub fn spawn_claude_session_task(
                         ),
                     )
                     .await;
+                    crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, !was_cancelled).await;
                 }
             }
         }

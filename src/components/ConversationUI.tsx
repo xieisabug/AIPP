@@ -33,6 +33,7 @@ import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
 import FileDropArea from "./FileDropArea";
 import useFileDropHandler from "../hooks/useFileDropHandler";
+import { describeAskAiError } from "@/lib/askAiError";
 import InputArea, { InputAreaRef } from "./conversation/InputArea";
 import MessageEditDialog from "./MessageEditDialog";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
@@ -1216,7 +1217,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 queueId,
             }).catch((error) => {
                 toast.error("提升打断消息失败", {
-                    description: String(error),
+                    description: describeAskAiError(error),
                     position: "bottom-right",
                 });
             });
@@ -1226,7 +1227,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const handleQueuedMessageSendNow = useCallback((queueId: number) => {
             void invoke("send_queued_conversation_message_now", { queueId }).catch((error) => {
                 toast.error("排队消息没有发出", {
-                    description: String(error),
+                    description: describeAskAiError(error),
                     position: "bottom-right",
                 });
             });
@@ -2436,6 +2437,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <ChevronDown className="h-4 w-4" />回到底部
                         </Button>}
                         {!readOnly && <InputArea
+                            permissionConversationIds={Number(conversationId)}
                             ref={inputAreaRef}
                             inputText={inputText}
                             setInputText={setInputText}
@@ -2444,6 +2446,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             handleDeleteFile={handleDeleteFile}
                             handlePaste={handlePaste}
                             handleSend={handleSend}
+                            busySendBehavior={busySendBehavior}
                             aiIsResponsing={effectiveAiIsResponsing}
                             placement="bottom"
                             isMobile={isMobile}

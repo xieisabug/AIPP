@@ -261,6 +261,9 @@ impl AgentSessionControl for NativeControl {
         self.busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).map_err(|_|error("Native agent already has an active prompt"))?;
         self.tx.send(Command::Prompt { id, text, window }).map_err(|e| { self.busy.store(false, Ordering::SeqCst); error(e) })
     }
+    async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
+        self.request(json!({"type":"steer","turn":turn,"text":text})).await.map(|_| ())
+    }
     async fn cancel_current_prompt(&self) -> Result<(), AppError> { self.request(json!({"type":"cancel"})).await.map(|_| ()) }
     async fn set_config_option(&self, key: String, value: String) -> Result<(), AppError> { self.request(json!({"type":"config", "key":key,"value":value})).await.map(|_| ()) }
 }
@@ -361,6 +364,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                             super::persistence::persist_session_id(&app, &identity, Some(&run), &native_session)?;
                             let mcp_prompt = prepared.mcp_scope.as_ref().map(|scope|scope.begin_prompt(id)).transpose()?;
                             active.as_mut().unwrap()._mcp_prompt = mcp_prompt;
+                            snapshot.lock().unwrap()["current_turn_id"] = json!(id.to_string());
                             snapshot.lock().unwrap()["is_busy"] = json!(true);
                             publish_snapshot(&app, &identity, driver, &snapshot)?;
                             json!({"type":"prompt","text":text,"turn":id.to_string()})
@@ -482,12 +486,14 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                                 handle_agent_success(&app, &turn.window, cid, &turn.text, turn.id, kind).await;
                             }
                             if let Some(manager) = app.try_state::<crate::state::activity_state::ConversationActivityManager>() { manager.clear_agent_focus(&app, &identity, false).await; }
+                            let completed_window = turn.window.clone();
                             active = None;
                             busy.store(false, Ordering::SeqCst);
                             cancel_deadline = None;
                             super::approval::cancel_app_requests_for_scope(&app, &super::approval::AgentRequestScope::native(driver.0, Some(prepared.instance.provider_id), cid, &run)).await;
                             snapshot.lock().unwrap()["is_busy"] = json!(false);
                             publish_snapshot(&app, &identity, driver, &snapshot)?;
+                            crate::api::ai_api::native_queue::finish_turn(&app, &completed_window, cid, &run, !cancelled).await;
                         }
                         _ => {}
                     }
@@ -754,7 +760,12 @@ async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity,
     app.state::<AcpPermissionState>().store_request_guarded(event.clone(), sender, scope.clone(), guard.clone()).await?;
     match review {
         Some((agent, working_directory)) => { tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, turn, agent, working_directory)); }
-        None => crate::api::operation_api::emit_permission_request_event(app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(identity.conversation_id), &event)?,
+        None => {
+            if let Err(error) = present_permission(app, &event, json!(event)).await {
+                app.state::<AcpPermissionState>().remove_request(&event.request_id).await;
+                return Err(error);
+            }
+        }
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {

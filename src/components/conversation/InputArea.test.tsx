@@ -26,7 +26,9 @@ function InputAreaHarness({
     onDeleteFile = () => {},
     commandMode,
     onContextCommand,
+    busySendBehavior,
 }: {
+    busySendBehavior?: "queue" | "interrupt";
     commandMode?: "chat" | "butler";
     onContextCommand?: (command: "compact" | "reload") => Promise<void>;
     initialText?: string;
@@ -53,6 +55,7 @@ function InputAreaHarness({
             handlePaste={() => {}}
             handleDeleteFile={onDeleteFile}
             handleSend={onSend}
+            busySendBehavior={busySendBehavior}
             aiIsResponsing={aiIsResponsing}
             placement={placement}
             isMobile={isMobile}
@@ -111,6 +114,15 @@ describe("InputArea slash completion", () => {
 
         expect(onSend).toHaveBeenCalledOnce();
     });
+
+    it.each([["queue", "interrupt"], ["interrupt", "queue"]] as const)(
+        "should switch %s to %s with Ctrl+Enter during a reply", (busySendBehavior, expected) => {
+            const onSend = vi.fn();
+            render(<InputAreaHarness aiIsResponsing initialText="补充一句" busySendBehavior={busySendBehavior} onSend={onSend} />);
+            fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", ctrlKey: true });
+            expect(onSend).toHaveBeenCalledWith(undefined, expected);
+        },
+    );
 
     it("shows slash namespaces after typing slash", async () => {
         const user = userEvent.setup();

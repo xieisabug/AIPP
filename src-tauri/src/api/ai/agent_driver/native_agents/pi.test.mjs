@@ -182,3 +182,17 @@ test('should preserve Pi tool failures and finish individual thinking blocks whe
     assert.equal(fixture.commands.at(-1).type, 'abort');
   } finally { await runtime.close(); }
 });
+
+test('should steer only the intended active Pi turn without aborting or starting another prompt', async () => {
+  const fixture = piFixture();
+  const runtime = await openPi({ cwd: process.cwd() }, () => {}, fixture);
+  try {
+    await runtime.prompt('original', 'turn1');
+    await runtime.steer('turn1', 'new guidance');
+    await assert.rejects(runtime.steer('turn2', 'wrong target'), /no longer the active turn/);
+    fixture.emit({ type: 'agent_end' });
+    await assert.rejects(runtime.steer('turn1', 'too late'), /no longer the active turn/);
+    assert.deepEqual(fixture.commands.filter(c => ['prompt', 'steer', 'abort'].includes(c.type))
+      .map(c => [c.type, c.message]), [['prompt', 'original'], ['steer', 'new guidance']]);
+  } finally { await runtime.close(); }
+});

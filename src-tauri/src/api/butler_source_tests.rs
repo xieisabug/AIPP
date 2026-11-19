@@ -21,11 +21,8 @@ fn public_continuation_rejects_reused_ids_and_missing_anchors() {
 }
 
 #[test]
-fn native_drivers_cannot_enter_the_application_queue() {
-    // Claude, Codex and ACP share native assistant type 4, not a queue capability.
-    for _driver in ["claude", "codex", "acp"] {
-        assert!(super::ensure_queue_supported(Some(4)).is_err());
-    }
+fn test_queue_support_includes_native_agents_and_excludes_plugins() {
+    assert!(super::ensure_queue_supported(Some(4)).is_ok());
     assert!(super::ensure_queue_supported(Some(0)).is_ok());
     assert!(super::ensure_queue_supported(None).is_ok());
     assert!(super::ensure_queue_supported(Some(3)).is_err());
@@ -43,13 +40,6 @@ fn handoff_requires_original_conversation_identity_not_goal_freshness() {
     assert!(crate::db::butler_control::ensure_turn(&conn,1).is_err());
     crate::db::butler_control::set(&conn,1,"cancel").unwrap();
     assert!(crate::db::butler_control::ensure_turn(&conn,1).is_err());
-}
-
-#[test]
-fn native_activity_uses_live_prompt_not_persistent_session_existence() {
-    assert!(super::native_prompt_is_active(&serde_json::json!({"has_active_prompt":true})));
-    assert!(!super::native_prompt_is_active(&serde_json::json!({"has_active_prompt":false})));
-    assert!(super::native_prompt_is_active(&serde_json::json!({})));
 }
 
 #[test]

@@ -51,6 +51,7 @@
 
 import React, { useRef, useEffect, useState, useCallback, useId, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
+import { ComposerPermissionSlot } from "./ComposerPermissionSlot";
 import CircleButton from "../CircleButton";
 import { Switch } from "@/components/ui/switch";
 import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
@@ -89,6 +90,7 @@ export interface InputAreaRef {
 }
 
 interface InputAreaProps {
+    permissionConversationIds?: number | readonly number[];
     inputText: string;
     setInputText: React.Dispatch<React.SetStateAction<string>>;
     /**
@@ -99,7 +101,8 @@ interface InputAreaProps {
     handleChooseFile?: () => void;
     handlePaste?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
     handleDeleteFile?: (fileId: number) => void;
-    handleSend: (emptyPrompt?: string) => void;
+    handleSend: (emptyPrompt?: string, busyOverride?: "queue" | "interrupt") => void;
+    busySendBehavior?: "queue" | "interrupt";
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
     isMobile?: boolean;
@@ -146,6 +149,7 @@ const InputArea = React.memo(
                 handlePaste,
                 handleDeleteFile = NO_FILE_DELETE,
                 handleSend,
+                busySendBehavior,
                 aiIsResponsing,
                 placement = "bottom",
                 isMobile = false,
@@ -160,6 +164,7 @@ const InputArea = React.memo(
                 planModeSwitching = false,
                 onPlanModeToggle,
                 topChip,
+                permissionConversationIds,
                 mentionCandidates,
                 placeholder,
                 ariaLabel,
@@ -433,12 +438,16 @@ const InputArea = React.memo(
                 }
             }, [onContextCommand, aiIsResponsing, fileInfoList, hideSlashCompletion, setInputText]);
 
-            const submit = (emptyPrompt?: string) => {
+            const submit = (emptyPrompt?: string, alternate = false) => {
                 const text = inputText.trim();
                 if (commandMode && (text === "/compact" || (commandMode === "butler" && text === "/reload"))) {
                     void executeCommand(text === "/reload" ? "reload" : "compact");
                 } else {
-                    handleSend(emptyPrompt);
+                    if (alternate && aiIsResponsing && text && busySendBehavior) {
+                        handleSend(undefined, busySendBehavior === "queue" ? "interrupt" : "queue");
+                    } else {
+                        handleSend(emptyPrompt);
+                    }
                 }
             };
 
@@ -1214,7 +1223,7 @@ const InputArea = React.memo(
                     } else {
                         // Enter for submit (only if not in IME composition)
                         e.preventDefault();
-                        submit();
+                        submit(undefined, e.ctrlKey || e.metaKey);
                     }
                 } else if (e.key === "Tab" && slashListVisible) {
                     e.preventDefault();
@@ -1417,6 +1426,7 @@ const InputArea = React.memo(
                     data-aipp-slot="chat-input-area"
                     data-attachment-count={attachmentCount}
                 >
+                    {permissionConversationIds && <ComposerPermissionSlot conversationIds={permissionConversationIds} placement={placement} />}
                     {isMobile && hasAttachments ? (
                         <div
                             className="input-area-attachment-tray"
@@ -1531,7 +1541,10 @@ const InputArea = React.memo(
                     ) : null}
                     <CircleButton
                         size={isMobile ? "medium" : placement === "bottom" ? "large" : "medium"}
-                        onClick={() => submit(!aiIsResponsing && !inputText.trim() ? "继续你的工作" : undefined)}
+                        onClick={event => submit(!aiIsResponsing && !inputText.trim() ? "继续你的工作" : undefined, event.ctrlKey || event.metaKey)}
+                        title={busySendBehavior && aiIsResponsing && inputText.trim() ? (
+                            busySendBehavior === "queue" ? "排队发送（Ctrl/⌘ + Enter 插队）" : "插队发送（Ctrl/⌘ + Enter 排队）"
+                        ) : undefined}
                         icon={sendButtonVisual ?? sendButtonIcon ?? defaultSendButtonIcon}
                         primary
                         className={`input-area-send-button ${placement} ${sendButtonVisual ? "has-custom-visual" : ""}`}

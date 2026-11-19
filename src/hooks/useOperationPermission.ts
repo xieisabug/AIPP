@@ -12,6 +12,7 @@ interface UseOperationPermissionOptions {
     conversationId?: number;
     /** 当前窗口可处理的一组会话 ID */
     conversationIds?: number[];
+    acceptBackgroundRequests?: boolean;
 }
 
 interface PermissionRequestBase {
@@ -58,6 +59,7 @@ function shouldHandleConversationRequest(
 interface UsePermissionRequestQueueOptions {
     conversationId?: number;
     conversationIds?: number[];
+    acceptBackgroundRequests?: boolean;
     requestEventName: string;
     resolvedEventName: string;
 }
@@ -78,6 +80,7 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
     const {
         conversationId,
         conversationIds,
+        acceptBackgroundRequests,
         requestEventName,
         resolvedEventName,
     } = options;
@@ -107,7 +110,7 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
         const enqueue = (request: TRequest) => {
             if (!active || resolved.has(request.request_id)) return;
             if (
-                !shouldHandleConversationRequest(
+                !acceptBackgroundRequests && !shouldHandleConversationRequest(
                     request.conversation_id,
                     conversationId,
                     conversationIds
@@ -153,7 +156,7 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
             unsubscribe.then((f) => f());
             resolvedSubscription.then((f) => f());
         };
-    }, [conversationId, conversationIds, requestEventName, resolvedEventName, removeRequestById]);
+    }, [conversationId, conversationIds, acceptBackgroundRequests, requestEventName, resolvedEventName, removeRequestById]);
 
     return {
         pendingRequest,
@@ -167,7 +170,7 @@ function usePermissionRequestQueue<TRequest extends PermissionRequestBase>(
 }
 
 export function useOperationPermission(options: UseOperationPermissionOptions = {}) {
-    const { conversationId, conversationIds } = options;
+    const { conversationId, conversationIds, acceptBackgroundRequests } = options;
     const {
         pendingRequest,
         isDialogOpen,
@@ -179,6 +182,7 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
     } = usePermissionRequestQueue<OperationPermissionRequest>({
         conversationId,
         conversationIds,
+        acceptBackgroundRequests,
         requestEventName: "operation-permission-request",
         resolvedEventName: "operation-permission-resolved",
     });
@@ -242,10 +246,11 @@ export function useOperationPermission(options: UseOperationPermissionOptions = 
 interface UseAcpPermissionOptions {
     conversationId?: number;
     conversationIds?: number[];
+    acceptBackgroundRequests?: boolean;
 }
 
 export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
-    const { conversationId, conversationIds } = options;
+    const { conversationId, conversationIds, acceptBackgroundRequests } = options;
     const {
         pendingRequest,
         isDialogOpen,
@@ -257,6 +262,7 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
     } = usePermissionRequestQueue<AcpPermissionRequest>({
         conversationId,
         conversationIds,
+        acceptBackgroundRequests,
         requestEventName: "acp-permission-request",
         resolvedEventName: "acp-permission-resolved",
     });
