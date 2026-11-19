@@ -1,5 +1,6 @@
 import { useButlerReplyEntry } from "./useButlerReplyEntry";
 import { SendLayoutSnapshot, type SendLayout } from "./SendLayoutSnapshot";
+import { flushSync } from "react-dom";
 import React, {
     useCallback,
     useEffect,
@@ -24,6 +25,7 @@ import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
+import { LAST_REPLY_CONTAINER_MIN_HEIGHT } from "./layoutConstants";
 import {
     followScrollContainerBottom,
     pinScrollContainerToBottom,
@@ -59,6 +61,8 @@ interface VirtuosoMessageListProps extends UseMessageListElementsProps {
 
 interface VirtuosoMessageListContext {
     liveItems: RenderableConversationItem[];
+    /** Estimated height of retained rows above that are not mounted yet. */
+    pendingPx?: number;
 }
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 180;
@@ -71,6 +75,56 @@ const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 2500;
 const INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS = 15_000;
 /** 流式输出期间持续贴底；实际结束由 streamingMessages 清空时的 effect cleanup 负责 */
 const STREAM_FOLLOW_MAX_DURATION_MS = 10 * 60_000;
+/**
+ * Retained transcripts open tail-first: the first commit only lays out about two
+ * viewports of rows, older rows are prepended in idle-time slices afterwards.
+ * Mounting and laying out a whole rich transcript in one commit took seconds.
+ */
+const RETAINED_INITIAL_VIEWPORTS = 2;
+const RETAINED_INITIAL_MIN_PX = 1200;
+const RETAINED_INITIAL_MIN_ROWS = 8;
+const RETAINED_SLICE_PX = 600;
+const RETAINED_SLICE_MAX_ROWS = 4;
+
+function rowSpan(item: RenderableConversationItem): number {
+    return item.estimatedHeight + (item.joinsNext ? 0 : VIRTUAL_ROW_GAP_PX);
+}
+
+/** First row of the initially mounted tail; 0 mounts everything. */
+export function retainedTailStart(items: RenderableConversationItem[], viewportHeight: number): number {
+    const budget = Math.max(RETAINED_INITIAL_MIN_PX, viewportHeight * RETAINED_INITIAL_VIEWPORTS);
+    let start = items.length;
+    let height = 0;
+    while (start > 0 && (height < budget || items.length - start < RETAINED_INITIAL_MIN_ROWS)) {
+        start -= 1;
+        height += rowSpan(items[start]);
+    }
+    // Never start inside a bubble split across joined rows.
+    while (start > 0 && items[start - 1].joinsNext) start -= 1;
+    return start;
+}
+
+/** First row after prepending one more slice above `start`. */
+export function retainedSliceStart(items: RenderableConversationItem[], start: number): number {
+    let next = start;
+    let height = 0;
+    while (next > 0 && start - next < RETAINED_SLICE_MAX_ROWS && height < RETAINED_SLICE_PX) {
+        next -= 1;
+        height += rowSpan(items[next]);
+    }
+    while (next > 0 && items[next - 1].joinsNext) next -= 1;
+    return next;
+}
+
+type IdleHandle = { cancel: () => void };
+function scheduleIdle(callback: () => void): IdleHandle {
+    if (typeof window.requestIdleCallback === "function") {
+        const id = window.requestIdleCallback(callback, { timeout: 250 });
+        return { cancel: () => window.cancelIdleCallback(id) };
+    }
+    const id = window.setTimeout(callback, 16);
+    return { cancel: () => window.clearTimeout(id) };
+}
 
 function readContentWidth(element: HTMLElement): number {
     const style = getComputedStyle(element);
@@ -178,14 +232,39 @@ const MeasuredVirtuosoItem = React.memo(
 
 MeasuredVirtuosoItem.displayName = "MeasuredVirtuosoItem";
 
+const RowGap = () => (
+    <div aria-hidden className="flex-none" style={{ height: VIRTUAL_ROW_GAP_PX }} />
+);
+
+interface LiveTurn {
+    key: string;
+    lastTurn: boolean;
+    items: RenderableConversationItem[];
+}
+
+function groupLiveTurns(items: RenderableConversationItem[]): LiveTurn[] {
+    const turns: LiveTurn[] = [];
+    for (const item of items) {
+        const key = item.turnKey ?? "head";
+        const current = turns[turns.length - 1];
+        if (current && current.key === key && current.lastTurn === !!item.lastTurn) {
+            current.items.push(item);
+        } else {
+            turns.push({ key, lastTurn: !!item.lastTurn, items: [item] });
+        }
+    }
+    return turns;
+}
+
 const VirtuosoLiveFooter = React.memo(
     ({ context }: { context: VirtuosoMessageListContext }) => {
         const footerRef = useRef<HTMLDivElement | null>(null);
-        const { liveItems } = context;
+        const { liveItems, pendingPx = 0 } = context;
         const footerKey = useMemo(
             () => `live-tail:${liveItems.map((item) => item.key).join("|")}`,
             [liveItems],
         );
+        const turns = useMemo(() => groupLiveTurns(liveItems), [liveItems]);
 
         useRecordedHeight(footerKey, footerRef);
 
@@ -193,17 +272,42 @@ const VirtuosoLiveFooter = React.memo(
             return null;
         }
 
-        // last-reply 的 min-height 直接读 live-only CSS 变量，无需再在 footer 上覆盖
+        // Each turn keeps one wrapper keyed by its user message. When a new turn
+        // starts, the previous wrapper only loses the last-reply min-height; its
+        // rows are not reparented, so their Markdown, code blocks and layout survive.
         return (
             <div ref={footerRef} className="flex flex-col">
-                {liveItems.map((item, index) => (
-                    <React.Fragment key={item.key}>
-                        {item.element}
-                        {index < liveItems.length - 1 && !item.joinsNext && (
-                            <div aria-hidden className="flex-none" style={{ height: VIRTUAL_ROW_GAP_PX }} />
-                        )}
-                    </React.Fragment>
-                ))}
+                {pendingPx > 0 ? (
+                    <div
+                        aria-hidden
+                        className="flex-none"
+                        data-aipp-slot="chat-history-pending"
+                        style={{ height: pendingPx }}
+                    />
+                ) : null}
+                {turns.map((turn, turnIndex) => {
+                    const lastItem = turn.items[turn.items.length - 1];
+                    return (
+                        <React.Fragment key={`turn:${turn.key}`}>
+                            <div
+                                className="flex flex-col"
+                                {...(turn.lastTurn ? {
+                                    id: "last-reply-container",
+                                    "data-aipp-slot": "chat-last-reply-container",
+                                    style: { minHeight: LAST_REPLY_CONTAINER_MIN_HEIGHT },
+                                } : {})}
+                            >
+                                {turn.items.map((item, index) => (
+                                    <React.Fragment key={item.key}>
+                                        {item.element}
+                                        {index < turn.items.length - 1 && !item.joinsNext && <RowGap />}
+                                    </React.Fragment>
+                                ))}
+                            </div>
+                            {turnIndex < turns.length - 1 && !lastItem.joinsNext && <RowGap />}
+                        </React.Fragment>
+                    );
+                })}
             </div>
         );
     },
@@ -275,16 +379,16 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 }) => {
     useButlerReplyEntry(scrollContainerRef, conversationId, historyLoaded, butlerBubbleMotion, messageListProps.allDisplayMessages);
     const [listWidth, setListWidth] = useState<number | null>(null);
-    const { renderItems } = useMessageListElements({
-        ...messageListProps,
-        listWidthPx: listWidth || undefined,
-    });
     // Keep bounded rich transcripts mounted: viewport crossings must not
     // repeatedly recreate code blocks and change the reader's scroll anchor.
     const retainHistory = messageListProps.allDisplayMessages.length <= 80
         && messageListProps.allDisplayMessages.reduce(
             (total, message) => total + (message.content?.length ?? 0), 0,
         ) <= 500_000;
+    const { renderItems } = useMessageListElements({
+        ...messageListProps,
+        listWidthPx: listWidth || undefined,
+    });
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
     const listWrapperRef = useRef<HTMLDivElement | null>(null);
     const sendLayoutSnapshotRef = useRef<SendLayout | null>(null);
@@ -859,6 +963,87 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         } satisfies React.CSSProperties
         : undefined;
 
+    // ---- Tail-first mounting of retained history ----
+    const retainedKey = `${conversationId}:${dataConversationKey}`;
+    const [retainedWindow, setRetainedWindow] = useState<{ key: string; firstKey: string | null }>(
+        { key: "", firstKey: null },
+    );
+    const retainedActive = retainHistory && historyItems.length > 0;
+    if (retainedActive && retainedWindow.key !== retainedKey) {
+        // Only a freshly opened transcript starts tail-first. A conversation that grows
+        // into this path after a send already has every row mounted.
+        const opening = renderedConversationRef.current !== conversationId
+            && hasCurrentConversationMessages
+            && pendingScrollMessageId === null;
+        const start = opening ? retainedTailStart(renderItems, viewportHeight) : 0;
+        setRetainedWindow({ key: retainedKey, firstKey: start > 0 ? renderItems[start].key : null });
+    } else if (retainedActive && retainedWindow.firstKey !== null && pendingScrollMessageId !== null) {
+        // A jump needs its target mounted.
+        setRetainedWindow({ key: retainedKey, firstKey: null });
+    }
+    let retainedStart = 0;
+    if (retainedActive && retainedWindow.key === retainedKey && retainedWindow.firstKey !== null) {
+        const index = renderItems.findIndex((item) => item.key === retainedWindow.firstKey);
+        retainedStart = index > 0 ? index : 0;
+    }
+    const retainedItems = useMemo(
+        () => (retainedStart > 0 ? renderItems.slice(retainedStart) : renderItems),
+        [renderItems, retainedStart],
+    );
+    const retainedPendingPx = useMemo(() => {
+        let height = 0;
+        for (let index = 0; index < retainedStart; index += 1) height += rowSpan(renderItems[index]);
+        return height;
+    }, [renderItems, retainedStart]);
+    const retainedStateRef = useRef({ items: renderItems, start: retainedStart, pendingPx: retainedPendingPx });
+    retainedStateRef.current = { items: renderItems, start: retainedStart, pendingPx: retainedPendingPx };
+    const mountRetainedFrom = useCallback((firstKey: string | null) => {
+        const container = scrollContainerRef.current;
+        const fromBottom = container ? container.scrollHeight - container.scrollTop : null;
+        flushSync(() => setRetainedWindow((current) => ({ ...current, firstKey })));
+        // Rows are prepended above the reader; keep what is on screen where it is.
+        if (container && fromBottom !== null) {
+            container.scrollTop = container.scrollHeight - fromBottom;
+        }
+    }, [scrollContainerRef]);
+    // Backfill after the tail has been shown at the bottom, one idle slice at a time.
+    const retainedBackfillReady = retainedStart > 0
+        && initialBottomVisibleConversationId === conversationId
+        && !!effectiveScrollParent;
+    useEffect(() => {
+        if (!retainedBackfillReady) return;
+        const container = effectiveScrollParent;
+        let handle: IdleHandle | null = null;
+        const run = () => {
+            handle = null;
+            // Never move rows under a running send slide.
+            if (container?.dataset.sendPhase || isSendScrollAnimating()) {
+                handle = scheduleIdle(run);
+                return;
+            }
+            const { items, start } = retainedStateRef.current;
+            if (start <= 0) return;
+            const next = retainedSliceStart(items, start);
+            mountRetainedFrom(next > 0 ? items[next].key : null);
+        };
+        handle = scheduleIdle(run);
+        return () => handle?.cancel();
+    }, [retainedBackfillReady, retainedStart, effectiveScrollParent, isSendScrollAnimating, mountRetainedFrom]);
+    // Scrolling toward rows that are not mounted yet mounts the rest at once.
+    useEffect(() => {
+        const container = effectiveScrollParent;
+        if (!retainedBackfillReady || !container) return;
+        const onScroll = () => {
+            const { start, pendingPx } = retainedStateRef.current;
+            if (start > 0 && !container.dataset.sendPhase
+                && container.scrollTop < pendingPx + container.clientHeight * 0.5) {
+                mountRetainedFrom(null);
+            }
+        };
+        container.addEventListener("scroll", onScroll, { passive: true });
+        return () => container.removeEventListener("scroll", onScroll);
+    }, [retainedBackfillReady, effectiveScrollParent, mountRetainedFrom]);
+
     const itemContent = useCallback(
         (index: number, item: RenderableConversationItem) => (
             <MeasuredVirtuosoItem
@@ -962,7 +1147,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 data-aipp-initial-bottom-positioning={shouldHideInitialBottomPositioning ? "true" : undefined}
                 style={initialBottomPositioningStyle}
             >
-                <VirtuosoLiveFooter context={{ liveItems: renderItems }} />
+                <VirtuosoLiveFooter context={{ liveItems: retainedItems, pendingPx: retainedPendingPx }} />
             </SendLayoutSnapshot>
         );
     }

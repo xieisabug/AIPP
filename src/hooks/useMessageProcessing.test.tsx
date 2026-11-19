@@ -1,6 +1,6 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { Message } from "@/data/Conversation";
+import { Message, StreamEvent } from "@/data/Conversation";
 import { useMessageGroups } from "@/hooks/useMessageGroups";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 
@@ -169,3 +169,29 @@ describe("useMessageProcessing ordering", () => {
         expect(errors.map(m => [m.id, m.isSupersededError])).toEqual([[2, false], [4, true], [5, false], [7, false]]);
     });
  });
+
+describe("useMessageProcessing stream-only messages", () => {
+    it("should place a just-sent user message after the previous turn's late reply", () => {
+        // The previous reply finished long after its question (+30s).
+        const messages = [
+            makeMessage(1, "user", "2024-01-01T00:00:00.000Z"),
+            makeMessage(2, "reasoning", "2024-01-01T00:00:20.000Z", "g1"),
+            makeMessage(3, "response", "2024-01-01T00:00:30.000Z", "g1"),
+        ];
+        // ask_ai emits a message_update for the user message before message_add's reload lands.
+        const streamingMessages = new Map<number, StreamEvent>([
+            [4, { message_id: 4, message_type: "user", content: "新的问题", is_done: false } as unknown as StreamEvent],
+        ]);
+
+        const { result } = renderHook(() => useMessageProcessing({
+            messages,
+            streamingMessages,
+            conversation: undefined,
+            generationGroups: new Map(),
+            groupRootMessageIds: new Map(),
+            getMessageVersionInfo: () => ({ shouldShow: true }),
+        }));
+
+        expect(result.current.allDisplayMessages.map((message) => message.id)).toEqual([1, 2, 3, 4]);
+    });
+});

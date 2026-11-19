@@ -18,10 +18,7 @@ import MergedAssistantGroup, {
     type MergedAssistantGroupProps,
 } from "./MergedAssistantGroup";
 import { splitMergedGroupMessages } from "./mergedGroupSegments";
-import {
-    LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
-    LAST_REPLY_CONTAINER_MIN_HEIGHT,
-} from "./layoutConstants";
+import { LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX } from "./layoutConstants";
 import { findLastReplyStartIndex } from "./lastReplyLayout";
 import {
     estimateMergedGroupHeight,
@@ -80,6 +77,8 @@ export interface MessageElementSegment {
 
 export interface MessageElementEntry {
     messageId: number;
+    /** Stable list key; defaults to `message-<messageId>`. */
+    rowKey?: string;
     messageIds?: number[];
     estimatedHeight?: number;
     messageElement: React.ReactElement;
@@ -162,6 +161,14 @@ export interface RenderableConversationItem {
     virtualizationMode?: "virtualized" | "live";
     /** The next item continues the same bubble, so no row gap goes between them. */
     joinsNext?: boolean;
+    /**
+     * The turn (user message and its replies) this row belongs to. The live
+     * footer wraps each turn in a stable element, so a turn that stops being the
+     * newest keeps its DOM instead of being reparented and remounted.
+     */
+    turnKey?: string;
+    /** Row belongs to the newest turn, whose wrapper reserves a viewport of space. */
+    lastTurn?: boolean;
 }
 
 export function findFirstLiveSuffixIndex(
@@ -502,6 +509,10 @@ export function useMessageListElements({
     ]);
 
     const resultsOnly = useContext(ButlerResultsOnlyContext);
+    // A merged bubble that has been the live tail stays whole once it becomes history:
+    // re-splitting it into segment rows would remount it right when the next message is
+    // sent. Older history is still split, so long transcripts can mount in small pieces.
+    const wholeGroupKeysRef = useRef(new Set<string>());
 
     const messageElements = useMemo(() => {
         const customEntry = (message: Message): MessageElementEntry | null => {
@@ -586,7 +597,9 @@ export function useMessageListElements({
             const keepExpanded = options?.keepExpanded ?? false;
             // 合并组使用最后一条消息的 groupControl
             const groupControl = getGenerationGroupControl(lastMsg);
-            const groupKey = `merged-${groupMessages.map((message) => message.id).join("-")}`;
+            // Keyed by the first message: replies that join the group while streaming
+            // (reasoning -> response, tool rounds) must not remount the bubble.
+            const groupKey = `merged-${groupMessages[0].id}`;
             const groupProps: MergedAssistantGroupProps = {
                 groupMessages,
                 anyShining: groupMessages.some((m) => shiningMessageIds.has(m.id)),
@@ -619,7 +632,10 @@ export function useMessageListElements({
             );
 
             // 只有历史组会被虚拟化；尾部组留在 last-reply 容器里整体渲染。
-            const segmentMessageRuns = keepExpanded
+            if (keepExpanded) {
+                wholeGroupKeysRef.current.add(groupKey);
+            }
+            const segmentMessageRuns = keepExpanded || wholeGroupKeysRef.current.has(groupKey)
                 ? null
                 : splitMergedGroupMessages(
                     groupMessages,
@@ -653,6 +669,7 @@ export function useMessageListElements({
 
             result.push({
                 messageId: lastMsg.id,
+                rowKey: groupKey,
                 messageIds: groupMessages.map((message) => message.id),
                 estimatedHeight: groupEstimatedHeight,
                 messageElement: <MergedAssistantGroup key={groupKey} {...groupProps} />,
@@ -842,14 +859,21 @@ export function useMessageListElements({
             allDisplayMessages,
             messageElements,
         );
+        // Rows before the first user message share a head turn.
+        let turnKey = "head";
 
-        const pushMessageWithVersion = (entry: MessageElementEntry) => {
+        const pushMessageWithVersion = (entry: MessageElementEntry, lastTurn: boolean) => {
+            if (messageById.get(entry.messageId)?.message_type === "user") {
+                turnKey = `user-${entry.messageId}`;
+            }
+            const turn = { turnKey, ...(lastTurn ? { lastTurn: true } : {}) };
             const sourceMessage = messageById.get(entry.messageId) ?? allDisplayMessages[0];
             const shouldKeepLive =
-                sourceMessage?.message_type === "reasoning"
+                lastTurn
+                || sourceMessage?.message_type === "reasoning"
                 || cachedPreviewCodeCount(sourceMessage) > 0;
             const virtualizationMode = shouldKeepLive ? "live" : "virtualized";
-            if (entry.segments) {
+            if (entry.segments && !lastTurn) {
                 entry.segments.forEach((segment, index, segments) => {
                     items.push({
                         key: segment.key,
@@ -859,11 +883,12 @@ export function useMessageListElements({
                         element: segment.element,
                         virtualizationMode,
                         joinsNext: index < segments.length - 1,
+                        ...turn,
                     });
                 });
             } else {
                 items.push({
-                    key: `message-${entry.messageId}`,
+                    key: entry.rowKey ?? `message-${entry.messageId}`,
                     messageId: entry.messageId,
                     messageIds: entry.messageIds ?? [entry.messageId],
                     estimatedHeight:
@@ -872,6 +897,7 @@ export function useMessageListElements({
                         ?? 0,
                     element: entry.messageElement,
                     virtualizationMode,
+                    ...turn,
                 });
             }
 
@@ -883,126 +909,67 @@ export function useMessageListElements({
                     estimatedHeight: 48,
                     element: versionElement,
                     virtualizationMode,
+                    ...turn,
                 });
             }
         };
 
-        if (lastReplyStartIndex >= 0) {
-            const before = messageElements.slice(0, lastReplyStartIndex);
-            const lastGroup = messageElements.slice(lastReplyStartIndex);
+        // The newest turn (from the last user message) stays live; the footer wraps
+        // it in the min-height "last reply" container. Its rows keep the same keys
+        // they will have as history, so sending the next message does not remount them.
+        const hasLastTurn = lastReplyStartIndex >= 0;
+        messageElements.forEach((entry, index) => {
+            pushMessageWithVersion(entry, hasLastTurn && index >= lastReplyStartIndex);
+        });
+        const tail = {
+            turnKey,
+            virtualizationMode: "live" as const,
+            ...(hasLastTurn ? { lastTurn: true } : {}),
+        };
 
-            before.forEach((entry) => {
-                pushMessageWithVersion(entry);
-            });
-
-            const lastGroupMessageIds = lastGroup.flatMap((entry) => entry.messageIds ?? [entry.messageId]);
-            const lastGroupEstimatedHeight = Math.max(
-                0,
-                lastGroup.reduce((sum, entry) => {
-                    let next = sum + (
-                        entry.estimatedHeight
-                        ?? estimatedHeightByMessageId.get(entry.messageId)
-                        ?? 0
-                    );
-                    if (versionMap.has(`version-${entry.messageId}`)) {
-                        next += 48;
-                    }
-                    return next;
-                }, 0)
-                    + placeholderElements.length * 96
-                    + fallbackInlineInteractionItems.length * 112
-                    + (isMobile ? 0 : LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX),
-            );
-
+        placeholderElements.forEach((element, index) => {
             items.push({
-                key: "last-reply-container",
-                messageId:
-                    lastGroupMessageIds[lastGroupMessageIds.length - 1] ?? null,
-                messageIds: lastGroupMessageIds,
-                estimatedHeight: lastGroupEstimatedHeight,
-                virtualizationMode: "live",
-                element: (
-                    <div
-                        id="last-reply-container"
-                        style={{ minHeight: LAST_REPLY_CONTAINER_MIN_HEIGHT }}
-                        className="flex flex-col gap-4"
-                        data-aipp-slot="chat-last-reply-container"
-                    >
-                        {lastGroup.map((entry) => (
-                            <React.Fragment
-                                key={`last-group-${entry.messageId}`}
-                            >
-                                {entry.messageElement}
-                                {versionMap.get(`version-${entry.messageId}`)
-                                    || null}
-                            </React.Fragment>
-                        ))}
-                        {placeholderElements}
-                        {fallbackInlineInteractionItems.length > 0 && (
-                            <div className="flex flex-col gap-4 pt-2">
-                                {fallbackInlineInteractionItems.map((item) => (
-                                    <React.Fragment key={item.key}>
-                                        {item.content}
-                                    </React.Fragment>
-                                ))}
-                            </div>
-                        )}
-                        {/* Mobile input occupies its own layout space; only desktop needs overlay clearance. */}
-                        {!isMobile && <div
-                            className="flex-none"
-                            style={{
-                                height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
-                            }}
-                            data-aipp-slot="chat-bottom-spacer"
-                        />}
-                    </div>
-                ),
+                key: `placeholder-${index}`,
+                messageId: null,
+                estimatedHeight: 96,
+                element,
+                ...tail,
             });
-        } else {
-            // A bot may receive its first message from a peer before a human has spoken here.
-            messageElements.forEach(pushMessageWithVersion);
-            placeholderElements.forEach((element, index) => {
-                items.push({
-                    key: `placeholder-${index}`,
-                    messageId: null,
-                    estimatedHeight: 96,
-                    element,
-                    virtualizationMode: "live",
-                });
-            });
+        });
 
-            fallbackInlineInteractionItems.forEach((item, index) => {
-                items.push({
-                    key: `inline-${item.key}-${index}`,
-                    messageId: item.messageId ?? null,
-                    estimatedHeight: 112,
-                    element: (
-                        <div className="flex flex-col gap-4 pt-2">
+        if (fallbackInlineInteractionItems.length > 0) {
+            items.push({
+                key: "inline-interactions",
+                messageId: null,
+                estimatedHeight: fallbackInlineInteractionItems.length * 112,
+                element: (
+                    <div className="flex flex-col gap-4 pt-2">
+                        {fallbackInlineInteractionItems.map((item) => (
                             <React.Fragment key={item.key}>
                                 {item.content}
                             </React.Fragment>
-                        </div>
-                    ),
-                    virtualizationMode: "live",
-                });
+                        ))}
+                    </div>
+                ),
+                ...tail,
             });
+        }
 
-            // 与 last-reply 容器一致：桌面端输入框悬浮在列表上方，尾部需要留出空间。
-            if (!isMobile && items.length > 0) {
-                items.push({
-                    key: "chat-bottom-spacer",
-                    messageId: null,
-                    estimatedHeight: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
-                    element: (
-                        <div
-                            className="flex-none"
-                            style={{ height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX }}
-                            data-aipp-slot="chat-bottom-spacer"
-                        />
-                    ),
-                    virtualizationMode: "live",
-                });
-            }
+        // Desktop input floats over the list; keep room at the end. Mobile input has its own space.
+        if (!isMobile && items.length > 0) {
+            items.push({
+                key: "chat-bottom-spacer",
+                messageId: null,
+                estimatedHeight: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
+                element: (
+                    <div
+                        className="flex-none"
+                        style={{ height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX }}
+                        data-aipp-slot="chat-bottom-spacer"
+                    />
+                ),
+                ...tail,
+            });
         }
 
         return items;

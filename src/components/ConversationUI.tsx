@@ -104,7 +104,7 @@ import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
-import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
+import { mergeMessagesWithStreamingState, reuseEquivalentMessages } from "@/utils/streamingMessageState";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
@@ -381,7 +381,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     const saved = readingPositions.current.get(conversationId);
                     if (saved !== undefined && scrollContainerRef.current) {
                         handleUserScrollIntent();
-                        scrollContainerRef.current.scrollTop = saved;
+                        // Saved relative to the bottom: history above may still be mounting.
+                        const container = scrollContainerRef.current;
+                        container.scrollTop = container.scrollHeight - saved;
                         syncScrollState();
                     }
                     setRenderingConversationId(null);
@@ -406,7 +408,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [persistedSnapshot, setPersistedSnapshot] = useState<ConversationWithMessages>();
         const persistedSnapshotRevision = useRef(0);
         const acceptPersistedSnapshot = useCallback((snapshot: ConversationWithMessages, revision: number) => {
-            if (revision === persistedSnapshotRevision.current) setPersistedSnapshot(snapshot);
+            if (revision !== persistedSnapshotRevision.current) return;
+            // Butler's concise view renders straight from this snapshot. Reuse unchanged
+            // message objects so each refetch only re-renders what actually changed.
+            setPersistedSnapshot((previous) => previous?.conversation.id === snapshot.conversation.id
+                ? { ...snapshot, messages: reuseEquivalentMessages(previous.messages, snapshot.messages) }
+                : snapshot);
         }, []);
         const syncScrollPositionRef = useRef<{ conversationId: string; top: number } | null>(null);
         const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
@@ -927,11 +934,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             });
         }, [queuedMessages]);
 
+        const persistedMessages = persistedSnapshot?.conversation.id === Number(conversationId)
+            ? persistedSnapshot.messages
+            : undefined;
         const messagesWithQueued = useMemo(
-            () => [...(resultOnly
-                ? persistedSnapshot?.conversation.id === Number(conversationId) ? persistedSnapshot.messages : []
-                : messages), ...queuedDisplayMessages],
-            [messages, queuedDisplayMessages, resultOnly, persistedSnapshot, conversationId]
+            () => [...(resultOnly ? persistedMessages ?? [] : messages), ...queuedDisplayMessages],
+            [messages, queuedDisplayMessages, resultOnly, persistedMessages]
         );
 
         // 当 functionMap 变化时更新事件处理器
@@ -1009,16 +1017,32 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [interactions, inlineInteractionItems]);
         const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
         const butlerRunningHeld = useLinger(resultOnly && effectiveAiIsResponsing, BUTLER_IDLE_GAP_MS, conversationId);
+        // Replies already on screen before a run starts stay published. "Responding" turns on
+        // when the user presses send, but the new user message is persisted a moment later;
+        // until then the last user message is the previous turn's, and hiding everything after
+        // it made the previous reply vanish and pop back on every send.
+        const settledTailRef = useRef<{ conversationId: string; ids: ReadonlySet<number> }>({ conversationId: "", ids: new Set() });
+        if (resultOnly && !effectiveAiIsResponsing && !butlerRunningHeld) {
+            const ids = new Set<number>();
+            for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
+                if (allDisplayMessages[index].message_type === "user") break;
+                ids.add(allDisplayMessages[index].id);
+            }
+            settledTailRef.current = { conversationId, ids };
+        }
         const transcript = useMemo(() => {
             if (!resultOnly) return windowLabel === "butler_experiment"
                 ? withButlerProcessing(allDisplayMessages, Number(conversationId), effectiveAiIsResponsing)
                 : allDisplayMessages;
             const unpublished = new Set<number>();
             if (effectiveAiIsResponsing) {
+                const settled = settledTailRef.current.conversationId === conversationId
+                    ? settledTailRef.current.ids
+                    : new Set<number>();
                 for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
                     const message = allDisplayMessages[index];
                     if (message.message_type === "user") break;
-                    unpublished.add(message.id);
+                    if (!settled.has(message.id)) unpublished.add(message.id);
                 }
             }
             const reports = reportedProgressByMessage(Number(conversationId), displayAgentActivities.values(), mcpToolCallStates.values());
@@ -1459,7 +1483,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // The local run has finished: the persisted snapshot is authoritative,
                 // including remote edits that shorten content or delete messages.
                 clearStreamingMessages();
-                setMessages(result.messages);
+                setMessages((previous) => reuseEquivalentMessages(previous, result.messages));
                 setIsLoadingShow(false);
             },
             onError: (error) => toast.error(`同步后刷新聊天失败（conversation=${conversationId}）: ${String(error)}`),
@@ -2339,7 +2363,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onTouchMoveCapture={handleUserScrollIntent}
                             onScroll={event => {
                                 const container = event.currentTarget;
-                                if (!isLoadingShow && renderingConversationId === null && !container.closest('[hidden]')) readingPositions.current.set(conversationId, container.scrollTop);
+                                if (!isLoadingShow && renderingConversationId === null && !container.closest('[hidden]')) readingPositions.current.set(conversationId, container.scrollHeight - container.scrollTop);
                                 setShowBackToBottom(container.scrollHeight - container.scrollTop - container.clientHeight > 96);
                             }}
                             className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}

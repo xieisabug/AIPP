@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Message, Conversation, StreamEvent } from "../data/Conversation";
-import { compareMessagesChronologically } from "@/utils/messageOrdering";
+import { compareMessagesChronologically, getMessageOrderValue } from "@/utils/messageOrdering";
 
 export interface UseMessageProcessingProps {
     messages: Message[];
@@ -39,8 +39,15 @@ export function useMessageProcessing({
         const lastUserMessage = [...combinedMessages].reverse().find(msg => msg.message_type === "user");
         const baseTimestamp = lastUserMessage ? new Date(lastUserMessage.created_time).getTime() : Date.now();
 
-        // 为了确保同一轮对话中的所有流式消息使用相同的时间戳，我们使用统一的时间戳
-        const uniformStreamTimestamp = baseTimestamp + 1000;
+        // 为了确保同一轮对话中的所有流式消息使用相同的时间戳，我们使用统一的时间戳。
+        // 只存在于流里的消息（刚发出的 user、刚开始的回复）一定是最新的：不能早于已有消息，
+        // 否则新 user 气泡会先插进上一轮回复中间，再在重拉后跳到末尾，并把上一轮回复重新分组/重挂载。
+        let latestTimestamp = -Infinity;
+        for (const message of combinedMessages) {
+            const timestamp = getMessageOrderValue(message);
+            if (timestamp > latestTimestamp) latestTimestamp = timestamp;
+        }
+        const uniformStreamTimestamp = Math.max(baseTimestamp + 1000, latestTimestamp + 1);
 
         // 将流式消息添加到显示列表中
         streamingMessages.forEach((streamEvent) => {

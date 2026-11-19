@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Message, StreamEvent } from "@/data/Conversation";
-import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
+import { mergeMessagesWithStreamingState, reuseEquivalentMessages } from "@/utils/streamingMessageState";
 
 function makeMessage(
     id: number,
@@ -116,5 +116,64 @@ describe("mergeMessagesWithStreamingState", () => {
         expect(merged[1].id).toBe(2);
         expect(merged[1].content).toBe("新消息也要保留下来");
         expect(merged[1].finish_time).toEqual(finalizedAt);
+    });
+});
+
+describe("reuseEquivalentMessages", () => {
+    // IPC returns a fresh object graph: ISO strings, new arrays, nulls for absent fields.
+    const fromIpc = (message: Message): Message => JSON.parse(JSON.stringify({
+        ...message,
+        attachment_list: message.attachment_list ?? [],
+        tps: null,
+    }));
+
+    it("should keep previous message objects when a refetch returns identical data", () => {
+        const previous = [
+            makeMessage(1, "user", "你好", "2024-01-01T00:00:00.000Z", { attachment_list: [] }),
+            makeMessage(2, "response", "回答", "2024-01-01T00:00:01.000Z", { finish_time: new Date("2024-01-01T00:00:02.000Z") }),
+        ];
+
+        const result = reuseEquivalentMessages(previous, previous.map(fromIpc));
+
+        expect(result).toBe(previous);
+    });
+
+    it("should replace only the changed message when a refetch adds or edits messages", () => {
+        const previous = [
+            makeMessage(1, "user", "你好", "2024-01-01T00:00:00.000Z"),
+            makeMessage(2, "response", "回答", "2024-01-01T00:00:01.000Z"),
+        ];
+        const next = [
+            fromIpc(previous[0]),
+            fromIpc({ ...previous[1], content: "回答（已编辑）" }),
+            fromIpc(makeMessage(3, "user", "继续", "2024-01-01T00:00:03.000Z")),
+        ];
+
+        const result = reuseEquivalentMessages(previous, next);
+
+        expect(result[0]).toBe(previous[0]);
+        expect(result[1]).toBe(next[1]);
+        expect(result[2]).toBe(next[2]);
+    });
+
+    it("should keep untouched history identities when merging a message_add refetch", () => {
+        const current = [
+            makeMessage(1, "user", "你好", "2024-01-01T00:00:00.000Z"),
+            makeMessage(2, "response", "回答", "2024-01-01T00:00:01.000Z"),
+        ];
+        const refetched = [
+            ...current.map(fromIpc),
+            fromIpc(makeMessage(3, "user", "新问题", "2024-01-01T00:00:05.000Z")),
+        ];
+
+        const merged = mergeMessagesWithStreamingState(refetched, {
+            conversationId: 1,
+            currentMessages: current,
+        });
+
+        expect(merged.map((message) => message.id)).toEqual([1, 2, 3]);
+        expect(merged[0]).toBe(current[0]);
+        expect(merged[1]).toBe(current[1]);
+        expect(merged[2].content).toBe("新问题");
     });
 });

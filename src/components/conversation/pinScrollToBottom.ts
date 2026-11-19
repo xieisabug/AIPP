@@ -57,11 +57,12 @@ function observeAllContentElements(
     observedElements: Set<Element>,
     resizeObserver: ResizeObserver,
 ) {
-    const elements = [
-        ...Array.from(container.children),
-        ...Array.from(container.querySelectorAll("*")),
-    ];
-    elements.forEach((element) => {
+    // An in-flow wrapper's height already follows every descendant, so the
+    // container (viewport size) plus its direct children (the list wrapper)
+    // see all content growth. Observing each descendant added one observation
+    // per DOM node — thousands for a retained transcript — and re-walked the
+    // whole subtree on every mutation.
+    [container, ...Array.from(container.children)].forEach((element) => {
         if (observedElements.has(element)) {
             return;
         }
