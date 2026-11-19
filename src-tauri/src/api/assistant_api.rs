@@ -201,10 +201,13 @@ pub async fn get_agent_model_options(
     let mut options = Vec::new();
     let mut discovery_error = None;
 
+    let state = app_handle.state::<FeatureConfigState>();
+    let proxy = crate::api::ai::config::agent_network_proxy(&provider_configs, &*state.config_feature_map.lock().await);
     match provider.api_type.as_str() {
         CODEX_APP_SERVER_API_TYPE => {
-            let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, current_model.clone())
+            let mut config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, current_model.clone())
                 .map_err(|e| e.to_string())?;
+            if let Some(proxy) = &proxy { apply_network_proxy_to_env_vars(&mut config.env_vars, proxy); }
             let probe = probe_codex_models_cached(&app_handle, config).await?;
             let effective_default_model = current_model.clone().or_else(|| probe.default_model.clone());
             for entry in probe.models {
@@ -264,19 +267,7 @@ pub async fn get_agent_model_options(
                 .map_err(|error| error.to_string())?;
             config.model = current_model.clone();
             config.thought_level = configured_effort.clone();
-            let proxy_enabled = provider_configs
-                .iter()
-                .find(|config| config.name == "proxy_enabled")
-                .and_then(|config| config.value.parse::<bool>().ok())
-                .unwrap_or(false);
-            if proxy_enabled {
-                let feature_config_state = app_handle.state::<FeatureConfigState>();
-                let config_feature_map =
-                    feature_config_state.config_feature_map.lock().await.clone();
-                if let Some(proxy_url) = get_network_proxy_from_config(&config_feature_map) {
-                    apply_network_proxy_to_env_vars(&mut config.env_vars, &proxy_url);
-                }
-            }
+            if let Some(proxy) = &proxy { apply_network_proxy_to_env_vars(&mut config.env_vars, proxy); }
 
             match probe_acp_models_cached(config).await {
                 Ok(config_options) => {
@@ -312,6 +303,7 @@ pub async fn get_agent_model_options(
             use crate::api::ai::agent_driver::native_agents::{configuration, probe_models, DEFAULT_MODEL};
             let mut config = configuration(&detail.model_configs, &provider_configs, None).map_err(|e|e.to_string())?;
             crate::api::ai::agent_driver::native_agents::configure_instance(&app_handle, provider_id, api_type, &mut config).map_err(|e|e.to_string())?;
+            config.apply_proxy(api_type, proxy.as_deref());
             let key = config.probe_cache_key(api_type);
             let driver = api_type.to_string();
             let models = NATIVE_MODEL_PROBES.get_or_probe(key, move || async move { probe_models(&driver, config).await }).await?;

@@ -17,6 +17,18 @@ test('should pass the scoped MCP configuration to Cursor without enabling agent 
   await runtime.close();
 });
 
+test('should select the SDK HTTP/1.1 stream when the provider enables its proxy', async () => {
+  const sdk = cursorFixture().sdk;
+  if (!process.allowedNodeEnvironmentFlags.has('--use-env-proxy')) {
+    await assert.rejects(openCursor({ cwd: process.cwd(), useProxy: true }, () => {}, { sdk }), /Node.js/);
+    return;
+  }
+  let settings;
+  sdk.configureCursorSdk = options => { settings = options; };
+  await (await openCursor({ cwd: process.cwd(), useProxy: true }, () => {}, { sdk })).close();
+  assert.deepEqual(settings, { local: { useHttp1ForAgent: true } });
+});
+
 function cursorFixture() {
   const turns = [], events = [];
   const agent = { agentId: 'cursor1', async send(_text, options) {

@@ -19,6 +19,7 @@ vi.mock("../ConfigForm", async () => {
             <input aria-label="endpoint" {...useFormReturn.register("endpoint")} />
             {/* API Key 走真实的 customRender（保险箱引用字段），与 ConfigForm 的 custom 类型一致 */}
             <Controller control={useFormReturn.control} name="api_key" render={({ field }) => apiKey?.customRender(field)} />
+            {config.find(item => item.key === "advanced_config")?.config.customRender()}
             <span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span><span>{apiKey?.hint}</span>
         </div>;
     } };
@@ -36,6 +37,17 @@ describe("LLM provider field autosave", () => {
             return Promise.resolve();
         });
     });
+    it.each(["pi", "cursor", "opencode", "kiro", "antigravity", "codex_app_server", "claude_sdk"])(
+        "should persist the proxy switch when editing a %s provider", async apiType => {
+            render(<LLMProviderConfigForm id="1" index={0} apiType={apiType} name="Agent" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
+            await refresh();
+            fireEvent.click(screen.getByRole("button", { name: "高级配置" }));
+            fireEvent.click(screen.getByRole("switch", { name: "使用网络代理进行请求" }));
+            await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", {
+                llmProviderId: "1", name: "proxy_enabled", value: "true",
+            }));
+        },
+    );
     function mount() {
         render(<LLMProviderConfigForm id="1" index={0} apiType="openai_api" name="test" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
     }

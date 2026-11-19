@@ -261,6 +261,17 @@ pub fn get_network_proxy_from_config(
     None
 }
 
+pub fn agent_network_proxy(
+    providers: &[crate::db::llm_db::LLMProviderConfig],
+    features: &HashMap<String, HashMap<String, crate::db::system_db::FeatureConfig>>,
+) -> Option<String> {
+    if providers.iter().any(|c| c.name == "proxy_enabled" && c.value == "true") {
+        get_network_proxy_from_config(features)
+    } else {
+        None
+    }
+}
+
 /// 根据代理地址构建常见的代理环境变量
 pub fn build_proxy_env_vars(proxy_url: &str) -> HashMap<String, String> {
     let proxy_url = proxy_url.trim();

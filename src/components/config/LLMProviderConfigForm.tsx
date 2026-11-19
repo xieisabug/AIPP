@@ -373,7 +373,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     <div className="p-3 border border-border rounded-lg bg-muted">
                         <div className="flex items-center justify-between gap-4">
                             <div className="flex flex-col">
-                                <label className="text-sm font-medium text-foreground">
+                                <label htmlFor={`provider-proxy-${id}`} className="text-sm font-medium text-foreground">
                                     使用网络代理进行请求
                                 </label>
                                 <span className="text-xs text-muted-foreground">
@@ -381,6 +381,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                 </span>
                             </div>
                             <Switch
+                                id={`provider-proxy-${id}`}
                                 checked={proxyEnabled === "true"}
                                 onCheckedChange={(checked) => {
                                     form.setValue(
@@ -398,7 +399,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 </CollapsibleContent>
             </Collapsible>
         ),
-        [form, isAdvancedConfigExpanded, proxyEnabled, updateField],
+        [form, id, isAdvancedConfigExpanded, proxyEnabled, updateField],
     );
 
     // Pi / Cursor / OpenCode / Kiro / Antigravity：自动检测运行环境与版本
@@ -406,7 +407,13 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 表单字段定义
     const configFields = useMemo(() => {
-        if (nativeAgentFields) return nativeAgentFields;
+        const agentProxyField = {
+            key: "advanced_config",
+            config: { type: "custom" as const, label: "", value: "",
+                customRender: () => renderProxyAdvancedConfig("使用全局网络代理启动此 Agent"),
+            },
+        };
+        if (nativeAgentFields) return [...nativeAgentFields, agentProxyField];
         // GitHub Copilot 提供商：特殊表单
         if (isCopilotProvider) {
             return [
@@ -654,6 +661,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         tooltip: "默认复用 ~/.codex 登录态；这里只填写需要覆盖的环境变量",
                     },
                 },
+                agentProxyField,
             ];
         }
 
@@ -733,6 +741,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         tooltip: "默认复用本机 Claude Code 登录态；这里只填写需要覆盖的环境变量",
                     },
                 },
+                agentProxyField,
             ];
         }
 

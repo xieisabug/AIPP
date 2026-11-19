@@ -236,13 +236,15 @@ describe("NewProviderWizard", () => {
         expect(await screen.findByTestId("wizard-step")).toHaveTextContent("2/2 · 确认本机配置");
         expect(screen.queryByLabelText("接口地址")).not.toBeInTheDocument();
         expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByText("高级配置"));
+        fireEvent.click(screen.getByRole("switch", { name: "使用网络代理进行请求" }));
         await act(async () => {
             fireEvent.click(screen.getByRole("button", { name: "完成" }));
         });
         await waitFor(() => expect(onCreated).toHaveBeenCalledWith(DRAFT_ID));
         expect(invoke).not.toHaveBeenCalledWith("preview_model_list", expect.anything());
         // 没有 ~/.codex/config.toml 时写入与详情页一致的默认值
-        expect(configWrites()).toEqual([["codex_approval_policy", "on-request"], ["codex_sandbox", "workspace-write"]]);
+        expect(configWrites()).toEqual([["proxy_enabled", "true"], ["codex_approval_policy", "on-request"], ["codex_sandbox", "workspace-write"]]);
         expect(invoke).toHaveBeenCalledWith("update_llm_provider", {
             id: DRAFT_ID, name: "Codex", apiType: "codex_app_server", description: "", isEnabled: true,
         });
@@ -288,7 +290,7 @@ describe("NewProviderWizard", () => {
 
         fireEvent.click(screen.getByRole("button", { name: "完成" }));
         await waitFor(() => expect(onCreated).toHaveBeenCalledWith(DRAFT_ID));
-        expect(configWrites()).toEqual([["codex_approval_policy", "never"], ["codex_sandbox", "read-only"]]);
+        expect(configWrites()).toEqual([["proxy_enabled", "false"], ["codex_approval_policy", "never"], ["codex_sandbox", "read-only"]]);
     });
 
     it("should show Claude Code defaults without pinning them on the provider", async () => {
@@ -311,7 +313,7 @@ describe("NewProviderWizard", () => {
 
         fireEvent.click(screen.getByRole("button", { name: "完成" }));
         await waitFor(() => expect(onCreated).toHaveBeenCalledWith(DRAFT_ID));
-        expect(configWrites()).toEqual([]);
+        expect(configWrites()).toEqual([["proxy_enabled", "false"]]);
     });
 
     it("should show read notes when a config value cannot be used", async () => {

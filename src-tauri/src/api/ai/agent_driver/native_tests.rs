@@ -318,7 +318,7 @@ fn test_prepare_provider_config_and_assistant_environment_are_preserved() {
 }
 
 #[test]
-fn test_prepare_acp_applies_effort_and_only_enabled_network_proxy() {
+fn test_native_agent_proxy_applies_when_enabled_and_preserves_acp_effort() {
     let mut fixture = Fixture::new();
     fixture.overrides(&[("reasoning_effort", " high ")]);
     fixture.features.insert("network_config".into(), HashMap::from([("network_proxy".into(), FeatureConfig {
@@ -328,6 +328,15 @@ fn test_prepare_acp_applies_effort_and_only_enabled_network_proxy() {
     for enabled in [false, true] {
         let mut configs = provider_configs();
         configs.push(provider_config("proxy_enabled", if enabled { "true" } else { "false" }));
+        for driver in ["codex_app_server", "claude_sdk"] {
+            let prepared = fixture.prepare(driver, configs.clone()).unwrap();
+            let env = match prepared {
+                PreparedAgentSession::Codex(config) => config.env_vars,
+                PreparedAgentSession::Claude(config) => config.env_vars,
+                _ => panic!("unexpected driver"),
+            };
+            assert_eq!(env.get("HTTPS_PROXY").map(String::as_str), enabled.then_some("http://proxy.test:8080"));
+        }
         let PreparedAgentSession::Acp(config) = fixture.prepare("acp", configs).unwrap() else {
             panic!("expected ACP");
         };

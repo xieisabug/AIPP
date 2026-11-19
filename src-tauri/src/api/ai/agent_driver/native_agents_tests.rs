@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn test_native_agent_proxy_environment_and_cache_key() {
+    for driver in DRIVER_IDS {
+        let mut config = configuration(&[], &[], None).unwrap();
+        config.env.insert("no_proxy".into(), "internal.test".into());
+        config.env.insert("HTTPS_PROXY".into(), "http://custom.test".into());
+        let mut other = config.clone();
+        let original = config.probe_cache_key(driver);
+        config.apply_proxy(driver, Some("http://proxy.test"));
+        assert_eq!(config.env["HTTPS_PROXY"], "http://custom.test");
+        assert_eq!(config.env["HTTP_PROXY"], "http://proxy.test");
+        for host in ["internal.test", "localhost", "127.0.0.1", "::1"] {
+            assert!(config.env["NO_PROXY"].split(',').any(|entry| entry == host));
+        }
+        assert_eq!(config.env["NO_PROXY"], config.env["no_proxy"]);
+        assert_eq!(config.wire["useProxy"].as_bool().unwrap_or(false), driver == "cursor");
+        assert_ne!(config.probe_cache_key(driver), original);
+        let first = config.probe_cache_key(driver);
+        other.apply_proxy(driver, Some("http://other.test"));
+        assert_ne!(first, other.probe_cache_key(driver));
+    }
+}
+
+#[test]
 fn test_native_agent_restore_capabilities_in_session_snapshots() {
     let sessions = |driver: &'static str, snapshot: Value| {
         let payload = super::super::capabilities::snapshot_event_payload(

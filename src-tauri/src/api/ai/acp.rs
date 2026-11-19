@@ -394,6 +394,19 @@ pub fn apply_network_proxy_to_env_vars(
         }
     }
 
+    // Native HTTP/SSE servers and browser callbacks stay on the loopback interface.
+    let configured = env_vars.get("no_proxy").or_else(|| env_vars.get("NO_PROXY")).cloned()
+        .or_else(|| std::env::var("no_proxy").or_else(|_| std::env::var("NO_PROXY")).ok())
+        .unwrap_or_default();
+    let mut bypass: Vec<_> = configured.split(',').map(str::trim).filter(|host| !host.is_empty()).collect();
+    for host in ["localhost", "127.0.0.1", "::1", "[::1]"] {
+        if !bypass.iter().any(|existing| existing.eq_ignore_ascii_case(host)) {
+            bypass.push(host);
+        }
+    }
+    let bypass = bypass.join(",");
+    env_vars.insert("no_proxy".into(), bypass.clone());
+    env_vars.insert("NO_PROXY".into(), bypass);
     injected
 }
 

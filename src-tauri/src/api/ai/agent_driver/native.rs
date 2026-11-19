@@ -5,7 +5,7 @@ use super::session::{AgentSessionHandle, AgentSessionKind};
 use crate::api::ai::acp::{AcpConfig, AcpSessionConfigChoicePayload, apply_network_proxy_to_env_vars, extract_acp_config, refresh_acp_config_signature, spawn_agent_idle_reaper_once, spawn_acp_session_task};
 use crate::api::ai::codex_app_server::{CodexAppServerConfig, extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task, CodexSessionEntry, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES};
 use crate::api::ai::claude_sdk::{ClaudeSdkConfig, claude_model_choices, extract_claude_sdk_config, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry};
-use crate::api::ai::config::get_network_proxy_from_config;
+use crate::api::ai::config::agent_network_proxy;
 use crate::api::assistant_api::{AssistantDetail, resolve_acp_provider_id, CLAUDE_CODE_DEFAULT_MODEL};
 use super::turn::AgentTurnRequest;
 use super::registry::{AgentDriver, AgentDriverMetadata, AgentDriverRegistry, AgentInstanceConfig, AgentSessionLookup, AgentConfigField, AgentConfigValueType};
@@ -62,6 +62,7 @@ fn prepare_selected_config(
     let override_model_config = request.overrides;
     let provider_configs = &selected.configs;
     let driver = selected.kind;
+    let network_proxy = agent_network_proxy(provider_configs, request.feature_configs);
 
     if driver == AgentSessionKind::Codex {
         info!(conversation_id, "Codex app-server provider detected");
@@ -90,6 +91,7 @@ fn prepare_selected_config(
                 codex_config.collaboration_mode = Some(mode.to_string());
             }
         }
+        if let Some(proxy) = &network_proxy { apply_network_proxy_to_env_vars(&mut codex_config.env_vars, proxy); }
         codex_config.developer_instructions = request.native_butler_role.clone();
         codex_config.instance_id = Some(selected.provider_id);
         return Ok(PreparedAgentSession::Codex(codex_config));
@@ -108,19 +110,13 @@ fn prepare_selected_config(
                 config.permission_mode = Some(mode.to_string());
             }
         }
+        if let Some(proxy) = &network_proxy { apply_network_proxy_to_env_vars(&mut config.env_vars, proxy); }
         config.butler_instructions = request.native_butler_role.clone();
         config.instance_id = Some(selected.provider_id);
         return Ok(PreparedAgentSession::Claude(config));
     }
 
     // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
-    let proxy_enabled = provider_configs
-        .iter()
-        .find(|config| config.name == "proxy_enabled")
-        .and_then(|config| config.value.parse::<bool>().ok())
-        .unwrap_or(false);
-    let network_proxy =
-        proxy_enabled.then(|| get_network_proxy_from_config(request.feature_configs)).flatten();
     let mut acp_config =
         extract_acp_config(&assistant_detail.model_configs, provider_configs)?;
     acp_config.model = selected.model_override.clone()
@@ -144,7 +140,6 @@ fn prepare_selected_config(
     if let Some(proxy_url) = network_proxy.as_deref() {
         let injected = apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
         info!(
-            proxy_url = %proxy_url,
             injected,
             conversation_id,
             "ACP proxy env vars applied"
@@ -323,11 +318,11 @@ impl AgentDriver for BuiltinDriver {
     fn config_schema(&self) -> Vec<AgentConfigField> {
         let string = |name: &str| AgentConfigField { name: name.into(), required: false, value_type: AgentConfigValueType::String };
         let choice = |name: &str, values: &[&str]| AgentConfigField { name: name.into(), required: false, value_type: AgentConfigValueType::Choice(values.iter().map(|value| (*value).into()).collect()) };
-        let mut fields = vec![string("acp_working_directory"), string("acp_env_vars")];
+        let mut fields = vec![string("acp_working_directory"), string("acp_env_vars"),
+            AgentConfigField { name: "proxy_enabled".into(), required: false, value_type: AgentConfigValueType::Boolean }];
         match self.0 {
             AgentSessionKind::Acp => fields.extend([
                 string("acp_cli_command"), string("acp_additional_args"),
-                AgentConfigField { name: "proxy_enabled".into(), required: false, value_type: AgentConfigValueType::Boolean },
             ]),
             AgentSessionKind::Codex => fields.extend([
                 string("codex_cli_command"), string("codex_additional_args"),

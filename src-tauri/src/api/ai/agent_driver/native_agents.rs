@@ -49,7 +49,8 @@ impl AgentDriver for NativeDriver {
         ["agent_node_command", "agent_cli_command", "agent_sdk_directory", "acp_working_directory", "acp_env_vars",
             "antigravity_runtime", "antigravity_harness", "antigravity_auth_method", "antigravity_api_key", "kiro_agent", "kiro_effort", "cursor_api_key",
             "pi_approval", "kiro_autopilot", "antigravity_mode", "tool_review_mode"]
-            .iter().map(|name| AgentConfigField { name: name.to_string(), required: false, value_type: AgentConfigValueType::String }).collect()
+            .iter().map(|name| AgentConfigField { name: name.to_string(), required: false, value_type: AgentConfigValueType::String })
+            .chain(std::iter::once(AgentConfigField { name: "proxy_enabled".into(), required: false, value_type: AgentConfigValueType::Boolean })).collect()
     }
     fn capabilities(&self) -> AgentCapabilities { AgentCapabilities::baseline(self.0, self.declaration()) }
     fn prepare(&self, request: &AgentTurnRequest<'_>, instance: &AgentInstanceConfig, model_override: Option<&str>) -> Result<Box<dyn PreparedAgentSession>, AppError> {
@@ -62,12 +63,8 @@ impl AgentDriver for NativeDriver {
                 }
             }
         }
-        let proxy_enabled = instance.configs.iter().any(|c| c.name == "proxy_enabled" && c.value == "true");
-        if proxy_enabled {
-            if let Some(proxy) = crate::api::ai::config::get_network_proxy_from_config(request.feature_configs) {
-                crate::api::ai::acp::apply_network_proxy_to_env_vars(&mut config.env, &proxy);
-            }
-        }
+        let proxy = crate::api::ai::config::agent_network_proxy(&instance.configs, request.feature_configs);
+        config.apply_proxy(self.0, proxy.as_deref());
         if let Some(role) = &request.native_butler_role { config.wire["butlerInstructions"] = json!(role); }
         Ok(Box::new(Prepared { driver: *self, instance: instance.clone(), config, mcp_scope: None }))
     }
@@ -89,6 +86,15 @@ pub(crate) struct NativeConfig {
     review: bool,
 }
 impl NativeConfig {
+    pub(crate) fn apply_proxy(&mut self, driver: &str, proxy: Option<&str>) {
+        if let Some(proxy) = proxy {
+            crate::api::ai::acp::apply_network_proxy_to_env_vars(&mut self.env, proxy);
+            if driver == "cursor" {
+                self.env.insert("NODE_USE_ENV_PROXY".into(), "1".into());
+                self.wire["useProxy"] = json!(true);
+            }
+        }
+    }
     /// Everything a model probe depends on: launcher, working directory, environment and wire settings.
     pub(crate) fn probe_cache_key(&self, driver: &str) -> String {
         let env: std::collections::BTreeMap<_, _> = self.env.iter().collect();

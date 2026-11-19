@@ -34,9 +34,18 @@ export function loginUrl(value) {
   return value;
 }
 
+// This bridge has its own Node process per provider session. Both fetch (login/catalog)
+// and node:https (SDK streams) must consume the proxy configured before Node starts.
+function requireProxyRuntime(config) {
+  if (config.useProxy && !process.allowedNodeEnvironmentFlags.has('--use-env-proxy')) {
+    throw new Error(`Cursor 网络代理需要支持 --use-env-proxy 的 Node.js（22.21+ LTS 或 24.5+），当前为 ${process.version}`);
+  }
+}
+
 // Browser sign-in through the official SDK, persisted only after it fully succeeds.
 export async function loginCursor(config, emit, dependencies = {}) {
   if (!config.auth_store || !isAbsolute(config.auth_store)) throw new Error('Cursor sign-in requires an absolute per-provider credential path');
+  requireProxyRuntime(config);
   const sdk = dependencies.sdk || loadSdk(config);
   const pending = new sdk.InMemoryCredentialStore();
   const result = await sdk.Cursor.auth.login({ openBrowser: false, store: pending, apiKeyName: config.key_name || 'AIPP',
@@ -67,6 +76,7 @@ function transportDiagnostic(text) {
 }
 
 export async function openCursor(config, emit, dependencies = {}) {
+  requireProxyRuntime(config);
   const apiKey = await apiKeyFor(config);
   const models = async () => {
     if (!apiKey) throw new Error('Cursor 未登录：在提供商设置中点击「登录 Cursor」，或填写 Cursor API Key');
@@ -77,7 +87,12 @@ export async function openCursor(config, emit, dependencies = {}) {
     return data.items.map(model => ({ id: model.id, name: model.displayName }));
   };
   if (config.probe) return { models, async close() {} };
-  const { Agent } = dependencies.sdk || loadSdk(config);
+  const sdk = dependencies.sdk || loadSdk(config);
+  if (config.useProxy) {
+    if (typeof sdk.configureCursorSdk !== 'function') throw new Error('Cursor SDK 缺少代理所需的 HTTP/1.1 流式配置，请更新 @cursor/sdk');
+    sdk.configureCursorSdk({ local: { useHttp1ForAgent: true } });
+  }
+  const { Agent } = sdk;
   const options = {
     model: { id: config.model || 'default' },
     mode: 'agent',

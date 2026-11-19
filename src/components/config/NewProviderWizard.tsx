@@ -127,7 +127,6 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     }, []);
 
     const isHttp = apiType?.kind === "http";
-    const supportsProxy = apiType ? apiType.kind !== "local" || apiType.value === "acp" : false;
     const totalSteps = apiType && !isHttp ? 2 : 3;
     const stepLabel = step === 1
         ? "选择 API 类型"
@@ -248,7 +247,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             invoke("update_llm_provider_config", { llmProviderId: id, name: key, value });
         // 接口地址先于 API Key 写入：保险箱引用按当前地址确认去向
         if (type.kind === "http" && !type.noEndpoint) await write("endpoint", endpoint.trim());
-        if (type.kind !== "local" || type.value === "acp") await write("proxy_enabled", proxyEnabled ? "true" : "false");
+        await write("proxy_enabled", proxyEnabled ? "true" : "false");
         if (type.kind === "http") await write("api_key", apiKey.trim());
         for (const key of LOCAL_SETTING_KEYS[type.value] ?? []) {
             const value = localValues[key]?.trim();
@@ -525,27 +524,25 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                             />
                         )}
 
-                        {supportsProxy && (
-                            <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-                                <CollapsibleTrigger asChild>
-                                    <button type="button" className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
-                                        高级配置
-                                        <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", advancedOpen && "rotate-180")} />
-                                    </button>
-                                </CollapsibleTrigger>
-                                <CollapsibleContent className="mt-2">
-                                    <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-2.5">
-                                        <div className="flex min-w-0 flex-col">
-                                            <label htmlFor="new-provider-proxy" className="text-sm font-medium text-foreground">使用网络代理进行请求</label>
-                                            <span className="text-xs text-muted-foreground">
-                                                {apiType.value === "acp" ? "启动 ACP agent client 时注入全局网络代理环境变量" : "使用全局网络代理配置请求模型与获取模型列表"}
-                                            </span>
-                                        </div>
-                                        <Switch id="new-provider-proxy" checked={proxyEnabled} onCheckedChange={setProxyEnabled} />
+                        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                            <CollapsibleTrigger asChild>
+                                <button type="button" className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
+                                    高级配置
+                                    <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", advancedOpen && "rotate-180")} />
+                                </button>
+                            </CollapsibleTrigger>
+                            <CollapsibleContent className="mt-2">
+                                <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-2.5">
+                                    <div className="flex min-w-0 flex-col">
+                                        <label htmlFor="new-provider-proxy" className="text-sm font-medium text-foreground">使用网络代理进行请求</label>
+                                        <span className="text-xs text-muted-foreground">
+                                            {apiType.kind === "local" ? "使用全局网络代理启动此 Agent" : "使用全局网络代理配置请求模型与获取模型列表"}
+                                        </span>
                                     </div>
-                                </CollapsibleContent>
-                            </Collapsible>
-                        )}
+                                    <Switch id="new-provider-proxy" checked={proxyEnabled} onCheckedChange={setProxyEnabled} />
+                                </div>
+                            </CollapsibleContent>
+                        </Collapsible>
                     </div>
                 )}
 

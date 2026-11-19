@@ -74,18 +74,21 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
     return Err(format!("MOBILE_UNSUPPORTED: {display} requires a local desktop runtime"));
 
     let provider_name;
-    let mut config = {
+    let configs = {
         let db = crate::db::llm_db::LLMDatabase::new(app).map_err(|e|e.to_string())?;
         let provider = db.get_llm_provider(provider_id).map_err(|e|e.to_string())?;
         if provider.api_type != driver { return Err(format!("The selected provider is not {display}")); }
         provider_name = provider.name;
         // Use the form snapshot, so a pending autosave cannot sign in with old
         // paths/credentials. This does not persist or mutate provider settings.
-        let configs = settings.into_iter().map(|(name, value)| LLMProviderConfig {
+        settings.into_iter().map(|(name, value)| LLMProviderConfig {
             id: 0, name, value, llm_provider_id: provider_id, append_location: String::new(), is_addition: false,
-        }).collect::<Vec<_>>();
-        configuration(&[], &configs, None).map_err(|e|e.to_string())?
+        }).collect::<Vec<_>>()
     };
+    let mut config = configuration(&[], &configs, None).map_err(|e|e.to_string())?;
+    let state = app.state::<crate::FeatureConfigState>();
+    let proxy = crate::api::ai::config::agent_network_proxy(&configs, &*state.config_feature_map.lock().await);
+    config.apply_proxy(driver, proxy.as_deref());
     configure_instance(app, provider_id, driver, &mut config).map_err(|e|e.to_string())?;
     if driver == "cursor" {
         if config.env.contains_key("CURSOR_API_KEY") { return Err("已配置 Cursor API Key（或 CURSOR_API_KEY 环境变量），会优先使用它；如需浏览器登录请先清除".into()); }
