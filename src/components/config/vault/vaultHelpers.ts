@@ -32,19 +32,27 @@ export function suggestKey(name: string, taken: string[]): string {
     return candidate;
 }
 
+const pad = (value: number) => String(value).padStart(2, "0");
+
+/** 列表里的短时间：月-日 时:分。 */
 export function formatTime(ms: number | null | undefined): string {
     if (!ms) return "—";
     const date = new Date(ms);
-    const pad = (value: number) => String(value).padStart(2, "0");
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export function formatRelative(ms: number | null | undefined, now = Date.now()): string {
-    if (!ms) return "未使用";
+/** 详情里的完整时间：年-月-日 时:分。 */
+export function formatDateTime(ms: number): string {
+    const date = new Date(ms);
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前。 */
+export function formatRelative(ms: number, now = Date.now()): string {
     const minutes = Math.floor((now - ms) / 60000);
-    if (minutes < 1) return "刚刚使用";
-    if (minutes < 60) return `${minutes} 分钟前使用`;
+    if (minutes < 1) return "刚刚";
+    if (minutes < 60) return `${minutes} 分钟前`;
     const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours} 小时前使用`;
-    return `${Math.floor(hours / 24)} 天前使用`;
+    if (hours < 24) return `${hours} 小时前`;
+    return `${Math.floor(hours / 24)} 天前`;
 }
