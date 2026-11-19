@@ -1,3 +1,4 @@
+import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -1334,16 +1335,11 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                         {pluginDetailContent}
                     </TabsContent>
                     <TabsContent value="config" className="mt-4 space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <Input
-                                placeholder="config key"
-                                value={newConfigKey}
-                                onChange={(e) => setNewConfigKey(e.target.value)}
-                            />
-                            <Button onClick={handleSaveConfig} disabled={actionBusy}>
-                                保存配置
-                            </Button>
-                        </div>
+                        <Input
+                            placeholder="config key"
+                            value={newConfigKey}
+                            onChange={(e) => setNewConfigKey(e.target.value)}
+                        />
                         <Textarea
                             placeholder="config value（可选）"
                             value={newConfigValue}
@@ -1371,6 +1367,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                                 ))
                             )}
                         </div>
+                        <ConfigSaveFooter>
+                            <Button onClick={handleSaveConfig} disabled={actionBusy}>保存配置</Button>
+                        </ConfigSaveFooter>
                     </TabsContent>
                     <TabsContent value="hooks" className="mt-4 space-y-4">
                         <div className="flex items-center justify-between gap-3">

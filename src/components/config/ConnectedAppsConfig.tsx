@@ -1,3 +1,4 @@
+import { ConfigSheetBody } from "@/components/common/ConfigSaveFooter";
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ArrowLeft, ChevronRight, CloudOff, Plus, RefreshCw, Search } from 'lucide-react';
@@ -298,7 +299,17 @@ export default function ConnectedAppsConfig() {
             const app = await invoke<AppDefinition>('get_app_directory_detail', {id});
             setApps(old => [...old.filter(a => a.id !== app.id), app]); setImportOpen(false); setSelection({kind:'app',appId:app.id});
         }} />
-        <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl"><SheetHeader><SheetTitle>GitHub 插件</SheetTitle><SheetDescription>高级来源管理；应用详情与安装请从应用目录进入。</SheetDescription></SheetHeader>{pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig directoryCatalog={pluginCatalog} initialSource={pluginSource} onChanged={() => void reload()} /></div>}</SheetContent></Sheet>
+        <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}>
+            <SheetContent className="w-full overflow-hidden sm:max-w-3xl">
+                <ConfigSheetBody>
+                    <SheetHeader>
+                        <SheetTitle>GitHub 插件</SheetTitle>
+                        <SheetDescription>高级来源管理；应用详情与安装请从应用目录进入。</SheetDescription>
+                    </SheetHeader>
+                    {pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig directoryCatalog={pluginCatalog} initialSource={pluginSource} onChanged={() => void reload()} /></div>}
+                </ConfigSheetBody>
+            </SheetContent>
+        </Sheet>
         <BuiltinToolDialog isOpen={!!builtinId} initialTemplateId={builtinId} onClose={() => setBuiltinId(undefined)} onSubmit={() => { setBuiltinId(undefined); void reload(); }} />
     </div>;
 }

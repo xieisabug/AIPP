@@ -1,3 +1,4 @@
+import { ConfigFooterLayout } from "@/components/common/ConfigSaveFooter";
 import React, { useState, useEffect, useMemo, memo } from 'react';
 import { ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
@@ -251,9 +252,11 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                                 <ChevronLeft className="h-4 w-4" />返回列表
                             </button>
                         )}
-                        <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 pt-4 pb-6" data-aipp-slot="config-page-scroll" data-aipp-config-detail-scroll>
-                            {content}
-                        </div>
+                        <ConfigFooterLayout>
+                            <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 pt-4 pb-6" data-aipp-slot="config-page-scroll" data-aipp-config-detail-scroll>
+                                {content}
+                            </div>
+                        </ConfigFooterLayout>
                     </div>
                 ) : renderMobileList()}
             </div>
@@ -272,9 +275,11 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                 </div>
             ) : shouldShowDropdown ? (
                 // 窄屏：滚动容器占满宽度、内边距放在滚动容器内部，滚动条贴住屏幕边缘
-                <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 pb-6" data-aipp-slot="config-page-scroll">
-                    {content}
-                </div>
+                <ConfigFooterLayout>
+                    <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 pb-6" data-aipp-slot="config-page-scroll">
+                        {content}
+                    </div>
+                </ConfigFooterLayout>
             ) : (
                 <div className="flex flex-1 min-h-0 gap-6 px-4 py-6" data-aipp-slot="config-split">
                     {/* 左侧列表：固定宽度、占满高度，列表内部独立滚动（工具栏固定） */}
@@ -283,8 +288,12 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                     </div>
 
                     {/* 右侧配置区域，独立滚动 */}
-                    <div className="min-w-0 flex-1 min-h-0 overflow-y-auto thin-scrollbar" data-aipp-slot="config-page-scroll">
-                        {content}
+                    <div className="flex min-w-0 flex-1 flex-col">
+                        <ConfigFooterLayout>
+                            <div className="min-w-0 flex-1 min-h-0 overflow-y-auto thin-scrollbar" data-aipp-slot="config-page-scroll">
+                                {content}
+                            </div>
+                        </ConfigFooterLayout>
                     </div>
                 </div>
             )}

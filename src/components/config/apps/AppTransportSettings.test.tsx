@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { MCPServer } from '@/data/MCP';
+import { ConfigFooterLayout } from '@/components/common/ConfigSaveFooter';
 import AppTransportSettings from './AppTransportSettings';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -13,7 +14,10 @@ describe('AppTransportSettings', () => {
         const onSaved = vi.fn();
         vi.mocked(invoke).mockResolvedValue(undefined);
         const user = userEvent.setup();
-        render(<AppTransportSettings server={server} onSaved={onSaved} />);
+        render(<ConfigFooterLayout>
+            <div data-testid="scroll-body"><AppTransportSettings server={server} onSaved={onSaved} /></div>
+        </ConfigFooterLayout>);
+        expect(screen.getByTestId('scroll-body')).not.toContainElement(screen.getByRole('button', { name: '保存网络设置' }));
         await user.clear(screen.getByLabelText('调用超时（毫秒）'));
         await user.type(screen.getByLabelText('调用超时（毫秒）'), '45000');
         await user.click(screen.getByRole('switch'));

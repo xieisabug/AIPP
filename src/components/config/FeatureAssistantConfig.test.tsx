@@ -96,9 +96,9 @@ describe("FeatureAssistantConfig network config", () => {
         fireEvent.change(proxyInput, {
             target: { value: "http://proxy.example.com:8080" },
         });
-        const saveButtons = screen.getAllByRole("button", { name: "保存配置" });
-        expect(saveButtons.length).toBeGreaterThanOrEqual(1);
-        await user.click(saveButtons[0]);
+        const saveButton = screen.getByRole("button", { name: "保存配置" });
+        expect(saveButton.closest('[data-aipp-slot="config-form-save-footer"]')).not.toBeNull();
+        await user.click(saveButton);
 
         await waitFor(() => {
             const saveCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_feature_config");

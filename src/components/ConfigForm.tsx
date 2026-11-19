@@ -1,3 +1,4 @@
+import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
 import OptionalConfigSection from "./config/OptionalConfigSection";
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Control, Controller, SubmitHandler, UseFormReturn } from "react-hook-form";
@@ -75,6 +76,8 @@ interface ConfigFormProps {
     /** Caller-computed dirty state; when omitted falls back to RHF formState.isDirty. */
     isDirty?: boolean;
     isSaving?: boolean;
+    saveDisabled?: boolean;
+    saveStatus?: string;
     assistantConfigApi?: AssistantConfigApi;
     layout?: "default" | "prompt" | "provider";
     assistantType?: number | null;  // 用于过滤模型（ACP 助手 vs 普通助手）
@@ -82,7 +85,6 @@ interface ConfigFormProps {
     extensionFieldKeys?: readonly string[];
     advancedConfigKey?: string | number;
     onSave?: SubmitHandler<any>;
-    showHeaderSave?: boolean;
     onCopy?: () => void;
     onDelete?: () => void;
     onEdit?: () => void;
@@ -468,13 +470,14 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     useFormReturn,
     isDirty: isDirtyProp,
     isSaving = false,
+    saveDisabled = false,
+    saveStatus,
     assistantConfigApi,
     assistantType,
     advancedFieldKeys = [],
     extensionFieldKeys = [],
     advancedConfigKey,
     onSave,
-    showHeaderSave = true,
     onCopy,
     onDelete,
     onEdit,
@@ -684,22 +687,6 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             未保存
                         </span>
                     ) : null}
-                    {/* 移动端展开时使用底部固定保存栏，头部只保留状态与更多菜单 */}
-                    {onSave && showHeaderSave && !(isMobilePlatform && isExpanded) && (
-                        <Button
-                            type="button"
-                            size="sm"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                void onSave(useFormReturn.getValues());
-                            }}
-                            className="bg-primary hover:bg-primary/90 text-primary-foreground min-h-9"
-                            disabled={isSaving}
-                            data-aipp-slot="config-form-save-header"
-                        >
-                            {isSaving ? "保存中…" : "保存配置"}
-                        </Button>
-                    )}
                     {isMobilePlatform && (onCopy || onEdit || onDelete) ? (
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
@@ -778,26 +765,23 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
             >
                 <Form {...useFormReturn}>
                     {renderContent()}
-                    {onSave && (
-                        <div
-                            className="sticky bottom-0 z-20 mt-8 border-t border-border bg-card/95 pt-4 pb-[max(1rem,env(safe-area-inset-bottom,0px))] backdrop-blur supports-[backdrop-filter]:bg-card/80"
-                            style={{ bottom: "var(--aipp-keyboard-inset-bottom, 0px)" }}
-                            data-aipp-slot="config-form-save-footer"
-                        >
+                    {onSave && isExpanded && (
+                        <ConfigSaveFooter>
                             <div className="flex items-center gap-3">
                                 <Button
                                     type="button"
-                                    disabled={isSaving}
+                                    disabled={isSaving || saveDisabled}
                                     onClick={() => void onSave(useFormReturn.getValues())}
-                                    className="bg-primary hover:bg-primary/90 text-primary-foreground min-h-11"
+                                    className="bg-primary hover:bg-primary/90 text-primary-foreground"
                                 >
                                     {isSaving ? "保存中…" : "保存配置"}
                                 </Button>
+                                {saveStatus && <span role="status" className="text-xs text-muted-foreground">{saveStatus}</span>}
                                 {isDirty ? (
                                     <span className="text-xs font-medium text-foreground">有未保存的更改</span>
                                 ) : null}
                             </div>
-                        </div>
+                        </ConfigSaveFooter>
                     )}
                 </Form>
             </CardContent>

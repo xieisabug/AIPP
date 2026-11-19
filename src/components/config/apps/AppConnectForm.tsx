@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
+import { useId, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { ExternalLink, KeyRound, Loader2, LogIn, ShieldCheck } from 'lucide-react';
@@ -34,6 +35,7 @@ function Intro({ app, connection }: { app: AppDefinition; connection?: AppConnec
 export default function AppConnectForm({ app, connection, updateDefinition, onConnected, onCancel }: {
     app: AppDefinition; connection?: AppConnection; updateDefinition?: boolean; onConnected: (serverId: number) => void; onCancel?: () => void;
 }) {
+    const formId = useId();
     const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(app.fields.map(f => [f.key, f.secret ? '' : connection?.config[f.key] ?? f.default ?? ''])));
     const [label, setLabel] = useState(connection?.label ?? app.name);
     // One id per form instance: retries of the same submit are idempotent on the backend.
@@ -68,7 +70,7 @@ export default function AppConnectForm({ app, connection, updateDefinition, onCo
     };
 
     const submitLabel = busy ? '正在准备连接…' : app.connection.auth === 'oauth' ? '登录并连接' : '保存并验证';
-    return <form className="space-y-5" onSubmit={e => { e.preventDefault(); void connect(); }}>
+    return <form id={formId} className="space-y-5" onSubmit={e => { e.preventDefault(); void connect(); }}>
         {updateDefinition && connection && <section className="rounded-md border p-3 text-sm">
             <h4 className="font-medium">更新后的工具和权限</h4>
             {(app.connection.http_api?.tools ?? []).map(tool => {
@@ -112,13 +114,15 @@ export default function AppConnectForm({ app, connection, updateDefinition, onCo
             </div>;
         })}
         {error && <p role="alert" className="rounded-lg border border-destructive/30 px-3 py-2 text-sm break-words text-destructive">{error}</p>}
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
-            {authorizationUrl && <Button type="button" variant="outline" className="mr-auto" onClick={() => void openUrl(authorizationUrl).then(() => { setError(''); if (createdId) onConnected(createdId); }).catch(() => setError('系统浏览器打开失败，请检查默认浏览器设置。'))}>
-                <ExternalLink className="h-4 w-4" />重新打开授权页面
-            </Button>}
-            {createdId !== undefined && !authorizationUrl && <p role="status" className="mr-auto text-sm text-muted-foreground">连接已创建，状态会在详情中更新。</p>}
-            {onCancel && <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>取消</Button>}
-            {createdId === undefined && <Button type="submit" disabled={busy}>{busy && <Loader2 className="h-4 w-4 animate-spin" />}{submitLabel}</Button>}
-        </div>
+        <ConfigSaveFooter>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+                {authorizationUrl && <Button type="button" variant="outline" className="mr-auto" onClick={() => void openUrl(authorizationUrl).then(() => { setError(''); if (createdId) onConnected(createdId); }).catch(() => setError('系统浏览器打开失败，请检查默认浏览器设置。'))}>
+                    <ExternalLink className="h-4 w-4" />重新打开授权页面
+                </Button>}
+                {createdId !== undefined && !authorizationUrl && <p role="status" className="mr-auto text-sm text-muted-foreground">连接已创建，状态会在详情中更新。</p>}
+                {onCancel && <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>取消</Button>}
+                {createdId === undefined && <Button form={formId} type="submit" disabled={busy}>{busy && <Loader2 className="h-4 w-4 animate-spin" />}{submitLabel}</Button>}
+            </div>
+        </ConfigSaveFooter>
     </form>;
 }

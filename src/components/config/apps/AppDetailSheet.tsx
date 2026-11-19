@@ -1,3 +1,4 @@
+import { ConfigSheetBody } from "@/components/common/ConfigSaveFooter";
 import { useConnectionRefresh } from './useConnectionRefresh';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { shareConfig, checkFailure, type ConnectionCheck } from './connectionManagement';
@@ -303,66 +304,68 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
 
     return <>
         <Sheet open={!!selection} onOpenChange={open => { if (!open) close(); }}>
-            <SheetContent className="w-full gap-0 overflow-y-auto p-0 sm:max-w-2xl">
-                <SheetHeader className="space-y-4 border-b px-6 pb-0 pt-6">
-                    <div className="flex items-start gap-4 pr-6">
-                        <AppIcon size="lg" builtinCommand={server?.is_builtin ? server.command : undefined} icon={apps.find(entry => entry.id === app?.id)?.icon ?? app?.icon} official={official} />
-                        <div className="min-w-0 flex-1 space-y-1">
-                            <SheetTitle className="truncate text-lg">{title}</SheetTitle>
-                            <SheetDescription className="truncate">{subtitle}</SheetDescription>
-                            {status && summary && <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-muted-foreground">
-                                <AppStatusBadge status={status} />
-                                <span aria-hidden>·</span><span>{summary.known ? `${summary.enabled} / ${summary.total} 个工具已启用` : '工具尚未检测，验证连接后显示'}</span>
-                            </div>}
+            <SheetContent className="w-full gap-0 overflow-hidden p-0 sm:max-w-2xl">
+                <ConfigSheetBody>
+                    <SheetHeader className="space-y-4 border-b px-6 pb-0 pt-6">
+                        <div className="flex items-start gap-4 pr-6">
+                            <AppIcon size="lg" builtinCommand={server?.is_builtin ? server.command : undefined} icon={apps.find(entry => entry.id === app?.id)?.icon ?? app?.icon} official={official} />
+                            <div className="min-w-0 flex-1 space-y-1">
+                                <SheetTitle className="truncate text-lg">{title}</SheetTitle>
+                                <SheetDescription className="truncate">{subtitle}</SheetDescription>
+                                {status && summary && <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-muted-foreground">
+                                    <AppStatusBadge status={status} />
+                                    <span aria-hidden>·</span><span>{summary.known ? `${summary.enabled} / ${summary.total} 个工具已启用` : '工具尚未检测，验证连接后显示'}</span>
+                                </div>}
+                            </div>
+                            {headerActions}
                         </div>
-                        {headerActions}
+                        {notice}
+                        {server && !connectView ? <Tabs value={tab} onValueChange={value => { setTab(value); if (value === 'access') setJustConnected(undefined); }}>
+                            <TabsList className="h-auto gap-4 rounded-none bg-transparent p-0">
+                                {[['overview', '概览'], ['tools', summary?.known ? `工具 ${summary.total}` : '工具'], ...(!server.is_builtin ? [['access', '助手授权']] : []), ...(connection ? [['settings', '连接设置']] : [])].map(([value, label]) =>
+                                    <TabsTrigger key={value} value={value} className="-mb-px h-9 flex-none rounded-none border-0 border-b-2 border-transparent px-0 shadow-none data-[state=active]:border-foreground data-[state=active]:bg-transparent data-[state=active]:shadow-none dark:data-[state=active]:bg-transparent">{label}</TabsTrigger>)}
+                            </TabsList>
+                        </Tabs> : <div className="pb-2" />}
+                    </SheetHeader>
+                    <div className="px-6 py-6">
+                        {connectView ? connectViewContent : server ? <Tabs value={tab} onValueChange={setTab}>
+                            <TabsContent value="overview" className="mt-0">{overview}</TabsContent>
+                            <TabsContent value="tools" className="mt-0">
+                                {!server.is_builtin && !!serverTools?.length && <div className="mb-4 flex flex-wrap justify-end gap-2">
+                                    {[true, false].map(enabled => <Button key={String(enabled)} size="sm" variant="outline"
+                                        disabled={!!busy || !deviceSupported || serverTools.every(tool => tool.is_enabled === enabled)}
+                                        onClick={() => void run('正在更新工具开关…', () => invoke('set_connection_tools_enabled', { serverId: server.id, isEnabled: enabled }))}>
+                                        {enabled ? '全部开启' : '全部关闭'}
+                                    </Button>)}
+                                </div>}
+                                <MCPConfig key={server.id} initialServerId={server.id} detailOnly compact
+                                onEditManaged={connection ? () => connection.definition.connection.transport === 'stdio' ? void openPluginConnection(connection.definition) : startConnect(connection) : undefined}
+                                onRefreshManaged={!server.is_builtin ? () => verify(server.id) : undefined} /></TabsContent>
+                            {!server.is_builtin && <TabsContent value="access" className="mt-0"><AppAssistantAccess serverId={server.id} /></TabsContent>}
+                            {connection && <TabsContent value="settings" className="mt-0 space-y-4">
+                                <Panel title="账号与凭据" description={connection.credential_status}>
+                                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                                        <div className="space-y-0.5"><p>{connection.label}</p><p className="text-xs text-muted-foreground">{authLabel(connection.definition.connection.auth)}</p></div>
+                                        {connection.definition.connection.transport !== 'stdio'
+                                            ? <Button size="sm" variant="outline" onClick={() => startConnect(connection)}>重新配置</Button>
+                                            : <Button size="sm" variant="outline" onClick={() => void openPluginConnection(connection.definition)}>管理插件本地连接</Button>}
+                                    </div>
+                                </Panel>
+                                {['http', 'http_api'].includes(server.transport_type) && <Panel title="网络" description="调整超时和代理不需要重新授权。">
+                                    <AppTransportSettings key={`${server.id}-${server.timeout}-${server.proxy_enabled}`} server={server} onSaved={() => { toast.success('网络设置已保存'); void refresh().catch(() => {}); }} />
+                                </Panel>}
+                                <Panel danger title="断开连接" description={connection.credential_on_device === false
+                                    ? '这台设备没有此连接的凭据，无法撤销服务商授权；断开会停用连接并同步到其他设备。建议在保存凭据的设备上断开。'
+                                    : '断开会停用连接、删除本机凭据，并尝试撤销服务商支持的 OAuth 授权；已执行的操作不会回滚。启用同步时，断开和凭据删除会同步到其他设备。'}>
+                                    {connection.status === 'disconnected'
+                                        ? <p className="text-sm text-muted-foreground">{connection.error ? '上次断开未完成，请在页面顶部重试或选择不撤销授权。' : '此连接已断开。'}</p>
+                                        : <div className="flex justify-end"><Button size="sm" variant="outline" className="border-destructive/40 text-destructive hover:bg-destructive/5 hover:text-destructive" disabled={!!busy} onClick={() => void disconnect(connection.server_id)}>{busyIcon('正在断开连接…') ?? <Unplug className="h-4 w-4" />}断开连接</Button></div>}
+                                </Panel>
+                            </TabsContent>}
+                        </Tabs> : overview}
+                        {!server && !connectView && !app && !pluginOverview && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Info className="h-4 w-4" />连接配置已移除。</p>}
                     </div>
-                    {notice}
-                    {server && !connectView ? <Tabs value={tab} onValueChange={value => { setTab(value); if (value === 'access') setJustConnected(undefined); }}>
-                        <TabsList className="h-auto gap-4 rounded-none bg-transparent p-0">
-                            {[['overview', '概览'], ['tools', summary?.known ? `工具 ${summary.total}` : '工具'], ...(!server.is_builtin ? [['access', '助手授权']] : []), ...(connection ? [['settings', '连接设置']] : [])].map(([value, label]) =>
-                                <TabsTrigger key={value} value={value} className="-mb-px h-9 flex-none rounded-none border-0 border-b-2 border-transparent px-0 shadow-none data-[state=active]:border-foreground data-[state=active]:bg-transparent data-[state=active]:shadow-none dark:data-[state=active]:bg-transparent">{label}</TabsTrigger>)}
-                        </TabsList>
-                    </Tabs> : <div className="pb-2" />}
-                </SheetHeader>
-                <div className="px-6 py-6">
-                    {connectView ? connectViewContent : server ? <Tabs value={tab} onValueChange={setTab}>
-                        <TabsContent value="overview" className="mt-0">{overview}</TabsContent>
-                        <TabsContent value="tools" className="mt-0">
-                            {!server.is_builtin && !!serverTools?.length && <div className="mb-4 flex flex-wrap justify-end gap-2">
-                                {[true, false].map(enabled => <Button key={String(enabled)} size="sm" variant="outline"
-                                    disabled={!!busy || !deviceSupported || serverTools.every(tool => tool.is_enabled === enabled)}
-                                    onClick={() => void run('正在更新工具开关…', () => invoke('set_connection_tools_enabled', { serverId: server.id, isEnabled: enabled }))}>
-                                    {enabled ? '全部开启' : '全部关闭'}
-                                </Button>)}
-                            </div>}
-                            <MCPConfig key={server.id} initialServerId={server.id} detailOnly compact
-                            onEditManaged={connection ? () => connection.definition.connection.transport === 'stdio' ? void openPluginConnection(connection.definition) : startConnect(connection) : undefined}
-                            onRefreshManaged={!server.is_builtin ? () => verify(server.id) : undefined} /></TabsContent>
-                        {!server.is_builtin && <TabsContent value="access" className="mt-0"><AppAssistantAccess serverId={server.id} /></TabsContent>}
-                        {connection && <TabsContent value="settings" className="mt-0 space-y-4">
-                            <Panel title="账号与凭据" description={connection.credential_status}>
-                                <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-                                    <div className="space-y-0.5"><p>{connection.label}</p><p className="text-xs text-muted-foreground">{authLabel(connection.definition.connection.auth)}</p></div>
-                                    {connection.definition.connection.transport !== 'stdio'
-                                        ? <Button size="sm" variant="outline" onClick={() => startConnect(connection)}>重新配置</Button>
-                                        : <Button size="sm" variant="outline" onClick={() => void openPluginConnection(connection.definition)}>管理插件本地连接</Button>}
-                                </div>
-                            </Panel>
-                            {['http', 'http_api'].includes(server.transport_type) && <Panel title="网络" description="调整超时和代理不需要重新授权。">
-                                <AppTransportSettings key={`${server.id}-${server.timeout}-${server.proxy_enabled}`} server={server} onSaved={() => { toast.success('网络设置已保存'); void refresh().catch(() => {}); }} />
-                            </Panel>}
-                            <Panel danger title="断开连接" description={connection.credential_on_device === false
-                                ? '这台设备没有此连接的凭据，无法撤销服务商授权；断开会停用连接并同步到其他设备。建议在保存凭据的设备上断开。'
-                                : '断开会停用连接、删除本机凭据，并尝试撤销服务商支持的 OAuth 授权；已执行的操作不会回滚。启用同步时，断开和凭据删除会同步到其他设备。'}>
-                                {connection.status === 'disconnected'
-                                    ? <p className="text-sm text-muted-foreground">{connection.error ? '上次断开未完成，请在页面顶部重试或选择不撤销授权。' : '此连接已断开。'}</p>
-                                    : <div className="flex justify-end"><Button size="sm" variant="outline" className="border-destructive/40 text-destructive hover:bg-destructive/5 hover:text-destructive" disabled={!!busy} onClick={() => void disconnect(connection.server_id)}>{busyIcon('正在断开连接…') ?? <Unplug className="h-4 w-4" />}断开连接</Button></div>}
-                            </Panel>
-                        </TabsContent>}
-                    </Tabs> : overview}
-                    {!server && !connectView && !app && !pluginOverview && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Info className="h-4 w-4" />连接配置已移除。</p>}
-                </div>
+                </ConfigSheetBody>
             </SheetContent>
         </Sheet>
         <ConfirmDialog isOpen={!!removing} title="删除连接" confirmText={`删除「${removing ? connections.find(c => c.server_id === removing.id)?.label ?? removing.name : ''}」的连接、工具配置和凭据。聊天历史、服务商账号、共享技能和其他连接会保留。`}

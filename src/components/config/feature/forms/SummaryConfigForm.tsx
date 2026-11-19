@@ -1,3 +1,4 @@
+import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
 import React, { useCallback, useMemo } from "react";
 import { UseFormReturn } from "react-hook-form";
 import { Controller } from "react-hook-form";
@@ -488,11 +489,11 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                 </ConfigSection>
 
                 {/* 保存按钮 */}
-                <div className="pt-4 border-t border-border">
+                <ConfigSaveFooter>
                     <Button onClick={handleSaveSummary} className="bg-primary hover:bg-primary/90 text-primary-foreground">
                         保存配置
                     </Button>
-                </div>
+                </ConfigSaveFooter>
             </div>
         </Form>
     );

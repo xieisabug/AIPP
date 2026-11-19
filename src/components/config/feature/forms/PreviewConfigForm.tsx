@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { UseFormReturn } from "react-hook-form";
 import ConfigForm from "@/components/ConfigForm";
-import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrorMessage } from "@/utils/error";
 
@@ -121,20 +120,6 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
                         className="min-h-48 font-mono text-xs"
                         spellCheck={false}
                     />
-                    <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs text-muted-foreground">
-                            {resourcePolicyStatus}
-                        </div>
-                        <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void saveResourcePolicy()}
-                            disabled={isSavingResourcePolicy || !resourcePolicyText.trim()}
-                        >
-                            保存策略
-                        </Button>
-                    </div>
                 </div>
             ),
         },
@@ -365,6 +350,10 @@ export const PreviewConfigForm: React.FC<PreviewConfigFormProps> = ({
             layout="default"
             classNames="bottom-space"
             useFormReturn={form}
+            onSave={saveResourcePolicy}
+            isSaving={isSavingResourcePolicy}
+            saveDisabled={!resourcePolicyText.trim()}
+            saveStatus={resourcePolicyStatus}
         />
     );
 };
