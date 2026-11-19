@@ -448,3 +448,25 @@ fn test_group_member_quote_marker_becomes_reply_to_visible_message() {
         .unwrap().unwrap().reply.unwrap();
     assert_eq!((unmatched.reply_to, unmatched.body.as_str()), (None, "确认。"));
 }
+
+#[test]
+fn test_credential_anchor_is_stable_for_running_turn_and_exact_for_published_reply() {
+    let mut conn = setup();
+    let (room, members) = group_with(&mut conn, &["甲", "乙"]);
+    let question = post_user(&mut conn, room.id, "anchor-q", "测试请求", None).unwrap();
+    let turns = route(&mut conn, room.id, question.seq, &[members[0].id], 1).unwrap();
+    let (active, member, _) = run(&mut conn, turns[0]);
+    let source = reply(&conn, member.conversation_id, "synthetic tool request");
+    let anchor = credential_request_anchor(&conn, member.conversation_id, source).unwrap().unwrap();
+    assert_eq!(anchor, RequestAnchor { group_id: room.id, seq: question.seq });
+    post_user(&mut conn, room.id, "anchor-new", "另一个新消息", None).unwrap();
+    assert_eq!(credential_request_anchor(&conn, member.conversation_id, source).unwrap(), Some(anchor.clone()));
+    assert!(credential_request_anchor(&conn, members[1].conversation_id, source).unwrap().is_none());
+    assert!(credential_request_anchor(&conn, member.conversation_id, source + 1000).unwrap().is_none());
+    let final_source = reply(&conn, member.conversation_id, "synthetic final reply");
+    let published = finish_turn(&mut conn, active.id, Outcome::Reply("synthetic final reply".into())).unwrap().unwrap().reply.unwrap();
+    assert_eq!(credential_request_anchor(&conn, member.conversation_id, final_source).unwrap(),
+        Some(RequestAnchor { group_id: room.id, seq: published.seq }));
+    assert!(credential_request_anchor(&conn, member.conversation_id, source).unwrap().is_none(), "never attach an unpublished source to a later reply");
+    assert_eq!(anchor.seq, question.seq, "queued requests retain the captured anchor after turn completion");
+}

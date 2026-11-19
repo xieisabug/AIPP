@@ -36,6 +36,8 @@ pub struct VaultInputRequest {
     pub request_id: String,
     pub conversation_id: Option<i64>,
     pub message_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_anchor: Option<crate::db::butler_group::RequestAnchor>,
     pub assistant_name: Option<String>,
     pub purpose: String,
     pub fields: Vec<InputField>,
@@ -107,6 +109,7 @@ pub(crate) async fn request(app: &AppHandle, conversation_id: Option<i64>, args:
         return Err(UseError::new("approval_required", "无人值守的任务不能请用户填写，请让用户先在凭据保险箱中保存这些条目"));
     }
     let request = VaultInputRequest {
+        group_anchor: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         conversation_id,
         message_id: crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
@@ -128,7 +131,8 @@ pub(crate) async fn request(app: &AppHandle, conversation_id: Option<i64>, args:
     }
 }
 
-async fn ask(app: &AppHandle, request: VaultInputRequest) -> Result<Answer, UseError> {
+async fn ask(app: &AppHandle, mut request: VaultInputRequest) -> Result<Answer, UseError> {
+    request.group_anchor = super::group_anchor(app, request.conversation_id, request.message_id);
     let (sender, receiver) = oneshot::channel();
     let request_id = request.request_id.clone();
     let conversation_id = request.conversation_id;

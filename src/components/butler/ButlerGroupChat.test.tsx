@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButlerGroupDetail } from "@/data/ButlerGroup";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
@@ -374,5 +374,63 @@ describe("ButlerGroupChat", () => {
         renderChat();
         expect(await screen.findByText("停止前的进度")).toBeInTheDocument();
         expect(screen.queryByText("迟到的进度")).toBeNull();
+    });
+});
+
+
+describe("group Vault card placement", () => {
+    it("should pin cards to their messages, wait for unloaded targets, and remove resolved cards", async () => {
+        const { listen } = await import("@tauri-apps/api/event");
+        const { default: Transcript } = await import("./ButlerGroupTranscript");
+        const original = vi.mocked(listen).getMockImplementation();
+        const handlers = new Map<string, (event: { payload: unknown }) => void>();
+        vi.mocked(listen).mockImplementation(async (name, handler) => {
+            handlers.set(name, handler as (event: { payload: unknown }) => void);
+            return () => { handlers.delete(name); };
+        });
+        const use = { requestId: "use-317", conversationId: 102, messageId: 9999, groupAnchor: { groupId: 7, seq: 2 },
+            assistantName: "写作助手", entries: [{ id: "synthetic", key: "fake_key", name: "测试凭据" }], tool: "synthetic",
+            destination: { kind: "local", label: "本机测试", origin: null, insecure: false }, preview: "<vault:fake_key>",
+            previewKind: "command", canAlways: false, createdAt: 1 };
+        const input = { requestId: "input-317", conversationId: 101, messageId: 9998, groupAnchor: { groupId: 7, seq: 3 },
+            assistantName: "总管家", purpose: "合成测试", fields: [{ key: "other_key", name: "测试填写", description: "" }], createdAt: 2 };
+        mockInvokeHandler("vault_list_use_requests", () => [use, use]);
+        mockInvokeHandler("vault_list_input_requests", () => [input]);
+        mockInvokeHandler("list_butler_interactions", args => args?.conversationId === 102 ? [{
+            kind: "report", id: 317, request_id: "report-317", anchor: 9000,
+            occurred_ms: Date.parse("2026-11-09T08:01:20Z"), request: { text: "凭据请求期间的进度" },
+        }] : []);
+        const base = detail().messages;
+        const view = (messages: ButlerGroupDetail["messages"]) => <AntiLeakageProvider enabled={false}>
+            <Transcript groupId={7} historyLoaded messages={messages} members={members} running={[]} turns={detail().interaction_turns} />
+        </AntiLeakageProvider>;
+        try {
+            const mounted = render(view(base.filter(message => message.seq !== 2)));
+            await waitFor(() => expect(document.querySelector('[data-vault-request-id="input-317"]')).not.toBeNull());
+            expect(document.querySelector('[data-vault-request-id="use-317"]')).toBeNull();
+            expect(document.querySelector('[data-aipp-slot="butler-group-vault-pending"]')).toHaveTextContent("1 个凭据请求");
+            mounted.rerender(view(base));
+            await waitFor(() => expect(document.querySelector('[data-vault-request-id="use-317"]')).not.toBeNull());
+            const anchored = (id: string) => document.querySelector(`[data-vault-request-id="${id}"]`)?.closest("[data-group-message-seq]")?.getAttribute("data-group-message-seq");
+            expect(anchored("use-317")).toBe("2");
+            expect(anchored("input-317")).toBe("3");
+            const report = await screen.findByText("凭据请求期间的进度");
+            expect(report.compareDocumentPosition(screen.getByText("初稿如下")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+            expect(screen.getAllByText("凭据请求期间的进度")).toHaveLength(1);
+            expect(document.querySelectorAll('[data-vault-request-id="use-317"]')).toHaveLength(1);
+            mounted.rerender(view([...base, { ...base[2], seq: 4, source_message_id: 9002, body: "新的成员消息" }]));
+            expect(anchored("use-317")).toBe("2");
+            expect(anchored("input-317")).toBe("3");
+            act(() => {
+                handlers.get("vault-use-resolved")?.({ payload: { requestId: use.requestId, conversationId: 102 } });
+                handlers.get("vault-input-resolved")?.({ payload: { requestId: input.requestId, conversationId: 101 } });
+            });
+            await waitFor(() => expect(document.querySelectorAll('[data-aipp-slot="butler-group-vault"]')).toHaveLength(0));
+            act(() => handlers.get("vault-use-request")?.({ payload: use }));
+            expect(document.querySelectorAll('[data-aipp-slot="butler-group-vault"]')).toHaveLength(0);
+            mounted.unmount();
+        } finally {
+            if (original) vi.mocked(listen).mockImplementation(original);
+        }
     });
 });

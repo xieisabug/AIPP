@@ -20,6 +20,7 @@ import { ButlerQuoteJumpContext } from "./ButlerQuote";
 import { HelperSummaryRow, LiveReportBubbles } from "./ButlerProgressRow";
 import { useButlerProgress } from "./butlerProgress";
 import { formatDivider, showTimeDivider } from "./butlerGroupModel";
+import { groupVaultRequests } from "./groupVaultRequests";
 
 // 群聊只展示成员的最终发言：流式、推理、工具调用、版本切换都留在成员各自的执行会话里，列表的这些输入恒为空。
 const NO_STREAMS = new Map<number, StreamEvent>();
@@ -70,10 +71,7 @@ const MemberAskListener = memo(function MemberAskListener({ conversationId, onCh
 
 function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShown: () => void }) {
     const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
-    const vault = useVaultUseRequests(member.conversation_id);
-    const vaultInput = useVaultInputRequests(member.conversation_id);
-    const shown = !!elicitation.questionRequest || !!elicitation.decisionError
-        || vault.requests.length > 0 || vaultInput.requests.length > 0;
+    const shown = !!elicitation.questionRequest || !!elicitation.decisionError;
     useEffect(() => {
         if (shown) onShown();
     }, [shown, onShown]);
@@ -85,9 +83,6 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
                 errorMessage={elicitation.decisionError} onSubmit={elicitation.handleSubmit} onCancel={elicitation.handleCancel} />}
             {!elicitation.questionRequest && elicitation.decisionError &&
                 <p role="alert" className="text-sm text-destructive">{elicitation.decisionError}</p>}
-            {vault.requests.map(request => <VaultUseCard key={request.requestId} request={request} onRespond={vault.respond} />)}
-            {vaultInput.requests.map(request => <VaultInputCard key={request.requestId} request={request}
-                onSubmit={vaultInput.submit} onDecline={vaultInput.decline} />)}
         </div>
     </div>;
 }
@@ -132,6 +127,13 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
         () => new Set(messages.filter((message, index) => showTimeDivider(message, messages[index - 1])).map(message => message.seq)),
         [messages],
     );
+
+    // Listen once for all member conversations; cards belong to stable group rows, not live tail.
+    const vault = useVaultUseRequests(members.map(member => member.conversation_id));
+    const vaultInput = useVaultInputRequests(members.map(member => member.conversation_id));
+    const useCards = useMemo(() => groupVaultRequests(groupId, messages, vault.requests), [groupId, messages, vault.requests]);
+    const inputCards = useMemo(() => groupVaultRequests(groupId, messages, vaultInput.requests), [groupId, messages, vaultInput.requests]);
+    const requestMember = (conversationId: number | null) => members.find(member => member.conversation_id === conversationId);
 
     const speakers = useMemo(() => {
         const map = new Map(members.map(m => [m.conversation_id, m]));
@@ -181,15 +183,29 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
                 </div>
             </div>;
         }
-        return <div>
+        return <div data-group-message-seq={message.seq}>
             {events}
             {time}
             <ButlerGroupMessageRow groupId={groupId} message={message}
                 quoted={message.reply_to ? bySeq.get(message.reply_to) : undefined}
                 sender={message.sender_member ? membersById.get(message.sender_member) : undefined}
                 highlighted={shiningMessageIds.has(chat.id)} />
+            {(useCards.bySeq.get(message.seq) ?? []).map(request => {
+                const member = requestMember(request.conversationId);
+                return <div key={`vault-use-${request.requestId}`} className="min-w-0 max-w-[min(65%,48rem)]" data-aipp-slot="butler-group-vault" data-vault-request-id={request.requestId}>
+                    {member && <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={`${member.name} 请求使用凭据`} />}
+                    <VaultUseCard request={request} onRespond={vault.respond} />
+                </div>;
+            })}
+            {(inputCards.bySeq.get(message.seq) ?? []).map(request => {
+                const member = requestMember(request.conversationId);
+                return <div key={`vault-input-${request.requestId}`} className="min-w-0 max-w-[min(65%,48rem)]" data-aipp-slot="butler-group-vault" data-vault-request-id={request.requestId}>
+                    {member && <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={`${member.name} 请你填写凭据`} />}
+                    <VaultInputCard request={request} onSubmit={vaultInput.submit} onDecline={vaultInput.decline} />
+                </div>;
+            })}
         </div>;
-    }, [bySeq, dividerSeqs, groupId, groupMessageByChatId, membersById, shiningMessageIds, before, renderResult]);
+    }, [bySeq, dividerSeqs, groupId, groupMessageByChatId, membersById, shiningMessageIds, before, renderResult, useCards, inputCards, members, vault.respond, vaultInput.submit, vaultInput.decline]);
 
     // 停在底部时跟到底部（与私聊收到新消息一致），上翻阅读时 smartScroll 不打扰。
     const follow = useCallback(() => {
@@ -236,6 +252,9 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
     }, [chatIdBySeq]);
 
     return <div className="relative flex min-h-0 flex-1 flex-col" data-aipp-slot="butler-group-transcript">
+        {useCards.pending.length + inputCards.pending.length > 0 && <p role="status" className="px-6 py-2 text-sm text-muted-foreground" data-aipp-slot="butler-group-vault-pending">
+            有 {useCards.pending.length + inputCards.pending.length} 个凭据请求等待对应群消息加载，请加载较早消息。
+        </p>}
         {members.map(member => <MemberAskListener key={member.conversation_id} conversationId={member.conversation_id} onChange={onQuestion} />)}
         <ConversationTurnRail turns={railTurns} scrollContainerRef={scrollContainerRef} onSelect={selectTurn} />
         <div ref={scrollContainerRef} onWheelCapture={handleUserScrollIntent} onTouchMoveCapture={handleUserScrollIntent}

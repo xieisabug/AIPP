@@ -7,6 +7,7 @@ fn field(key: &str, name: &str) -> InputField {
 fn queue(request_id: &str, conversation_id: Option<i64>, created_at: i64) -> oneshot::Receiver<Answer> {
     let (sender, receiver) = oneshot::channel();
     let request = VaultInputRequest {
+        group_anchor: None,
         request_id: request_id.into(), conversation_id, message_id: None, assistant_name: None,
         purpose: "测试".into(), fields: vec![field("id_card", "身份证号")], created_at,
     };

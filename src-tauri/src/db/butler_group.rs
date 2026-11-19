@@ -223,6 +223,28 @@ pub struct Turn {
     pub error: Option<String>,
 }
 
+/// Stable public-message anchor for a credential request in a member execution conversation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestAnchor { pub group_id: i64, pub seq: i64 }
+
+pub fn credential_request_anchor(conn: &Connection, conversation: i64, source_message: i64) -> Result<Option<RequestAnchor>> {
+    // A published source has an exact counterpart. Never approximate with a later source ID.
+    let published = conn.query_row("SELECT group_id,seq FROM butler_chat_group_message
+        WHERE source_conversation_id=?1 AND source_message_id=?2 AND kind='message' LIMIT 1",
+        params![conversation, source_message], |r| Ok(RequestAnchor { group_id: r.get(0)?, seq: r.get(1)? })).optional()?;
+    if published.is_some() { return Ok(published); }
+    // During execution there is no public assistant reply yet. Pin to the turn's triggering
+    // group message now, before another user message or a later turn can change the live tail.
+    Ok(conn.query_row("SELECT t.group_id,t.trigger_seq FROM butler_chat_group_turn t
+        JOIN butler_chat_group_member m ON m.id=t.member_id
+        JOIN message source ON source.id=?2 AND source.conversation_id=m.conversation_id
+        WHERE m.conversation_id=?1 AND m.active=1 AND t.state='running'
+          AND t.input_message_id IS NOT NULL AND source.id>=t.input_message_id
+        ORDER BY t.id DESC LIMIT 1", params![conversation, source_message],
+        |r| Ok(RequestAnchor { group_id: r.get(0)?, seq: r.get(1)? })).optional()?)
+}
+
 const GROUP_COLUMNS: &str = "id,name,seq,created_at,updated_at";
 const MEMBER_COLUMNS: &str = "id,group_id,assistant_id,name,conversation_id,joined_after,delivered_through,active";
 const MESSAGE_COLUMNS: &str = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,created_at,source_conversation_id,source_message_id";

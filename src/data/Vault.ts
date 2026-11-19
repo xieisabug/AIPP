@@ -82,6 +82,8 @@ export interface VaultUseRequest {
     requestId: string;
     conversationId: number | null;
     messageId: number | null;
+    /** Stable group message captured when the request was created. */
+    groupAnchor?: { groupId: number; seq: number } | null;
     assistantName: string | null;
     entries: VaultEntryLabel[];
     tool: string;
@@ -106,6 +108,8 @@ export interface VaultInputRequest {
     requestId: string;
     conversationId: number | null;
     messageId: number | null;
+    /** Stable group message captured when the request was created. */
+    groupAnchor?: { groupId: number; seq: number } | null;
     assistantName: string | null;
     purpose: string;
     fields: VaultInputField[];
