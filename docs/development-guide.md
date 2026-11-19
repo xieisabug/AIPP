@@ -28,6 +28,7 @@
 4. Use Tailwind classes for styling
 5. Add component-specific styles in CSS modules if needed
 6. 编写界面的时候，注意样式风格要和现在的界面一致，使用 ShadcnUI 的组件和 tailwind css 的写法，我的主色调是黑白灰，尽量少使用别的颜色
+7. 设置类「列表 + 详情」页面用 `ConfigPageLayout` + `SidebarList` + `ListItemButton`（`src/components/common/`）：列表项只占一行，不放第二行小字；`SidebarList` 顶部只放搜索和页面自己的按钮（`addButton`），`title` 只作无障碍名称，不再显示标题和说明。列表需要分组时用 `SidebarListGroups`（传 `{ key, label, count, children }[]`），不要手写分组标题：标题吸顶并显示条目数，多个分组时点标题可跳到其他分组（参考 `SkillsConfig`）。样式只用主题变量（`bg-card`、`border-border`、`bg-primary/10` 等），主题通过 `data-aipp-slot` 定制：`config-split`、`config-list-pane`、`config-list`、`config-list-toolbar`、`config-list-search`、`config-list-actions`、`config-list-items`、`config-list-group`、`config-list-group-header`、`config-list-item`、`config-page-scroll`。
 
 ## Adding New Assistant Types
 

@@ -92,6 +92,9 @@ impl AgentPromptContext for tauri::Window {
 pub trait AgentSessionControl: Send + Sync {
     fn metadata(&self) -> super::registry::AgentDriverMetadata;
     fn send_prompt(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError>;
+    async fn steer(&self, _turn: String, _text: String) -> Result<(), AppError> {
+        Err(AppError::ProviderError(format!("{} has no active-turn steering interface", self.metadata().id)))
+    }
     async fn cancel_current_prompt(&self) -> Result<(), AppError>;
     async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError>;
 }
@@ -125,6 +128,10 @@ impl AgentSessionHandle {
         self.control.send_prompt(message_id, prompt, attachments, context)
     }
 
+    pub async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
+        self.control.steer(turn, text).await
+    }
+
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
         if !self.capabilities().cancel_prompt {
             return Err(AppError::ProviderError(format!("driver '{}' does not support cancelling a prompt", self.metadata().id)));
@@ -151,19 +158,22 @@ impl AgentSessionControl for AcpSessionHandle {
 }
 
 macro_rules! native_text_session {
-    ($handle:ty, $kind:expr) => {
+    ($handle:ty, $kind:expr $(, $steer:ident)?) => {
         #[async_trait::async_trait]
         impl AgentSessionControl for $handle {
             fn metadata(&self) -> super::registry::AgentDriverMetadata { $kind.into() }
             fn send_prompt(&self, message_id: i64, prompt: String, _attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
                 <$handle>::send_prompt(self, message_id, prompt, context.window()?)
             }
+            $(async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
+                <$handle>::$steer(self, turn, text).await
+            })?
             async fn cancel_current_prompt(&self) -> Result<(), AppError> { <$handle>::cancel_current_prompt(self).await }
             async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> { <$handle>::set_config_option(self, config_id, value).await }
         }
     };
 }
-native_text_session!(CodexSessionHandle, AgentSessionKind::Codex);
+native_text_session!(CodexSessionHandle, AgentSessionKind::Codex, steer);
 native_text_session!(ClaudeSessionHandle, AgentSessionKind::Claude);
 
 #[cfg(test)]

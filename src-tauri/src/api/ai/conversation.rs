@@ -620,6 +620,14 @@ pub fn select_responses_stateful_request(
         return Err("branched or regenerated history");
     }
 
+    let context_boundary = all_messages.iter().filter(|(m, _)| m.message_type == "system")
+        .filter_map(|(m, _)| {
+            if crate::api::ai::context_manager::persistence::is_compaction_summary(&m.content) {
+                return Some(m.id);
+            }
+            serde_json::from_str::<serde_json::Value>(m.metadata_json.as_deref()?).ok()?
+                .get("context_reload_after")?.as_i64()
+        }).max().unwrap_or(0);
     let mut selected: Option<(usize, String)> = None;
     for (index, message_id) in message_ids.iter().enumerate() {
         let Some(message) = message_by_id.get(message_id).copied() else {
@@ -628,7 +636,7 @@ pub fn select_responses_stateful_request(
         if message.message_type != "response" && message.message_type != "reasoning" {
             continue;
         }
-        if message.finish_time.is_none() {
+        if message.id <= context_boundary || message.finish_time.is_none() {
             continue;
         }
         if let Some(response_id) = response_id_from_message_metadata(message) {

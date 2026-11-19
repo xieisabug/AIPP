@@ -175,5 +175,73 @@ export function mergeMessagesWithStreamingState(
         );
     });
 
-    return Array.from(mergedById.values()).sort(compareMessagesChronologically);
+    return reuseEquivalentMessages(
+        currentMessages,
+        Array.from(mergedById.values()).sort(compareMessagesChronologically),
+    );
+}
+
+const MESSAGE_TIME_FIELDS = new Set(["created_time", "start_time", "finish_time", "first_token_time"]);
+
+function isEmptyMessageField(value: unknown): boolean {
+    return value == null || (Array.isArray(value) && value.length === 0);
+}
+
+function equivalentMessageField(field: string, previous: unknown, next: unknown): boolean {
+    if (previous === next) return true;
+    // IPC sends [] / null for absent lists and optional fields; local copies may omit them.
+    if (isEmptyMessageField(previous) || isEmptyMessageField(next)) {
+        return isEmptyMessageField(previous) && isEmptyMessageField(next);
+    }
+    if (MESSAGE_TIME_FIELDS.has(field)) {
+        // Persisted snapshots carry ISO strings, locally built messages carry Date objects.
+        const previousTime = new Date(previous as string | Date).getTime();
+        const nextTime = new Date(next as string | Date).getTime();
+        return previousTime === nextTime || (Number.isNaN(previousTime) && Number.isNaN(nextTime));
+    }
+    if (typeof previous === "object" && typeof next === "object") {
+        // attachment_list / regenerate / large_message_preview are small JSON values.
+        try {
+            return JSON.stringify(previous) === JSON.stringify(next);
+        } catch {
+            return false;
+        }
+    }
+    return false;
+}
+
+function equivalentMessage(previous: Message, next: Message): boolean {
+    const fields = new Set([...Object.keys(previous), ...Object.keys(next)]);
+    for (const field of fields) {
+        if (!equivalentMessageField(
+            field,
+            (previous as unknown as Record<string, unknown>)[field],
+            (next as unknown as Record<string, unknown>)[field],
+        )) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Keep the previous object for every message whose data did not change.
+ *
+ * Every `message_add` re-reads the whole conversation, and IPC hands back a
+ * brand new object graph. Without this, each send re-renders and re-parses the
+ * whole history (memo comparators, WeakMap caches and merged-group checks all
+ * key on identity). Returns `previous` itself when nothing changed at all, so
+ * a no-op refresh does not re-render the list.
+ */
+export function reuseEquivalentMessages(previous: Message[], next: Message[]): Message[] {
+    if (previous.length === 0) return next;
+    const previousById = new Map(previous.map((message) => [message.id, message] as const));
+    let unchanged = previous.length === next.length;
+    const result = next.map((message, index) => {
+        const old = previousById.get(message.id);
+        const reused = old && (old === message || equivalentMessage(old, message)) ? old : message;
+        if (reused !== previous[index]) unchanged = false;
+        return reused;
+    });
+    return unchanged ? previous : result;
 }

@@ -123,6 +123,7 @@ pub struct AgentActivityEvent {
 }
 
 enum CodexSessionCommand {
+    Steer { turn: String, text: String, response: oneshot::Sender<Result<(), String>> },
     Prompt { message_id: i64, prompt: String, window: tauri::Window, cancellation_generation: u64 },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
     SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
@@ -262,6 +263,16 @@ impl CodexSessionHandle {
             ));
         }
         Ok(())
+    }
+
+    pub async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
+        let (response, receipt) = oneshot::channel();
+        self.sender.send(CodexSessionCommand::Steer { turn, text, response })
+            .map_err(|_| AppError::ProviderError(format!("Codex steer channel closed [run={}]", self.run_id)))?;
+        tokio::time::timeout(std::time::Duration::from_secs(35), receipt).await
+            .map_err(|_| AppError::ProviderError(format!("Codex turn/steer acknowledgement timed out [run={}]", self.run_id)))?
+            .map_err(|_| AppError::ProviderError(format!("Codex steer receipt lost [run={}]", self.run_id)))?
+            .map_err(AppError::ProviderError)
     }
 
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
@@ -2012,6 +2023,7 @@ fn persist_response(
     content: &str,
     done: bool,
     usage: Option<CodexTurnUsage>,
+    final_text: Option<&str>,
 ) {
     if let Ok(db) = ConversationDatabase::new(app_handle) {
         if let Ok(repo) = db.message_repo() {
@@ -2026,10 +2038,13 @@ fn persist_response(
                     message.token_count = usage
                         .map(|value| value.total_tokens)
                         .unwrap_or(message.output_token_count);
+                    let mut metadata = message.metadata_json.as_deref()
+                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                        .filter(Value::is_object).unwrap_or_else(|| json!({}));
+                    if let Some(text) = final_text {
+                        crate::db::butler_execution::record_agent_final(&mut metadata, content, text);
+                    }
                     if let Some(usage) = usage {
-                        let mut metadata = message.metadata_json.as_deref()
-                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
                         if let Some(map) = metadata.as_object_mut() {
                             map.insert("usage_source".to_string(), json!("reported"));
                             map.insert("thought_tokens".to_string(), json!(usage.reasoning_tokens));
@@ -2038,17 +2053,11 @@ fn persist_response(
                             map.insert("cached_write_tokens".to_string(), json!(usage.cache_write_input_tokens));
                             map.insert("cache_creation_tokens".to_string(), json!(usage.cache_write_input_tokens));
                         }
-                        message.metadata_json = serde_json::to_string(&metadata).ok();
                     } else {
                         // 没有收到用量通知时输出按字数估算，必须标明是估算，对话信息才会提示。
-                        let mut metadata = message.metadata_json.as_deref()
-                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
-                        if let Some(map) = metadata.as_object_mut() {
-                            map.insert("usage_source".to_string(), json!("estimated"));
-                        }
-                        message.metadata_json = serde_json::to_string(&metadata).ok();
+                        metadata["usage_source"] = json!("estimated");
                     }
+                    message.metadata_json = serde_json::to_string(&metadata).ok();
                     let _ = repo.update(&message);
                 }
             }
@@ -2510,6 +2519,9 @@ async fn run_session(
 
     while let Some(command) = receiver.recv().await {
         match command {
+            CodexSessionCommand::Steer { response, .. } => {
+                let _ = response.send(Err("Codex steering target already finished".into()));
+            }
             CodexSessionCommand::SetConfigOption { config_id, value, response } => {
                 match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                     Ok(()) => {
@@ -2578,6 +2590,7 @@ async fn run_session(
                 snapshot.has_active_prompt = true;
                 emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                 let mut content = String::new();
+                let mut final_text: Option<String> = None;
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -2585,6 +2598,8 @@ async fn run_session(
                 let mut usage_tracker = CodexTurnUsageTracker::default();
                 let mut restore = CodexContextRestore::default();
                 let mut turn_completed = false;
+                let mut steer_receipts = HashMap::new();
+                let mut completed_normally = false;
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
@@ -2606,6 +2621,19 @@ async fn run_session(
                                         let _ = response.send(result);
                                     } else {
                                         let _ = response.send(Ok(()));
+                                    }
+                                }
+                                Some(CodexSessionCommand::Steer { turn, text, response }) => {
+                                    if response.is_closed() { continue; }
+                                    if turn_id.as_deref() != Some(turn.as_str()) || turn_completed {
+                                        let _ = response.send(Err("Codex steering target already finished".into()));
+                                    } else {
+                                        request_id += 1;
+                                        let params = json!({"threadId":thread_id,"expectedTurnId":turn,"input":[{"type":"text","text":text}]});
+                                        match write_frame(&mut stdin, &json_rpc_request(request_id, "turn/steer", params)).await {
+                                            Ok(()) => { steer_receipts.insert(request_id, response); }
+                                            Err(error) => { let _ = response.send(Err(error)); }
+                                        }
                                     }
                                 }
                                 Some(CodexSessionCommand::Prompt { .. }) => warn!(conversation_id, "Codex prompt received while another turn is active; queued prompt is not supported"),
@@ -2673,6 +2701,13 @@ async fn run_session(
                         continue;
                     }
                     if frame.get("method").is_none() {
+                        if let Some(reply) = frame["id"].as_u64().and_then(|id| steer_receipts.remove(&id)) {
+                            let result = if let Some(error) = frame.get("error") { Err(format!("Codex turn/steer: {error}")) }
+                                else if frame.pointer("/result/turnId").and_then(Value::as_str) == turn_id.as_deref() { Ok(()) }
+                                else { Err(format!("Codex turn/steer returned an unexpected turn: {}", frame["result"])) };
+                            let _ = reply.send(result);
+                            continue;
+                        }
                         restore.acknowledge(&thread_id, &frame)?;
                         continue;
                     }
@@ -2698,7 +2733,7 @@ async fn run_session(
                                             first_any_token_time = Some(chrono::Utc::now());
                                         }
                                         content.push_str(delta);
-                                        persist_response(&app_handle, message_id, &content, false, None);
+                                        persist_response(&app_handle, message_id, &content, false, None, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
                                         let _ = emit_to_window(&window, event_identity.clone(), event);
                                     }
@@ -2733,7 +2768,7 @@ async fn run_session(
                                             }
                                         }
                                         if let Some(reasoning_id) = reasoning_message_id {
-                                            persist_response(&app_handle, reasoning_id, &reasoning, false, None);
+                                            persist_response(&app_handle, reasoning_id, &reasoning, false, None, None);
                                             let event = ConversationEvent {
                                                 r#type: "message_update".to_string(),
                                                 data: serde_json::to_value(MessageUpdateEvent {
@@ -2785,6 +2820,11 @@ async fn run_session(
                                                         );
                                                     }
                                                 }
+                                            }
+                                        } else if item_type == Some("agentMessage") {
+                                            if method == "item/completed" {
+                                                final_text = if item["phase"] == "commentary" { Some(String::new()) }
+                                                    else { item["text"].as_str().map(str::to_owned) };
                                             }
                                         } else {
                                             let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
@@ -2848,6 +2888,7 @@ async fn run_session(
                                             .map(str::to_string)
                                             .or_else(|| Some("Codex turn failed".to_string()));
                                     }
+                                    completed_normally = turn.get("status").and_then(Value::as_str) == Some("completed");
                                     turn_completed = true;
                                 },
                                 "mcpServer/startupStatus/updated" => {
@@ -2889,8 +2930,12 @@ async fn run_session(
                     }
                     }
                 let turn_usage = usage_tracker.turn_usage();
+                if content.is_empty() {
+                    if let Some(text) = &final_text { content.clone_from(text); }
+                }
                 if manual_compact && turn_error.is_none() && content.is_empty() {
                     content = super::agent_driver::manual_compact::compact_done_text(None);
+                    final_text = None;
                 }
                 if turn_error.is_none() && content.is_empty() && reasoning.is_empty() && plan_messages.is_empty() {
                     turn_error = Some("Codex 本轮未返回任何内容".to_string());
@@ -2910,7 +2955,8 @@ async fn run_session(
                         );
                     }
                 }
-                persist_response(&app_handle, message_id, &content, true, turn_usage);
+                let published = if completed_normally { final_text.as_deref() } else { Some("") };
+                persist_response(&app_handle, message_id, &content, true, turn_usage, published);
                 if let Some(reasoning_id) = reasoning_message_id {
                     persist_codex_reasoning(&app_handle, reasoning_id, &reasoning);
                     let _ = emit_to_window(
@@ -2957,6 +3003,7 @@ async fn run_session(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take();
+                crate::api::ai_api::native_queue::finish_turn(&app_handle, &window, conversation_id, run_id, completed_normally).await;
             }
         }
     }

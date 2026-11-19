@@ -719,18 +719,9 @@ pub async fn save_assistant(
     let mut model_names = name_cache_state.assistant_names.lock().await;
     model_names.insert(assistant_detail.assistant.id, assistant_detail.assistant.name);
 
-    // Save or update the AssistantPrompts
-    for prompt in assistant_detail.prompts {
-        if prompt.id == 0 {
-            assistant_db
-                .add_assistant_prompt(prompt.assistant_id, &prompt.prompt)
-                .map_err(|e| e.to_string())?;
-        } else {
-            assistant_db
-                .update_assistant_prompt(prompt.id, &prompt.prompt)
-                .map_err(|e| e.to_string())?;
-        }
-    }
+    crate::api::ai_api::context_commands::save_assistant_prompts(
+        &app_handle, &assistant_db, assistant_id, &assistant_detail.prompts,
+    ).map_err(|error| format!("保存助手指令失败：{error}"))?;
 
     // Save or update the AssistantModels
     for mut model in assistant_detail.model {

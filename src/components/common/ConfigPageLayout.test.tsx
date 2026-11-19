@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ConfigSaveFooter } from "./ConfigSaveFooter";
 import ConfigPageLayout, { SelectOption } from "./ConfigPageLayout";
 import { registerConfigBeforeLeave } from "@/lib/configLeaveGuard";
 import { backConfigSection, ConfigSectionContext, useConfigSectionDetailTitle } from "@/lib/configSectionNav";
@@ -23,7 +24,7 @@ function Harness({ onSelect = vi.fn(), selected = "a", detailRequest }: { onSele
             <TitleProbe />
             <ConfigPageLayout
                 sidebar={<div>sidebar</div>}
-                content={<div>detail content</div>}
+                content={<div>detail content<ConfigSaveFooter><button>保存配置</button></ConfigSaveFooter></div>}
                 selectOptions={options}
                 selectedOptionId={selected}
                 onSelectOption={onSelect}
@@ -49,6 +50,7 @@ describe("ConfigPageLayout mobile list → detail", () => {
         render(<Harness onSelect={onSelect} />);
         fireEvent.click(screen.getByText("显示"));
         expect(onSelect).toHaveBeenCalledWith("a");
+        expect(screen.getByRole("button", { name: "保存配置" }).closest('[data-aipp-slot="config-page-scroll"]')).toBeNull();
         expect(screen.getByText("detail content")).toBeTruthy();
         expect(screen.getByTestId("detail-title").textContent).toBe("显示");
     });
@@ -59,6 +61,7 @@ describe("ConfigPageLayout mobile list → detail", () => {
         let consumed = false;
         act(() => { consumed = backConfigSection("feature"); });
         expect(consumed).toBe(true);
+        expect(screen.queryByRole("button", { name: "保存配置" })).toBeNull();
         expect(screen.queryByText("detail content")).toBeNull();
         expect(screen.getByTestId("detail-title").textContent).toBe("none");
         expect(backConfigSection("feature")).toBe(false);

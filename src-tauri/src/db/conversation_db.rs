@@ -246,6 +246,8 @@ pub struct MessageDetail {
     pub regenerate: Vec<MessageDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub large_message_preview: Option<LargeMessagePreviewMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub butler_final_text: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1587,7 +1589,7 @@ impl QueuedConversationMessageRepository {
         f(&self.conn)
     }
 
-    fn queued_message_from_row(row: &rusqlite::Row<'_>) -> Result<QueuedConversationMessage> {
+    pub(crate) fn queued_message_from_row(row: &rusqlite::Row<'_>) -> Result<QueuedConversationMessage> {
         Ok(QueuedConversationMessage {
             id: row.get(0)?,
             conversation_id: row.get(1)?,

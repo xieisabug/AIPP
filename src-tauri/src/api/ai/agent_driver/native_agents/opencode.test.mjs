@@ -18,6 +18,10 @@ test('should retain OpenCode tool identity, actual diff and exit code for semant
     assert.equal(events.find(e => e.id === 'edit').metadata.diff, '+real');
     assert.equal(events.find(e => e.id === 'bash').metadata.exitCode, 0);
     assert.equal(events.find(e => e.id === 'read').input.filePath, 'a.rs');
+    f.event('message.part.updated', { part: { id:'final', messageID:'answer', sessionID:'s1', type:'text', text:'答复' } });
+    f.event('session.idle', { sessionID:'s1' });
+    await tick();
+    assert.equal(events.at(-1).final_text, '答复');
   } finally { await runtime.close(); }
 });
 
@@ -182,5 +186,21 @@ test('should send Butler instructions in the OpenCode system field on resume', a
   try {
     await runtime.prompt('hello', 1);
     assert.deepEqual(f.requests.at(-1).body, {system:'role', parts:[{type:'text', text:'hello'}]});
+  } finally { await runtime.close(); }
+});
+
+test('should accept a new prompt in the same OpenCode session after the requested abort finishes', async () => {
+  const f = openCodeFixture(), events = [];
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, e => events.push(e), f);
+  try {
+    await runtime.prompt('original', 'first');
+    await runtime.cancel();
+    f.event('session.error', { sessionID: 's1', error: { name: 'MessageAbortedError' } });
+    await tick();
+    assert.deepEqual(events.find(e => e.type === 'done'), { type: 'done', turn: 'first', cancelled: true, error: undefined });
+    await runtime.prompt('priority input', 'second');
+    assert.deepEqual(f.requests.filter(r => r.path.endsWith('/prompt_async')).map(r => [r.path, r.body.parts[0].text]), [
+      ['/session/s1/prompt_async', 'original'], ['/session/s1/prompt_async', 'priority input'],
+    ]);
   } finally { await runtime.close(); }
 });

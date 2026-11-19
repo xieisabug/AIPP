@@ -1,3 +1,4 @@
+import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
 import OptionalConfigSection from "@/components/config/OptionalConfigSection";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UseFormReturn } from "react-hook-form";
@@ -1487,7 +1488,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                         )}
                     </div>
 
-                    <div className="pt-4 border-t border-border">
+                    <ConfigSaveFooter>
                         <Button
                             type="button"
                             onClick={handleSave}
@@ -1511,7 +1512,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                         {butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured && (
                             <p className="text-sm text-destructive mt-2">请先填写飞书 App Secret</p>
                         )}
-                    </div>
+                    </ConfigSaveFooter>
                 </CardContent>
             </Card>
             {saveFeatureConfigProp && (

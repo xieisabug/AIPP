@@ -31,6 +31,8 @@ import {
 
 interface InlineCodePreviewCardProps {
     parameters: string;
+    sourceRequestId?: string;
+    savedStatus?: string;
     llmCallId?: string;
     conversationId?: number;
     messageId?: number;
@@ -323,6 +325,8 @@ function buildClientDetectedExternalResources(code?: string): PreviewExternalRes
 
 export default function InlineCodePreviewCard({
     parameters,
+    sourceRequestId,
+    savedStatus,
     llmCallId,
     conversationId,
     messageId,
@@ -525,10 +529,10 @@ export default function InlineCodePreviewCard({
         parsePreviewCodeToolResult(stateOverride?.result ?? persistedToolCall?.result ?? null);
 
     const displayState: DisplayState = useMemo(() => {
-        if (toolResult?.status === "submitted") {
+        if (toolResult?.status === "submitted" || savedStatus === "submitted") {
             return "submitted";
         }
-        if (toolResult?.status === "dismissed") {
+        if (toolResult?.status === "dismissed" || savedStatus === "dismissed") {
             return "dismissed";
         }
         const status = stateOverride?.status ?? persistedToolCall?.status;
@@ -545,7 +549,7 @@ export default function InlineCodePreviewCard({
             return "streaming";
         }
         return "idle";
-    }, [toolResult, stateOverride?.status, persistedToolCall?.status, isStreaming]);
+    }, [toolResult, savedStatus, stateOverride?.status, persistedToolCall?.status, isStreaming]);
     const loadingMessage = useMemo(() => {
         if (!previewRequest?.loadingMessages?.length) {
             return null;
@@ -747,6 +751,7 @@ export default function InlineCodePreviewCard({
                     return;
                 }
                 const matched = events.find((event) => {
+                    if (sourceRequestId) return event.request_id === sourceRequestId;
                     const signature = buildPreviewCodeSignature({
                         title: event.title,
                         renderer: event.renderer,
@@ -778,6 +783,7 @@ export default function InlineCodePreviewCard({
     }, [
         conversationId,
         requestSignature,
+        sourceRequestId,
         rawPreviewInteractionMode,
         rawPreviewRenderer,
         rawPreviewTitle,
@@ -789,6 +795,7 @@ export default function InlineCodePreviewCard({
         }
         const unsubscribe = listen<PreviewCodeRequestEvent>("preview-code-request", (event) => {
             const payload = event.payload;
+            if (sourceRequestId && payload.request_id !== sourceRequestId) return;
             if (
                 conversationId !== undefined &&
                 payload.conversation_id !== undefined &&
@@ -804,7 +811,7 @@ export default function InlineCodePreviewCard({
                 interactionMode: payload.interactionMode,
             });
             if (
-                signature === requestSignature
+                sourceRequestId === payload.request_id || signature === requestSignature
                 || (
                     rawPreviewRequest
                     && payload.title === rawPreviewTitle
@@ -823,6 +830,7 @@ export default function InlineCodePreviewCard({
     }, [
         conversationId,
         requestSignature,
+        sourceRequestId,
         rawPreviewInteractionMode,
         rawPreviewRenderer,
         rawPreviewTitle,
@@ -853,7 +861,7 @@ export default function InlineCodePreviewCard({
                 if (!active || preparingRequestSignatureRef.current !== requestSignature) {
                     return;
                 }
-                setResolvedRequestId(payload.request_id);
+                if (!sourceRequestId) setResolvedRequestId(payload.request_id);
                 setPreparedPreviewRequest(payload);
                 setClientDetectedExternalResources(null);
             })
@@ -876,6 +884,7 @@ export default function InlineCodePreviewCard({
         rawPreviewRenderer,
         rawPreviewTitle,
         requestSignature,
+        sourceRequestId,
     ]);
 
     useEffect(() => {

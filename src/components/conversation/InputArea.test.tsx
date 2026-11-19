@@ -24,7 +24,13 @@ function InputAreaHarness({
     onSend = () => {},
     fileInfoList = null,
     onDeleteFile = () => {},
+    commandMode,
+    onContextCommand,
+    busySendBehavior,
 }: {
+    busySendBehavior?: "queue" | "interrupt";
+    commandMode?: "chat" | "butler";
+    onContextCommand?: (command: "compact" | "reload") => Promise<void>;
     initialText?: string;
     aiIsResponsing?: boolean;
     planMode?: boolean;
@@ -40,6 +46,8 @@ function InputAreaHarness({
 
     return (
         <InputArea
+            commandMode={commandMode}
+            onContextCommand={onContextCommand}
             inputText={inputText}
             setInputText={setInputText}
             fileInfoList={fileInfoList}
@@ -47,6 +55,7 @@ function InputAreaHarness({
             handlePaste={() => {}}
             handleDeleteFile={onDeleteFile}
             handleSend={onSend}
+            busySendBehavior={busySendBehavior}
             aiIsResponsing={aiIsResponsing}
             placement={placement}
             isMobile={isMobile}
@@ -106,6 +115,15 @@ describe("InputArea slash completion", () => {
         expect(onSend).toHaveBeenCalledOnce();
     });
 
+    it.each([["queue", "interrupt"], ["interrupt", "queue"]] as const)(
+        "should switch %s to %s with Ctrl+Enter during a reply", (busySendBehavior, expected) => {
+            const onSend = vi.fn();
+            render(<InputAreaHarness aiIsResponsing initialText="补充一句" busySendBehavior={busySendBehavior} onSend={onSend} />);
+            fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", ctrlKey: true });
+            expect(onSend).toHaveBeenCalledWith(undefined, expected);
+        },
+    );
+
     it("shows slash namespaces after typing slash", async () => {
         const user = userEvent.setup();
         render(<InputAreaHarness />);
@@ -116,6 +134,39 @@ describe("InputArea slash completion", () => {
         expect(await screen.findByText("skills")).toBeInTheDocument();
         expect(screen.getByText("artifacts")).toBeInTheDocument();
         expect(screen.getByText("即将支持")).toBeInTheDocument();
+    });
+
+    it("should run reload from the shared Butler menu when selected", async () => {
+        const run = vi.fn().mockResolvedValue(undefined);
+        render(<InputAreaHarness commandMode="butler" onContextCommand={run} />);
+        await userEvent.type(screen.getByRole("textbox"), "/");
+        expect(screen.getByText("skills")).toBeVisible();
+        await userEvent.click(screen.getByRole("button", { name: /reload/ }));
+        expect(run).toHaveBeenCalledExactlyOnceWith("reload");
+        expect(screen.getByRole("textbox")).toHaveValue("");
+    });
+
+    it("should offer compact without reload when opening the Chat menu", async () => {
+        render(<InputAreaHarness commandMode="chat" onContextCommand={vi.fn()} />);
+        await userEvent.type(screen.getByRole("textbox"), "/");
+        expect(screen.getByText("compact")).toBeVisible();
+        expect(screen.queryByText("reload")).toBeNull();
+    });
+
+    it("should execute reload when submitting the typed Butler command with Enter", async () => {
+        const run = vi.fn().mockResolvedValue(undefined);
+        render(<InputAreaHarness commandMode="butler" onContextCommand={run} />);
+        await userEvent.type(screen.getByRole("textbox"), "/reload{Enter}");
+        expect(run).toHaveBeenCalledExactlyOnceWith("reload");
+    });
+
+    it.each(["chat", "butler"] as const)("should execute a bare compact command when sent in %s", async mode => {
+        const run = vi.fn().mockResolvedValue(undefined);
+        const send = vi.fn();
+        render(<InputAreaHarness commandMode={mode} onContextCommand={run} onSend={send} initialText="/compact" />);
+        await userEvent.click(screen.getByRole("button", { name: "发送" }));
+        expect(run).toHaveBeenCalledExactlyOnceWith("compact");
+        expect(send).not.toHaveBeenCalled();
     });
 
     it("inserts skills invocation through slash selection", async () => {

@@ -1,4 +1,11 @@
-import { Message } from "@/data/Conversation";
+import type { Message } from "@/data/Conversation";
+
+/** SQLite stores UTC, including rows written without an explicit offset. */
+export function parseDatabaseTime(value: string | Date): Date {
+    if (typeof value !== "string") return value;
+    const iso = value.replace(" ", "T");
+    return new Date(/(?:z|[+-]\d\d:?\d\d)$/i.test(iso) ? iso : `${iso}Z`);
+}
 
 type MessageOrderingFields = Pick<
     Message,

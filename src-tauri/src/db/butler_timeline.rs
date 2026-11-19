@@ -100,7 +100,8 @@ pub fn task_posts(
                 (SELECT next.created_time FROM conversation next
                  WHERE current.conversation_kind='butler_contact_archive' AND next.assistant_id=current.assistant_id
                    AND next.conversation_kind IN ('butler_contact', 'butler_contact_archive') AND next.id>current.id
-                 ORDER BY next.id LIMIT 1)
+                 ORDER BY next.id LIMIT 1),
+                CASE WHEN nullif(final.content,'') IS NOT NULL THEN final.metadata_json END
          FROM butler_task_definition d
          JOIN conversation t ON t.id=d.task_conversation_id
          JOIN conversation parent ON parent.id=d.butler_conversation_id
@@ -134,7 +135,13 @@ pub fn task_posts(
             _ => "waiting",
         };
         let finished: Option<DateTime<Utc>> = row.get(7)?;
-        let body: Option<String> = row.get(8)?;
+        let mut body: Option<String> = row.get(8)?;
+        if status == "delivered" {
+            let metadata: Option<String> = row.get(15)?;
+            if let Some(answer) = body.as_deref().and_then(|text| super::butler_execution::agent_final_text(text, metadata.as_deref())) {
+                body = Some(answer);
+            }
+        }
         let error = if status == "failed" {
             Some(body.clone().unwrap_or_else(|| format!("任务 #{task} 失败，任务结果未记录底层原因，请查看执行记录")))
         } else { None };

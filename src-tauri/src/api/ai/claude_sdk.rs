@@ -442,13 +442,19 @@ pub async fn prepare_claude_mcp_bridge(
     Ok(())
 }
 
-fn persist(app: &tauri::AppHandle, id: i64, content: &str, done: bool) {
+fn persist(app: &tauri::AppHandle, id: i64, content: &str, done: bool, final_text: Option<&str>) {
     if let Ok(db) = ConversationDatabase::new(app) {
         if let Ok(repo) = db.message_repo() {
             if let Ok(Some(mut message)) = repo.read(id) {
                 message.content = content.into();
                 if done {
                     message.finish_time = Some(chrono::Utc::now());
+                    if let Some(text) = final_text {
+                        let mut metadata = message.metadata_json.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok())
+                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
+                        crate::db::butler_execution::record_agent_final(&mut metadata, content, text);
+                        message.metadata_json = Some(metadata.to_string());
+                    }
                 }
                 let _ = repo.update(&message);
             }
@@ -1332,6 +1338,7 @@ pub fn spawn_claude_session_task(
                         manager.set_agent_streaming(&app, &event_identity, message_id).await;
                     }
                     let mut content = String::new();
+                    let mut final_text = None;
                     let mut agent_plan_message: Option<AgentPlanMessage> = None;
                     let mut activities = ClaudeActivities::default();
                     let mut was_cancelled = false;
@@ -1454,7 +1461,7 @@ pub fn spawn_claude_session_task(
                                     frame.pointer("/event/delta/text").and_then(Value::as_str)
                                 {
                                     content.push_str(delta);
-                                    persist(&app, message_id, &content, false);
+                                    persist(&app, message_id, &content, false, None);
                                     emit_update(&event_identity,
                                         &window,
                                         _conversation_id,
@@ -1528,6 +1535,7 @@ pub fn spawn_claude_session_task(
                                 }
                             }
                             "result" => {
+                                if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") { break; }
                                 if let Some(error) = claude_result_error(&frame) {
                                     stream_error = Some(error);
                                     break;
@@ -1535,6 +1543,7 @@ pub fn spawn_claude_session_task(
                                 if content.is_empty() {
                                     content = claude_result_fallback_content(&frame, compact_boundary);
                                 }
+                                final_text = frame["result"].as_str().filter(|text| !text.is_empty()).map(str::to_owned);
                                 usage = frame.get("usage").cloned().unwrap_or(Value::Null);
                                 break;
                             }
@@ -1553,7 +1562,7 @@ pub fn spawn_claude_session_task(
                         }
                         break;
                     }
-                    if content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
+                    if !was_cancelled && content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
                         emit_claude_run_failure(
                             &app,
                             &event_identity,
@@ -1565,7 +1574,7 @@ pub fn spawn_claude_session_task(
                         }
                         break;
                     }
-                    persist(&app, message_id, &content, true);
+                    persist(&app, message_id, &content, true, if was_cancelled { Some("") } else { final_text.as_deref() });
                     if !usage.is_null() {
                         persist_usage(&app, message_id, &usage);
                     }
@@ -1586,7 +1595,9 @@ pub fn spawn_claude_session_task(
                     } else {
                         content.as_str()
                     };
-                    handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
+                    if !was_cancelled {
+                        handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
+                    }
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                         manager.clear_agent_focus(&app, &event_identity, false).await;
                     }
@@ -1604,6 +1615,7 @@ pub fn spawn_claude_session_task(
                         ),
                     )
                     .await;
+                    crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, !was_cancelled).await;
                 }
             }
         }

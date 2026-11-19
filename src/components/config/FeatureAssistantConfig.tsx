@@ -607,7 +607,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                             <div className="flex-1 flex items-center">
                                 {feature.icon}
                                 <div className="ml-3 flex-1 truncate">
-                                    <div className="font-medium truncate">{feature.name}</div>
+                                    <div className="truncate">{feature.name}</div>
                                 </div>
                             </div>
                         </div>

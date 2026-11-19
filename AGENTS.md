@@ -16,6 +16,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **管家开工提示**：总管家、联系人、任务助手与群成员使用 `report_progress` 说明准备做什么，工具回执后沿既有执行链路继续。按执行会话广播 `butler_progress_summary`，私聊与群成员行以气泡显示上报原话，同时居中显示本轮辅助模型的最新总结；最终交付仍由原会话处理。
 
+管家简洁聊天按实际发生时间排列每次成功上报、问答与预览，普通正文只展示本轮完成时的最后答复。原生通道通过 `db/butler_execution.rs` 记录最终正文边界，执行记录保留完整内容。私聊投影在 `butlerTimeline.ts`，群聊通过成员执行轮次的输入、回复与结束时间定位交互（`butlerGroupResults.tsx`）。恢复实时问答按执行会话和原请求 ID 匹配。
+
 **管家引用展示**：`preview_message`（Agent 工具，归入协作工具，只在管家非群聊会话注入、免审核）按 `message_id` 或 `work_ref`（`exchange:`/`task:`/`scheduled_run:`）原样展示另一条助手回复，代替转述；模型拿到的只是小回执。句柄由系统在交给模型的地方附上：协作答复首行「引用：」、`<butler_task_result>`/`<butler_scheduled_task_result>` 的 `final_message_id`。可引用范围与管家历史检索一致，工具与界面取数共用 `db/message_preview.rs` + `api/message_preview.rs`。管家定时任务不通知的运行会话以隐藏 `scheduled_run` 保留（每任务最近 20 次，删任务连带删除）供引用。管家简洁聊天直接显示 `preview_file` 的文件内容、`preview_code` 的代码预览与 `ask_user_question` 的问答卡；三者共用 `ButlerInteractionResult` 展示已保存的结果，实时问答由原会话接收。前端卡片 `MessagePreviewToolCall` 是交付结果，简洁聊天也保留（`butlerTranscript`、`McpToolCallRenderer` 的结果类工具白名单）；飞书投递时展开原文。
 
 **管家长期记忆**：`butler_memory` 工具 + `db/butler_memory.rs` 单表，范围为助手私有 / 群（本群成员共享）/ 全局，私有记忆不进群。只有本轮用户本人的消息（群里为直接回应用户发言的回复）能写入；协作、派工、续接转达、后台续跑不算。每轮附带的 `<long_term_memory>` 随用户消息入库并逐字回放：首次按相关度在 800 字预算内附带一批（`initial="true"`，不保证是全部，放不下的提示条数、模型可 recall），之后对照“这次要发出的历史”里模型已经看到的记忆（附带过的记忆块、压缩检查点里的记忆块、本会话 `butler_memory` 工具返回的保存/更正/忘记/查到的结果）只附带新增/更新/删除与相关未看到的记忆；压缩时摘要输入去掉记忆块（`butler_memory::without_memory`），在摘要检查点后面重新首次附带一次当前版本（`CheckpointStore::memory_snapshot`），不在用户消息里整批重带。界面不显示附带了哪些记忆。删除聊天保留记忆，删群删群记忆，删助手删其私有记忆。界面在联系人资料“记忆”页与群聊信息面板。见 `api/butler_memory.rs`。
@@ -29,7 +31,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **聊天界面只有一套**（Ask 是单轮弹窗，只共用输入框）：
 - 输入框：ChatUI、管家私聊/总管家（经 `ConversationUI`）、Ask、管家群聊都直接用 `src/components/conversation/InputArea.tsx`，输入相关新功能加在这里即全部生效；各场景差异用能力 props 表达（不传 `handleChooseFile` = 不支持附件，如群聊；`mentionCandidates` 替换 @ 候选，群聊传本群成员与“所有人”；`topChip` 引用条），不要再为某个场景手写输入框。发送语义各场景自理，但发送键约定一致：有内容即发送（回复中可插话/排队），空输入且在回复时为停止，空闲时点击空输入框的发送按钮会发送「继续你的工作」。
-- 消息列表：私聊与群聊共用 `VirtuosoMessageList` + `useMessageListElements`（虚拟化、打开贴底与晚到布局跟随、发送滑动、跳转高亮、最后一轮布局）与 `useScrollManagement`、`ConversationTurnRail`；气泡统一是 `MessageItem`。群聊（`ButlerGroupTranscript.tsx`）通过 `transcriptKey`（消息分属多个成员执行会话）、`mergeAssistantMessages={false}`（不同成员不并气泡）、`renderMessageRow`（发言人/时间分隔/系统提示）、`inlineInteractionItems`（正在输入/成员提问）接入；列表层改进直接作用于两者，不要再为某个场景手写列表或滚动逻辑。
+- 会话命令共用输入框的菜单和发送处理。普通聊天与管家支持 `/compact`，管家另有 `/reload`。普通模型复用摘要检查点，Agent 走原生压缩；群聊按成员执行会话处理。提示词构建与普通回合共用，入口在 `api/ai_api/context_commands.rs`。
+- 消息列表：私聊与群聊共用 `VirtuosoMessageList` + `useMessageListElements`（虚拟化、打开贴底与晚到布局跟随、发送滑动、跳转高亮、最后一轮布局）与 `useScrollManagement`、`ConversationTurnRail`；气泡统一是 `MessageItem`。群聊（`ButlerGroupTranscript.tsx`）通过 `transcriptKey`（消息分属多个成员执行会话）、`mergeAssistantMessages={false}`（不同成员不并气泡）、`renderMessageRow`（发言人/时间分隔/系统提示）、`inlineInteractionItems`（正在输入/成员提问）接入；列表层改进直接作用于两者，不要再为某个场景手写列表或滚动逻辑。发送时上一轮不得重挂载（按轮稳定包裹、合并气泡按首条 id 作 key、重拉复用未变消息对象），保留节点的长会话尾部优先挂载，细节与回归方法见 [滚动性能手册](./docs/chat-scroll-perf-playbook.md)。
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 
@@ -75,6 +78,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ## Key Development Patterns
 
 **原生 Agent 扩展**：Pi/Cursor/OpenCode/Kiro/Antigravity 在 `api/ai/agent_driver/native_agents.rs` 注册，协议适配脚本位于同名目录；Pi 使用 RPC + extension、Cursor 使用官方 Node SDK、OpenCode 使用本机 HTTP/SSE，Kiro V3 与 Antigravity 使用官方原生 ACP（`acp-native.mjs`），身份不与通用 ACP 混用。Antigravity 与 Cursor 的浏览器登录在 `native_agents_auth.rs`，按 provider 实例隔离账号（Cursor 走 SDK `Cursor.auth.login()`，密钥存 `agent-profiles/cursor/<id>/auth.json`，`CURSOR_API_KEY` 优先）；普通对话不启动 OAuth。提供商表单的环境检测（Node 安装枚举、CLI/SDK 定位与版本）、最新版本查询与一键更新在 `native_agents_env.rs`，CLI 检测与更新命令都经桥接 `tools.mjs` + `common.mjs` 的 `launchPlan()` 执行，保证显示的路径就是会话实际启动的程序；前端为 `src/components/config/native-agent/`。原生智能体审批：助手级 `pi_approval`/`kiro_autopilot`/`antigravity_mode` 经 wire 进入桥接；助手 `tool_review_mode=auto_model` 时 `queue_permission` 先调用 `tool_review::review_agent_permission`，安全只自动选 `allow_once`，否则才弹卡（带 `review` 原因）并触发提醒。新增驱动复用统一 dispatch、实例归属、scoped MCP 和审批 stores。协议测试使用 `node --test src-tauri/src/api/ai/agent_driver/native_agents/native-agents.test.mjs`；安装与能力边界见 `docs/product/11-ACP集成.md`。
+
+原生 Agent 的普通排队在成功终态清理之后经 `ai_api/native_queue.rs` 派发；Pi、Codex 插队绑定活动回合，其余驱动中断后等待同一 actor 的终态。当前会话的权限申请复用 InputArea 旁的可折叠面板，背景会话保留弹窗。
 
 管家原生 Agent 的上下文由 `agent_driver/turn.rs` 使用实际选中 MCP 目录构造。新增驱动需核对系统指令入口、普通回合、恢复/压缩后的投递和原生工具调用，用户正文与管家规则保持独立；各协议映射见 [ACP 集成](./docs/product/11-ACP集成.md)。
 

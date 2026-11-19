@@ -26,12 +26,34 @@ function asFinitePositiveInt(value: unknown): number | null {
     return Math.floor(num);
 }
 
+/**
+ * Parsed by metadata string. The list re-reads every message's metadata on each
+ * transcript update, and agent messages carry tens of KB of activities there.
+ * Identical strings hit the cache; most messages are rejected by the substring check.
+ */
+const streamRetryMetaCache = new Map<string, StreamRetryMeta | null>();
+const STREAM_RETRY_META_CACHE_LIMIT = 500;
+
 export function parseStreamRetryMeta(message: Message | null | undefined): StreamRetryMeta | null {
-    if (!message?.metadata_json) {
+    const raw = message?.metadata_json;
+    if (!raw || !raw.includes("stream_retry")) {
         return null;
     }
+    const cached = streamRetryMetaCache.get(raw);
+    if (cached !== undefined) {
+        return cached;
+    }
+    const meta = parseStreamRetryMetaJson(raw);
+    if (streamRetryMetaCache.size >= STREAM_RETRY_META_CACHE_LIMIT) {
+        streamRetryMetaCache.clear();
+    }
+    streamRetryMetaCache.set(raw, meta);
+    return meta;
+}
+
+function parseStreamRetryMetaJson(raw: string): StreamRetryMeta | null {
     try {
-        const parsed = JSON.parse(message.metadata_json) as {
+        const parsed = JSON.parse(raw) as {
             stream_retry?: {
                 session_id?: unknown;
                 attempt?: unknown;

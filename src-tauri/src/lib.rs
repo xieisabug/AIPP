@@ -999,6 +999,7 @@ pub fn run() {
     let app = app
         .invoke_handler(tauri::generate_handler![
             ask_ai,
+            api::ai_api::context_commands::run_conversation_context_command,
             enqueue_conversation_message,
             list_queued_conversation_messages,
             promote_queued_conversation_message,

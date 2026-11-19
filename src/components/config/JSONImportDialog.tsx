@@ -221,12 +221,12 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
 
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && handleCancel()}>
-            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
                 <DialogHeader>
                     <DialogTitle>JSON导入MCP服务器配置</DialogTitle>
                 </DialogHeader>
 
-                {reviewing ? <div className="space-y-4 py-4">
+                {reviewing ? <div className="min-h-0 overflow-y-auto space-y-4 py-4">
                     {catalog && <p>来源：AIPP 应用目录 · {catalog}。打开详情可查看服务地址和登录要求，再决定是否连接。</p>}
                     {preview.map((config, i) => <section key={i} className="space-y-2 rounded-md border p-3 text-sm">
                         <p>来源：导入的自定义 MCP · {config.transport_type}</p>
@@ -238,7 +238,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                     </section>)}
                     {preview.length > 0 && <p className="text-sm">导入后保持停用。保存配置不会启动程序、登录或授权工具。</p>}
                     <Button variant="outline" disabled={submitting} onClick={() => {setCatalog('');setPreview([]);}}>返回 JSON</Button>
-                </div> : <div className="space-y-4 py-4">
+                </div> : <div className="min-h-0 overflow-y-auto space-y-4 py-4">
                     <div className="space-y-2">
                         <Label htmlFor="json-content">JSON配置</Label>
                         <Textarea
@@ -289,7 +289,7 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                     </div>
                 </div>}
 
-                <DialogFooter>
+                <DialogFooter className="shrink-0">
                     <Button
                         variant="outline"
                         onClick={handleCancel}

@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
+import { emit } from "@tauri-apps/api/event";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import type { MCPToolCall } from "@/data/MCPToolCall";
 import { useAskUserQuestion } from "./useInlineInteraction";
@@ -29,6 +30,29 @@ describe("useAskUserQuestion submit", () => {
         mockInvokeHandler("list_recoverable_butler_questions", () => [recovered]);
     });
     afterEach(() => clearAllMockHandlers());
+
+    it("should keep the current member's questions in order when a prior conversation snapshot arrives late", async () => {
+        let resolveOld!: (requests: typeof recovered[]) => void;
+        const oldSnapshot = new Promise<typeof recovered[]>(resolve => { resolveOld = resolve; });
+        const first = { ...recovered, conversation_id: 1523, request_id: "first" };
+        const next = { ...first, request_id: "next" };
+        const snapshot = vi.fn(args => args?.conversationId === 1522 ? oldSnapshot : [first]);
+        mockInvokeHandler("list_recoverable_butler_questions", snapshot);
+        mockInvokeHandler("submit_ask_user_question_response", () => null);
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        const { result, rerender } = renderHook(({ id }) => useAskUserQuestion({ conversationId:id }), { initialProps: {id:1522} });
+        await waitFor(() => expect(snapshot).toHaveBeenCalledWith({ conversationId:1522 }));
+        rerender({ id:1523 });
+        await waitFor(() => expect(result.current.pendingRequest?.request_id).toBe("first"));
+        await act(async () => {
+            await emit("ask-user-question-request", first);
+            await emit("ask-user-question-request", next);
+            resolveOld([recovered]);
+        });
+        await act(() => result.current.handleSubmit("first", { 规格:"回答" }));
+        expect(result.current.pendingRequest?.request_id).toBe("next");
+        expect(result.current.viewMode).toBe("questionnaire");
+    });
 
     it("should keep the questionnaire and show the error when the answer is not delivered", async () => {
         mockInvokeHandler("submit_ask_user_question_response", () => {
@@ -60,5 +84,14 @@ describe("useAskUserQuestion submit", () => {
         expect(toast.error).toHaveBeenCalledWith("回答没有送达", expect.objectContaining({
             description: expect.stringContaining("没有等待中的请求"),
         }));
+    });
+
+    it("should keep a live question answerable when cancellation fails", async () => {
+        mockInvokeHandler("submit_ask_user_question_response", () => { throw "执行仍在等待"; });
+        const { result } = renderHook(() => useAskUserQuestion({ conversationId:1522 }));
+        await waitFor(() => expect(result.current.pendingRequest?.request_id).toBe(recovered.request_id));
+        await act(() => result.current.handleCancel(recovered.request_id));
+        expect(result.current.pendingRequest?.request_id).toBe(recovered.request_id);
+        expect(toast.error).toHaveBeenCalledWith("未能取消提问", { description:"执行仍在等待" });
     });
 });

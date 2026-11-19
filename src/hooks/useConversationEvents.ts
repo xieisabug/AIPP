@@ -23,6 +23,7 @@ import {
     QueuedConversationMessage,
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
+import { parseDatabaseTime } from "@/utils/messageOrdering";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { noteToolReview } from "@/hooks/toolReviewStore";
 import { invalidateMcpToolCall } from "@/services/conversationResourceCache";
@@ -513,8 +514,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 parameters: call.parameters,
                 result: call.result,
                 error: call.error,
-                started_time: call.started_time ? new Date(call.started_time) : undefined,
-                finished_time: call.finished_time ? new Date(call.finished_time) : undefined,
+                started_time: call.started_time || call.created_time ? parseDatabaseTime(call.started_time || call.created_time) : undefined,
+                finished_time: call.finished_time ? parseDatabaseTime(call.finished_time) : undefined,
             };
             stateMap.set(call.id, update);
             if (call.status === "executing" || call.status === "pending") {

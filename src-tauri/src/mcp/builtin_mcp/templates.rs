@@ -461,7 +461,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "to":{"type":"string","description":"Exact contact name or #assistant_id"},
                     "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
                     "request_id":{"type":"string","description":"Reuse on retry; use a new key for a new round"},
-                    "max_rounds":{"type":"integer","minimum":1,"maximum":12,"description":"Budget for the entire user instruction including nested help, set on first request (default 6)"},
+                    "max_rounds":{"type":"integer","minimum":1,"maximum":50,"description":"Initial shared collaboration budget (default 50). Additional blocks of 50 require review automatically when needed."},
                     "deliver_to":{"type":"string","enum":["user","sender"],"description":"Who receives the answer. See tool description for the default."},
                     "report_to_user":{"type":"boolean","description":"Deprecated alias: true equals deliver_to=user, false equals deliver_to=sender."}
                 }}),

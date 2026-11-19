@@ -291,6 +291,16 @@ pub fn pending_exchanges(conn: &Connection) -> rusqlite::Result<Vec<Exchange>> {
     rows.collect()
 }
 
+pub const ROUND_BLOCK: i64 = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("协作链 #{chain} 已达到 {limit} 轮")]
+pub struct RoundLimit {
+    pub chain: i64,
+    pub limit: i64,
+}
+
+#[derive(Clone, Copy)]
 pub struct NewRequest<'a> {
     pub owner: i64,
     pub target: i64,
@@ -306,6 +316,10 @@ pub struct NewRequest<'a> {
 }
 
 pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exchange> {
+    enqueue_reviewed(conn, req, None)
+}
+
+pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Option<RoundLimit>) -> anyhow::Result<Exchange> {
     anyhow::ensure!(req.owner != req.target, "不能向同一个联系人派发协作请求");
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     super::butler_control::ensure_delegation(&tx, req.owner)?;
@@ -403,14 +417,14 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
     }
     // 轮数预算与停止状态按整条工作链计算，不能靠切换会话或新一轮重新计数。
     let (count, limit, stopped, chain_expiry): (i64, Option<i64>, i64, Option<DateTime<Utc>>) = tx.query_row(
-        "SELECT count(*),min(max_rounds),count(CASE WHEN stop_requested=1 THEN 1 END),min(expires_at)
+        "SELECT count(*),max(max_rounds),count(CASE WHEN stop_requested=1 THEN 1 END),min(expires_at)
          FROM butler_peer_exchange WHERE coalesce(chain,root)=?1",
         [chain],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let limit = limit.unwrap_or(req.limit);
     anyhow::ensure!(stopped == 0, "该协作已停止，请向用户汇报现有结果");
-    anyhow::ensure!(count < limit, "协作已达到 {limit} 轮，请汇报已有结果和分歧");
+
     let busy: bool = tx.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE root=?1 AND target=?2 AND state IN {ACTIVE})"),
         params![root, req.target],
@@ -418,6 +432,18 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
     )?;
     anyhow::ensure!(!busy, "与该助手的上一轮仍在进行，收到回复后可继续发送");
     let depth = parent.as_ref().map_or(1, |p| p.depth + 1);
+    anyhow::ensure!(chain_expiry.is_none_or(|at| at > Utc::now()), "协作链已过期");
+    let boundary = RoundLimit { chain, limit };
+    if let Some(grant) = approved {
+        anyhow::ensure!(grant.chain == chain, "审核期间协作归属已变化");
+    }
+    let limit = if count < limit {
+        limit
+    } else if approved == Some(boundary) {
+        limit.checked_add(ROUND_BLOCK).ok_or_else(|| anyhow::anyhow!("协作轮数溢出"))?
+    } else {
+        return Err(boundary.into());
+    };
     // 有效期由整条链首次发起时确定，后续轮次与下级继承，不重新计时。
     let expires_at = parent
         .as_ref()

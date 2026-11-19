@@ -9,13 +9,13 @@ fn fixture() -> Connection {
             content TEXT, metadata_json TEXT);
         CREATE TABLE butler_task_definition(id INTEGER PRIMARY KEY, task_conversation_id INTEGER,
             executor_assistant_id INTEGER, butler_conversation_id INTEGER, title TEXT, goal TEXT);
-        CREATE TABLE butler_task_result(task_conversation_id INTEGER, final_message_id INTEGER, summary TEXT);
+        CREATE TABLE butler_task_result(task_conversation_id INTEGER, final_message_id INTEGER, summary TEXT, structured_output_json TEXT);
         INSERT INTO conversation VALUES (10,'butler_main',1,NULL,NULL,NULL),
             (20,'butler_contact',2,NULL,NULL,NULL),(30,'butler_contact',3,NULL,NULL,NULL),
             (41,'butler_task',2,'succeeded','done',NULL);
         INSERT INTO butler_task_definition VALUES (1,41,2,10,'报告','写报告');
         INSERT INTO message VALUES (1,41,'response','原报告正文',NULL);
-        INSERT INTO butler_task_result VALUES (41,1,'摘要');
+        INSERT INTO butler_task_result(task_conversation_id,final_message_id,summary) VALUES (41,1,'摘要');
     ").unwrap();
     conn
 }

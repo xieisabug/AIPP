@@ -4,7 +4,7 @@ interface CircleButtonProps {
     primary?: boolean;
     size?: 'mini' | 'small' | 'medium' | 'large';
     icon: ReactNode;
-    onClick: () => void;
+    onClick: React.MouseEventHandler<HTMLButtonElement>;
     className?: string;
     type?: 'submit' | 'button';
     style?: CSSProperties;

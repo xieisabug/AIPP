@@ -774,3 +774,42 @@ fn test_queued_owner_resume_and_unrelated_work_remain_eligible() {
     assert!(claim(&db,&ex).unwrap());
     assert!(write_input(&mut db,ex.id,"request",30,"稿件",1,"model").is_ok());
 }
+
+#[test]
+fn test_butler_peer_round_extension_is_bound_to_chain_and_budget() {
+    let mut db = chain_database();
+    let chain = message(&db, 10, "user", "协作");
+    enqueue(&mut db, NewRequest { limit: 1, ..delegate(10, 20, "first", "分析") }).unwrap();
+    let next = delegate(10, 30, "second", "复核");
+    let boundary = *enqueue(&mut db, next).unwrap_err().downcast_ref::<RoundLimit>().unwrap();
+    assert_eq!(boundary, RoundLimit { chain, limit: 1 });
+    assert!(enqueue_reviewed(&mut db, next, Some(RoundLimit { chain: chain + 1, ..boundary })).is_err());
+    let approved = enqueue_reviewed(&mut db, next, Some(boundary)).unwrap();
+    assert_eq!((approved.round_no, approved.max_rounds), (2, 51));
+    assert_eq!(enqueue(&mut db, next).unwrap().id, approved.id);
+    let third = enqueue(&mut db, delegate(10, 60, "third", "补充")).unwrap();
+    assert_eq!((third.round_no, third.max_rounds), (3, 51));
+}
+
+#[test]
+fn test_butler_peer_reviews_each_block_of_fifty_rounds() {
+    let mut db = chain_database();
+    let chain = message(&db, 10, "user", "分批处理");
+    let mut last_approval = None;
+    for round in 1..=101 {
+        let key = round.to_string();
+        let request = NewRequest { limit: ROUND_BLOCK, ..delegate(10, 20, &key, "处理下一批") };
+        let exchange = if round == 51 || round == 101 {
+            let error = enqueue_reviewed(&mut db, request, last_approval).unwrap_err();
+            let boundary = *error.downcast_ref::<RoundLimit>().unwrap();
+            assert_eq!(boundary, RoundLimit { chain, limit: round - 1 });
+            last_approval = Some(boundary);
+            enqueue_reviewed(&mut db, request, last_approval).unwrap()
+        } else {
+            enqueue(&mut db, request).unwrap()
+        };
+        assert_eq!(exchange.round_no, round);
+        assert_eq!(exchange.max_rounds, ((round - 1) / 50 + 1) * 50);
+        db.execute("UPDATE butler_peer_exchange SET state='delivered' WHERE id=?1", [exchange.id]).unwrap();
+    }
+}

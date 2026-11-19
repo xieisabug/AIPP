@@ -4601,7 +4601,7 @@ async fn process_acp_prompt(
     window: tauri::Window,
     history_prefix: Option<String>,
     butler_instructions: Option<String>,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     client_handle.set_current_message(message_id).await;
     client_handle.set_window(window).await;
     client_handle.reset_buffers().await;
@@ -4704,7 +4704,7 @@ async fn process_acp_prompt(
             }),
         )
         .await;
-    Ok(())
+    Ok(prompt_succeeded)
 }
 
 async fn run_acp_session(
@@ -5421,7 +5421,7 @@ async fn run_acp_connected_session(
     } else {
         VecDeque::new()
     };
-    let mut active_prompt: Option<oneshot::Receiver<Result<(), AppError>>> = None;
+    let mut active_prompt: Option<oneshot::Receiver<Result<bool, AppError>>> = None;
     let mut active_mcp_prompt = None;
     let mut instructions_pending = true;
     let mut agent_closed_connection = false;
@@ -5540,7 +5540,10 @@ async fn run_acp_connected_session(
                     client_handle.set_active_prompt(false).await;
                     active_prompt = None;
                     match prompt_result {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(succeeded)) => {
+                            let window = client_handle.window.lock().await.clone();
+                            crate::api::ai_api::native_queue::finish_turn(&app_handle, &window, conversation_id, &client_handle.run_id, succeeded).await;
+                        }
                         Ok(Err(error)) => {
                             client_handle.send_error_event(&error.to_string()).await;
                             return Err(error);

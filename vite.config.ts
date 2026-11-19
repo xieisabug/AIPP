@@ -11,6 +11,7 @@ export default defineConfig(async () => ({
 		// Only scan the app entry; artifact templates and tmp backups are separate apps.
 		entries: ["index.html"],
 		include: [
+			"@tauri-apps/plugin-notification",
 			"mermaid",
 			"react-syntax-highlighter",
 			"react-syntax-highlighter/dist/esm/styles/prism",

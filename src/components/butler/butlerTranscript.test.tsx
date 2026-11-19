@@ -10,6 +10,20 @@ describe("Butler transcript", () => {
     const history = [message(1, "user", "查编号"), message(2, "reasoning", "找文件"), step,
         message(4, "tool_result", "原始输出"), message(5, "response", "编号 LT-7042")];
 
+    it("should publish only the final text when a turn has unmarked commentary or ends without a reply", () => {
+        const process = message(2, "response", "先查一下");
+        expect(butlerTranscript([history[0], process, history[4]])).toEqual([history[0], history[4]]);
+        for (const terminal of [
+            message(3, "response", "未完成", {finish_time:null}),
+            message(3, "response", "[[NO_REPLY]]"),
+            message(3, "response", "只有过程", {butler_final_text:""}),
+            message(3, "response", "停止时的片段", {metadata_json:'{"end_reason":"cancelled"}'}),
+        ]) expect(butlerTranscript([history[0], process, terminal])).toEqual([history[0]]);
+        const response = message(3, "response", "执行记录和答复", {butler_final_text:"答复"});
+        expect(butlerTranscript([history[0], process, response]).map(m => m.content)).toEqual(["查编号","答复"]);
+        expect(response.content).toBe("执行记录和答复");
+    });
+
     it("should retain only the answer after a tool completes and after reloading history", () => {
         expect(butlerTranscript(history)).toEqual([history[0], history[4]]);
         expect(butlerTranscript(structuredClone(history))).toEqual([history[0], history[4]]);

@@ -1,8 +1,11 @@
+export type ContextCommand = "compact" | "reload";
+
 export interface SlashNamespaceItem {
     name: string;
     description: string;
     isEnabled: boolean;
     source?: "aipp" | "acp";
+    action?: ContextCommand;
     inputHint?: string | null;
 }
 

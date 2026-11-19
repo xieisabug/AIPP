@@ -23,9 +23,13 @@ export interface ConversationWithMessages {
 
 export interface Message {
     /** Display-only communication row in the desktop Butler timeline. */
-    butler_inline_interactions?: import("../components/ConversationUI").InlineInteractionItem[];
     butler_interaction?: import("react").ReactNode;
+    butler_event_order?: number;
+    butler_live_item_key?: string;
+    butler_published_reports?: string[];
     butler_posts?: import("../components/butler/butlerTimeline").PeerPost[];
+    /** Native agents can store commentary and the final answer in the same response. */
+    butler_final_text?: string | null;
     id: number;
     conversation_id: number;
     message_type: string;
@@ -55,14 +59,24 @@ export interface Message {
     reply_quote?: MessageReplyQuote;
 }
 
+// Keyed by the metadata string: the list re-reads it for every message on each update,
+// and agent messages carry large activity logs that may mention "scheduled_task".
+const scheduledTaskMetadataCache = new Map<string, Record<string, unknown> | null>();
+
 export function readScheduledTaskMetadata(raw: Message["metadata_json"]): Record<string, unknown> | null {
     if (!raw?.includes("scheduled_task")) return null;
+    const cached = scheduledTaskMetadataCache.get(raw);
+    if (cached !== undefined) return cached;
+    let result: Record<string, unknown> | null = null;
     try {
         const metadata = JSON.parse(raw);
-        return metadata?.origin === "scheduled_task" ? metadata : null;
+        result = metadata?.origin === "scheduled_task" ? metadata : null;
     } catch {
-        return null;
+        result = null;
     }
+    if (scheduledTaskMetadataCache.size >= 500) scheduledTaskMetadataCache.clear();
+    scheduledTaskMetadataCache.set(raw, result);
+    return result;
 }
 
 export interface MessageReplyQuote {

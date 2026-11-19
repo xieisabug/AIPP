@@ -1,3 +1,4 @@
+import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
@@ -228,6 +229,8 @@ function ChatUIWindow() {
     // 只为当前会话弹审批（权限弹窗与工具调用确认卡片），聚焦时这个会话的审批不再发系统通知。
     useApprovalSurface(selectedConversation ? [parseInt(selectedConversation, 10)] : []);
 
+    const acceptBackgroundRequests = useFocusedWindow();
+
     // 操作权限对话框
     const {
         pendingRequest,
@@ -236,6 +239,7 @@ function ChatUIWindow() {
         isSubmitting,
         handleDecision,
     } = useOperationPermission({
+        acceptBackgroundRequests,
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
     const {
@@ -245,6 +249,7 @@ function ChatUIWindow() {
         isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
+        acceptBackgroundRequests,
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
     const {

@@ -132,7 +132,12 @@ export async function openPi(config, emit, dependencies = {}) {
       void request({ type: 'abort' }).catch(fail);
     }
     if (frame.type === 'agent_end') {
-      emit({ ...base, type: 'done', error: failure });
+      const last = Array.isArray(frame.messages) ? frame.messages.findLast(message => message.role === 'assistant') : undefined;
+      let finalText;
+      if (last?.stopReason === 'toolUse') finalText = '';
+      else if (typeof last?.content === 'string') finalText = last.content;
+      else if (Array.isArray(last?.content)) finalText = last.content.filter(block => block.type === 'text').map(block => block.text).join('');
+      emit({ ...base, type: 'done', error: failure, final_text: finalText });
       turn = null; failure = undefined; questions.clear(); tools.clear(); thinkingId = undefined;
     }
   }, fail);
@@ -162,6 +167,10 @@ export async function openPi(config, emit, dependencies = {}) {
             emit({ type: 'done', turn }); turn = null; questions.clear();
           }
         }
+      },
+      async steer(expectedTurn, text) {
+        if (!turn || turn !== expectedTurn) throw new Error('Pi steering target is no longer the active turn');
+        await request({ type: 'steer', message: text });
       },
       async cancel() { await request({ type: 'abort' }); },
       async reply(id, value) { send({ type: 'extension_ui_response', id, confirmed: value === 'allow' }); },

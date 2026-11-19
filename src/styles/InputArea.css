@@ -980,3 +980,14 @@
     flex-direction: column;
     justify-content: center;
 }
+
+.composer-permission-slot {
+    position: absolute;
+    z-index: 30;
+    max-height: 48dvh;
+    overflow: auto;
+    border-radius: 0.75rem;
+}
+.composer-permission-slot[data-placement="bottom"] { transform: translateY(-100%); }
+.composer-permission-slot:empty { display: none; }
+.input-area.top:has(.composer-permission-slot:not(:empty)) { z-index: 20; }

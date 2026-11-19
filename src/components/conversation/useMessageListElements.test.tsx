@@ -139,7 +139,7 @@ describe("useMessageListElements merged assistant preview state", () => {
             makeMessage({ id: 7 }), makeMessage({ id: 8 }),
         ];
         const { result } = renderHook(() => useMessageListElements(makeHookProps(butlerTranscript(messages))));
-        expect(result.current.messageElements.map(group => group.messageIds)).toEqual([[1, 2], [4], [6], [7, 8]]);
+        expect(result.current.messageElements.map(group => group.messageIds)).toEqual([[2], [4], [6], [8]]);
     });
 
     it("treats every message in the trailing merged assistant group as the last message", () => {
@@ -273,10 +273,10 @@ describe("useMessageListElements merged assistant preview state", () => {
         );
 
         const mergedGroupItem = mergedResult.current.renderItems.find(
-            (item) => item.key === "message-3",
+            (item) => item.key === "merged-2",
         );
         const singleItem = singleResult.current.renderItems.find(
-            (item) => item.key === "message-3",
+            (item) => item.key === "merged-3",
         );
 
         expect(mergedGroupItem?.messageIds).toEqual([2, 3]);
@@ -307,11 +307,13 @@ describe("useMessageListElements merged assistant preview state", () => {
             ...segmentItems.slice(0, -1).map(() => true),
             false,
         ]);
-        // 尾部组仍整体留在 last-reply 容器中
-        const lastReply = items.find((item) => item.key === "last-reply-container");
+        // 尾部组不拆段，整体留在最后一轮（live）中
+        const lastTurn = items.filter((item) => item.lastTurn);
+        expect(lastTurn.every((item) => item.virtualizationMode === "live")).toBe(true);
+        expect(lastTurn.some((item) => item.key.includes(":segment-"))).toBe(false);
         // All nested message IDs must remain addressable by virtualized scrolling,
         // including replies hidden inside a collapsed retry/merged group.
-        expect(lastReply?.messageIds).toEqual([5, 6, 7]);
+        expect(lastTurn.flatMap((item) => item.messageIds ?? [])).toEqual([5, 6, 7]);
     });
 
     it("caps historical row height estimates for auto-collapsed code blocks", () => {
@@ -345,10 +347,10 @@ describe("useMessageListElements merged assistant preview state", () => {
         );
 
         const codeItem = codeResult.current.renderItems.find(
-            (item) => item.key === "message-2",
+            (item) => item.key === "merged-2",
         );
         const plainItem = plainResult.current.renderItems.find(
-            (item) => item.key === "message-2",
+            (item) => item.key === "merged-2",
         );
 
         expect(codeItem?.estimatedHeight ?? 0).toBeLessThan(1500);
@@ -458,9 +460,9 @@ describe("unmerged retry attempts", () => {
         mockDisplayConfig.isMergeAssistantMessages = false;
         const messages = [makeMessage({ id: 1, message_type: "user" }), retry(2, 1), retry(3, 2, "completed")];
         const { result } = renderHook(() => useMessageListElements(makeHookProps(messages)));
-        const row = result.current.renderItems.find(item => item.key === "last-reply-container");
-        expect(row?.messageIds).toEqual([1, 2, 3]);
-        expect(row?.messageId).toBe(3);
+        const lastTurn = result.current.renderItems.filter(item => item.lastTurn);
+        expect(lastTurn.flatMap(item => item.messageIds ?? [])).toEqual([1, 2, 3]);
+        expect(lastTurn.filter(item => item.messageId !== null).at(-1)?.messageId).toBe(3);
     });
 
     it("should retain every failed attempt after reopening when all retries fail", () => {
@@ -527,5 +529,65 @@ describe("unmerged retry attempts", () => {
         expect(grouped[0].estimatedHeight).toBe(40);
         expect(grouped[1]).toBe(rows[2]);
         expect(grouped[3]).toBe(rows[4]);
+    });
+});
+
+describe("turn-stable render items", () => {
+    const firstTurn = [
+        makeMessage({ id: 1, message_type: "user", content: "问题一" }),
+        makeMessage({ id: 2, message_type: "reasoning", content: "思考" }),
+        makeMessage({ id: 3, message_type: "response", content: "回答一" }),
+    ];
+
+    it("should keep the previous turn's row keys when the next user turn is appended", () => {
+        const { result, rerender } = renderHook(
+            ({ messages }) => useMessageListElements(makeHookProps(messages)),
+            { initialProps: { messages: firstTurn } },
+        );
+        // Message rows only: the trailing spacer always follows the newest turn.
+        const before = result.current.renderItems.filter((item) => item.turnKey === "user-1" && item.messageId !== null);
+        expect(before.every((item) => item.lastTurn)).toBe(true);
+
+        rerender({ messages: [...firstTurn, makeMessage({ id: 4, message_type: "user", content: "问题二" })] });
+
+        const after = result.current.renderItems;
+        const previousTurn = after.filter((item) => item.turnKey === "user-1" && item.messageId !== null);
+        expect(previousTurn.map((item) => item.key)).toEqual(before.map((item) => item.key));
+        expect(previousTurn.some((item) => item.lastTurn)).toBe(false);
+        expect(after.filter((item) => item.lastTurn).map((item) => item.turnKey)).toEqual(["user-4", "user-4"]);
+    });
+
+    it("should keep the merged bubble key while streamed replies join the group", () => {
+        const { result, rerender } = renderHook(
+            ({ messages }) => useMessageListElements(makeHookProps(messages)),
+            { initialProps: { messages: firstTurn.slice(0, 2) } },
+        );
+        const keyBefore = result.current.renderItems.find((item) => item.messageIds?.includes(2))?.key;
+
+        rerender({ messages: firstTurn });
+
+        const merged = result.current.renderItems.find((item) => item.messageIds?.includes(3));
+        expect(merged?.messageIds).toEqual([2, 3]);
+        expect(merged?.key).toBe(keyBefore);
+    });
+
+    it("should keep the previous live bubble whole when it becomes history", () => {
+        const longResponse = Array.from({ length: 40 }, () => "a very long assistant response line").join("\n\n");
+        const firstTurn = [
+            makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+            makeMessage({ id: 2, message_type: "response", content: longResponse }),
+            makeMessage({ id: 3, message_type: "response", content: longResponse }),
+        ];
+        const { result, rerender } = renderHook(
+            ({ messages }) => useMessageListElements(makeHookProps(messages)),
+            { initialProps: { messages: firstTurn } },
+        );
+        expect(result.current.renderItems.find((item) => item.key === "merged-2")?.lastTurn).toBe(true);
+
+        rerender({ messages: [...firstTurn, makeMessage({ id: 4, message_type: "user", content: "user-2" })] });
+
+        // Same row (no segment re-split), so the bubble is not remounted by the send.
+        expect(result.current.renderItems.some((item) => item.key.includes(":segment-"))).toBe(false);
+        expect(result.current.renderItems.find((item) => item.key === "merged-2")?.messageIds).toEqual([2, 3]);
     });
 });

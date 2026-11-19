@@ -51,6 +51,7 @@ const members = [
 function detail(patch: Partial<ButlerGroupDetail> = {}): ButlerGroupDetail {
     return {
         id: 7, name: "周报小组", members, has_more: false, turns: [], routing: false,
+        interaction_turns: [{ conversation_id: 102, input_id: 8999, trigger_seq: 2, reply_seq: 3 }],
         messages: [
             { group_id: 7, seq: 1, sender_member: null, sender_assistant: null, sender_name: "系统", kind: "notice", body: "你邀请 总管家、写作助手 加入了群聊", reply_to: null, created_at: "2026-11-09 08:00:00", source_conversation_id: null, source_message_id: null },
             { group_id: 7, seq: 2, sender_member: null, sender_assistant: null, sender_name: "我", kind: "message", body: "帮我写周报", reply_to: null, created_at: "2026-11-09 08:01:00", source_conversation_id: null, source_message_id: null },
@@ -87,6 +88,7 @@ beforeEach(() => {
     clearAllMockHandlers();
     // 通用输入框加载的 ! / # / 斜杠 / 全部助手 补全源；群聊的 @ 只用本群成员，不能出现全部助手里的人。
     mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+    mockInvokeHandler("list_butler_interactions", () => []);
     mockInvokeHandler("get_bang_list", () => []);
     mockInvokeHandler("vault_list_use_requests", () => []);
     mockInvokeHandler("vault_list_input_requests", () => []);
@@ -191,7 +193,7 @@ describe("ButlerGroupChat", () => {
         ]);
         renderChat();
         expect(await screen.findByText("很早以前的话")).toBeInTheDocument();
-        expect(api.listOlderButlerGroupMessages).toHaveBeenCalledWith(7, 1, expect.any(Number));
+        expect(api.listOlderButlerGroupMessages).toHaveBeenCalledWith(7, 1, 200);
         expect(screen.queryByText("查看更早的消息")).toBeNull();
     });
 
@@ -200,6 +202,23 @@ describe("ButlerGroupChat", () => {
         await screen.findByText("初稿如下");
         fireEvent.click(screen.getByLabelText("发送"));
         await waitFor(() => expect(api.postButlerGroupMessage).toHaveBeenCalledWith(7, expect.any(String), "继续你的工作", null));
+    });
+
+    it("should page past 200 older messages and keep the loaded history when the group refreshes", async () => {
+        const base = detail();
+        const make = (seq: number) => ({ ...base.messages[0], seq, body: `历史 ${seq}` });
+        api.getButlerGroup.mockResolvedValueOnce(detail({messages:[make(204)], has_more:true}))
+            .mockResolvedValue(detail({messages:[make(205)], has_more:true}));
+        api.listOlderButlerGroupMessages.mockImplementation(async (_id, before, limit) => {
+            const first = Math.max(1, before - limit);
+            return Array.from({length:before - first}, (_, i) => make(first + i));
+        });
+        renderChat();
+        await waitFor(() => expect(api.listOlderButlerGroupMessages.mock.calls).toEqual([[7,204,200], [7,4,200]]));
+        const refresh = api.onButlerGroupChanged.mock.calls[0][0];
+        refresh(7);
+        await waitFor(() => expect(api.getButlerGroup).toHaveBeenCalledTimes(2));
+        expect(api.listOlderButlerGroupMessages).toHaveBeenCalledTimes(2);
     });
 
     it("should quote a member reply with the private chat quote button and chip", async () => {
@@ -296,7 +315,30 @@ describe("ButlerGroupChat", () => {
         renderChat();
         const draft = await screen.findByText("群里的文件内容");
         expect(draft.closest('[data-message-type="ui_interaction_preview_file"]')).toBeTruthy();
+        expect(draft.compareDocumentPosition(screen.getByText("初稿如下")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(screen.queryByText("preview_file")).toBeNull();
+    });
+
+    it("should keep a member's open questionnaire between their report and another member's reply", async () => {
+        const base = detail();
+        const reply = { ...base.messages[2], sender_member:1, sender_assistant:11, sender_name:"总管家", source_conversation_id:101 };
+        api.getButlerGroup.mockResolvedValue(detail({messages:[...base.messages.slice(0, 2), reply],
+            interaction_turns:[{conversation_id:102,input_id:8900,trigger_seq:2,reply_seq:null}]}));
+        const at = Date.parse("2026-11-09T08:01:20Z");
+        mockInvokeHandler("list_butler_interactions", args => args?.conversationId === 102 ? [
+            { kind:"report", request_id:"r", id:1, anchor:9000, occurred_ms:at, request:{ text:"正在核对" } },
+            { kind:"question", request_id:"q", id:2, anchor:9000, occurred_ms:at+1,
+                request:{ request_id:"q", questions:[{question:"要哪一版？"}] }, answers:null },
+        ] : []);
+        askUser.mockImplementation(({conversationId}) => conversationId === 102
+            ? { isDialogOpen:true, pendingRequest:{request_id:"q", questions:[{question:"要哪一版？"}]}, viewMode:"questionnaire", messageId:9000 }
+            : { isDialogOpen:false });
+        renderChat();
+        const report = await screen.findByText("正在核对");
+        const question = screen.getByText("要哪一版？");
+        expect(report.compareDocumentPosition(question) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(question.compareDocumentPosition(screen.getByText("初稿如下")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.getAllByText("要哪一版？")).toHaveLength(1);
     });
 
     it("should show a member question while other members keep replying after @everyone", async () => {
@@ -319,6 +361,20 @@ describe("ButlerGroupChat", () => {
         expect(elicitation).toHaveBeenCalledWith({ conversationId: 101 });
         expect(elicitation).toHaveBeenCalledWith({ conversationId: 102 });
     });
+
+    it("should retain progress sent before a stopped turn and discard its late events", async () => {
+        const base = detail();
+        api.getButlerGroup.mockResolvedValue(detail({messages:base.messages.slice(0, 2),
+            interaction_turns:[{conversation_id:102,input_id:8999,trigger_seq:2,reply_seq:null,ended_at:"2026-11-09 08:01:20.500"}]}));
+        const before = Date.parse("2026-11-09T08:01:20.200Z");
+        mockInvokeHandler("list_butler_interactions", args => args?.conversationId === 102 ? [
+            {kind:"report", id:1, request_id:"r1", anchor:9000, occurred_ms:before, request:{text:"停止前的进度"}},
+            {kind:"report", id:2, request_id:"r2", anchor:9000, occurred_ms:before+800, request:{text:"迟到的进度"}},
+        ] : []);
+        renderChat();
+        expect(await screen.findByText("停止前的进度")).toBeInTheDocument();
+        expect(screen.queryByText("迟到的进度")).toBeNull();
+    });
 });
 
 
@@ -340,9 +396,13 @@ describe("group Vault card placement", () => {
             assistantName: "总管家", purpose: "合成测试", fields: [{ key: "other_key", name: "测试填写", description: "" }], createdAt: 2 };
         mockInvokeHandler("vault_list_use_requests", () => [use, use]);
         mockInvokeHandler("vault_list_input_requests", () => [input]);
+        mockInvokeHandler("list_butler_interactions", args => args?.conversationId === 102 ? [{
+            kind: "report", id: 317, request_id: "report-317", anchor: 9000,
+            occurred_ms: Date.parse("2026-11-09T08:01:20Z"), request: { text: "凭据请求期间的进度" },
+        }] : []);
         const base = detail().messages;
         const view = (messages: ButlerGroupDetail["messages"]) => <AntiLeakageProvider enabled={false}>
-            <Transcript groupId={7} historyLoaded messages={messages} members={members} running={[]} />
+            <Transcript groupId={7} historyLoaded messages={messages} members={members} running={[]} turns={detail().interaction_turns} />
         </AntiLeakageProvider>;
         try {
             const mounted = render(view(base.filter(message => message.seq !== 2)));
@@ -354,6 +414,9 @@ describe("group Vault card placement", () => {
             const anchored = (id: string) => document.querySelector(`[data-vault-request-id="${id}"]`)?.closest("[data-group-message-seq]")?.getAttribute("data-group-message-seq");
             expect(anchored("use-317")).toBe("2");
             expect(anchored("input-317")).toBe("3");
+            const report = await screen.findByText("凭据请求期间的进度");
+            expect(report.compareDocumentPosition(screen.getByText("初稿如下")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+            expect(screen.getAllByText("凭据请求期间的进度")).toHaveLength(1);
             expect(document.querySelectorAll('[data-vault-request-id="use-317"]')).toHaveLength(1);
             mounted.rerender(view([...base, { ...base[2], seq: 4, source_message_id: 9002, body: "新的成员消息" }]));
             expect(anchored("use-317")).toBe("2");

@@ -4,7 +4,7 @@ fn fixture() -> Connection {
     c.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY,assistant_id INTEGER,conversation_kind TEXT,butler_task_status TEXT,butler_task_finalized_at TEXT,butler_task_summary TEXT);
     CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,parent_id INTEGER,message_type TEXT,content TEXT,metadata_json TEXT);
     CREATE TABLE butler_task_definition(task_conversation_id INTEGER,butler_conversation_id INTEGER,executor_assistant_id INTEGER,title TEXT,goal TEXT);
-    CREATE TABLE butler_task_result(task_conversation_id INTEGER,final_message_id INTEGER,summary TEXT);
+    CREATE TABLE butler_task_result(task_conversation_id INTEGER,final_message_id INTEGER,summary TEXT,structured_output_json TEXT);
     INSERT INTO conversation VALUES(10,1,'butler_main',NULL,NULL,NULL),(20,2,'butler_contact',NULL,NULL,NULL),(30,3,'butler_contact',NULL,NULL,NULL),(40,2,'butler_task','running',NULL,NULL);
     INSERT INTO butler_task_definition VALUES(40,10,2,'报告','写报告');
     INSERT INTO message VALUES(1,20,NULL,'user','继续',NULL),(2,20,1,'response','调用工具',NULL),(3,10,NULL,'user','恢复',NULL),(4,30,NULL,'user','恢复',NULL),(5,40,NULL,'user','原任务',NULL);").unwrap();

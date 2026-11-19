@@ -96,13 +96,13 @@ describe("useConversationOperations quote reply", () => {
     });
 
     it("should keep text, attachments and quote when the native backend rejects unsupported interruption", async () => {
-        mockInvokeHandler("enqueue_conversation_message", () => { throw new Error("当前原生 Agent 不支持运行中插队，请停止后发送"); });
+        mockInvokeHandler("enqueue_conversation_message", () => { throw { ProviderError: "目标回合已结束" }; });
         const { result, props } = setup(true, {
             assistants: [{ id: 2, name: "Claude", assistant_type: 4 }],
             fileInfoList: [{ id: 10 }],
         });
         await act(async () => { result.current.handleSend(); });
-        await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining("不支持运行中插队")));
+        await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining("目标回合已结束")));
         expect(props.setInputText).not.toHaveBeenCalled();
         expect(props.clearFileInfoList).not.toHaveBeenCalled();
         expect(props.clearQuote).not.toHaveBeenCalled();

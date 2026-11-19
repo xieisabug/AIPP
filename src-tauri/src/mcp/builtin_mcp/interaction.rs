@@ -679,6 +679,7 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
 }
 
 struct PendingAskUserRequest {
+    registered_at: std::time::Instant,
     sender: oneshot::Sender<AskUserQuestionDecision>,
     event: AskUserQuestionRequestEvent,
     scope: AgentRequestScope,
@@ -768,7 +769,7 @@ impl InteractionState {
         if pending.contains_key(&event.request_id) {
             return Err(format!("AskUserQuestion request '{}' is already pending", event.request_id));
         }
-        pending.insert(event.request_id.clone(), PendingAskUserRequest { sender, event, scope });
+        pending.insert(event.request_id.clone(), PendingAskUserRequest { sender, event, scope, registered_at: std::time::Instant::now() });
         Ok(())
     }
 
@@ -791,9 +792,12 @@ impl InteractionState {
         &self,
         conversation_id: i64,
     ) -> Vec<AskUserQuestionRequestEvent> {
-        self.pending_ask_user.lock().await.values()
+        let pending = self.pending_ask_user.lock().await;
+        let mut requests: Vec<_> = pending.values()
             .filter(|request| request.event.conversation_id == Some(conversation_id))
-            .map(|request| request.event.clone()).collect()
+            .collect();
+        requests.sort_by_key(|request| (request.registered_at, &request.event.request_id));
+        requests.into_iter().map(|request| request.event.clone()).collect()
     }
 
     pub async fn resolve_ask_user_request(
@@ -932,7 +936,13 @@ pub(crate) async fn request_ask_user_question_scoped(
 
     if let Some(id)=conversation_id {
         let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
-        crate::db::butler_goal::save_question(&conn,id,&request_id,&serde_json::to_string(&event).map_err(|e|e.to_string())?,crate::api::butler_peer::TOOL_MESSAGE.try_with(|id|*id).ok().flatten(),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+        let payload = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+        crate::db::butler_goal::save_question(&conn,id,&request_id,&payload,event.message_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+        if let Some(anchor) = event.message_id.filter(|_| event.call_id.is_none()) {
+            if crate::db::butler_interactions::is_group_member(&conn, id).map_err(|e| e.to_string())? {
+                crate::db::butler_interactions::save_event(&conn, id, anchor, "question", &request_id, &payload).map_err(|e| e.to_string())?;
+            }
+        }
     }
     let (tx, rx) = oneshot::channel::<AskUserQuestionDecision>();
     let scope = scope.unwrap_or_else(|| AgentRequestScope::application(conversation_id));
@@ -1064,7 +1074,8 @@ pub async fn emit_preview_file_request(
 
     if let (Some(cid), Some(anchor), Ok(raw)) = (conversation_id, event.message_id, crate::db::butler_interactions::PREVIEW_ARGUMENTS.try_with(Clone::clone)) {
         let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db| db.get_connection()).map_err(|e| e.to_string())?;
-        if crate::db::butler_goal::is_butler(&conn,cid).map_err(|e| e.to_string())? {
+        if crate::db::butler_goal::is_butler(&conn,cid).map_err(|e| e.to_string())?
+            || crate::db::butler_interactions::is_group_member(&conn, cid).map_err(|e| e.to_string())? {
             crate::db::butler_interactions::save_preview(&conn,cid,anchor,&request_id,occurred_ms,&raw).map_err(|e| e.to_string())?;
         }
     }
@@ -1103,9 +1114,33 @@ pub async fn request_preview_code(
         event
     };
 
-    let interaction_mode = event.interaction_mode.clone();
+    // Native agent tools have no MCP call row or marker from which to restore the card.
+    let anchor = crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten();
+    let mut recorded = None;
+    if let (Some(cid), Some(anchor), Ok(raw)) = (conversation_id, anchor, crate::db::butler_interactions::PREVIEW_ARGUMENTS.try_with(Clone::clone)) {
+        let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db| db.get_connection()).map_err(|e| e.to_string())?;
+        if crate::mcp::execution_api::INTERACTION_CALL_ID.try_with(|_| ()).is_err()
+            && (crate::db::butler_goal::is_butler(&conn, cid).map_err(|e| e.to_string())?
+                || crate::db::butler_interactions::is_group_member(&conn, cid).map_err(|e| e.to_string())?) {
+            let payload = serde_json::json!({ "parameters": raw });
+            crate::db::butler_interactions::save_event(&conn, cid, anchor, "code", &request_id, &payload.to_string()).map_err(|e| e.to_string())?;
+            recorded = Some(cid);
+        }
+    }
 
-    if interaction_mode == "none" {
+    let result = present_preview_code(app_handle, interaction_state, event).await;
+    if let Some(cid) = recorded {
+        let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db| db.get_connection()).map_err(|e| e.to_string())?;
+        let status = result.as_ref().map(|r| r.status.as_str()).unwrap_or("failed");
+        crate::db::butler_interactions::finish_code(&conn, cid, &request_id, status).map_err(|e| e.to_string())?;
+        let _ = app_handle.emit("butler_interactions_changed", cid);
+    }
+    result
+}
+
+async fn present_preview_code(app_handle: &AppHandle, interaction_state: &InteractionState, event: PreviewCodeRequestEvent) -> Result<PreviewCodeResponse, String> {
+    let request_id = event.request_id.clone();
+    if event.interaction_mode == "none" {
         let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
         interaction_state.store_preview_code_request(event.clone(), tx).await;
         let mut cleanup_guard = PendingInteractionCleanup::new(
@@ -1524,8 +1559,12 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn list_recoverable_butler_questions(app_handle:AppHandle,conversation_id:i64)->Result<Vec<AskUserQuestionRequestEvent>,String> {
-    let conn=crate::db::conversation_db::ConversationDatabase::new(&app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
-    crate::db::butler_goal::waiting_questions(&conn,conversation_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?
-        .into_iter().map(|raw|serde_json::from_str(&raw).map_err(|e|e.to_string())).collect()
+pub async fn list_recoverable_butler_questions(app_handle: AppHandle, conversation_id: i64) -> Result<Vec<AskUserQuestionRequestEvent>, String> {
+    let mut requests = app_handle.state::<InteractionState>().list_requests_for_conversation(conversation_id).await;
+    let conn = crate::db::conversation_db::ConversationDatabase::new(&app_handle).and_then(|db| db.get_connection()).map_err(|e| e.to_string())?;
+    for raw in crate::db::butler_goal::waiting_questions(&conn, conversation_id, chrono::Utc::now().timestamp()).map_err(|e| e.to_string())? {
+        let saved: AskUserQuestionRequestEvent = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        if !requests.iter().any(|live| live.request_id == saved.request_id) { requests.push(saved); }
+    }
+    Ok(requests)
 }

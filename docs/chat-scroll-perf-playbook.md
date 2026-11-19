@@ -87,6 +87,10 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 - `messagesRenderedMs` 表示 harness 启动到出现消息 DOM 的耗时（不是完整可交互耗时）；`initialSettleMs` 是随后 72 帧采样所用时间。滚动探针会先发出 wheel 事件解除初始贴底跟随，避免程序滚动被跟随逻辑拉回。
 - `VirtuosoMessageList` 当前在展示消息不超过80条且正文总量不超过500,000字符时保留节点。屏外行不能用 `content-visibility: auto`：估高小于真实高度时，滚出视口的行会被压扁，`scrollTop` 会被夹到最底部。超过任一阈值时使用虚拟列表，上下 overscan 约 1.5 倍视口，两侧最少各 4 条。贴底 ResizeObserver 只在用户仍在底部时跟随尾部变高，不能沿用上一次 `forceScroll`。回归时应覆盖两条路径，并分别记录冷打开、Loading关闭和真实滚轮往返。只看预热后的程序滚动帧率，不能证明首次滚动不跳动；流式新增消息跨阈值也应单独验证。用户上滑或拖滚动条时，视口不得被拉回底部。
 - 流式更新期间，`window.__AIPP_CHAT_PERF_CAPTURE__.getMessageItemRenderCounts()` 应只让尾部消息的渲染次数增加。历史消息持续增加，说明 memo 又被新的 props 引用击穿。
+- 保留节点路径打开时**尾部优先挂载**（`retainedTailStart`/`retainedSliceStart`）：首帧只挂约两屏行，上方未挂载部分用 footer 内的 `chat-history-pending` 占位（按估高），初始贴底完成后在空闲时间每次往上补一小片，并保持「距底部距离」不变；跳转消息或滚近占位区时一次补齐，发送动画进行中暂停。只在「打开」时生效，发送导致从 live-only 进入保留路径时不能卸载已挂载的行。整段一次性挂载的成本主要是强制同步布局（`readContentWidth` 的 `getComputedStyle`/`clientWidth` 触发整表布局）加 Markdown 解析，二者都与挂载行数成正比。阅读位置按距底部距离保存/恢复（`ConversationUI` `readingPositions`）。
+- 发送时**上一轮不能重挂载**：live footer 按 `turnKey`（user 消息 id）给每一轮一个稳定包裹层，只有最新一轮带 `last-reply-container` 的 min-height/id/slot；合并气泡按首条消息 id 作 key（流式新增 reasoning/工具轮次不重挂载）；当过最新一轮的合并气泡变成历史后保持整块，不再拆成 `:segment-` 行（更早的历史照常拆段，供尾部优先挂载细分）。回归看 harness 的 mounts：发送期间只应出现新 user 与新回复的挂载。
+- 每次 `message_add` 都会整会话重拉，IPC 返回全新对象图：`mergeMessagesWithStreamingState` / `reuseEquivalentMessages` 对内容未变的消息复用旧对象（管家简洁视图读 `persistedSnapshot`，同样复用），否则所有按引用的 memo、WeakMap 缓存（agent 活动、MCP 引用、预览计数）在每次发送时全部失效。`metadata_json` 解析（`parseStreamRetryMeta`、`readScheduledTaskMetadata`）按字符串缓存，agent 消息的元数据可达数十 KB。
+- 只在流里的消息（`message_update` 先于重拉到达的新 user、刚开始的回复）必须排在已有消息之后（`useMessageProcessing`），否则新气泡会先插进上一轮回复中间再跳到末尾。管家简洁视图按「开始回复前已在屏上的尾部」判定已发布，发送瞬间不能把上一轮回复当成未发布藏掉。
 - **不要并行跑多个 harness**：它们会竞争 Cargo 默认构建/输出锁，必须串行执行、等上一个结束再跑下一个
 - 如果以后排查别的 UI 问题，没有现成入口，就按同样模式补一个：
   - 前端暴露测试 API

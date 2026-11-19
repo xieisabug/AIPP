@@ -93,8 +93,12 @@ test('should forward Pi text and approval while accepting abort before the user 
     fixture.emit({ type: 'extension_ui_request', id: 'question', method: 'input', title: 'Which file?' });
     await runtime.answer('question', { 'Which file?': 'README.md' });
     assert.equal(fixture.commands.at(-1).value, 'README.md');
-    fixture.emit({ type: 'agent_end' });
+    fixture.emit({ type: 'agent_end', messages: [
+      {role:'assistant', stopReason:'toolUse', content:[{type:'text', text:'先检查'}]},
+      {role:'assistant', stopReason:'stop', content:[{type:'thinking', thinking:'过程'}, {type:'text', text:'answer'}]},
+    ] });
     assert.equal(events.find(e => e.type === 'text').text, 'answer');
+    assert.equal(events.at(-1).final_text, 'answer');
     assert.equal(events.find(e => e.type === 'permission').turn, 'turn1');
     assert.equal(events.filter(e => e.type === 'done').length, 1);
     await runtime.prompt('next', 'turn2');
@@ -180,5 +184,19 @@ test('should preserve Pi tool failures and finish individual thinking blocks whe
     assert.equal(events.at(-1).kind, 'file_read');
     await runtime.cancel();
     assert.equal(fixture.commands.at(-1).type, 'abort');
+  } finally { await runtime.close(); }
+});
+
+test('should steer only the intended active Pi turn without aborting or starting another prompt', async () => {
+  const fixture = piFixture();
+  const runtime = await openPi({ cwd: process.cwd() }, () => {}, fixture);
+  try {
+    await runtime.prompt('original', 'turn1');
+    await runtime.steer('turn1', 'new guidance');
+    await assert.rejects(runtime.steer('turn2', 'wrong target'), /no longer the active turn/);
+    fixture.emit({ type: 'agent_end' });
+    await assert.rejects(runtime.steer('turn1', 'too late'), /no longer the active turn/);
+    assert.deepEqual(fixture.commands.filter(c => ['prompt', 'steer', 'abort'].includes(c.type))
+      .map(c => [c.type, c.message]), [['prompt', 'original'], ['steer', 'new guidance']]);
   } finally { await runtime.close(); }
 });

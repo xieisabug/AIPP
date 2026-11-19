@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef } from "react";
 import {
     type FilteredSlashSkill,
@@ -6,6 +7,7 @@ import {
 
 interface SlashCompletionListProps {
     visible: boolean;
+    desktopAnchor?: HTMLElement | null;
     placement: "top" | "bottom";
     cursorPosition: {
         bottom: number;
@@ -37,6 +39,7 @@ const renderHighlightedText = (text: string, highlightIndices: number[]) => {
 
 export default function SlashCompletionList({
     visible,
+    desktopAnchor,
     placement,
     cursorPosition,
     mode,
@@ -77,11 +80,17 @@ export default function SlashCompletionList({
         return null;
     }
 
-    return (
+    const anchor = desktopAnchor?.getBoundingClientRect();
+    const input = desktopAnchor?.querySelector("textarea")?.getBoundingClientRect() ?? anchor;
+    const menu = (
         <div
             ref={listRef}
             className="slash-completion-list"
-            style={{
+            style={anchor && input ? {
+                position: "fixed",
+                left: Math.max(4, Math.min(anchor.left + cursorPosition.left, window.innerWidth - 284)),
+                ...(placement === "bottom" ? { bottom: window.innerHeight - input.top + 8 } : { top: input.bottom + 8 }),
+            } : {
                 ...(placement === "top"
                     ? { top: cursorPosition.top }
                     : { bottom: cursorPosition.bottom }),
@@ -155,4 +164,5 @@ export default function SlashCompletionList({
                   ))}
         </div>
     );
+    return anchor ? createPortal(menu, document.body) : menu;
 }

@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import VirtuosoMessageList, { getVirtuosoRowMinHeight } from "./VirtuosoMessageList";
+import VirtuosoMessageList, { getVirtuosoRowMinHeight, retainedSliceStart, retainedTailStart } from "./VirtuosoMessageList";
 import * as sendSlide from "./sendScrollSequence";
 import * as sentBubble from "./sentBubbleAnimation";
 import type { Message } from "@/data/Conversation";
@@ -126,6 +126,48 @@ describe("VirtuosoMessageList row height reservation", () => {
         expect(
             getVirtuosoRowMinHeight(0, { estimatedHeight: 240 }),
         ).toBe(240);
+    });
+
+    it("should not remount the previous turn when the next message is sent", () => {
+        const firstTurn = [
+            makeMessage({ id: 1, message_type: "user", content: "问题一" }),
+            makeMessage({ id: 2, content: "回答一" }),
+        ];
+        const props = makeProps(firstTurn);
+        const view = render(<VirtuosoMessageList {...props} />);
+        const previousReply = screen.getByTestId("message-2");
+        expect(document.getElementById("last-reply-container")).toContainElement(previousReply);
+
+        view.rerender(<VirtuosoMessageList {...props} allDisplayMessages={[
+            ...firstTurn,
+            makeMessage({ id: 3, message_type: "user", content: "问题二" }),
+        ]} />);
+
+        // Same DOM node: its Markdown, code blocks and layout survive the send.
+        expect(screen.getByTestId("message-2")).toBe(previousReply);
+        const lastReply = document.getElementById("last-reply-container");
+        expect(lastReply).toContainElement(screen.getByTestId("message-3"));
+        expect(lastReply).not.toContainElement(previousReply);
+        expect(document.querySelectorAll("[data-aipp-slot='chat-last-reply-container']")).toHaveLength(1);
+    });
+
+    it("should keep the previous merged reply bubble mounted when the next message is sent", () => {
+        const firstTurn = [
+            makeMessage({ id: 1, message_type: "user", content: "问题一" }),
+            makeMessage({ id: 2, message_type: "reasoning", content: "思考" }),
+            makeMessage({ id: 3, message_type: "response", content: "回答一" }),
+        ];
+        const props = makeProps(firstTurn);
+        const view = render(<VirtuosoMessageList {...props} />);
+        const bubble = document.querySelector("[data-message-type='merged'][data-message-id='3']");
+        expect(bubble).not.toBeNull();
+
+        view.rerender(<VirtuosoMessageList {...props} allDisplayMessages={[
+            ...firstTurn,
+            makeMessage({ id: 4, message_type: "user", content: "问题二" }),
+        ]} />);
+
+        expect(document.querySelector("[data-message-type='merged'][data-message-id='3']")).toBe(bubble);
     });
 
     it("should keep bounded history mounted when messages are rich but few", () => {
@@ -1135,5 +1177,67 @@ describe("VirtuosoMessageList send ownership", () => {
         expect(cancel).toHaveBeenCalledTimes(2);
         expect(bubble).toHaveBeenCalledTimes(2);
         fixture.unmount();
+    });
+});
+
+describe("retained history tail-first mounting", () => {
+    const rows = (heights: number[], joined: number[] = []) => heights.map((estimatedHeight, index) => ({
+        key: `row-${index}`, messageId: index, estimatedHeight, element: <div />, joinsNext: joined.includes(index),
+    }));
+
+    beforeEach(() => {
+        vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    });
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    it("should mount about two viewports of tail rows first", () => {
+        // 40 rows of 100px (+16px gap); viewport 800px -> budget 1600px -> 14 rows.
+        expect(retainedTailStart(rows(Array(40).fill(100)), 800)).toBe(26);
+    });
+
+    it("should mount everything when the transcript fits the initial budget", () => {
+        expect(retainedTailStart(rows(Array(6).fill(100)), 800)).toBe(0);
+    });
+
+    it("should never start inside a bubble split across joined rows", () => {
+        // Rows 24..26 are one bubble; the tail must take all of it.
+        expect(retainedTailStart(rows(Array(40).fill(100), [24, 25]), 800)).toBe(24);
+        // Rows 19..23 are one bubble; a 4-row slice would stop at row 20, inside it.
+        expect(retainedSliceStart(rows(Array(40).fill(100), [19, 20, 21, 22]), 24)).toBe(19);
+    });
+
+    it("should prepend at most a small slice per step", () => {
+        expect(retainedSliceStart(rows(Array(40).fill(100)), 26)).toBe(22);
+        expect(retainedSliceStart(rows(Array(40).fill(400)), 26)).toBe(24);
+        expect(retainedSliceStart(rows(Array(40).fill(100)), 2)).toBe(0);
+    });
+
+    it("should open a long retained transcript with only its tail mounted", () => {
+        const messages = Array.from({ length: 60 }, (_, index) => makeMessage({
+            id: index + 1,
+            message_type: index % 2 === 0 ? "user" : "response",
+            content: `message ${index + 1}`,
+        }));
+        render(<VirtuosoMessageList {...makeProps(messages)} historyLoaded={false} />);
+
+        expect(screen.getByTestId("message-60")).toBeInTheDocument();
+        expect(screen.queryByTestId("message-1")).not.toBeInTheDocument();
+        const pending = document.querySelector<HTMLElement>("[data-aipp-slot='chat-history-pending']");
+        expect(pending).not.toBeNull();
+        expect(parseFloat(pending!.style.height)).toBeGreaterThan(0);
+    });
+
+    it("should mount the whole retained transcript when jumping to a message", () => {
+        const messages = Array.from({ length: 60 }, (_, index) => makeMessage({
+            id: index + 1,
+            message_type: index % 2 === 0 ? "user" : "response",
+            content: `message ${index + 1}`,
+        }));
+        render(<VirtuosoMessageList {...makeProps(messages)} historyLoaded={false} pendingScrollMessageId={1} />);
+
+        expect(screen.getByTestId("message-1")).toBeInTheDocument();
+        expect(document.querySelector("[data-aipp-slot='chat-history-pending']")).toBeNull();
     });
 });

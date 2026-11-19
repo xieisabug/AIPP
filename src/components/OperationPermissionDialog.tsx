@@ -6,6 +6,9 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { type ReactNode, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
+import { usePermissionHost } from "./conversation/ComposerPermissionSlot";
 import { Button } from "@/components/ui/button";
 import { Shield, ShieldAlert, ShieldCheck } from "lucide-react";
 
@@ -82,14 +85,50 @@ const permissionCodeBlockClassName =
     "mt-2 max-h-56 w-full max-w-full overflow-auto rounded-md bg-background p-2 font-mono text-xs whitespace-pre-wrap break-all";
 const neutralActionClassName =
     "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-border !bg-background py-2 text-left !text-foreground hover:!bg-muted hover:!text-foreground";
-const denyActionClassName =
-    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-red-500/60 !bg-red-50 py-2 text-left !text-red-700 hover:!bg-red-100 hover:!text-red-800 dark:!border-red-500/40 dark:!bg-red-950/30 dark:!text-red-300 dark:hover:!bg-red-950/50";
-const denyStrongActionClassName =
-    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !bg-red-600 py-2 text-left !text-white hover:!bg-red-700 dark:!bg-red-700 dark:hover:!bg-red-800";
-const allowActionClassName =
-    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-emerald-500/60 !bg-emerald-50 py-2 text-left !text-emerald-800 hover:!bg-emerald-100 hover:!text-emerald-900 dark:!border-emerald-500/40 dark:!bg-emerald-950/30 dark:!text-emerald-300 dark:hover:!bg-emerald-950/50";
-const allowStrongActionClassName =
-    "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !bg-emerald-600 py-2 text-left !text-white hover:!bg-emerald-700 dark:!bg-emerald-700 dark:hover:!bg-emerald-800";
+
+function PermissionSurface({ conversationId, open, width, title, actions, children }: {
+    conversationId?: number;
+    open: boolean;
+    width: string;
+    title: ReactNode;
+    actions: ReactNode;
+    children: ReactNode;
+}) {
+    const host = usePermissionHost(conversationId);
+    useLayoutEffect(() => {
+        if (!host || !open) return;
+        const composer = host.parentElement;
+        const input = composer?.querySelector<HTMLElement>(".input-area-textarea-container");
+        if (!composer || !input) return;
+        const align = () => {
+            const box = input.getBoundingClientRect();
+            const root = composer.getBoundingClientRect();
+            host.style.left = (box.left - root.left) + "px";
+            host.style.width = box.width + "px";
+            host.style.top = (host.dataset.placement === "top" ? box.bottom - root.top + 6 : box.top - root.top - 6) + "px";
+        };
+        align();
+        const observer = new ResizeObserver(align);
+        observer.observe(input);
+        observer.observe(composer);
+        return () => observer.disconnect();
+    }, [host, open]);
+    if (!open) return null;
+    if (host) return createPortal(
+        <details open className="rounded-xl border bg-background px-3 py-2 text-sm shadow-lg">
+            <summary className="cursor-pointer font-semibold"><span className="inline-flex items-center gap-2 align-middle">{title}</span></summary>
+            <div className="mt-2 grid gap-2">{children}{actions}</div>
+        </details>, host);
+    return <AlertDialog open>
+        <AlertDialogContent className={`${permissionDialogClassName} ${width}`}>
+            <AlertDialogHeader className={permissionDialogHeaderClassName}>
+                <AlertDialogTitle className="flex items-center gap-2">{title}</AlertDialogTitle>
+                <AlertDialogDescription asChild>{children}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter className="min-w-0 overflow-hidden">{actions}</AlertDialogFooter>
+        </AlertDialogContent>
+    </AlertDialog>;
+}
 
 export function OperationPermissionDialog({
     request,
@@ -124,89 +163,85 @@ export function OperationPermissionDialog({
     };
 
     return (
-        <AlertDialog open={isOpen}>
-            <AlertDialogContent className={`${permissionDialogClassName} !max-w-lg`}>
-                <AlertDialogHeader className={permissionDialogHeaderClassName}>
-                    <AlertDialogTitle className="flex items-center gap-2">
-                        <Shield className="h-5 w-5 text-yellow-500" />
-                        操作权限请求
-                    </AlertDialogTitle>
-                    <AlertDialogDescription asChild>
-                        <div className={permissionDialogBodyClassName}>
-                            <p>AI 助手请求执行以下操作：</p>
-                            <div className={permissionDetailPanelClassName}>
-                                <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">操作:</span>
-                                    <span className="min-w-0 text-muted-foreground">{operationLabel}</span>
-                                </div>
-                                <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">{oneTimeOnly ? "操作详情:" : "路径:"}</span>
-                                    <span className="min-w-0 break-all font-mono text-xs text-foreground">
-                                        {request.path}
-                                    </span>
-                                </div>
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                                {oneTimeOnly ? "批准只对上述具体参数和当前工作有效，5分钟后失效；目标或参数变化需重新批准。" : "该路径不在允许访问的目录白名单中，请选择是否授权此操作。"}
-                            </p>
-                            {errorMessage ? (
-                                <p className="text-xs text-destructive">{errorMessage}</p>
-                            ) : null}
-                        </div>
-                    </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                    <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
-                        <Button
-                            variant="outline"
-                            onClick={handleDeny}
-                            disabled={isSubmitting}
-                            className={denyActionClassName}
-                        >
-                            <ShieldAlert className="h-4 w-4 shrink-0" />
-                            拒绝
-                        </Button>
-                        <Button
-                            variant="outline"
-                            onClick={handleAllow}
-                            disabled={isSubmitting}
-                            className={allowActionClassName}
-                        >
-                            <Shield className="h-4 w-4 shrink-0" />
-                            仅本次允许
-                        </Button>
-                        {!oneTimeOnly && <>
-                        <Button
-                            variant="outline"
-                            onClick={handleAllowForConversation}
-                            disabled={isSubmitting}
-                            className={allowActionClassName}
-                        >
-                            <Shield className="h-4 w-4 shrink-0" />
-                            对话期间信任
-                        </Button>
-                        <Button
-                            variant="outline"
-                            onClick={handleAllowForAssistant}
-                            disabled={isSubmitting}
-                            className={allowActionClassName}
-                        >
-                            <ShieldCheck className="h-4 w-4 shrink-0" />
-                            添加到助手工作区
-                        </Button>
-                        <Button
-                            onClick={handleAllowAndSave}
-                            disabled={isSubmitting}
-                            className={`${allowStrongActionClassName} sm:col-span-2`}
-                        >
-                            <ShieldCheck className="h-4 w-4 shrink-0" />
-                            允许并加入全局白名单
-                        </Button>
-                        </>}
+        <PermissionSurface key={request.request_id} conversationId={request.conversation_id} open={isOpen}
+            width="!max-w-lg"
+            title={<>
+                <Shield className="h-5 w-5 text-muted-foreground" />
+                操作权限请求
+            </>}
+            actions={
+                <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
+                    <Button
+                        variant="outline"
+                        onClick={handleDeny}
+                        disabled={isSubmitting}
+                        className={neutralActionClassName}
+                    >
+                        <ShieldAlert className="h-4 w-4 shrink-0" />
+                        拒绝
+                    </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleAllow}
+                        disabled={isSubmitting}
+                        className={neutralActionClassName}
+                    >
+                        <Shield className="h-4 w-4 shrink-0" />
+                        仅本次允许
+                    </Button>
+                    {!oneTimeOnly && <>
+                    <Button
+                        variant="outline"
+                        onClick={handleAllowForConversation}
+                        disabled={isSubmitting}
+                        className={neutralActionClassName}
+                    >
+                        <Shield className="h-4 w-4 shrink-0" />
+                        对话期间信任
+                    </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleAllowForAssistant}
+                        disabled={isSubmitting}
+                        className={neutralActionClassName}
+                    >
+                        <ShieldCheck className="h-4 w-4 shrink-0" />
+                        添加到助手工作区
+                    </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleAllowAndSave}
+                        disabled={isSubmitting}
+                        className={`${neutralActionClassName} sm:col-span-2`}
+                    >
+                        <ShieldCheck className="h-4 w-4 shrink-0" />
+                        允许并加入全局白名单
+                    </Button>
+                    </>}
+                </div>
+            }>
+            <div className={permissionDialogBodyClassName}>
+                <p>AI 助手请求执行以下操作：</p>
+                <div className={permissionDetailPanelClassName}>
+                    <div className="flex items-start gap-2 text-sm">
+                        <span className="shrink-0 font-medium text-foreground">操作:</span>
+                        <span className="min-w-0 text-muted-foreground">{operationLabel}</span>
                     </div>
-                </AlertDialogFooter>
-            </AlertDialogContent>
-        </AlertDialog>
+                    <div className="flex items-start gap-2 text-sm">
+                        <span className="shrink-0 font-medium text-foreground">{oneTimeOnly ? "操作详情:" : "路径:"}</span>
+                        <span className="min-w-0 break-all font-mono text-xs text-foreground">
+                            {request.path}
+                        </span>
+                    </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                    {oneTimeOnly ? "批准只对上述具体参数和当前工作有效，5分钟后失效；目标或参数变化需重新批准。" : "该路径不在允许访问的目录白名单中，请选择是否授权此操作。"}
+                </p>
+                {errorMessage ? (
+                    <p className="text-xs text-destructive">{errorMessage}</p>
+                ) : null}
+            </div>
+        </PermissionSurface>
     );
 }
 
@@ -222,21 +257,6 @@ const acpOptionLabel = (option: AcpPermissionOption) => {
             return "始终拒绝";
         default:
             return option.name || "未知选项";
-    }
-};
-
-const acpOptionClassName = (kind: string) => {
-    switch (kind) {
-        case "allow_always":
-            return allowStrongActionClassName;
-        case "allow_once":
-            return allowActionClassName;
-        case "reject_always":
-            return denyStrongActionClassName;
-        case "reject_once":
-            return denyActionClassName;
-        default:
-            return neutralActionClassName;
     }
 };
 
@@ -337,82 +357,77 @@ export function AcpPermissionDialog({
     if (!request) return null;
 
     return (
-        <AlertDialog open={isOpen}>
-            <AlertDialogContent className={`${permissionDialogClassName} sm:!max-w-xl`}>
-                <AlertDialogHeader className={permissionDialogHeaderClassName}>
-                    <AlertDialogTitle className="flex items-center gap-2">
-                        <Shield className="h-5 w-5 text-yellow-500" />
-                        {request.agent_kind === "codex_app_server"
-                            ? "Codex 执行权限请求"
-                            : `${({ pi: "Pi", cursor: "Cursor", opencode: "OpenCode", kiro: "Kiro", antigravity: "Antigravity", claude_sdk: "Claude Code" } as Record<string, string>)[request.agent_kind ?? ""] ?? "ACP"} 工具权限请求`}
-                    </AlertDialogTitle>
-                    <AlertDialogDescription asChild>
-                        <div className={permissionDialogBodyClassName}>
-                            {request.review && <PermissionReviewNotice review={request.review} />}
-                            {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
-                                <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">标题:</span>
-                                    <span className="min-w-0 break-words text-muted-foreground">
-                                        {request.title || "未命名"}
-                                    </span>
-                                </div>
-                                <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">类型:</span>
-                                    <span className="min-w-0 break-words text-muted-foreground">
-                                        {request.kind || "未知"}
-                                    </span>
-                                </div>
-                                <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">工具调用 ID:</span>
-                                    <span className="min-w-0 break-all font-mono text-xs text-foreground">
-                                        {request.tool_call_id}
-                                    </span>
-                                </div>
-                                {request.parameters && (
-                                    <div className="min-w-0 text-sm">
-                                        <span className="font-medium text-foreground">参数:</span>
-                                        <pre className={permissionCodeBlockClassName}>
-                                            {request.parameters}
-                                        </pre>
-                                    </div>
-                                )}
-                            </div>}
-                            {errorMessage ? (
-                                <p className="text-xs text-destructive">{errorMessage}</p>
-                            ) : null}
-                        </div>
-                    </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter className="min-w-0 overflow-hidden">
-                    <div className="grid min-w-0 w-full grid-cols-1 gap-2 sm:grid-cols-2">
-                        {!request.options.some(option => option.option_id === "cancel") && <Button
+        <PermissionSurface key={request.request_id} conversationId={request.conversation_id} open={isOpen}
+            width="sm:!max-w-xl"
+            title={<>
+                <Shield className="h-5 w-5 text-muted-foreground" />
+                {request.agent_kind === "codex_app_server"
+                    ? "Codex 执行权限请求"
+                    : `${({ pi: "Pi", cursor: "Cursor", opencode: "OpenCode", kiro: "Kiro", antigravity: "Antigravity", claude_sdk: "Claude Code" } as Record<string, string>)[request.agent_kind ?? ""] ?? "ACP"} 工具权限请求`}
+            </>}
+            actions={
+                <div className="grid min-w-0 w-full grid-cols-1 gap-2 sm:grid-cols-2">
+                    {!request.options.some(option => option.option_id === "cancel") && <Button
+                        variant="outline"
+                        onClick={() => onDecision(request.request_id, undefined, true)}
+                        disabled={isSubmitting}
+                        className={neutralActionClassName}
+                    >
+                        <ShieldAlert className="h-4 w-4 shrink-0" />
+                        取消请求
+                    </Button>}
+                    {request.options.map((option) => (
+                        <Button
+                            key={option.option_id}
                             variant="outline"
-                            onClick={() => onDecision(request.request_id, undefined, true)}
+                            onClick={() => onDecision(request.request_id, option.option_id, false)}
                             disabled={isSubmitting}
                             className={neutralActionClassName}
                         >
-                            <ShieldAlert className="h-4 w-4 shrink-0" />
-                            取消请求
-                        </Button>}
-                        {request.options.map((option) => (
-                            <Button
-                                key={option.option_id}
-                                variant={option.kind === "allow_always" || option.kind === "reject_always" ? "default" : "outline"}
-                                onClick={() => onDecision(request.request_id, option.option_id, false)}
-                                disabled={isSubmitting}
-                                className={acpOptionClassName(option.kind)}
-                            >
-                                {option.kind.startsWith("allow") ? (
-                                    <ShieldCheck className="h-4 w-4 shrink-0" />
-                                ) : (
-                                    <ShieldAlert className="h-4 w-4 shrink-0" />
-                                )}
-                                {request.agent_kind === "codex_app_server" ? option.name : acpOptionLabel(option)}
-                            </Button>
-                        ))}
+                            {option.kind.startsWith("allow") ? (
+                                <ShieldCheck className="h-4 w-4 shrink-0" />
+                            ) : (
+                                <ShieldAlert className="h-4 w-4 shrink-0" />
+                            )}
+                            {request.agent_kind === "codex_app_server" ? option.name : acpOptionLabel(option)}
+                        </Button>
+                    ))}
+                </div>
+            }>
+            <div className={permissionDialogBodyClassName}>
+                {request.review && <PermissionReviewNotice review={request.review} />}
+                {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
+                    <div className="flex items-start gap-2 text-sm">
+                        <span className="shrink-0 font-medium text-foreground">标题:</span>
+                        <span className="min-w-0 break-words text-muted-foreground">
+                            {request.title || "未命名"}
+                        </span>
                     </div>
-                </AlertDialogFooter>
-            </AlertDialogContent>
-        </AlertDialog>
+                    <div className="flex items-start gap-2 text-sm">
+                        <span className="shrink-0 font-medium text-foreground">类型:</span>
+                        <span className="min-w-0 break-words text-muted-foreground">
+                            {request.kind || "未知"}
+                        </span>
+                    </div>
+                    <div className="flex items-start gap-2 text-sm">
+                        <span className="shrink-0 font-medium text-foreground">工具调用 ID:</span>
+                        <span className="min-w-0 break-all font-mono text-xs text-foreground">
+                            {request.tool_call_id}
+                        </span>
+                    </div>
+                    {request.parameters && (
+                        <div className="min-w-0 text-sm">
+                            <span className="font-medium text-foreground">参数:</span>
+                            <pre className={permissionCodeBlockClassName}>
+                                {request.parameters}
+                            </pre>
+                        </div>
+                    )}
+                </div>}
+                {errorMessage ? (
+                    <p className="text-xs text-destructive">{errorMessage}</p>
+                ) : null}
+            </div>
+        </PermissionSurface>
     );
 }

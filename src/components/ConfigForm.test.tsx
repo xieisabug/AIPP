@@ -110,7 +110,7 @@ function GroupedFormHarness({ assistantId = 1, hideExtensions = false, onSave = 
     const form = useForm({ defaultValues: { basic: "model", temperature: "0.7", plugin: "saved" } });
     return <ConfigForm title="Assistant" layout="prompt" useFormReturn={form}
         advancedConfigKey={assistantId} advancedFieldKeys={["temperature"]} extensionFieldKeys={["plugin"]}
-        onSave={onSave} showHeaderSave={false}
+        onSave={onSave}
         config={[
             { key: "basic", config: { type: "input", label: "基础模型" } },
             { key: "temperature", config: { type: "input", label: "温度" } },

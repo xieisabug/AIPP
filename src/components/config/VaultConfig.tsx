@@ -1,12 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { ArrowRight, KeyRound, Lock, Plus, RefreshCw, ShieldOff } from "lucide-react";
+import { ArrowRight, KeyRound, Plus, ShieldOff } from "lucide-react";
 import { ConfigPageLayout, EmptyState, ListItemButton, SidebarList, ConfigPageLoading } from "@/components/common";
 import type { SelectOption } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import FormDialog from "@/components/FormDialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,8 +13,10 @@ import { PasswordInput } from "@/components/ui/password-input";
 import { Textarea } from "@/components/ui/textarea";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import type { VaultCapability, VaultConfigReference, VaultCreateInput, VaultItem, VaultUsageEntry } from "@/data/Vault";
+import VaultGuide from "./vault/VaultGuide";
 import VaultItemDetail, { type VaultItemPatch } from "./vault/VaultItemDetail";
-import { formatRelative, isSimpleVaultValue, keyError, suggestKey } from "./vault/vaultHelpers";
+import { VaultKeyInput } from "./vault/VaultItemEditDialog";
+import { isSimpleVaultValue, keyError, suggestKey } from "./vault/vaultHelpers";
 
 interface VaultConfigProps {
     navigateTo?: (menuKey: string) => void;
@@ -24,20 +25,22 @@ interface VaultConfigProps {
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const simpleValueWarning = "凭据过于简单可能导致普通内容被误遮盖，建议使用较长且独特的值。";
 
-function StatusBar({ capability }: { capability: VaultCapability }) {
-    return (
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1.5">
-                <Lock className="h-3.5 w-3.5" />
-                本机加密 · {capability.backend}
-            </span>
-            <span className="flex items-center gap-1.5">
-                <RefreshCw className="h-3.5 w-3.5" />
-                {capability.syncMessage}
-                {capability.pendingFromOtherDevices > 0 && `（${capability.pendingFromOtherDevices} 个来自其他设备的条目待解锁）`}
-            </span>
-        </div>
-    );
+/**
+ * 只在需要用户处理时出现：其他设备开启了同步、口令已更换，或有条目还没解密。
+ * 「未设置同步口令」「同步正常」都是常态，不显示。
+ */
+function SyncNotice({ capability }: { capability: VaultCapability }) {
+    const where = "「程序功能 → 数据」";
+    const pending = capability.pendingFromOtherDevices;
+    const text = capability.syncState === "mismatch"
+        ? `同步口令已在其他设备更换，请在${where}输入新口令。`
+        : pending > 0
+            ? `有 ${pending} 个来自其他设备的条目待解锁，在${where}输入同步口令后可用。`
+            : capability.syncState === "needs_passphrase"
+                ? `其他设备已开启同步，在${where}输入同步口令后才能同步。`
+                : null;
+    if (!text) return null;
+    return <p className="shrink-0 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm" data-aipp-slot="vault-sync-notice">{text}</p>;
 }
 
 interface CreateState {
@@ -65,6 +68,8 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const [deleteOpen, setDeleteOpen] = useState(false);
     const [referenceState, setReferenceState] = useState<{ itemId: string; list: VaultConfigReference[] } | null>(null);
     const createValueIsSimple = isSimpleVaultValue(create.value);
+    /** 名称里没有英文时只能生成 entry 这类通用键，提示用户改成助手认得出的名字。 */
+    const genericKey = /^entry(_\d+)?$/.test(create.key);
     const replaceValueIsSimple = isSimpleVaultValue(replaceValue ?? "");
 
     const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
@@ -210,15 +215,13 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
 
     const selectOptions: SelectOption[] = useMemo(() => items.map((item) => ({
         id: item.id,
-        label: item.name,
-        description: `${item.key} · ${formatRelative(item.lastUsedAt)}`,
-        icon: <KeyRound className="h-4 w-4" />,
+        label: item.status === "locked" ? `${item.name}（待解锁）` : item.name,
     })), [items]);
 
     const appCredentialsLink = navigateTo ? (
         <button
             type="button"
-            className="mt-3 flex w-full items-center justify-between rounded-lg border border-dashed border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/50"
+            className="flex w-full items-center justify-between rounded-lg border border-dashed border-border px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/50"
             onClick={() => navigateTo("mcp-config")}
         >
             <span>应用连接的凭据在「应用与工具」中管理</span>
@@ -229,7 +232,6 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const sidebar = (
         <SidebarList
             title="凭据保险箱"
-            description="助手用占位符使用，看不到值"
             icon={<KeyRound className="h-5 w-5" />}
             searchValue={search}
             onSearchChange={setSearch}
@@ -238,16 +240,11 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
         >
             {filtered.map((item) => (
                 <ListItemButton key={item.id} isSelected={selected?.id === item.id} onClick={() => setSelectedId(item.id)}>
-                    <div className="w-full min-w-0">
-                        <div className="flex items-center gap-2">
-                            <span className="truncate font-medium">{item.name}</span>
-                            {item.status === "locked" && <Badge variant="outline" className="shrink-0">待解锁</Badge>}
-                        </div>
-                        <div className="truncate text-xs text-muted-foreground"><span className="font-mono">{item.key}</span> · {formatRelative(item.lastUsedAt)}</div>
-                    </div>
+                    <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                    {item.status === "locked" && <span className="shrink-0 text-xs text-muted-foreground">待解锁</span>}
                 </ListItemButton>
             ))}
-            {appCredentialsLink}
+            {filtered.length === 0 && <p className="px-3 py-6 text-center text-xs text-muted-foreground">没有匹配的条目</p>}
         </SidebarList>
     );
 
@@ -257,7 +254,9 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
         return (
             <ConfigPageLayout
                 sidebar={null}
-                content={
+                content={null}
+                showEmptyState
+                emptyState={
                     <EmptyState
                         icon={<ShieldOff className="h-8 w-8 text-muted-foreground" />}
                         title="凭据保险箱不可用"
@@ -286,18 +285,17 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                     </div>
                     <div className="space-y-2">
                         <Label htmlFor="vault-create-key">键</Label>
-                        <Input
+                        <VaultKeyInput
                             id="vault-create-key"
-                            className="font-mono"
-                            autoCapitalize="none"
-                            spellCheck={false}
-                            placeholder="github_token"
                             value={create.key}
-                            onChange={(event) => setCreate((state) => ({ ...state, key: event.target.value.trim(), keyEdited: true }))}
+                            describedBy={genericKey ? "vault-create-key-hint" : undefined}
+                            onChange={(key) => setCreate((state) => ({ ...state, key, keyEdited: true }))}
                         />
-                        <p className="text-xs text-muted-foreground">
-                            助手在工具调用里写 <code className="font-mono">{`<vault:${create.key || "键"}>`}</code> 使用这个值。
-                        </p>
+                        {genericKey && (
+                            <p id="vault-create-key-hint" className="text-xs text-muted-foreground">
+                                建议改成有意义的英文，如 id_card，助手更容易认出它。
+                            </p>
+                        )}
                     </div>
                     <div className="space-y-2">
                         <Label htmlFor="vault-create-value">值</Label>
@@ -309,7 +307,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                             onChange={(event) => setCreate((state) => ({ ...state, value: event.target.value }))}
                         />
                         {createValueIsSimple && <p id="vault-create-value-warning" className="text-xs text-amber-600 dark:text-amber-400">{simpleValueWarning}</p>}
-                        <p className="text-xs text-muted-foreground">只填值本身，例如令牌不需要带 Bearer 前缀；格式由助手在使用时拼好。</p>
+                        <p className="text-xs text-muted-foreground">只填值本身，令牌不要带 Bearer 前缀。</p>
                     </div>
                     <div className="space-y-2">
                         <Label htmlFor="vault-create-description">给助手的说明（可选）</Label>
@@ -363,22 +361,13 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
             <>
                 <ConfigPageLayout
                     sidebar={null}
-                    content={
-                        <div className="space-y-6">
-                            <StatusBar capability={capability} />
-                            <EmptyState
-                                icon={<KeyRound className="h-8 w-8 text-muted-foreground" />}
-                                title="保险箱是空的"
-                                description="把 API Key、密码、身份证号等放进保险箱。助手在工具调用里写占位符来使用，每次使用都会先问你，助手看不到值。助手缺少某个值时也可以请你当场填写。"
-                                action={
-                                    <Button onClick={openCreate} className="gap-2">
-                                        <Plus className="h-4 w-4" />
-                                        新建条目
-                                    </Button>
-                                }
-                            />
+                    content={null}
+                    showEmptyState
+                    emptyState={
+                        <VaultGuide onCreate={openCreate}>
+                            <SyncNotice capability={capability} />
                             {appCredentialsLink}
-                        </div>
+                        </VaultGuide>
                     }
                 />
                 {dialogs}
@@ -391,8 +380,8 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
             <ConfigPageLayout
                 sidebar={sidebar}
                 content={
-                    <div className="space-y-6">
-                        <StatusBar capability={capability} />
+                    <div className="space-y-4">
+                        <SyncNotice capability={capability} />
                         {selected && (
                             <VaultItemDetail
                                 item={selected}

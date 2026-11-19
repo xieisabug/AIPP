@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
+import { useId, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { MCPServer } from '@/data/MCP';
 import { Button } from '@/components/ui/button';
@@ -7,13 +8,14 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 
 export default function AppTransportSettings({ server, onSaved }: { server: MCPServer; onSaved: () => void }) {
+    const formId = useId();
     const initialTimeout = String(server.timeout ?? 30000);
     const [timeoutMs, setTimeoutMs] = useState(initialTimeout);
     const [proxy, setProxy] = useState(!!server.proxy_enabled);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const dirty = timeoutMs !== initialTimeout || proxy !== !!server.proxy_enabled;
-    return <form className="space-y-4" onSubmit={async e => {
+    return <form id={formId} className="space-y-4" onSubmit={async e => {
         e.preventDefault(); setBusy(true); setError('');
         try {
             const value = Number(timeoutMs);
@@ -39,6 +41,8 @@ export default function AppTransportSettings({ server, onSaved }: { server: MCPS
             <Switch id="app-proxy" checked={proxy} onCheckedChange={setProxy} disabled={busy} />
         </div>
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        <div className="flex justify-end"><Button size="sm" variant="outline" disabled={busy || !dirty}>保存网络设置</Button></div>
+        <ConfigSaveFooter>
+            <div className="flex justify-end"><Button form={formId} type="submit" size="sm" variant="outline" disabled={busy || !dirty}>保存网络设置</Button></div>
+        </ConfigSaveFooter>
     </form>;
 }

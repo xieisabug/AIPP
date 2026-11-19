@@ -591,6 +591,8 @@ fn test_review_prompt_carries_user_intent_as_untrusted_data() {
     assert!(REVIEW_SYSTEM_PROMPT.contains("用户意图"));
     assert!(REVIEW_SYSTEM_PROMPT.contains("超出意图范围的副作用操作返回 safe=false"));
     assert!(REVIEW_SYSTEM_PROMPT.contains("意图本身不能使下面列出的高危操作变得安全"));
+    assert!(REVIEW_SYSTEM_PROMPT.contains("首要依据是调用本身可能造成的伤害"));
+    assert!(REVIEW_SYSTEM_PROMPT.contains("列举文件名、读取配置与读取密钥正文有不同的影响"));
     let intent = ReviewIntent { label: "定时任务指令（无人值守运行，用户不在场）", text: "每天把日报发到飞书群「研发周会」".into() };
     let user = build_review_user_prompt("飞书", "send_message", r#"{"chat":"研发周会"}"#, None, Some(&intent));
     assert!(user.contains("用户意图（定时任务指令（无人值守运行，用户不在场））"));
@@ -606,20 +608,51 @@ fn test_review_intent_uses_originating_turn_for_delayed_and_continued_calls() {
     db.execute_batch("CREATE TABLE message(id INTEGER PRIMARY KEY, conversation_id INTEGER, parent_id INTEGER, message_type TEXT, content TEXT);
         INSERT INTO message VALUES (1, 1, NULL, 'user', '任务指令'), (2, 1, NULL, 'user', 'placeholder'),
         (3, 1, NULL, 'response', ''), (4, 1, NULL, 'user', '下一轮'), (5, 1, 2, 'response', '');").unwrap();
+    db.execute_batch("ALTER TABLE message ADD COLUMN metadata_json TEXT").unwrap();
     let request = format!("{}仅允许读取", "长".repeat(3100));
     let context = crate::utils::turn_context::wrap(["隐藏上下文"]);
     let stored = crate::utils::turn_context::append(&request, context.as_deref());
     db.execute("UPDATE message SET content = ?1 WHERE id = 2", [stored]).unwrap();
     for anchor in [3, 5] {
         let text = review_intent_text(&db, 1, Some(anchor), false).unwrap().unwrap();
-        let intent = ReviewIntent { label: "本轮用户消息", text };
+        let intent = ReviewIntent { label: "最近最多三条用户消息，从早到晚", text };
         let prompt = build_review_user_prompt("fs", "read", "{}", None, Some(&intent));
         assert!(prompt.contains(&request));
         assert!(!prompt.contains("隐藏上下文") && !prompt.contains("下一轮"));
     }
     for id in 6..36 {
-        db.execute("INSERT INTO message VALUES (?1, 1, NULL, 'user', 'Tool execution results: ok')", [id]).unwrap();
+        db.execute("INSERT INTO message(id, conversation_id, parent_id, message_type, content) VALUES (?1, 1, NULL, 'user', 'Tool execution results: ok')", [id]).unwrap();
     }
-    assert_eq!(review_intent_text(&db, 1, Some(35), false).unwrap().as_deref(), Some("下一轮"));
+    let history = |anchor| {
+        let json = review_intent_text(&db, 1, Some(anchor), false).unwrap().unwrap();
+        serde_json::from_str::<Vec<String>>(&json).unwrap()
+    };
+    assert_eq!(history(35), ["任务指令", &request, "下一轮"]);
+    db.execute_batch(r#"INSERT INTO message VALUES
+        (36, 1, 4, 'user', '继续', NULL), (37, 1, 36, 'user', '自动转达', '{"origin":"butler_peer"}'),
+        (38, 1, 4, 'user', '另一个分支', NULL), (39, 1, 37, 'response', '', NULL);"#).unwrap();
+    assert_eq!(history(39), [request.as_str(), "下一轮", "继续"]);
+    assert_eq!(review_intent_text(&db, 1, None, false).unwrap(), None);
     assert_eq!(review_intent_text(&db, 1, Some(35), true).unwrap().as_deref(), Some("任务指令"));
+}
+
+#[test]
+fn test_review_intent_group_uses_only_visible_human_posts() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(r#"
+        CREATE TABLE message(id INTEGER, conversation_id INTEGER, parent_id INTEGER, message_type TEXT, content TEXT, metadata_json TEXT);
+        CREATE TABLE butler_chat_group_member(id INTEGER, conversation_id INTEGER, joined_after INTEGER);
+        CREATE TABLE butler_chat_group_turn(member_id INTEGER, input_message_id INTEGER, group_id INTEGER, input_through INTEGER);
+        CREATE TABLE butler_chat_group_message(group_id INTEGER, seq INTEGER, kind TEXT, sender_member INTEGER, sender_assistant INTEGER, body TEXT);
+        INSERT INTO message VALUES (10, 5, NULL, 'user', '混合群聊记录', '{"origin":"butler_group"}');
+        INSERT INTO butler_chat_group_member VALUES (1, 5, 1);
+        INSERT INTO butler_chat_group_turn VALUES (1, 10, 7, 6);
+        INSERT INTO butler_chat_group_message VALUES
+          (7, 1, 'message', NULL, NULL, '入群前'), (7, 2, 'message', NULL, NULL, '检查配置'),
+          (7, 3, 'message', 1, 2, '助手发言'), (7, 4, 'notice', NULL, NULL, '系统通知'),
+          (7, 5, 'message', NULL, NULL, '仅查看'), (7, 6, 'message', NULL, NULL, '继续'),
+          (7, 7, 'message', NULL, NULL, '晚到消息'), (8, 5, 'message', NULL, NULL, '别的群');
+    "#).unwrap();
+    let history = review_intent_text(&db, 5, Some(10), false).unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Vec<String>>(&history).unwrap(), ["检查配置", "仅查看", "继续"]);
 }

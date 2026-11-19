@@ -1,16 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import type { MCPToolCall } from "@/data/MCPToolCall";
-import { isButlerInteractionTool } from "./ButlerPresentationContext";
-import ButlerInteractionResult from "./ButlerInteractionResult";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useGroupResults, positionGroupResults, type GroupQuestion } from "./butlerGroupResults";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { AskUserQuestionCard } from "@/components/InlineInteractionCards";
 import type { InlineInteractionItem } from "@/components/ConversationUI";
 import ConversationTurnRail, { makeTurnPreview, type TurnRailItem } from "@/components/conversation/ConversationTurnRail";
 import VirtuosoMessageList from "@/components/conversation/VirtuosoMessageList";
 import type { MessageScrollAlign } from "@/components/conversation/scrollHighlight";
 import type { Message, StreamEvent } from "@/data/Conversation";
-import type { ButlerGroupMember, ButlerGroupMessage } from "@/data/ButlerGroup";
+import type { ButlerGroupInteractionTurn, ButlerGroupMember, ButlerGroupMessage } from "@/data/ButlerGroup";
 import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { useAskUserQuestion } from "@/hooks/useInlineInteraction";
 import { useVaultUseRequests } from "@/hooks/useVaultUseRequests";
@@ -21,7 +17,7 @@ import { useScrollManagement } from "@/hooks/useScrollManagement";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker, toChatMessage } from "./ButlerGroupMessageRow";
 import { ButlerQuoteJumpContext } from "./ButlerQuote";
-import { HelperSummaryRow } from "./ButlerProgressRow";
+import { HelperSummaryRow, LiveReportBubbles } from "./ButlerProgressRow";
 import { useButlerProgress } from "./butlerProgress";
 import { formatDivider, showTimeDivider } from "./butlerGroupModel";
 import { groupVaultRequests } from "./groupVaultRequests";
@@ -41,13 +37,13 @@ function toTranscriptMessage(groupId: number, message: ButlerGroupMessage, quote
     return message.kind === "message" ? chat : { ...chat, message_type: `butler_group_${message.kind}` };
 }
 
-function TypingRow({ member }: { member: ButlerGroupMember }) {
+function TypingRow({ member, shown }: { member: ButlerGroupMember; shown?: string[] }) {
     const progress = useButlerProgress(member.conversation_id);
     return <div role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
         <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name}>
             <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={20} figure animated state="thinking" />
         </ButlerGroupSpeaker>
-        {progress?.reports.map(text => <div key={text} className="butler-peer-bubble break-words">{text}</div>)}
+        <LiveReportBubbles reports={progress?.reports} published={shown} />
         {progress?.helper ? <HelperSummaryRow summary={progress.helper} /> : <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
             <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
         </div>}
@@ -55,12 +51,27 @@ function TypingRow({ member }: { member: ButlerGroupMember }) {
 }
 
 /** 成员在执行中向用户提的问题，显示在群聊里，答案回到这位成员的原执行。 */
+const MemberAskListener = memo(function MemberAskListener({ conversationId, onChange }: {
+    conversationId: number; onChange: (id: number, question: GroupQuestion | null) => void;
+}) {
+    const question = useAskUserQuestion({ conversationId });
+    const { pendingRequest, isDialogOpen, callId, messageId, viewMode, completedAnswers, readOnly, handleSubmit, handleCancel } = question;
+    useEffect(() => {
+        if (!isDialogOpen || !pendingRequest) { onChange(conversationId, null); return; }
+        onChange(conversationId, {
+            key: pendingRequest.request_id, call: callId ?? undefined, owner: messageId ?? undefined,
+            time: Date.now(), answered: viewMode === "summary",
+            content: <AskUserQuestionCard request={pendingRequest} isOpen viewMode={viewMode} completedAnswers={completedAnswers}
+                readOnly={readOnly} onSubmit={handleSubmit} onCancel={handleCancel} />,
+        });
+        return () => onChange(conversationId, null);
+    }, [conversationId, onChange, pendingRequest, isDialogOpen, callId, messageId, viewMode, completedAnswers, readOnly, handleSubmit, handleCancel]);
+    return null;
+});
+
 function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShown: () => void }) {
-    const question = useAskUserQuestion({ conversationId: member.conversation_id });
     const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
-    // 已提交的问答由持久化结果卡接管，其余实时问题继续在这里回答。
-    const showQuestion = question.isDialogOpen && question.viewMode !== "summary";
-    const shown = showQuestion || !!elicitation.questionRequest || !!elicitation.decisionError;
+    const shown = !!elicitation.questionRequest || !!elicitation.decisionError;
     useEffect(() => {
         if (shown) onShown();
     }, [shown, onShown]);
@@ -68,9 +79,6 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
     return <div data-aipp-slot="butler-group-question">
         <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={`${member.name} 想问你`} />
         <div className="min-w-0 max-w-[min(65%,48rem)]">
-            {showQuestion && <AskUserQuestionCard request={question.pendingRequest} isOpen={question.isDialogOpen}
-                viewMode={question.viewMode} completedAnswers={question.completedAnswers} readOnly={question.readOnly}
-                onSubmit={question.handleSubmit} onCancel={question.handleCancel} />}
             {elicitation.questionRequest && <AskUserQuestionCard request={elicitation.questionRequest} isOpen viewMode="questionnaire"
                 errorMessage={elicitation.decisionError} onSubmit={elicitation.handleSubmit} onCancel={elicitation.handleCancel} />}
             {!elicitation.questionRequest && elicitation.decisionError &&
@@ -79,69 +87,13 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
     </div>;
 }
 
-/**
- * 列表尾部的实时内容（与私聊的内联交互同一个位置）：正在输入的成员与成员提问。
- * 提问监听要一直挂着，问题来了才能出现；挂载时也会恢复尚未回答的问题。
- */
-function GroupLiveTail({ members, running, onGrow }: { members: ButlerGroupMember[]; running: ButlerGroupMember[]; onGrow: () => void }) {
-    return <>
-        {running.map(member => <TypingRow key={`typing-${member.id}`} member={member} />)}
-        {members.map(member => <MemberQuestion key={`question-${member.id}`} member={member} onShown={onGrow} />)}
-    </>;
-}
-
-/** 群消息和成员执行会话分别存储。按源消息 ID 把预览放回该成员的回复旁，尚在执行的放在群聊末尾。 */
-function useGroupResults(members: ButlerGroupMember[]) {
-    const [calls, setCalls] = useState<Map<number, MCPToolCall[]>>(new Map());
-    const memberConversations = members.map(member => member.conversation_id).join(",");
-    useEffect(() => {
-        let active = true;
-        setCalls(new Map());
-        const subscriptions = memberConversations.split(",").filter(Boolean).map(async id => {
-            const conversationId = Number(id);
-            let revision = 0;
-            async function refresh() {
-                const current = ++revision;
-                try {
-                    const rows = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", { conversationId });
-                    if (!active || current !== revision) return;
-                    const previews = rows.filter(call => call.conversation_id === conversationId
-                        && isButlerInteractionTool(call.tool_name)
-                        && (call.status === "success" || call.tool_name === "preview_code" && call.status === "executing"))
-                        .sort((a, b) => a.id - b.id);
-                    setCalls(previous => new Map(previous).set(conversationId, previews));
-                } catch (error) {
-                    console.error("读取群成员预览失败", conversationId, error);
-                }
-            }
-            const off = await listen<{ type: string; data?: { tool_name?: string } }>(
-                `conversation_event_${conversationId}`, ({ payload }) => {
-                    if (payload.type === "mcp_tool_call_update" && (!payload.data?.tool_name || isButlerInteractionTool(payload.data.tool_name))) void refresh();
-                });
-            if (active) void refresh();
-            return off;
-        }).map(subscription => subscription.catch(error => {
-            console.error("监听群成员交互结果失败", error);
-        }));
-        return () => {
-            active = false;
-            subscriptions.forEach(subscription => { void subscription.then(off => off?.()); });
-        };
-    }, [memberConversations]);
-    return calls;
-}
-
-function groupPreview(call: MCPToolCall, live = false) {
-    return <ButlerInteractionResult key={call.id} toolName={call.tool_name} callId={call.id} status={call.status}
-        conversationId={call.conversation_id} messageId={call.assistant_message_id ?? call.message_id} parameters={call.parameters} isLastMessage={live} />;
-}
-
 interface Props {
     groupId: number;
     historyLoaded?: boolean;
     messages: ButlerGroupMessage[];
     members: ButlerGroupMember[];
     running: ButlerGroupMember[];
+    turns: ButlerGroupInteractionTurn[];
 }
 
 /**
@@ -149,7 +101,7 @@ interface Props {
  * 发送滑动、引用/轮次跳转与高亮、左侧轮次导航、最后一轮布局都来自共享列表；
  * 群聊特有的发言人、时间分隔、系统提示通过自定义行接入，列表的改进会同时作用于私聊和群聊。
  */
-export default function ButlerGroupTranscript({ groupId, historyLoaded = false, messages, members, running }: Props) {
+export default function ButlerGroupTranscript({ groupId, historyLoaded = false, messages, members, running, turns }: Props) {
     const { messagesEndRef, scrollContainerRef, handleUserScrollIntent, syncScrollState, smartScroll } =
         useScrollManagement({ disableTailObservation: true });
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
@@ -183,27 +135,35 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
     const inputCards = useMemo(() => groupVaultRequests(groupId, messages, vaultInput.requests), [groupId, messages, vaultInput.requests]);
     const requestMember = (conversationId: number | null) => members.find(member => member.conversation_id === conversationId);
 
-    const previewCalls = useGroupResults(members);
-    const { previewsBySeq, pendingPreviews } = useMemo(() => {
-        const previewsBySeq = new Map<number, MCPToolCall[]>();
-        const pendingPreviews: MCPToolCall[] = [];
-        for (const member of members) {
-            const calls = previewCalls.get(member.conversation_id) ?? [];
-            const replies = messages.filter(message => message.source_conversation_id === member.conversation_id && message.source_message_id);
-            for (const call of calls) {
-                const owner = call.assistant_message_id ?? call.message_id;
-                const reply = replies.find(row => owner && row.source_message_id! >= owner);
-                if (reply) {
-                    const previews = previewsBySeq.get(reply.seq) ?? [];
-                    previews.push(call);
-                    previewsBySeq.set(reply.seq, previews);
-                } else {
-                    pendingPreviews.push(call);
-                }
+    const speakers = useMemo(() => {
+        const map = new Map(members.map(m => [m.conversation_id, m]));
+        for (const message of messages) {
+            if (message.source_conversation_id && message.sender_assistant && !map.has(message.source_conversation_id)) {
+                map.set(message.source_conversation_id, { id: message.sender_member!, conversation_id: message.source_conversation_id,
+                    assistant_id: message.sender_assistant, name: message.sender_name, is_chief: false });
             }
         }
-        return { previewsBySeq, pendingPreviews };
-    }, [previewCalls, members, messages]);
+        return map;
+    }, [messages, members]);
+    const results = useGroupResults([...speakers.keys()].sort((a, b) => a - b).join(","));
+    const [questions, setQuestions] = useState<Map<number, GroupQuestion>>(() => new Map());
+    const onQuestion = useCallback((id: number, question: GroupQuestion | null) => {
+        setQuestions(previous => {
+            if (!question && !previous.has(id)) return previous;
+            const next = new Map(previous);
+            if (question) next.set(id, question);
+            else next.delete(id);
+            return next;
+        });
+    }, []);
+    const { before, tail, currentReports } = useMemo(() => positionGroupResults(results, turns, messages, questions), [results, turns, messages, questions]);
+    const renderResult = useCallback((event: (typeof tail)[number]) => {
+        const member = speakers.get(event.conversation);
+        return member && <div key={event.key} className="mb-2" data-aipp-slot={event.liveQuestion ? "butler-group-question" : undefined}>
+            <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={event.liveQuestion ? `${member.name} 想问你` : member.name} />
+            {event.content}
+        </div>;
+    }, [speakers]);
 
     const renderMessageRow = useCallback((chat: Message) => {
         const message = groupMessageByChatId.get(chat.id);
@@ -211,8 +171,10 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
         const time = dividerSeqs.has(message.seq)
             ? <div className="py-1 text-center text-[11px] text-muted-foreground">{formatDivider(message.created_at)}</div>
             : null;
+        const events = before.get(message.seq)?.map(renderResult);
         if (message.kind !== "message") {
             return <div>
+                {events}
                 {time}
                 <div className="flex justify-center" data-aipp-slot={`butler-group-${message.kind}`}>
                     <span className={`max-w-[80%] whitespace-pre-wrap break-words rounded-lg px-3 py-1 text-center text-xs ${message.kind === "error" ? "bg-destructive/5 text-destructive" : "text-muted-foreground"}`}>
@@ -222,12 +184,12 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
             </div>;
         }
         return <div data-group-message-seq={message.seq}>
+            {events}
             {time}
             <ButlerGroupMessageRow groupId={groupId} message={message}
                 quoted={message.reply_to ? bySeq.get(message.reply_to) : undefined}
                 sender={message.sender_member ? membersById.get(message.sender_member) : undefined}
                 highlighted={shiningMessageIds.has(chat.id)} />
-            {previewsBySeq.get(message.seq)?.map(call => groupPreview(call))}
             {(useCards.bySeq.get(message.seq) ?? []).map(request => {
                 const member = requestMember(request.conversationId);
                 return <div key={`vault-use-${request.requestId}`} className="min-w-0 max-w-[min(65%,48rem)]" data-aipp-slot="butler-group-vault" data-vault-request-id={request.requestId}>
@@ -243,7 +205,7 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
                 </div>;
             })}
         </div>;
-    }, [bySeq, dividerSeqs, groupId, groupMessageByChatId, membersById, shiningMessageIds, previewsBySeq, useCards, inputCards, members, vault.respond, vaultInput.submit, vaultInput.decline]);
+    }, [bySeq, dividerSeqs, groupId, groupMessageByChatId, membersById, shiningMessageIds, before, renderResult, useCards, inputCards, members, vault.respond, vaultInput.submit, vaultInput.decline]);
 
     // 停在底部时跟到底部（与私聊收到新消息一致），上翻阅读时 smartScroll 不打扰。
     const follow = useCallback(() => {
@@ -264,18 +226,13 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
     const liveTail = useMemo<InlineInteractionItem[]>(() => [{
         key: "butler-group-live-tail",
         content: <>
-            {pendingPreviews.map(call => {
-                const member = members.find(item => item.conversation_id === call.conversation_id)!;
-                return <div key={call.id}>
-                    <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name} />
-                    {groupPreview(call, true)}
-                </div>;
-            })}
-            <GroupLiveTail members={members} running={running} onGrow={follow} />
+            {tail.map(renderResult)}
+            {running.map(member => <TypingRow key={`typing-${member.id}`} member={member} shown={currentReports.get(member.conversation_id)} />)}
+            {members.map(member => <MemberQuestion key={`question-${member.id}`} member={member} onShown={follow} />)}
         </>,
-    }], [follow, members, running, pendingPreviews]);
+    }], [follow, members, running, tail, renderResult, currentReports]);
 
-    const turns = useMemo<TurnRailItem[]>(
+    const railTurns = useMemo<TurnRailItem[]>(
         () => chatMessages.filter(message => message.message_type === "user")
             .map(message => ({ id: message.id, preview: makeTurnPreview(message.content) })),
         [chatMessages],
@@ -298,7 +255,8 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
         {useCards.pending.length + inputCards.pending.length > 0 && <p role="status" className="px-6 py-2 text-sm text-muted-foreground" data-aipp-slot="butler-group-vault-pending">
             有 {useCards.pending.length + inputCards.pending.length} 个凭据请求等待对应群消息加载，请加载较早消息。
         </p>}
-        <ConversationTurnRail turns={turns} scrollContainerRef={scrollContainerRef} onSelect={selectTurn} />
+        {members.map(member => <MemberAskListener key={member.conversation_id} conversationId={member.conversation_id} onChange={onQuestion} />)}
+        <ConversationTurnRail turns={railTurns} scrollContainerRef={scrollContainerRef} onSelect={selectTurn} />
         <div ref={scrollContainerRef} onWheelCapture={handleUserScrollIntent} onTouchMoveCapture={handleUserScrollIntent}
             className="conversation-scroll-transparent-track box-border flex h-full min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-6"
             style={{ overflowAnchor: "none" }} aria-label="群聊记录" data-aipp-slot="butler-group-messages">

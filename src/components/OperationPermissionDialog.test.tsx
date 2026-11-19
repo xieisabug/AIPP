@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { ComposerPermissionSlot } from "./conversation/ComposerPermissionSlot";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AcpPermissionDialog } from "./OperationPermissionDialog";
 
@@ -14,6 +15,26 @@ const request = {
 };
 
 describe("AcpPermissionDialog", () => {
+    it("should move the same request between the composer and dialog when switching conversations", () => {
+        const decide = vi.fn();
+        const view = (id: number) => <>
+            <ComposerPermissionSlot conversationIds={[id]} placement="bottom" />
+            <AcpPermissionDialog request={request} isOpen onDecision={decide} />
+        </>;
+        const { rerender } = render(view(1));
+        expect(screen.queryByRole("alertdialog")).toBeNull();
+        const summary = screen.getByText("Pi 工具权限请求").closest("summary")!;
+        fireEvent.click(summary);
+        expect(summary.parentElement).not.toHaveAttribute("open");
+        rerender(view(2));
+        expect(screen.getByRole("alertdialog")).toHaveTextContent("允许 Pi 使用 bash");
+        rerender(view(1));
+        expect(screen.queryByRole("alertdialog")).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "本次允许" }));
+        expect(decide).toHaveBeenCalledWith(request.request_id, "allow", false);
+        expect(decide).toHaveBeenCalledTimes(1);
+    });
+
     it("should explain why AIPP auto-review handed the request to the user", () => {
         render(<AcpPermissionDialog request={{ ...request, review: { verdict: "risky", reason: "自动审核认为需要人工确认：递归删除目录" } }} isOpen onDecision={vi.fn()} />);
         expect(screen.getByRole("status")).toHaveTextContent("递归删除目录");

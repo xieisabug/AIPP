@@ -147,6 +147,7 @@ export async function openCursor(config, emit, dependencies = {}) {
           thinking.end(turn, result.status === 'cancelled' ? 'cancelled' : error ? 'failed' : 'success');
           if (!error && !sawText && typeof result.result === 'string' && result.result) emit({ type: 'text', turn, text: result.result });
           emit({ type: 'done', turn, error,
+            final_text: !error && result.status === 'finished' && typeof result.result === 'string' ? result.result : undefined,
             cancelled: result.status === 'cancelled' });
         }, error => {
           if (active !== current) return;

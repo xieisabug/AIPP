@@ -12,6 +12,7 @@ import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import {
     ConfigPageLayout,
     SidebarList,
+    SidebarListGroups,
     ListItemButton,
     EmptyState,
     ConfigPageLoading,
@@ -21,8 +22,7 @@ import {
 import {
     ScannedSkill,
     SkillWithConfig,
-    groupSkillsBySource,
-    SkillSourceType
+    orderedSkillGroups
 } from "../../data/Skill";
 
 import SkillActionDropdown from "./SkillActionDropdown";
@@ -261,29 +261,16 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
         }
     }, [skillToDelete, scanSkills]);
 
-    // Group skills by source
-    const groupedSkills = useMemo(() => {
-        return groupSkillsBySource(skills);
-    }, [skills]);
-
-    // Filter grouped skills by search query（支持拼音）
-    const filteredGroupedSkills = useMemo(() => {
-        if (!searchQuery.trim()) return groupedSkills;
-        const filtered = new Map<SkillSourceType, ScannedSkill[]>();
-        for (const [sourceType, sourceSkills] of groupedSkills.entries()) {
-            const matched = sourceSkills.filter(skill =>
+    // 先按搜索过滤（支持拼音），再按来源分组；分组数只算匹配项
+    const skillGroups = useMemo(() => {
+        const visible = searchQuery.trim()
+            ? skills.filter(skill =>
                 PinyinFilter.matches(skill.display_name, searchQuery) ||
                 PinyinFilter.matches(skill.identifier, searchQuery)
-            );
-            if (matched.length > 0) {
-                filtered.set(sourceType, matched);
-            }
-        }
-        return filtered;
-    }, [groupedSkills, searchQuery, pinyinReady]);
-
-    // Source order for display
-    const sourceOrder: SkillSourceType[] = ['agents', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
+            )
+            : skills;
+        return orderedSkillGroups(visible);
+    }, [skills, searchQuery, pinyinReady]);
 
     // Check if skill is enabled for assistant
     const isSkillEnabled = useCallback((identifier: string) => {
@@ -334,62 +321,33 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                 />
             }
         >
-            {sourceOrder.map(sourceType => {
-                const sourceSkills = filteredGroupedSkills.get(sourceType);
-                if (!sourceSkills || sourceSkills.length === 0) return null;
-
-                return (
-                    <div key={sourceType} className="space-y-2">
-                        <div className="text-xs font-medium text-muted-foreground tracking-wider px-1">
-                            {sourceSkills[0].source_display_name}
-                        </div>
-                        {sourceSkills.map((skill) => {
-                            const config = getSkillConfig(skill.identifier);
-                            const hasConfig = !!config;
-                            const isEnabled = config?.config.is_enabled ?? false;
-
-                            return (
-                                <ListItemButton
-                                    key={skill.identifier}
-                                    isSelected={selectedSkill?.identifier === skill.identifier}
-                                    onClick={() => handleSelectSkill(skill)}
-                                >
-                                    <div className="flex items-center w-full">
-                                        <span className="flex-1 truncate font-medium">{skill.display_name}</span>
-                                        {assistantId && hasConfig && isEnabled && (
-                                            <Badge variant="secondary" className="ml-2 flex-shrink-0 text-xs">
-                                                启用
-                                            </Badge>
-                                        )}
-                                    </div>
-                                </ListItemButton>
-                            );
-                        })}
-                    </div>
-                );
-            })}
-
-            {/* Custom sources */}
-            {Array.from(filteredGroupedSkills.entries())
-                .filter(([sourceType]) => !sourceOrder.includes(sourceType))
-                .map(([sourceType, sourceSkills]) => (
-                    <div key={sourceType} className="space-y-2">
-                        <div className="text-xs font-medium text-muted-foreground tracking-wider px-1">
-                            {sourceSkills[0].source_display_name}
-                        </div>
-                        {sourceSkills.map((skill) => (
+            {skillGroups.length === 0 ? (
+                <p className="px-3 py-6 text-center text-sm text-muted-foreground">没有匹配的 Skills</p>
+            ) : (
+                <SidebarListGroups
+                    groups={skillGroups.map((group) => ({
+                        key: group.key,
+                        label: group.label,
+                        count: group.skills.length,
+                        children: group.skills.map((skill) => (
                             <ListItemButton
                                 key={skill.identifier}
                                 isSelected={selectedSkill?.identifier === skill.identifier}
                                 onClick={() => handleSelectSkill(skill)}
                             >
-                                <span className="flex-1 truncate font-medium">{skill.display_name}</span>
+                                <span className="flex-1 truncate">{skill.display_name}</span>
+                                {assistantId && getSkillConfig(skill.identifier)?.config.is_enabled && (
+                                    <Badge variant="secondary" className="flex-shrink-0 text-xs">
+                                        启用
+                                    </Badge>
+                                )}
                             </ListItemButton>
-                        ))}
-                    </div>
-                ))}
+                        )),
+                    }))}
+                />
+            )}
         </SidebarList>
-    ), [filteredGroupedSkills, selectedSkill, isRefreshing, assistantId, getSkillConfig, handleSelectSkill, scanSkills, handleOpenSkillsFolder, handleInstallOfficial, handleShowInstallGuide, searchQuery]);
+    ), [skillGroups, selectedSkill, isRefreshing, assistantId, getSkillConfig, handleSelectSkill, scanSkills, handleOpenSkillsFolder, handleInstallOfficial, handleShowInstallGuide, searchQuery]);
 
     // Main content
     const content = useMemo(() => selectedSkill ? (

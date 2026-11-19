@@ -133,6 +133,7 @@ pub struct GroupDetail {
     pub messages: Vec<group::Message>,
     pub has_more: bool,
     pub turns: Vec<TurnView>,
+    pub interaction_turns: Vec<group::InteractionTurn>,
     /// 有消息正在等待判断由谁回复。
     pub routing: bool,
 }
@@ -175,10 +176,10 @@ pub async fn get_butler_group(app_handle: AppHandle, group_id: i64) -> Result<Gr
     desktop()?;
     let roster = roster(&app_handle).await?;
     sync_roster(&app_handle, group_id, &roster).await?;
-    let (room, members, mut messages, turns, routing) = database(&app_handle, "读取", move |conn| {
+    let (room, members, mut messages, turns, interaction_turns, routing) = database(&app_handle, "读取", move |conn| {
         Ok((group::get(conn, group_id)?, group::members(conn, group_id)?,
             group::messages(conn, group_id, None, PAGE + 1)?, group::open_turns(conn, group_id)?,
-            group::has_pending_route(conn, group_id)?))
+            group::interaction_turns(conn, group_id)?, group::has_pending_route(conn, group_id)?))
     }).await?;
     let has_more = messages.len() > PAGE;
     if has_more {
@@ -187,7 +188,7 @@ pub async fn get_butler_group(app_handle: AppHandle, group_id: i64) -> Result<Gr
     Ok(GroupDetail {
         id: room.id, name: room.name, members: member_views(members, &roster), messages, has_more,
         turns: turns.into_iter().map(|t| TurnView { member_id: t.member_id, state: t.state, round: t.round, rounds: t.rounds }).collect(),
-        routing,
+        interaction_turns, routing,
     })
 }
 

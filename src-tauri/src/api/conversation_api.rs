@@ -524,6 +524,10 @@ pub async fn get_conversation_with_messages(
             &message.content,
         );
         message_details.push(MessageDetail {
+            butler_final_text: if conversation.conversation_kind.starts_with("butler")
+                && matches!(message.message_type.as_str(), "response" | "assistant") && message.finish_time.is_some() {
+                crate::db::butler_execution::agent_final_text(&message.content, message.metadata_json.as_deref())
+            } else { None },
             id: message.id,
             parent_id: message.parent_id,
             conversation_id: message.conversation_id,

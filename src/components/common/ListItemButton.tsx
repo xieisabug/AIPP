@@ -1,5 +1,5 @@
 import React, { memo } from 'react';
-import { Button } from "../ui/button";
+import { cn } from "@/utils/utils";
 
 interface ListItemButtonProps {
     isSelected: boolean;
@@ -8,6 +8,10 @@ interface ListItemButtonProps {
     className?: string;
 }
 
+/**
+ * 设置页左栏的一项：默认一行高，无边框，字重统一为 font-medium（页面内容不必再设字重）；
+ * 选中样式与设置菜单一致（primary/10 着色），随主题变化。
+ */
 const ListItemButton: React.FC<ListItemButtonProps> = ({
     isSelected,
     onClick,
@@ -15,21 +19,23 @@ const ListItemButton: React.FC<ListItemButtonProps> = ({
     className = ""
 }) => {
     return (
-        <Button
-            variant={isSelected ? "default" : "outline"}
+        <button
+            type="button"
+            aria-current={isSelected ? "true" : undefined}
             onClick={onClick}
-            className={`
-                w-full justify-start text-left transition-all duration-200
-                ${isSelected
-                    ? 'bg-primary hover:bg-primary/90 text-primary-foreground shadow-none'
-                    : 'hover:bg-muted hover:border-muted-foreground text-foreground'
-                }
-                ${className}
-            `}
+            className={cn(
+                "flex min-h-9 w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm font-medium transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                isSelected
+                    ? "bg-primary/10 text-primary"
+                    : "text-foreground hover:bg-muted",
+                className,
+            )}
+            data-aipp-slot="config-list-item"
         >
             {children}
-        </Button>
+        </button>
     );
 };
 
-export default memo(ListItemButton); 
+export default memo(ListItemButton);

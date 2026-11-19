@@ -12,7 +12,7 @@ import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { SCHEDULE_FOCUS_TASK_EVENT, consumePendingScheduleFocus, type ScheduleFocusTaskPayload } from "@/lib/scheduleTaskFocus";
 import ScheduleTaskDetail, { RunStatusDot } from "@/components/schedule/ScheduleTaskDetail";
 import ScheduleTaskEditor from "@/components/schedule/ScheduleTaskEditor";
-import { formatShortDateTime, parseToolLogPayload, taskGroup, taskGroupLabels, type TaskGroup } from "@/components/schedule/scheduleFormat";
+import { parseToolLogPayload, taskGroup, taskGroupLabels, type TaskGroup } from "@/components/schedule/scheduleFormat";
 import type {
     ScheduledRun,
     ScheduledTask,
@@ -37,25 +37,12 @@ const formatToolLogValue = (value: unknown): string => {
 };
 
 function TaskListRow({ task, selected, onSelect }: { task: ScheduledTask; selected: boolean; onSelect: () => void }) {
-    const sub = selected ? "text-primary-foreground/80" : "text-muted-foreground";
-    const next = task.enabled && task.upcoming[0] ? `下次 ${formatShortDateTime(task.upcoming[0])}` : task.pausedReason;
+    // 列表一项一行：状态点 + 名称；暂停时同一行标出。周期、下次运行等在右侧详情里。
     return (
-        <ListItemButton isSelected={selected} onClick={onSelect} className="h-auto items-start py-2">
-            <div className="w-full min-w-0">
-                <div className="flex items-center gap-2">
-                    {task.lastRun && <RunStatusDot status={task.lastRun.status} />}
-                    <span className={`truncate text-sm font-medium ${selected ? "text-primary-foreground" : "text-foreground"}`}>{task.name}</span>
-                </div>
-                <div className={`mt-0.5 truncate text-xs ${sub}`}>
-                    {task.scheduleText} · {task.assistantName}
-                </div>
-                {next && (
-                    <div className={`mt-0.5 flex items-center gap-1 truncate text-xs ${sub}`}>
-                        <Clock className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{next}</span>
-                    </div>
-                )}
-            </div>
+        <ListItemButton isSelected={selected} onClick={onSelect}>
+            {task.lastRun && <RunStatusDot status={task.lastRun.status} />}
+            <span className="min-w-0 flex-1 truncate">{task.name}</span>
+            {!task.enabled && <span className="shrink-0 text-xs text-muted-foreground">已暂停</span>}
         </ListItemButton>
     );
 }
@@ -328,8 +315,8 @@ export default function ScheduleWindow() {
             ) : (
                 <div className="space-y-4" data-aipp-slot="schedule-task-groups">
                     {grouped.map(({ group, items }) => (
-                        <div key={group} className="space-y-1.5">
-                            <div className={`px-1 text-[11px] font-medium ${group === "attention" ? "text-destructive" : "text-muted-foreground"}`}>
+                        <div key={group} className="space-y-0.5">
+                            <div className={`px-3 pb-1 text-[11px] font-medium ${group === "attention" ? "text-destructive" : "text-muted-foreground"}`}>
                                 {taskGroupLabels[group]} · {items.length}
                             </div>
                             {items.map((task) => (
