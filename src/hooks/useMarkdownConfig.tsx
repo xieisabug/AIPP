@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo, useCallback } from "react";
 import React from "react";
 import { Components } from "react-markdown";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { MarkdownLink } from "@/components/conversation/MarkdownLink";
 import rehypeRaw from "rehype-raw";
 import rehypeKatex from "rehype-katex";
 import rehypeSanitize from "rehype-sanitize";
@@ -126,28 +126,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </code>
                 );
             },
-            a: ({ href, children, ...props }: any) => {
-                const handleClick = useCallback(
-                    (e: React.MouseEvent) => {
-                        e.preventDefault();
-                        if (href) {
-                            openUrl(href).catch(console.error);
-                        }
-                    },
-                    [href],
-                );
-
-                return (
-                    <a
-                        href={href}
-                        onClick={handleClick}
-                        className="text-primary hover:text-primary/80 underline cursor-pointer"
-                        {...props}
-                    >
-                        {children}
-                    </a>
-                );
-            },
+            a: MarkdownLink,
             img: ({ src, alt, ...props }: any) => <LazyImage src={src} alt={alt} {...props} />,
             ...(isMobilePlatform && !disableMarkdownSyntax
                 ? {

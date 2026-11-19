@@ -443,8 +443,13 @@ body {
     line-height: inherit;
 }
 
-.prose a {
+.prose a:not(.aipp-markdown-link) {
     @apply text-primary hover:text-primary/80 underline;
+}
+
+.aipp-markdown-link {
+    @apply cursor-pointer font-semibold text-[#014f99] no-underline hover:text-[#013e78] dark:text-blue-400 dark:hover:text-blue-300;
+    overflow-wrap: anywhere;
 }
 
 .prose table {
