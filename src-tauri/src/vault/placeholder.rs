@@ -438,6 +438,7 @@ async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Calle
         }
         let (preview, preview_kind) = preview(server, tool_name, args);
         let request = VaultUseRequest {
+            group_anchor: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             conversation_id,
             message_id: crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
