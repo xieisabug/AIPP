@@ -53,10 +53,6 @@ pub(super) async fn defer_if_busy(app: &AppHandle, id: i64, origin: &str) -> any
     );
     Ok(true)
 }
-/// 未指定时整条用户指令（含多层协作）的默认轮数预算。
-const MAX_ROUNDS: i64 = 6;
-/// 整条协作链可设置的最大轮数预算。
-const MAX_ROUNDS_LIMIT: i64 = 12;
 fn connection(app: &AppHandle) -> anyhow::Result<Connection> {
     Ok(ConversationDatabase::new(app)?.get_connection()?)
 }
@@ -89,6 +85,30 @@ pub(super) async fn bot_names(app: &AppHandle) -> anyhow::Result<HashMap<i64, St
             (a.id, name)
         })
         .collect())
+}
+
+async fn approve_round_extension(app: &AppHandle, current: i64, request: peer::NewRequest<'_>, boundary: peer::RoundLimit) -> anyhow::Result<()> {
+    use crate::mcp::builtin_mcp::interaction::{request_ask_user_question, InteractionState};
+    let (user_goal, recent) = {
+        let conn = connection(app)?;
+        let goal: Option<String> = conn.query_row("SELECT (SELECT content FROM message WHERE id=?1)", [boundary.chain], |row| row.get(0))?;
+        let goal = goal.as_deref().map(|body| crate::utils::turn_context::visible(body).chars().take(1600).collect::<String>());
+        let mut stmt = conn.prepare("SELECT substr(body,1,400),substr(coalesce(reply,error,''),1,600) FROM butler_peer_exchange WHERE coalesce(chain,root)=?1 ORDER BY id DESC LIMIT 3")?;
+        let rows = stmt.query_map([boundary.chain], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))?;
+        (goal, rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    };
+    let new_limit = boundary.limit.checked_add(peer::ROUND_BLOCK).context("协作轮数溢出")?;
+    let details = json!({"chain":boundary.chain,"current_limit":boundary.limit,"proposed_limit":new_limit,
+        "original_request":user_goal,"recent_exchanges":recent,"recipient":request.recipient,"next_request":request.body});
+    let review = crate::mcp::tool_review::review_round_extension(app, current, request.tool_message_id, &details.to_string()).await;
+    if review.verdict == "safe" { return Ok(()); }
+    let question = format!("{}。是否允许将额度增至 {new_limit} 轮？下一轮交给{}：{}\n审核说明：{}", boundary,
+        request.recipient, request.body, review.error_detail.as_deref().unwrap_or(&review.reason));
+    let prompt = serde_json::from_value(json!({"questions":[{"header":"协作续额","question":question,
+        "options":[{"label":"拒绝","description":"保留当前额度"},{"label":"允许","description":"批准本次增加 50 轮"}]}]}))?;
+    let answers = request_ask_user_question(app, &app.state::<InteractionState>(), Some(current), prompt).await.map_err(anyhow::Error::msg)?;
+    ensure!(answers.get(&question).is_some_and(|answer| answer == "允许"), "用户未批准协作续额，请汇报已有结果");
+    Ok(())
 }
 
 pub async fn tool(
@@ -202,28 +222,36 @@ pub async fn tool(
                 .map(str::trim)
                 .filter(|s| !s.is_empty() && s.len() <= 128)
                 .context("需要 1 至 128 字节的稳定 request_id")?;
-            let limit = args["max_rounds"].as_i64().unwrap_or(MAX_ROUNDS);
-            ensure!((1..=MAX_ROUNDS_LIMIT).contains(&limit), "max_rounds 必须在 1 至 {MAX_ROUNDS_LIMIT} 之间");
+            let limit = args["max_rounds"].as_i64().unwrap_or(peer::ROUND_BLOCK);
+            ensure!((1..=peer::ROUND_BLOCK).contains(&limit), "max_rounds 必须在 1 至 {} 之间", peer::ROUND_BLOCK);
             let report_to_user = match args["deliver_to"].as_str() {
                 Some("user") => Some(true),
                 Some("sender") => Some(false),
                 Some(other) => return Err(anyhow!("deliver_to 只能是 user 或 sender，收到 {other}")),
                 None => args["report_to_user"].as_bool(),
             };
-            let exchange = peer::enqueue(
-                &mut db.get_connection()?,
-                peer::NewRequest {
-                    owner: current,
-                    tool_message_id: TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
-                    target,
-                    sender: names.get(&sender_id).context("发送助手已删除")?,
-                    recipient: &names[&target_id],
-                    key,
-                    body: text,
-                    limit,
-                    report_to_user,
-                },
-            )?;
+            let request = peer::NewRequest {
+                owner: current,
+                tool_message_id: TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
+                target,
+                sender: names.get(&sender_id).context("发送助手已删除")?,
+                recipient: &names[&target_id],
+                key,
+                body: text,
+                limit,
+                report_to_user,
+            };
+            let attempt = peer::enqueue(&mut db.get_connection()?, request);
+            let exchange = match attempt {
+                Ok(exchange) => exchange,
+                Err(error) => {
+                    let Some(boundary) = error.downcast_ref::<peer::RoundLimit>().copied() else {
+                        return Err(error);
+                    };
+                    approve_round_extension(app, current, request, boundary).await?;
+                    peer::enqueue_reviewed(&mut db.get_connection()?, request, Some(boundary))?
+                }
+            };
             WAKE.notify_one();
             updated(app);
             let instruction = match exchange.state.as_str() {

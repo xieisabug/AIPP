@@ -774,6 +774,14 @@ pub async fn review_agent_permission(
     review_with_definition(app_handle, conversation_id, Some(response_message_id), 0, &format!("{agent} 智能体"), title, parameters, Some(definition)).await
 }
 
+pub(crate) async fn review_round_extension(app: &tauri::AppHandle, conversation: i64, message: Option<i64>, details: &str) -> ReviewRecordDraft {
+    let definition = ToolReviewDefinition {
+        description: "在原有工作范围内追加 50 次助手协作请求。根据用户目标、近期答复和下一步判断是否值得继续。重复委派、缺乏进展或超出目标应交用户决定。".into(),
+        input_schema: String::new(),
+    };
+    review_with_definition(app, conversation, message, 0, "管家协作", "追加协作轮数", details, Some(definition)).await
+}
+
 async fn review_with_definition(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
