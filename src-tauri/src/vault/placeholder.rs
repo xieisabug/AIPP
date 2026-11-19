@@ -75,6 +75,18 @@ fn substitute_value(value: &mut Value, values: &BTreeMap<String, String>) {
     }
 }
 
+fn keys_for_call(server: &MCPServer, tool_name: &str, args: &Value) -> Result<BTreeSet<String>, UseError> {
+    if matches!(server.transport_type.as_str(), "stdio" | "builtin") {
+        let builtin = server.command.as_deref().and_then(crate::mcp::builtin_mcp::builtin_command_id);
+        // These tools store or forward text. A reference in that text is for a future call.
+        if matches!((builtin.as_deref(), tool_name),
+            (Some("agent"), "butler_memory") | (Some("ui_interaction"), "ask_user_question")) {
+            return Ok(BTreeSet::new());
+        }
+    }
+    keys_in(args)
+}
+
 // ---------- where the call goes ----------
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -377,7 +389,7 @@ fn log_refusal(app: &AppHandle, entries: &BTreeMap<String, Resolved>, conversati
 pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, server: &MCPServer, tool_name: &str, parameters: &str) -> Result<Prepared, String> {
     if !parameters.contains(MARKER) { return Ok(Prepared::default()); }
     let args: Value = match serde_json::from_str(parameters) { Ok(args) => args, Err(_) => return Ok(Prepared::default()) };
-    let keys = keys_in(&args).map_err(|e| e.to_string())?;
+    let keys = keys_for_call(server, tool_name, &args).map_err(|e| e.to_string())?;
     if keys.is_empty() { return Ok(Prepared::default()); }
     if is_shell(server, tool_name) {
         let mut others = args.clone();

@@ -33,6 +33,26 @@ fn test_keys_found_anywhere_in_the_arguments() {
 }
 
 #[test]
+fn test_memory_and_questions_keep_literal_references_only_for_builtin_routes() {
+    let memory = json!({"action": "remember", "content": "发布时使用 <vault:deploy_key>"});
+    let question = json!({"questions": [{"question": "使用 <vault:deploy_key> 吗？"}]});
+    for (command, tool, args) in [
+        ("aipp:agent", "butler_memory", memory),
+        ("aipp:ui_interaction", "ask_user_question", question),
+    ] {
+        for transport in ["stdio", "builtin"] {
+            let builtin = server(transport, Some(command), None);
+            assert!(keys_for_call(&builtin, tool, &args).unwrap().is_empty());
+            assert!(keys_for_call(&builtin, "another_tool", &args).unwrap().contains("deploy_key"));
+        }
+        let external = server("stdio", Some("external-mcp"), None);
+        assert!(keys_for_call(&external, tool, &args).unwrap().contains("deploy_key"));
+        let remote = server("http", Some(command), Some("https://example.org"));
+        assert!(keys_for_call(&remote, tool, &args).unwrap().contains("deploy_key"));
+    }
+}
+
+#[test]
 fn test_substitution_keeps_json_valid() {
     let mut args = json!({"note": "a <vault:quote> b", "list": ["<vault:quote>"]});
     let values = BTreeMap::from([("quote".to_string(), "say \"hi\"\nnext".to_string())]);
