@@ -302,7 +302,7 @@ const LLMProviderConfig: React.FC = () => {
                 >
                     <div className="flex items-center w-full">
                         <div className="flex-1 truncate">
-                            <div className="font-medium truncate">{provider.name}</div>
+                            <div className="truncate">{provider.name}</div>
                         </div>
                         {provider.is_enabled && (
                             <Zap className="h-3 w-3 ml-2 flex-shrink-0" />

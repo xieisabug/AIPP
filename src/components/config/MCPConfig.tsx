@@ -520,7 +520,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
                 >
                     <div className="flex items-center w-full">
                         <div className="flex-1 truncate">
-                            <div className="font-medium truncate">{server.name}</div>
+                            <div className="truncate">{server.name}</div>
                             {isMobilePlatform && !isMobileExecutableMcpServer(server) && (
                                 <div className="text-[10px] text-muted-foreground truncate">此设备不可执行</div>
                             )}

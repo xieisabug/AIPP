@@ -1184,7 +1184,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     <div className="flex items-center w-full">
                         <div className="flex-1 truncate">
                             <div
-                                className={`font-medium truncate ${!plugin.isInstalled ? "text-destructive" : ""}`}
+                                className={`truncate ${!plugin.isInstalled ? "text-destructive" : ""}`}
                             >
                                 {plugin.isInstalled
                                     ? plugin.name

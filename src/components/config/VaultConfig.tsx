@@ -1,8 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { ArrowRight, Plus, ShieldOff } from "lucide-react";
-import { ConfigPageLayout, EmptyState, ConfigPageLoading } from "@/components/common";
+import { ArrowRight, KeyRound, Plus, ShieldOff } from "lucide-react";
+import { ConfigPageLayout, EmptyState, ListItemButton, SidebarList, ConfigPageLoading } from "@/components/common";
 import type { SelectOption } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import FormDialog from "@/components/FormDialog";
@@ -11,13 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Textarea } from "@/components/ui/textarea";
-import { useIsMobile } from "@/hooks/use-mobile";
-import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import type { VaultCapability, VaultConfigReference, VaultCreateInput, VaultItem, VaultUsageEntry } from "@/data/Vault";
 import VaultGuide from "./vault/VaultGuide";
 import VaultItemDetail, { type VaultItemPatch } from "./vault/VaultItemDetail";
-import VaultItemList from "./vault/VaultItemList";
 import { VaultKeyInput } from "./vault/VaultItemEditDialog";
 import { isSimpleVaultValue, keyError, suggestKey } from "./vault/vaultHelpers";
 
@@ -27,9 +24,6 @@ interface VaultConfigProps {
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const simpleValueWarning = "凭据过于简单可能导致普通内容被误遮盖，建议使用较长且独特的值。";
-
-/** 条目超过这个数量才提供搜索；条目少时搜索框没有用处。 */
-const SEARCH_THRESHOLD = 5;
 
 /**
  * 只在需要用户处理时出现：其他设备开启了同步、口令已更换，或有条目还没解密。
@@ -77,11 +71,6 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     /** 名称里没有英文时只能生成 entry 这类通用键，提示用户改成助手认得出的名字。 */
     const genericKey = /^entry(_\d+)?$/.test(create.key);
     const replaceValueIsSimple = isSimpleVaultValue(replaceValue ?? "");
-
-    // 移动平台或窄窗口沿用设置页的「列表 → 详情」两级导航；其余情况用一体化面板。
-    const isMobilePlatform = useIsMobilePlatform();
-    const isNarrow = useIsMobile();
-    const compact = isMobilePlatform || isNarrow;
 
     const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
     const keys = useMemo(() => items.map((item) => item.key), [items]);
@@ -240,17 +229,41 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
         </button>
     ) : null;
 
+    const sidebar = (
+        <SidebarList
+            title="凭据保险箱"
+            icon={<KeyRound className="h-5 w-5" />}
+            searchValue={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="搜索条目..."
+            addButton={addButton}
+        >
+            {filtered.map((item) => (
+                <ListItemButton key={item.id} isSelected={selected?.id === item.id} onClick={() => setSelectedId(item.id)}>
+                    <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                    {item.status === "locked" && <span className="shrink-0 text-xs text-muted-foreground">待解锁</span>}
+                </ListItemButton>
+            ))}
+            {filtered.length === 0 && <p className="px-3 py-6 text-center text-xs text-muted-foreground">没有匹配的条目</p>}
+        </SidebarList>
+    );
+
     if (!capability) return <ConfigPageLoading />;
 
     if (!capability.available) {
         return (
-            <div className="h-full min-h-0 overflow-y-auto px-4 py-6 thin-scrollbar" data-aipp-slot="vault-page">
-                <EmptyState
-                    icon={<ShieldOff className="h-8 w-8 text-muted-foreground" />}
-                    title="凭据保险箱不可用"
-                    description={capability.reason ?? "此设备没有可用的系统安全存储，保险箱已停用（不会以明文保存）。"}
-                />
-            </div>
+            <ConfigPageLayout
+                sidebar={null}
+                content={null}
+                showEmptyState
+                emptyState={
+                    <EmptyState
+                        icon={<ShieldOff className="h-8 w-8 text-muted-foreground" />}
+                        title="凭据保险箱不可用"
+                        description={capability.reason ?? "此设备没有可用的系统安全存储，保险箱已停用（不会以明文保存）。"}
+                    />
+                }
+            />
         );
     }
 
@@ -346,50 +359,16 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     if (items.length === 0) {
         return (
             <>
-                <div className="h-full min-h-0 overflow-y-auto px-4 py-6 thin-scrollbar" data-aipp-slot="vault-page">
-                    <VaultGuide onCreate={openCreate}>
-                        <SyncNotice capability={capability} />
-                        {appCredentialsLink}
-                    </VaultGuide>
-                </div>
-                {dialogs}
-            </>
-        );
-    }
-
-    const detail = selected && (
-        <VaultItemDetail
-            item={selected}
-            usage={selected.id === selectedKey ? usage : []}
-            takenKeys={keys}
-            syncReady={capability.syncState === "ready"}
-            references={selected.id === selectedKey ? references : []}
-            onConfirmReference={(reference) => void confirmReference(reference)}
-            onUpdate={update}
-            onReplace={() => {
-                setReplaceError(null);
-                setReplaceValue("");
-            }}
-            onDelete={() => setDeleteOpen(true)}
-        />
-    );
-
-    if (compact) {
-        return (
-            <>
                 <ConfigPageLayout
                     sidebar={null}
-                    content={
-                        <div className="space-y-4">
+                    content={null}
+                    showEmptyState
+                    emptyState={
+                        <VaultGuide onCreate={openCreate}>
                             <SyncNotice capability={capability} />
-                            {detail}
-                        </div>
+                            {appCredentialsLink}
+                        </VaultGuide>
                     }
-                    selectOptions={selectOptions}
-                    selectedOptionId={selected?.id}
-                    onSelectOption={setSelectedId}
-                    selectPlaceholder="选择条目"
-                    addButton={addButton}
                 />
                 {dialogs}
             </>
@@ -398,22 +377,35 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
 
     return (
         <>
-            <div className="flex h-full min-h-0 flex-col gap-4 px-4 py-6" data-aipp-slot="vault-page">
-                <SyncNotice capability={capability} />
-                <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-card" data-aipp-slot="vault-panel">
-                    <VaultItemList
-                        items={filtered}
-                        selectedId={selected?.id}
-                        onSelect={setSelectedId}
-                        onCreate={openCreate}
-                        search={search}
-                        onSearchChange={items.length > SEARCH_THRESHOLD ? setSearch : undefined}
-                    />
-                    <div className="min-w-0 flex-1 overflow-y-auto px-6 py-5 thin-scrollbar" data-aipp-slot="vault-detail">
-                        {detail}
+            <ConfigPageLayout
+                sidebar={sidebar}
+                content={
+                    <div className="space-y-4">
+                        <SyncNotice capability={capability} />
+                        {selected && (
+                            <VaultItemDetail
+                                item={selected}
+                                usage={selected.id === selectedKey ? usage : []}
+                                takenKeys={keys}
+                                syncReady={capability.syncState === "ready"}
+                                references={selected.id === selectedKey ? references : []}
+                                onConfirmReference={(reference) => void confirmReference(reference)}
+                                onUpdate={update}
+                                onReplace={() => {
+                                    setReplaceError(null);
+                                    setReplaceValue("");
+                                }}
+                                onDelete={() => setDeleteOpen(true)}
+                            />
+                        )}
                     </div>
-                </div>
-            </div>
+                }
+                selectOptions={selectOptions}
+                selectedOptionId={selected?.id}
+                onSelectOption={setSelectedId}
+                selectPlaceholder="选择条目"
+                addButton={addButton}
+            />
             {dialogs}
         </>
     );

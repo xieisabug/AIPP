@@ -770,7 +770,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         void handleChooseAssistant(assistant);
                     }}
                 >
-                    <span className="font-medium truncate">{assistant.name}</span>
+                    <span className="truncate">{assistant.name}</span>
                 </ListItemButton>
                 </AssistantItemContextMenu>
             ))}

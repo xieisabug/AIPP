@@ -3,6 +3,7 @@ import { AlertTriangle, Check, Copy, KeyRound, Pencil, Plus, Trash2, X } from "l
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { vaultPlaceholder, type VaultConfigReference, type VaultItem, type VaultUsageEntry } from "@/data/Vault";
 import VaultItemEditDialog from "./VaultItemEditDialog";
@@ -105,8 +106,8 @@ export default function VaultItemDetail({ item, usage, takenKeys, syncReady, ref
     };
 
     return (
-        <div className="space-y-6" data-aipp-slot="vault-detail-content">
-            <header className="flex items-start justify-between gap-4 border-b border-border pb-5" data-aipp-slot="vault-detail-header">
+        <Card className="gap-0 py-0 shadow-none" data-aipp-slot="vault-detail">
+            <CardHeader className="flex flex-row items-start justify-between gap-4 border-b py-5" data-aipp-slot="vault-detail-header">
                 <div className="min-w-0 space-y-2">
                     <div className="flex items-center gap-2">
                         <h2 className="truncate text-lg font-semibold">{item.name}</h2>
@@ -136,9 +137,9 @@ export default function VaultItemDetail({ item, usage, takenKeys, syncReady, ref
                         删除
                     </Button>
                 </div>
-            </header>
+            </CardHeader>
 
-            <div className="space-y-8">
+            <CardContent className="space-y-8 py-6">
                 <Section slot="vault-section-basic" title="基本信息">
                     <dl className="divide-y divide-border rounded-lg border border-border">
                         <Field label="值" action={<Button variant="outline" size="sm" onClick={onReplace}>替换值</Button>}>
@@ -279,7 +280,7 @@ export default function VaultItemDetail({ item, usage, takenKeys, syncReady, ref
                         </Button>
                     )}
                 </Section>
-            </div>
+            </CardContent>
 
             <VaultItemEditDialog
                 item={item}
@@ -289,6 +290,6 @@ export default function VaultItemDetail({ item, usage, takenKeys, syncReady, ref
                 onClose={() => setEditOpen(false)}
                 onUpdate={onUpdate}
             />
-        </div>
+        </Card>
     );
 }

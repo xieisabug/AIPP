@@ -54,10 +54,9 @@ describe("VaultConfig", () => {
         expect(await screen.findByRole("heading", { name: "GitHub 令牌" })).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "复制占位符 <vault:github_token>" })).toBeInTheDocument();
         expect(screen.getByText("https://api.github.com")).toBeInTheDocument();
-        // 常态信息（加密后端、未设置同步口令、搜索框）不占位置。
+        // 常态信息（加密后端、未设置同步口令）不占位置。
         expect(screen.queryByText(/Windows 凭据管理器/)).not.toBeInTheDocument();
         expect(screen.queryByText(/输入同步口令/)).not.toBeInTheDocument();
-        expect(screen.queryByPlaceholderText("搜索条目...")).not.toBeInTheDocument();
         expect(screen.queryByText(/发送时注入为/)).not.toBeInTheDocument();
     });
 
@@ -348,10 +347,14 @@ describe("VaultConfig", () => {
         expect(await screen.findByText("只保存在本机")).toBeInTheDocument();
     });
 
-    it("should offer search once the list is long enough to need it", async () => {
-        mockBackend({ vault_list: Array.from({ length: 6 }, (_, index) => ({ ...item, id: `i${index}`, key: `key_${index}`, name: `Entry ${index}` })) });
+    it("should filter the list by name, key or description", async () => {
+        const user = userEvent.setup();
+        mockBackend({ vault_list: [item, { ...item, id: "b2", key: "id_card", name: "身份证号", description: "" }] });
         render(<VaultConfig />);
-        expect(await screen.findByPlaceholderText("搜索条目...")).toBeInTheDocument();
+        await user.type(await screen.findByPlaceholderText("搜索条目..."), "id_card");
+        const list = screen.getByRole("navigation", { name: "凭据保险箱" });
+        expect(within(list).getByRole("button", { name: "身份证号" })).toBeInTheDocument();
+        expect(within(list).queryByRole("button", { name: "GitHub 令牌" })).not.toBeInTheDocument();
     });
 
     it("should explain a key change only after the key is edited", async () => {
@@ -363,18 +366,19 @@ describe("VaultConfig", () => {
         expect(screen.getByText(/助手要改用新的占位符/)).toBeInTheDocument();
     });
 
-    it("should list entries one line each inside a themeable panel", async () => {
+    it("should list entries one line each in the shared themeable list", async () => {
         const locked = { ...item, id: "b2", key: "nas_password", name: "NAS 密码", status: "locked" as const };
         mockBackend({ vault_list: [item, locked] });
         const { container } = render(<VaultConfig />);
         await screen.findByRole("heading", { name: "GitHub 令牌" });
-        const list = screen.getByRole("navigation", { name: "保险箱条目" });
-        const rows = within(list).getAllByRole("button").filter((button) => button.getAttribute("data-aipp-slot") === "vault-list-item");
+        const list = screen.getByRole("navigation", { name: "凭据保险箱" });
+        const rows = Array.from(list.querySelectorAll('[data-aipp-slot="config-list-item"]'));
         expect(rows.map((row) => row.textContent)).toEqual(["GitHub 令牌", "NAS 密码待解锁"]);
         expect(rows[0]).toHaveAttribute("aria-current", "true");
         expect(within(list).queryByText("github_token")).not.toBeInTheDocument();
+        expect(within(list).getByRole("button", { name: "新建条目" })).toBeInTheDocument();
         // 主题通过这些 slot 定制外观，名称是对外约定。
-        for (const slot of ["vault-page", "vault-panel", "vault-list", "vault-list-new", "vault-detail", "vault-detail-header", "vault-section-basic", "vault-section-sites", "vault-section-references", "vault-section-usage"]) {
+        for (const slot of ["config-list", "config-list-toolbar", "config-list-search", "config-list-actions", "config-list-items", "vault-detail", "vault-detail-header", "vault-section-basic", "vault-section-sites", "vault-section-references", "vault-section-usage"]) {
             expect(container.querySelector(`[data-aipp-slot="${slot}"]`), slot).not.toBeNull();
         }
     });
@@ -385,7 +389,7 @@ describe("VaultConfig", () => {
         render(<VaultConfig />);
         await user.click(await screen.findByRole("button", { name: "GitHub 令牌" }));
         expect(await screen.findByRole("heading", { name: "GitHub 令牌" })).toBeInTheDocument();
-        expect(screen.queryByRole("navigation", { name: "保险箱条目" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("navigation", { name: "凭据保险箱" })).not.toBeInTheDocument();
     });
 
     it("should explain when the device has no secure storage", async () => {

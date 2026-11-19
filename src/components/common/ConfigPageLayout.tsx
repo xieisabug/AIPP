@@ -276,14 +276,14 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                     {content}
                 </div>
             ) : (
-                <div className="flex-1 min-h-0 grid gap-6 px-4 py-6 grid-cols-12">
-                    {/* 左侧列表 - 大屏幕时显示，列表内部独立滚动（标题/搜索栏固定） */}
-                    <div className="col-span-12 lg:col-span-4 xl:col-span-4 2xl:col-span-3 min-h-0">
+                <div className="flex flex-1 min-h-0 gap-6 px-4 py-6" data-aipp-slot="config-split">
+                    {/* 左侧列表：固定宽度、占满高度，列表内部独立滚动（工具栏固定） */}
+                    <div className="w-64 shrink-0 min-h-0 2xl:w-72" data-aipp-slot="config-list-pane">
                         {sidebar}
                     </div>
 
                     {/* 右侧配置区域，独立滚动 */}
-                    <div className="min-h-0 overflow-y-auto thin-scrollbar col-span-12 lg:col-span-8 xl:col-span-8 2xl:col-span-9" data-aipp-slot="config-page-scroll">
+                    <div className="min-w-0 flex-1 min-h-0 overflow-y-auto thin-scrollbar" data-aipp-slot="config-page-scroll">
                         {content}
                     </div>
                 </div>
