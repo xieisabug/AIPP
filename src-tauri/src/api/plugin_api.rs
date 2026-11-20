@@ -32,6 +32,9 @@ const PLUGIN_TYPE_CONFIG_KEY: &str = "plugin_type";
 const DEFAULT_PLUGIN_QUERY_MAX_ROWS: usize = 1000;
 const ABSOLUTE_PLUGIN_QUERY_MAX_ROWS: usize = 10000;
 const OFFICIAL_PLUGINS_API: &str = "https://aipp-helper.xiejingyang.com/api/plugins";
+/// 告诉 helper 当前客户端版本，helper 据此隐藏 `minAippVersion` 更高、本机装不了的插件。
+/// 不带此头的请求被 helper 视为 1.6.1 及更早的客户端。
+pub(crate) const AIPP_VERSION_HEADER: &str = "X-AIPP-Version";
 const OFFICIAL_PLUGINS_TIMEOUT_SECS: u64 = 5;
 const PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const PLUGIN_ARCHIVE_MAX_DISCOVERY_DEPTH: usize = 6;
@@ -2491,6 +2494,7 @@ pub async fn fetch_official_plugins(
     let client = build_plugin_archive_http_client(proxy_url.as_deref())?;
     let response = client
         .get(OFFICIAL_PLUGINS_API)
+        .header(AIPP_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
         .timeout(Duration::from_secs(OFFICIAL_PLUGINS_TIMEOUT_SECS))
         .send()
         .await
