@@ -857,7 +857,7 @@ impl MessageRepository {
         &self,
         conversation_id: i64,
     ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
-        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.metadata_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count
+        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.metadata_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count, ma.id as attachment_id
                                           FROM message
                                           LEFT JOIN message_attachment ma ON message.id = ma.message_id
                                           WHERE message.conversation_id = ?1
@@ -888,7 +888,8 @@ impl MessageRepository {
             };
             let attachment = if attachment_type.is_some() {
                 Some(MessageAttachment {
-                    id: 0,
+                    // 界面按附件 id 读取（如 Office 预览只读取已登记的附件），不能给占位 0
+                    id: row.get(24)?,
                     message_id: row.get(0)?,
                     attachment_type: attachment_type.unwrap(),
                     attachment_url: row.get(20)?,

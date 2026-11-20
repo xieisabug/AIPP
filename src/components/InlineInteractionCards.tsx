@@ -738,6 +738,7 @@ export function PreviewFileCard({
                                     openOfficePreviewModal({
                                         title: targetFile.title,
                                         source: getOfficeSourceFromPreviewFile(targetFile),
+                                        conversationId: request?.conversation_id ?? null,
                                     });
                                 }}
                             >

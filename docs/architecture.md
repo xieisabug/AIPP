@@ -73,11 +73,12 @@ src-tauri/
 │   │   ├── plugin_api.rs    # 插件安装、启停、配置与数据
 │   │   ├── token_statistics_api.rs # Token 统计
 │   │   ├── export_api.rs    # Markdown -> PDF / DOCX 导出
+│   │   ├── office_api.rs & office_save.rs # Office 预览插件、授权读取、选区引用登记、安全另存副本
 │   │   ├── copilot_api.rs & copilot_lsp.rs # GitHub Copilot 集成
 │   │   └── [other apis]...
 │   ├── mcp/                 # MCP 核心（注册/执行/检测/总结）
 │   │   ├── apps/            # helper 应用目录、连接实例、OAuth 与系统凭据存储
-│   │   ├── builtin_mcp/     # 内置 MCP 工具（agent/ui/search/operation/artifact）
+│   │   ├── builtin_mcp/     # 内置 MCP 工具（agent/ui/search/operation/artifact/office）
 │   │   ├── registry_api.rs  # MCP server 管理
 │   │   ├── execution_api.rs # MCP tool call 执行与状态
 │   │   └── detection.rs     # AI 响应中的 tool call 检测
@@ -125,6 +126,7 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 -   **Search Tools**: `search_web`, `fetch_url` with browser profile/fingerprint support
 -   **Operation Tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `execute_bash`, `get_bash_output`
 -   **Artifact Tools**: `get_artifact_workspace`, `show_artifact`
+-   **Office Tools** (`aipp:office`, injected for every conversation): `office_edit` edits a file the user handed over by reference (`db/office_refs.rs`) and saves a new copy; the edit runs in a window's hidden Office viewer iframe (`office-edit-request` → claim → `services/officeEditRunner.ts`), frontend card `OfficeEditToolCall`
 -   **Template Management**: Built-in MCP template registration and sync
 
 ## Artifact Management

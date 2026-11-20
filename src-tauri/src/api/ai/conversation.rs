@@ -518,7 +518,7 @@ pub fn build_chat_messages_with_context(
                 let reasoning_content = pending_reasoning_content.take();
                 chat_messages.push(build_assistant_message_from_content(
                     content,
-                    reasoning_content.as_deref(),
+                    reasoning_content.as_deref(), attachment_list,
                 ));
             }
             other => {
@@ -735,7 +735,7 @@ fn build_native_toolcall_paired_messages(
             "response" | "assistant" => {
                 let reasoning_content = pending_reasoning_content.take();
                 let assistant_message =
-                    build_assistant_message_from_content(content, reasoning_content.as_deref());
+                    build_assistant_message_from_content(content, reasoning_content.as_deref(), attachment_list);
                 let tool_call_ids = assistant_message
                     .content
                     .tool_calls()
@@ -789,11 +789,24 @@ pub fn build_message_list_from_selected_messages(
     selected_messages
         .iter()
         .map(|message| {
-            let attachment = msg_to_attachment.get(&message.id).cloned().flatten();
+            let mut attachments: Vec<_> = msg_to_attachment.get(&message.id).cloned().flatten().into_iter().collect();
+            // The context fitter carries per-message attachments through branch selection,
+            // compaction and plugin reordering. Keep the replay part attached to its owner.
+            if message.message_type == "response" {
+                if let Some(calls) = message.metadata_json.as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|v| v.pointer("/deepseek_web/server_tool_calls").cloned()) {
+                    attachments.push(MessageAttachment {
+                        id: 0, message_id: message.id, attachment_type: AttachmentType::Text,
+                        attachment_url: Some(DEEPSEEK_REPLAY.into()), attachment_content: Some(calls.to_string()),
+                        attachment_hash: None, use_vector: false, token_count: None,
+                    });
+                }
+            }
             (
                 message.message_type.clone(),
                 message.content.clone(),
-                attachment.map(|a| vec![a]).unwrap_or_else(Vec::new),
+                attachments,
             )
         })
         .collect()
@@ -955,11 +968,14 @@ pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Opti
     reconstruct_assistant_with_tool_calls_and_reasoning(content, None)
 }
 
+const DEEPSEEK_REPLAY: &str = "aipp:deepseek-server-tool-calls";
+
 fn build_assistant_message_from_content(
     content: &str,
     reasoning_content: Option<&str>,
+    attachments: &[MessageAttachment],
 ) -> ChatMessage {
-    reconstruct_assistant_with_tool_calls_and_reasoning(content, reasoning_content).unwrap_or_else(
+    let mut message = reconstruct_assistant_with_tool_calls_and_reasoning(content, reasoning_content).unwrap_or_else(
         || {
             let mut message = ChatMessage::assistant(content);
             if let Some(reasoning_content) =
@@ -969,7 +985,14 @@ fn build_assistant_message_from_content(
             }
             message
         },
-    )
+    );
+    for attachment in attachments.iter().filter(|a| a.id == 0 && a.attachment_url.as_deref() == Some(DEEPSEEK_REPLAY)) {
+        if let Some(calls) = attachment.attachment_content.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) {
+            message.content.push(ContentPart::from_custom(serde_json::json!({"type":"deepseek_web","server_tool_calls":calls}),
+                Some(genai::ModelIden::new(genai::adapter::AdapterKind::DeepSeek, "deepseek-flash"))));
+        }
+    }
+    message
 }
 
 fn append_reasoning_content(pending_reasoning_content: &mut Option<String>, content: &str) {

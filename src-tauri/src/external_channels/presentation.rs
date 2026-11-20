@@ -299,6 +299,11 @@ fn sanitize_plain_text(content: &str) -> Option<String> {
     let generic_attachment_regex =
         Regex::new(r#"(?s)<attachment\b([^>]*)>.*?</attachment>|<attachment\b([^>]*)\s*/?>"#)
             .unwrap();
+    // Office 选区块里的原文只给模型看，转发到外部渠道时只保留文件与位置
+    let office_selection_regex = Regex::new(
+        r#"(?s)<officeselection\b([^>]*)>.*?</officeselection>|<officeselection\b([^>]*)\s*/?>"#,
+    )
+    .unwrap();
 
     let without_tool_comments = tool_comment_regex.replace_all(content, "");
     let with_file_summaries = file_attachment_regex.replace_all(
@@ -325,8 +330,20 @@ fn sanitize_plain_text(content: &str) -> Option<String> {
             )
         },
     );
-    let without_attachments = generic_attachment_regex.replace_all(
+    let with_office_summaries = office_selection_regex.replace_all(
         &with_skill_summaries,
+        |captures: &regex::Captures<'_>| {
+            summarize_office_selection(
+                captures
+                    .get(1)
+                    .or_else(|| captures.get(2))
+                    .map(|value| value.as_str())
+                    .unwrap_or_default(),
+            )
+        },
+    );
+    let without_attachments = generic_attachment_regex.replace_all(
+        &with_office_summaries,
         |captures: &regex::Captures<'_>| {
             summarize_generic_attachment(
                 captures
@@ -952,6 +969,15 @@ fn summarize_skill_attachment(attributes: &str) -> String {
     match tag_attribute(&attributes, &["identifier", "skill_identifier"]) {
         Some(identifier) => format!("[技能附件] {}\n标识符：{}", skill_name, identifier),
         None => format!("[技能附件] {}", skill_name),
+    }
+}
+
+fn summarize_office_selection(attributes: &str) -> String {
+    let attributes = parse_tag_attributes(attributes);
+    let file = tag_attribute(&attributes, &["file"]).unwrap_or("Office 文件");
+    match tag_attribute(&attributes, &["location"]) {
+        Some(location) => format!("[Office 选区] {} · {}", file, location),
+        None => format!("[Office 选区] {}", file),
     }
 }
 

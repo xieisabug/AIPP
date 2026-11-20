@@ -39,6 +39,7 @@ pub mod mobile_capability;
 pub mod mobile_recovery;
 pub mod mobile_tasks;
 pub mod office_api;
+pub mod office_save;
 pub(crate) mod magpie;
 pub(crate) mod opencode_go;
 pub mod operation_api;

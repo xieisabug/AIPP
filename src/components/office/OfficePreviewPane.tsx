@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -34,18 +34,45 @@ import {
     enableOfficePreviewPlugin,
     getOfficePreviewPluginStatus,
     installOfficePreviewPlugin,
+    isOfficeEditPluginReady,
     isOfficePreviewPluginReady,
     officePreviewPluginNeedsInstall,
     recentOfficePluginInstallFailure,
     type OfficePreviewPluginStatus,
     type PluginInstallProgressPayload,
 } from "@/services/officePreviewPlugin";
+import { isOfficeSelection, type OfficeSelection } from "@/utils/officeSelection";
+
+export type OfficePaneMode = "view" | "edit";
+
+export interface OfficeLoadedFile {
+    fileName: string;
+    format: OfficeFilePayload["format"];
+    sha256: string;
+    sizeBytes: number;
+}
 
 export interface OfficePreviewPaneProps {
     title: string;
     source: OfficePreviewSource;
     className?: string;
     heightClassName?: string;
+    /** view：只读预览（可选中内容交给 AI）；edit：手动编辑，保存由宿主发起（总是另存副本）。 */
+    mode?: OfficePaneMode;
+    /** 需要选区 / 编辑能力（协议 2）时为 true：旧版组件会自动更新。 */
+    requireEdit?: boolean;
+    onSelectionChange?: (selection: OfficeSelection | null) => void;
+    onDirtyChange?: (dirty: boolean) => void;
+    onFileLoaded?: (file: OfficeLoadedFile | null) => void;
+    /** 查看器协议版本（2 起支持选区、编辑与 AI 修改）。 */
+    onViewerProtocol?: (protocol: number) => void;
+    /** 编辑器里按了 Ctrl/Cmd+S。 */
+    onSaveShortcut?: () => void;
+}
+
+export interface OfficePreviewPaneHandle {
+    /** 取当前编辑器里的文档字节（编辑模式）。 */
+    requestSave: () => Promise<ArrayBuffer>;
 }
 
 /** 渲染超时：BetterOffice DOCX 冷启动在 Android 约 3 秒，45 秒仍无回执视为卡死。 */
@@ -72,12 +99,19 @@ function formatMiB(bytes?: number | null): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
+export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePreviewPaneProps>(function OfficePreviewPane({
     title,
     source,
     className = "",
     heightClassName = "h-[68vh]",
-}) => {
+    mode = "view",
+    requireEdit = false,
+    onSelectionChange,
+    onDirtyChange,
+    onFileLoaded,
+    onViewerProtocol,
+    onSaveShortcut,
+}, ref) {
     const isMobilePlatform = useIsMobilePlatform();
     const ext = useMemo(
         () => detectOfficeExtension(title) ?? detectOfficeExtension(source.localPath),
@@ -94,7 +128,8 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
 
     const [loadingFile, setLoadingFile] = useState(false);
     const [rendering, setRendering] = useState(false);
-    const [filePayload, setFilePayload] = useState<OfficeFilePayload | null>(null);
+    /** 读取到的文件与它所属的读取序号：只发送当前这次读取的字节（字节转移给查看器后即失效）。 */
+    const [filePayload, setFilePayload] = useState<(OfficeFilePayload & { seq: number }) | null>(null);
     const [previewError, setPreviewError] = useState<ParsedOfficePreviewError | null>(null);
     const [viewerReady, setViewerReady] = useState(false);
     const [openingExternal, setOpeningExternal] = useState(false);
@@ -117,16 +152,29 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
     const autoInstallTriedRef = useRef(false);
     const viewerUrl = useMemo(() => resolveOfficeViewerUrl(), []);
     const targetOrigin = useMemo(() => viewerTargetOrigin(viewerUrl), [viewerUrl]);
-    const pluginReady = isOfficePreviewPluginReady(pluginStatus);
+    const needEdit = requireEdit || mode === "edit";
+    const pluginReady = needEdit ? isOfficeEditPluginReady(pluginStatus) : isOfficePreviewPluginReady(pluginStatus);
+    const pluginNeedsInstall =
+        officePreviewPluginNeedsInstall(pluginStatus)
+        || Boolean(needEdit && pluginStatus?.installed && pluginStatus.enabled && !pluginStatus.editSupported);
 
-    const sourceKey = `${source.attachmentId ?? ""}|${source.relayToken ?? ""}|${source.localPath ?? ""}`;
+    const sourceKey = `${source.refId ?? ""}|${source.attachmentId ?? ""}|${source.relayToken ?? ""}|${source.localPath ?? ""}`;
+    const callbacksRef = useRef({ onSelectionChange, onDirtyChange, onFileLoaded, onViewerProtocol, onSaveShortcut });
+    callbacksRef.current = { onSelectionChange, onDirtyChange, onFileLoaded, onViewerProtocol, onSaveShortcut };
+    const pendingSavesRef = useRef(new Map<number, { resolve: (buf: ArrayBuffer) => void; reject: (err: Error) => void }>());
 
     const postToViewer = useCallback(
         (message: Record<string, unknown>, transfer?: Transferable[]) => {
             const win = iframeRef.current?.contentWindow;
             // 查看器未就绪时 iframe 仍是 about:blank（宿主源），发过去只会触发 origin 不匹配告警
             if (!win || !viewerReadyRef.current) return false;
-            win.postMessage(message, targetOrigin, transfer);
+            try {
+                win.postMessage(message, targetOrigin, transfer);
+            } catch (err) {
+                // 例如转移已失效的 ArrayBuffer：不让异常冒出 effect，按未发送处理
+                console.warn("[OfficePreviewPane] postMessage to viewer failed:", err);
+                return false;
+            }
             return true;
         },
         [targetOrigin],
@@ -162,14 +210,14 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
                   },
         );
         try {
-            const status = await installOfficePreviewPlugin();
+            const status = await installOfficePreviewPlugin({ requireEdit: needEdit });
             setPluginStatus(status);
         } catch (err) {
             setInstallError(err instanceof Error ? err.message : String(err));
         } finally {
             setInstalling(false);
         }
-    }, []);
+    }, [needEdit]);
 
     useEffect(() => {
         void refreshStatus();
@@ -200,9 +248,14 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
         };
     }, [refreshStatus]);
 
+    // 需要编辑能力时（进入编辑、选区），旧版组件再自动更新一次。必须在下面的自动安装之前执行
+    useEffect(() => {
+        if (needEdit) autoInstallTriedRef.current = false;
+    }, [needEdit]);
+
     // 未安装时自动下载安装（每个面板只自动触发一次；冷却期内的失败不自动重试，由用户点重试）
     useEffect(() => {
-        if (isLegacy || !officePreviewPluginNeedsInstall(pluginStatus) || autoInstallTriedRef.current) return;
+        if (isLegacy || !pluginNeedsInstall || autoInstallTriedRef.current) return;
         autoInstallTriedRef.current = true;
         const recentFailure = recentOfficePluginInstallFailure();
         if (recentFailure) {
@@ -210,7 +263,7 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
             return;
         }
         void runInstall();
-    }, [isLegacy, pluginStatus, runInstall]);
+    }, [isLegacy, pluginNeedsInstall, runInstall]);
 
     // 插件就绪后读取已授权文件
     useEffect(() => {
@@ -221,12 +274,22 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
         setRendering(false);
         setPreviewError(null);
         setFilePayload(null);
+        callbacksRef.current.onSelectionChange?.(null);
+        callbacksRef.current.onDirtyChange?.(false);
+        callbacksRef.current.onFileLoaded?.(null);
         postToViewer({ type: "aipp-office:unload" });
 
         invoke<ArrayBuffer>("read_authorized_office_file", { source })
             .then((raw) => {
                 if (loadSeqRef.current !== seq) return;
-                setFilePayload(parseOfficeFileResponse(raw));
+                const payload = parseOfficeFileResponse(raw);
+                setFilePayload({ ...payload, seq });
+                callbacksRef.current.onFileLoaded?.({
+                    fileName: payload.fileName,
+                    format: payload.format,
+                    sha256: payload.sha256,
+                    sizeBytes: payload.sizeBytes,
+                });
                 setLoadingFile(false);
                 setRendering(true);
             })
@@ -238,18 +301,23 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
             });
 
         return () => {
-            // 切换文件或关闭时作废进行中的读取，并通知查看器卸载文档、释放 Worker 内存
+            // 切换文件 / 模式或关闭时作废进行中的读取，并通知查看器卸载文档、释放 Worker 内存
             loadSeqRef.current++;
             postToViewer({ type: "aipp-office:unload" });
+            pendingSavesRef.current.forEach((pending) => pending.reject(new Error("文档已关闭或重新加载，保存已取消")));
+            pendingSavesRef.current.clear();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- sourceKey 代表 source 的内容
-    }, [isLegacy, pluginReady, sourceKey, reloadToken, postToViewer]);
+    }, [isLegacy, pluginReady, sourceKey, reloadToken, postToViewer, mode]);
 
     // 文件读取完成且查看器就绪后，把字节转交给 iframe 内的 Worker 渲染
     useEffect(() => {
         if (!filePayload || !viewerReady) return;
         const seq = loadSeqRef.current;
+        // 模式切换等触发重新读取时，同一次提交里旧 payload 还在：它的字节可能已转移，不能再发
+        if (filePayload.seq !== seq) return;
         if (sentSeqRef.current !== seq) {
+            if (filePayload.bytes.byteLength === 0 && filePayload.sizeBytes > 0) return;
             // 转移 ArrayBuffer 所有权（零拷贝），宿主侧不再保留文档字节
             const bytes = filePayload.bytes;
             const sent = postToViewer(
@@ -261,6 +329,7 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
                     bytes,
                     isMobile: isMobilePlatform || window.innerWidth < 768,
                     colorMode: document.documentElement.classList.contains("dark") ? "dark" : "light",
+                    mode,
                 },
                 [bytes],
             );
@@ -281,7 +350,7 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
         }, RENDER_WATCHDOG_MS);
 
         return () => window.clearTimeout(timer);
-    }, [filePayload, viewerReady, isMobilePlatform, postToViewer]);
+    }, [filePayload, viewerReady, isMobilePlatform, postToViewer, mode]);
 
     // 只接收本面板 iframe 发来的消息；过期 requestId 的结果直接丢弃
     useEffect(() => {
@@ -293,15 +362,40 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
                 requestId?: number;
                 code?: string;
                 message?: string;
+                protocol?: number;
+                selection?: unknown;
+                bytes?: unknown;
             } | null;
             if (!data || typeof data.type !== "string") return;
 
             if (data.type === "aipp-office:viewer-ready") {
                 viewerReadyRef.current = true;
                 setViewerReady(true);
+                callbacksRef.current.onViewerProtocol?.(typeof data.protocol === "number" ? data.protocol : 1);
+                return;
+            }
+            if (data.type === "aipp-office:saved" || data.type === "aipp-office:save-error") {
+                const pending = pendingSavesRef.current.get(data.requestId ?? -1);
+                if (!pending) return;
+                pendingSavesRef.current.delete(data.requestId ?? -1);
+                if (data.type === "aipp-office:saved" && data.bytes instanceof ArrayBuffer) pending.resolve(data.bytes);
+                else pending.reject(new Error(data.message || "编辑器没有返回文件内容"));
                 return;
             }
             if (data.requestId !== loadSeqRef.current) return;
+
+            if (data.type === "aipp-office:selection") {
+                callbacksRef.current.onSelectionChange?.(isOfficeSelection(data.selection) ? data.selection : null);
+                return;
+            }
+            if (data.type === "aipp-office:dirty") {
+                callbacksRef.current.onDirtyChange?.(true);
+                return;
+            }
+            if (data.type === "aipp-office:save-shortcut") {
+                callbacksRef.current.onSaveShortcut?.();
+                return;
+            }
 
             if (data.type === "aipp-office:loaded") {
                 settledSeqRef.current = data.requestId;
@@ -320,6 +414,22 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
         window.addEventListener("message", onMessage);
         return () => window.removeEventListener("message", onMessage);
     }, []);
+
+    useImperativeHandle(ref, () => ({
+        requestSave: () =>
+            new Promise<ArrayBuffer>((resolve, reject) => {
+                const requestId = loadSeqRef.current;
+                if (settledSeqRef.current !== requestId) {
+                    reject(new Error("文档还没有加载完成"));
+                    return;
+                }
+                pendingSavesRef.current.set(requestId, { resolve, reject });
+                if (!postToViewer({ type: "aipp-office:save-request", requestId })) {
+                    pendingSavesRef.current.delete(requestId);
+                    reject(new Error("Office 组件尚未就绪"));
+                }
+            }),
+    }), [postToViewer]);
 
     const handleEnable = async () => {
         setEnabling(true);
@@ -467,8 +577,10 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
                     <div className="text-sm font-medium text-foreground">
                         {installError
                             ? "Office 预览组件下载失败"
-                            : pluginStatus.updateRequired
-                              ? "正在更新 Office 预览组件"
+                            : pluginStatus.updateRequired || (pluginStatus.installed && needEdit)
+                              ? needEdit && !pluginStatus.updateRequired
+                                  ? "正在更新 Office 组件以支持编辑与 AI 修改"
+                                  : "正在更新 Office 预览组件"
                               : "首次预览需要下载 Office 预览组件"}
                     </div>
                     <div className="text-xs leading-5 text-muted-foreground">
@@ -528,6 +640,6 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
             />
         </div>
     );
-};
+});
 
 export default OfficePreviewPane;

@@ -9,6 +9,8 @@ export interface OfficePreviewPluginStatus {
     localDevAvailable: boolean;
     /** 已安装但低于宿主要求的版本，需要重新下载。 */
     updateRequired?: boolean;
+    /** 已安装版本支持选区、编辑与 AI 修改。 */
+    editSupported?: boolean;
 }
 
 export interface PluginInstallProgressPayload {
@@ -24,6 +26,7 @@ export interface PluginInstallProgressPayload {
 export const OFFICE_PLUGIN_AUTO_RETRY_COOLDOWN_MS = 60_000;
 
 let inflightInstall: Promise<OfficePreviewPluginStatus> | null = null;
+let inflightRequiresEdit = false;
 let lastFailure: { at: number; message: string } | null = null;
 
 export function isOfficePreviewPluginReady(status?: OfficePreviewPluginStatus | null): boolean {
@@ -39,13 +42,26 @@ export function getOfficePreviewPluginStatus(): Promise<OfficePreviewPluginStatu
     return invoke<OfficePreviewPluginStatus>("get_office_preview_plugin_status");
 }
 
+export function isOfficeEditPluginReady(status?: OfficePreviewPluginStatus | null): boolean {
+    return isOfficePreviewPluginReady(status) && Boolean(status?.editSupported);
+}
+
 /**
  * 下载并安装 Office 预览插件。多个预览面板同时调用时共用同一次安装，
  * 进度通过 `plugin_install_progress` 事件广播给所有面板。
+ * `requireEdit`：选区、编辑与 AI 修改需要新版组件，旧版会一并更新。
  */
-export function installOfficePreviewPlugin(): Promise<OfficePreviewPluginStatus> {
+export function installOfficePreviewPlugin(options: { requireEdit?: boolean } = {}): Promise<OfficePreviewPluginStatus> {
+    const requireEdit = Boolean(options.requireEdit);
+    if (inflightInstall && requireEdit && !inflightRequiresEdit) {
+        // 正在进行的是普通安装：等它结束后再按编辑版本检查一次
+        return inflightInstall.then((status) =>
+            status.editSupported ? status : installOfficePreviewPlugin({ requireEdit: true }),
+        );
+    }
     if (!inflightInstall) {
-        inflightInstall = invoke<OfficePreviewPluginStatus>("install_office_preview_plugin", {})
+        inflightRequiresEdit = requireEdit;
+        inflightInstall = invoke<OfficePreviewPluginStatus>("install_office_preview_plugin", { requireEdit })
             .then((status) => {
                 lastFailure = null;
                 return status;
@@ -80,5 +96,6 @@ export function enableOfficePreviewPlugin(): Promise<OfficePreviewPluginStatus> 
 /** 仅供测试重置模块状态。 */
 export function __resetOfficePreviewPluginStateForTests(): void {
     inflightInstall = null;
+    inflightRequiresEdit = false;
     lastFailure = null;
 }

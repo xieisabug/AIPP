@@ -89,6 +89,9 @@ impl OfficePreviewError {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OfficePreviewSource {
+    /// `office_file_ref` 引用号：用户交给助手的文件或 AI 生成的副本。
+    #[serde(default)]
+    pub ref_id: Option<String>,
     pub attachment_id: Option<i64>,
     pub relay_token: Option<String>,
     pub local_path: Option<String>,
@@ -105,6 +108,8 @@ pub struct OfficePreviewPluginStatus {
     pub local_dev_available: bool,
     /// 已安装但版本低于宿主要求（查看器协议随宿主演进），需要重新下载新版。
     pub update_required: bool,
+    /// 已安装版本支持选区、编辑与 AI 修改（协议 2）。
+    pub edit_supported: bool,
 }
 
 pub fn classify_office_extension(file_name_or_path: &str) -> Result<OfficeFormat, OfficePreviewError> {
@@ -214,6 +219,8 @@ pub fn validate_office_bytes(
 /// 宿主要求的最低插件版本。查看器与宿主通过 postMessage 协作，协议或查看器行为修复后
 /// 提高此值，已安装的旧版会在下次预览时自动更新。
 pub const OFFICE_PLUGIN_REQUIRED_VERSION: &str = "0.1.1";
+/// 选区、手动编辑与 AI 修改需要的插件版本；只预览时不强制更新，用到这些功能时再更新。
+pub const OFFICE_PLUGIN_EDIT_VERSION: &str = "0.2.0";
 
 /// `a.b.c` 数值比较；无法解析的版本视为过旧。
 pub fn office_plugin_version_satisfies(installed: &str, required: &str) -> bool {
@@ -233,7 +240,7 @@ static OFFICE_PLUGIN_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::
 
 /// 官方插件目录不可用时的兜底下载地址（插件发布到 GitHub Releases，避开 Cloudflare 单文件上限）。
 const OFFICE_PLUGIN_FALLBACK_URL: &str =
-    "https://github.com/xieisabug/AIPP/releases/download/plugin-office-preview-plugin-v0.1.1/office-preview-plugin-0.1.1.aipp-plugin.zip";
+    "https://github.com/xieisabug/AIPP/releases/download/plugin-office-preview-plugin-v0.2.0/office-preview-plugin-0.2.0.aipp-plugin.zip";
 
 /// 插件运行时需要的文件；本地开发安装只复制这些，不带 node_modules / 源码。
 const OFFICE_PLUGIN_RUNTIME_ENTRIES: &[&str] = &["plugin.json", "dist", "assets"];
@@ -315,6 +322,10 @@ fn read_office_plugin_status(app_handle: &AppHandle) -> Result<OfficePreviewPlug
         && !version
             .as_deref()
             .is_some_and(|v| office_plugin_version_satisfies(v, OFFICE_PLUGIN_REQUIRED_VERSION));
+    let edit_supported = installed
+        && version
+            .as_deref()
+            .is_some_and(|v| office_plugin_version_satisfies(v, OFFICE_PLUGIN_EDIT_VERSION));
     Ok(OfficePreviewPluginStatus {
         plugin_code: OFFICE_PREVIEW_PLUGIN_CODE.to_string(),
         installed,
@@ -323,6 +334,7 @@ fn read_office_plugin_status(app_handle: &AppHandle) -> Result<OfficePreviewPlug
         version,
         local_dev_available: find_local_dev_plugin_dir().is_some(),
         update_required,
+        edit_supported,
     })
 }
 
@@ -419,16 +431,19 @@ pub async fn get_office_preview_plugin_status(
 
 /// 下载并安装 Office 预览插件；已安装时直接启用，不重复下载。
 /// `use_proxy` 省略时：配置了网络代理就走代理。`prefer_local_dev` 省略时：调试构建优先用仓库内构建产物。
+/// `require_edit` 为 true 时（选区、编辑、AI 修改）旧版插件也会更新到支持编辑的版本。
 #[tauri::command]
 pub async fn install_office_preview_plugin(
     app_handle: AppHandle,
     use_proxy: Option<bool>,
     prefer_local_dev: Option<bool>,
+    require_edit: Option<bool>,
 ) -> Result<OfficePreviewPluginStatus, String> {
     let _guard = OFFICE_PLUGIN_INSTALL_LOCK.lock().await;
+    let require_edit = require_edit.unwrap_or(false);
 
     let current = read_office_plugin_status(&app_handle)?;
-    if current.installed && !current.update_required {
+    if current.installed && !current.update_required && (!require_edit || current.edit_supported) {
         if !current.enabled {
             set_office_plugin_active(&app_handle, "office-plugin-enabled")?;
         }
@@ -460,11 +475,11 @@ pub async fn install_office_preview_plugin(
                 "插件已安装，但缺少查看器文件 dist/viewer/index.html，插件包可能不完整".to_string(),
             );
         }
-        if status.update_required {
+        if status.update_required || (require_edit && !status.edit_supported) {
             return Err(format!(
                 "已安装的 Office 预览插件版本 {} 低于所需的 {}，下载源可能尚未发布新版",
                 status.version.as_deref().unwrap_or("未知"),
-                OFFICE_PLUGIN_REQUIRED_VERSION
+                if require_edit { OFFICE_PLUGIN_EDIT_VERSION } else { OFFICE_PLUGIN_REQUIRED_VERSION }
             ));
         }
         Ok(status)
@@ -490,10 +505,21 @@ pub async fn enable_office_preview_plugin(
     read_office_plugin_status(&app_handle)
 }
 
-fn resolve_authorized_office_path(
+pub(crate) fn resolve_authorized_office_path(
     app_handle: &AppHandle,
     source: &OfficePreviewSource,
 ) -> Result<(PathBuf, String), OfficePreviewError> {
+    // 0. By office_file_ref id（用户交给助手的文件、AI 生成的副本）
+    if let Some(ref_id) = source.ref_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        let conn = ConversationDatabase::new(app_handle)
+            .and_then(|db| db.get_connection())
+            .map_err(|e| OfficePreviewError::new("read_error", format!("打开会话数据库失败：{}", e)))?;
+        let found = crate::db::office_refs::get(&conn, ref_id)
+            .map_err(|e| OfficePreviewError::new("read_error", e.to_string()))?
+            .ok_or_else(|| OfficePreviewError::new("file_not_found", "找不到这个文件记录（所在会话可能已删除）"))?;
+        return Ok((PathBuf::from(found.file_path), found.file_name));
+    }
+
     // 1. By attachment_id in ConversationDatabase
     if let Some(attachment_id) = source.attachment_id {
         let db = ConversationDatabase::new(app_handle).map_err(|e| {
@@ -637,7 +663,7 @@ pub fn encode_office_file_response(header: &OfficeFileHeader, bytes: &[u8]) -> R
     Ok(body)
 }
 
-fn office_preview_max_bytes() -> u64 {
+pub(crate) fn office_preview_max_bytes() -> u64 {
     if cfg!(mobile) {
         MOBILE_MAX_OFFICE_BYTES
     } else {

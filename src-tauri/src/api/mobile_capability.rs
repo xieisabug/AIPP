@@ -48,7 +48,7 @@ pub fn tool_issue(transport: &str, command: Option<&str>, tool: Option<&str>) ->
     let command = command.unwrap_or("").trim();
     if !matches!(transport, "stdio" | "builtin") || !matches!(command,
         "aipp:search" | "aipp:operation" | "aipp:artifact" | "aipp:dynamic_mcp"
-        | "aipp:ui_interaction" | "aipp:agent" | "aipp:superadmin") {
+        | "aipp:ui_interaction" | "aipp:agent" | "aipp:superadmin" | "aipp:office") {
         return Some(issue("external_stdio_mcp", "该工具没有已核验的进程内或 HTTP 执行实现；移动端不启动外部进程"));
     }
     match (command, tool) {

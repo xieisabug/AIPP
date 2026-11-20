@@ -1,6 +1,6 @@
 import ButlerInteractionResult from "./butler/ButlerInteractionResult";
 import React, { useContext } from "react";
-import { ButlerResultsOnlyContext, isButlerInteractionTool } from "./butler/ButlerPresentationContext";
+import { ButlerResultsOnlyContext, isButlerInteractionTool, isResultCardTool } from "./butler/ButlerPresentationContext";
 import McpToolCall from "@/components/McpToolCall";
 import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
 import { useToolReview } from "@/hooks/toolReviewStore";
@@ -97,7 +97,7 @@ const renderDefaultMcpToolCall = (props: McpToolComponentProps) => (
 const McpToolCallRenderer: React.FC<McpToolComponentProps> = (props) => {
     const resultsOnly = useContext(ButlerResultsOnlyContext);
     if (resultsOnly && isButlerInteractionTool(props.toolName)) return <ButlerInteractionResult {...props} />;
-    if (resultsOnly && props.toolName !== "preview_message") return null;
+    if (resultsOnly && !isResultCardTool(props.toolName)) return null;
     return <ExecutionToolCall {...props} />;
 };
 
@@ -105,7 +105,7 @@ const ExecutionToolCall: React.FC<McpToolComponentProps> = (props) => {
     useMcpToolComponentRegistrySnapshot();
     const { config } = useDisplayConfig();
     // 结果类工具的卡片就是内容本身，不受“统一使用默认工具卡片”的显示设置影响。
-    const selectedComponentId = props.toolName === "preview_message"
+    const selectedComponentId = isResultCardTool(props.toolName)
         ? AUTO_MCP_TOOL_COMPONENT_ID
         : config?.mcp_tool_call_component_id || AUTO_MCP_TOOL_COMPONENT_ID;
     const enhancedProps = {

@@ -10,6 +10,9 @@ const STANDARD_CUSTOM_TAGS: CustomTagHandlers = {
     bangwebtomarkdown: (match: RegExpExecArray) =>
         `\n<bangwebtomarkdown ${match[1]}></bangwebtomarkdown>\n`,
     bangweb: (match: RegExpExecArray) => `\n<bangweb ${match[1]}></bangweb>\n`,
+    // 选区原文只给模型看，气泡只显示文件卡片
+    officeselection: (match: RegExpExecArray) =>
+        `\n<officeselection ${match[1]}></officeselection>\n`,
 };
 
 const MCP_TOOL_CALL_HANDLER = (match: RegExpExecArray) => {

@@ -25,6 +25,7 @@ pub mod butler_history;
 pub mod butler_memory;
 pub mod butler_result_refs;
 pub mod message_preview;
+pub mod office_refs;
 pub mod butler_resume;
 pub mod butler_peer;
 pub mod butler_work;

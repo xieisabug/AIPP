@@ -10,6 +10,7 @@ import remarkCodeBlockMeta from "@/react-markdown/remarkCodeBlockMeta";
 import TipsComponent from "@/react-markdown/components/TipsComponent";
 import MessageFileAttachment from "@/components/MessageFileAttachment";
 import MessageSkillAttachment from "@/components/MessageSkillAttachment";
+import MessageOfficeSelection from "@/components/office/MessageOfficeSelection";
 import MessageWebContent from "@/components/conversation/MessageWebContent";
 import LazyImage from "@/components/common/LazyImage";
 // highlight is disabled to avoid missing deps in this revert
@@ -40,6 +41,7 @@ export const BASE_SANITIZE_SCHEMA = {
         ...(defaultSchema.tagNames || []),
         "fileattachment",
         "skillattachment",
+        "officeselection",
         "bangwebtomarkdown",
         "bangweb",
         // 允许自定义 Tips 组件标签
@@ -61,6 +63,7 @@ export const BASE_SANITIZE_SCHEMA = {
             "invocation",
             "identifier",
         ],
+        officeselection: ["refid", "file", "format", "location", "excerpt"],
         bangwebtomarkdown: [
             ...(defaultSchema.attributes?.bangwebtomarkdown || []),
             "url",
@@ -152,6 +155,7 @@ export const REHYPE_PLUGINS = [
 export const MARKDOWN_COMPONENTS_BASE = {
     fileattachment: MessageFileAttachment,
     skillattachment: MessageSkillAttachment,
+    officeselection: MessageOfficeSelection,
     bangwebtomarkdown: MessageWebContent,
     bangweb: MessageWebContent,
     tipscomponent: TipsComponent,

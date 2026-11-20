@@ -1,6 +1,6 @@
-/** 用户消息里渲染成卡片的自定义标签（附件、技能、网页、提示），RawTextRenderer 与折叠共用这条规则。 */
+/** 用户消息里渲染成卡片的自定义标签（附件、技能、Office 选区、网页、提示），RawTextRenderer 与折叠共用这条规则。 */
 export const CUSTOM_TAG_PATTERN =
-    /<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
+    /<(fileattachment|skillattachment|officeselection|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|skillattachment|officeselection|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
 
 /**
  * 长用户消息折叠：只按显示出来的文字计数和截断，附件等标签整块保留（它们显示成卡片），

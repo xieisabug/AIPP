@@ -28,7 +28,8 @@ vi.mock("@/hooks/use-platform", () => ({
     useIsMobilePlatform: () => false,
 }));
 
-import OfficePreviewPane from "./OfficePreviewPane";
+import React from "react";
+import OfficePreviewPane, { type OfficePreviewPaneHandle } from "./OfficePreviewPane";
 import { __resetOfficePreviewPluginStateForTests } from "@/services/officePreviewPlugin";
 
 const READY_STATUS = {
@@ -88,7 +89,7 @@ describe("OfficePreviewPane", () => {
         render(<OfficePreviewPane title="季度报告.docx" source={{ attachmentId: 101 }} />);
 
         await waitFor(() => {
-            expect(mockInvoke).toHaveBeenCalledWith("install_office_preview_plugin", {});
+            expect(mockInvoke).toHaveBeenCalledWith("install_office_preview_plugin", { requireEdit: false });
         });
         expect(screen.getByTestId("office-plugin-install-progress")).toBeInTheDocument();
 
@@ -162,7 +163,7 @@ describe("OfficePreviewPane", () => {
 
         render(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} />);
 
-        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("install_office_preview_plugin", {}));
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("install_office_preview_plugin", { requireEdit: false }));
         expect(screen.getByText("正在更新 Office 预览组件")).toBeInTheDocument();
         expect(mockInvoke).not.toHaveBeenCalledWith("read_authorized_office_file", expect.anything());
     });
@@ -299,6 +300,113 @@ describe("OfficePreviewPane", () => {
         expect(errBox).toHaveAttribute("data-error-code", "unsupported_legacy_format");
         expect(screen.getByText("暂不支持旧版二进制 Office 格式")).toBeInTheDocument();
         expect(mockInvoke).not.toHaveBeenCalledWith("install_office_preview_plugin", expect.anything());
+        expect(mockInvoke).not.toHaveBeenCalledWith("read_authorized_office_file", expect.anything());
+    });
+
+    it("should forward viewer selections, file fingerprint and protocol to the host callbacks", async () => {
+        mockReadyWithFile();
+        const onSelectionChange = vi.fn();
+        const onFileLoaded = vi.fn();
+        const onViewerProtocol = vi.fn();
+        render(
+            <OfficePreviewPane
+                title="a.docx"
+                source={{ attachmentId: 1 }}
+                onSelectionChange={onSelectionChange}
+                onFileLoaded={onFileLoaded}
+                onViewerProtocol={onViewerProtocol}
+            />,
+        );
+        await waitFor(() => expect(onFileLoaded).toHaveBeenCalledWith(expect.objectContaining({ sha256: "abc", format: "docx" })));
+        const { posted, fromViewer } = await mountViewer();
+        await fromViewer({ type: "aipp-office:viewer-ready", protocol: 2 });
+        expect(onViewerProtocol).toHaveBeenCalledWith(2);
+        const load = await waitFor(() => {
+            const msg = posted.mock.calls.find(([m]) => m.type === "aipp-office:load")?.[0];
+            expect(msg).toBeTruthy();
+            return msg;
+        });
+        expect(load.mode).toBe("view");
+
+        const selection = { format: "docx", selectedText: "旧文字", paragraphText: "这里是旧文字。" };
+        await fromViewer({ type: "aipp-office:selection", requestId: load.requestId, selection });
+        expect(onSelectionChange).toHaveBeenLastCalledWith(selection);
+        // 过期请求与格式不对的选区都不转发
+        await fromViewer({ type: "aipp-office:selection", requestId: load.requestId + 99, selection });
+        await fromViewer({ type: "aipp-office:selection", requestId: load.requestId, selection: { format: "docx" } });
+        expect(onSelectionChange).toHaveBeenLastCalledWith(null);
+    });
+
+    it("should load in edit mode and resolve requestSave with the bytes the viewer returns", async () => {
+        mockInvoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, version: "0.2.0", editSupported: true };
+            if (cmd === "read_authorized_office_file") return encodeOfficeResponse("a.docx", new Uint8Array([80, 75, 3, 4]));
+            return null;
+        });
+        const paneRef = React.createRef<OfficePreviewPaneHandle>();
+        const onDirtyChange = vi.fn();
+        render(<OfficePreviewPane ref={paneRef} title="a.docx" source={{ attachmentId: 1 }} mode="edit" onDirtyChange={onDirtyChange} />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", expect.anything()));
+        const { posted, fromViewer } = await mountViewer();
+        await fromViewer({ type: "aipp-office:viewer-ready", protocol: 2 });
+        const load = await waitFor(() => {
+            const msg = posted.mock.calls.find(([m]) => m.type === "aipp-office:load")?.[0];
+            expect(msg).toBeTruthy();
+            return msg;
+        });
+        expect(load.mode).toBe("edit");
+        await fromViewer({ type: "aipp-office:loaded", requestId: load.requestId, format: "docx" });
+        await fromViewer({ type: "aipp-office:dirty", requestId: load.requestId });
+        expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+
+        const saved = paneRef.current!.requestSave();
+        const request = posted.mock.calls.find(([m]) => m.type === "aipp-office:save-request")?.[0];
+        expect(request.requestId).toBe(load.requestId);
+        const bytes = new Uint8Array([1, 2, 3]).buffer;
+        await fromViewer({ type: "aipp-office:saved", requestId: request.requestId, bytes });
+        await expect(saved).resolves.toBe(bytes);
+    });
+
+    it("should not resend the already transferred bytes when switching to edit mode", async () => {
+        let reads = 0;
+        mockInvoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, version: "0.2.0", editSupported: true };
+            if (cmd === "read_authorized_office_file") {
+                reads += 1;
+                return encodeOfficeResponse("a.docx", new Uint8Array([80, 75, 3, 4]));
+            }
+            return null;
+        });
+        const view = render(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} mode="view" />);
+        await waitFor(() => expect(reads).toBe(1));
+        const { posted, fromViewer } = await mountViewer();
+        // 模拟真实 postMessage 的转移语义：已转移（长度为 0）的缓冲区再次转移会抛 DataCloneError
+        posted.mockImplementation((msg: { bytes?: ArrayBuffer }) => {
+            if (msg.bytes && msg.bytes.byteLength === 0) throw new DOMException("ArrayBuffer at index 0 is already detached.", "DataCloneError");
+            if (msg.bytes) Object.defineProperty(msg.bytes, "byteLength", { value: 0 });
+        });
+        await fromViewer({ type: "aipp-office:viewer-ready", protocol: 2 });
+        await waitFor(() => expect(posted.mock.calls.filter(([m]) => m.type === "aipp-office:load")).toHaveLength(1));
+
+        view.rerender(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} mode="edit" />);
+        await waitFor(() => expect(reads).toBe(2));
+        await waitFor(() => {
+            const loads = posted.mock.calls.filter(([m]) => m.type === "aipp-office:load").map(([m]) => m);
+            expect(loads).toHaveLength(2);
+            expect(loads[1].mode).toBe("edit");
+        });
+        expect(posted.mock.results.every((r) => r.type === "return")).toBe(true);
+    });
+
+    it("should update an old component before editing instead of loading a viewer without edit support", async () => {
+        mockInvoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, version: "0.1.1", editSupported: false };
+            if (cmd === "install_office_preview_plugin") return new Promise(() => {});
+            return null;
+        });
+        render(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} requireEdit />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("install_office_preview_plugin", { requireEdit: true }));
+        expect(screen.getByText("正在更新 Office 组件以支持编辑与 AI 修改")).toBeInTheDocument();
         expect(mockInvoke).not.toHaveBeenCalledWith("read_authorized_office_file", expect.anything());
     });
 });

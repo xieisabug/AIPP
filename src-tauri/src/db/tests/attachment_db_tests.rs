@@ -487,3 +487,40 @@ fn test_multiple_attachments_per_message() {
     let all = repo.list_by_id(&ids).unwrap();
     assert_eq!(all.len(), 3);
 }
+
+/// 会话加载的消息附件带真实 id：界面按 id 读取附件（如 Office 预览），不能是占位 0
+#[test]
+fn test_list_by_conversation_id_returns_real_attachment_id() {
+    let conn = create_test_db();
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, datetime('now'))",
+        ("Test Conversation", Some(1i64)),
+    )
+    .unwrap();
+    let conversation_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO message (conversation_id, message_type, content, created_time) VALUES (?, ?, ?, datetime('now'))",
+        (conversation_id, "user", "看看这个文件"),
+    )
+    .unwrap();
+    let message_id = conn.last_insert_rowid();
+    // 先占用几个 id，确认读到的是这条附件自己的 id
+    for _ in 0..3 {
+        conn.execute(
+            "INSERT INTO message_attachment (message_id, attachment_type, attachment_url, use_vector) VALUES (-1, 4, 'x', 0)",
+            [],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO message_attachment (message_id, attachment_type, attachment_url, use_vector) VALUES (?, 4, 'C:/docs/报告.docx', 0)",
+        [message_id],
+    )
+    .unwrap();
+    let attachment_id = conn.last_insert_rowid();
+
+    let messages = MessageRepository::new(conn).list_by_conversation_id(conversation_id).unwrap();
+    let attachment = messages.into_iter().find_map(|(_, a)| a).expect("message has an attachment");
+    assert_eq!(attachment.id, attachment_id);
+    assert_eq!(attachment.attachment_url.as_deref(), Some("C:/docs/报告.docx"));
+}

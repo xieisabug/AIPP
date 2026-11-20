@@ -14,7 +14,7 @@ interface RawTextRendererProps {
 
 // Render raw text while still allowing custom tags to hydrate as React components.
 const BODYLESS_CUSTOM_TAG_PATTERN =
-    /<(fileattachment|skillattachment)\b([^>]*)>[\s\S]*?<\/\1>/i;
+    /<(fileattachment|skillattachment|officeselection)\b([^>]*)>[\s\S]*?<\/\1>/i;
 
 const normalizeMatchedCustomTag = (tagText: string): string => {
     const match = tagText.match(BODYLESS_CUSTOM_TAG_PATTERN);

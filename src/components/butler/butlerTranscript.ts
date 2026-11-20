@@ -1,6 +1,6 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
 import { readScheduledTaskMetadata, type Message } from "@/data/Conversation";
-import { isButlerInteractionTool } from "./ButlerPresentationContext";
+import { isButlerInteractionTool, isResultCardTool } from "./ButlerPresentationContext";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
 import { visibleText } from "@/utils/turnContext";
@@ -82,7 +82,7 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                 if (backticks || tildes) return segment;
                 const { name, callId } = completeTool(segment, calls);
                 if (callId && positionedCalls?.has(callId)) return "";
-                if (isButlerInteractionTool(name) || (!pending && name === "preview_message" && !segment.startsWith("<!-- MCP_TOOL_CALL_STREAMING"))) {
+                if (isButlerInteractionTool(name) || (!pending && isResultCardTool(name) && !segment.startsWith("<!-- MCP_TOOL_CALL_STREAMING"))) {
                     if (scheduledResult && !pending) return segment;
                     shownPreviews.push(segment);
                 }

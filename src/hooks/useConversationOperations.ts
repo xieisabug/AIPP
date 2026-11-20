@@ -51,7 +51,7 @@ export interface UseConversationOperationsReturn {
     handleMessageFork: (messageId: number) => void;
     handleEditSave: (content: string) => void;
     handleEditSaveAndRegenerate: (content: string) => void;
-    handleSend: (emptyPrompt?: string) => void;
+    handleSend: (emptyPrompt?: string, busyOverride?: "queue" | "interrupt", direct?: { prompt: string }) => void;
     sendAgentCommand: (prompt: string) => Promise<void>;
     handleArtifact: (lang: string, inputStr: string) => void;
 
@@ -322,15 +322,19 @@ export function useConversationOperations({
         }
     };
 
-    // 发送消息的主要处理函数，使用节流防止频繁点击
-    const handleSend = throttle(async (emptyPrompt?: string, busyOverride?: "queue" | "interrupt") => {
+    // 发送消息的主要处理函数，使用节流防止频繁点击。
+    // `direct`：由界面其他入口（如 Office 预览的“让 AI 修改”）直接发送一段内容，不读取也不清空输入框、附件和引用。
+    const handleSend = throttle(async (emptyPrompt?: string, busyOverride?: "queue" | "interrupt", direct?: { prompt: string }) => {
+        const composerText = direct ? direct.prompt : inputText;
+        const composerFiles = direct ? undefined : fileInfoList;
+        const composerQuote = direct ? null : quote;
         if (aiIsResponsing) {
-            if (inputText.trim() !== "" && conversation?.id) {
+            if (composerText.trim() !== "" && conversation?.id) {
                 let assistantId = conversation.assistant_id ?? selectedAssistant;
-                let finalPrompt = inputText;
+                let finalPrompt = composerText;
                 let parsedAssistantId = assistantId;
                 try {
-                    const parsed = extractAssistantFromMessage(assistants, inputText, assistantId);
+                    const parsed = extractAssistantFromMessage(assistants, composerText, assistantId);
                     parsedAssistantId = parsed.assistantId;
                     finalPrompt = parsed.cleanedPrompt;
                 } catch (e) {
@@ -352,12 +356,13 @@ export function useConversationOperations({
                         conversation_id: String(conversation.id),
                         assistant_id: parsedAssistantId,
                         override_model_id: overrides.overrideModelId,
-                        attachment_list: fileInfoList?.map((i) => i.id),
-                        quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
+                        attachment_list: composerFiles?.map((i) => i.id),
+                        quote: composerQuote ? { kind: composerQuote.kind, id: composerQuote.id } : undefined,
                     },
                     queueKind: (busyOverride ?? busySendBehavior) === "interrupt" ? "interrupt" : "normal",
                 })
                     .then(() => {
+                        if (direct) return;
                         clearQuote?.();
                         if (isMobilePlatform) clearAcceptedMobileInput();
                         else { setInputText(""); clearFileInfoList(); }
@@ -389,7 +394,7 @@ export function useConversationOperations({
                 });
         } else {
             // 正常发送消息流程
-            const submittedText = inputText.trim() ? inputText : emptyPrompt ?? "";
+            const submittedText = composerText.trim() ? composerText : emptyPrompt ?? "";
             if (!submittedText) {
                 setInputText("");
                 return;
@@ -530,9 +535,9 @@ export function useConversationOperations({
                         prompt: finalPrompt,
                         conversation_id: conversationId,
                         assistant_id: parsedAssistantId,
-                        attachment_list: fileInfoList?.map((i) => i.id),
+                        attachment_list: composerFiles?.map((i) => i.id),
                         override_model_id: agentOverrides.overrideModelId,
-                        quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
+                        quote: composerQuote ? { kind: composerQuote.kind, id: composerQuote.id } : undefined,
                     },
                     overrideModelConfig: agentOverrides.overrideModelConfig,
                 })
@@ -549,7 +554,7 @@ export function useConversationOperations({
                             if (!quietRuntimeErrors) toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
                                 description: res.error_message,
                             });
-                        } else if (isMobilePlatform) {
+                        } else if (isMobilePlatform && !direct) {
                             clearAcceptedMobileInput();
                         }
                     })
@@ -564,10 +569,12 @@ export function useConversationOperations({
                     });
             }
 
-            clearQuote?.();
-            if (!isMobilePlatform) {
-                setInputText("");
-                clearFileInfoList();
+            if (!direct) {
+                clearQuote?.();
+                if (!isMobilePlatform) {
+                    setInputText("");
+                    clearFileInfoList();
+                }
             }
         }
     }, 200);

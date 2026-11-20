@@ -541,6 +541,24 @@ fn emit_message_add_event(
     Ok(())
 }
 
+const FILTERED_WEB_REPLY: &str = "DeepSeek 已停止回答此问题。";
+
+fn deepseek_web_data(content: &genai::chat::MessageContent) -> Option<&serde_json::Value> {
+    content.iter().find_map(|part| match part {
+        genai::chat::ContentPart::Custom(part) if part.typ() == Some("deepseek_web")
+            && part.adapter_kind() == Some(genai::adapter::AdapterKind::DeepSeek) => Some(&part.data),
+        _ => None,
+    })
+}
+
+fn web_metadata(existing: Option<String>, web: Option<&serde_json::Value>, filtered: bool) -> Option<String> {
+    if web.is_none() && !filtered { return existing; }
+    let mut data = metadata_object_from_raw(existing.as_deref());
+    if let Some(web) = web { data.insert("deepseek_web".into(), web.clone()); }
+    if filtered { data.insert("deepseek_filtered".into(), true.into()); }
+    Some(serde_json::Value::Object(data).to_string())
+}
+
 fn split_captured_content(
     captured_content: genai::chat::MessageContent,
 ) -> (Vec<ToolCall>, Vec<Binary>) {
@@ -3123,7 +3141,10 @@ async fn attempt_stream_chat(
                         }
                     }
                     ChatStreamEvent::End(mut end_event) => {
-                        debug!(?end_event, "end event");
+                        let filtered = chat_options.deepseek_web == Some(true)
+                            && matches!(end_event.captured_stop_reason, Some(genai::chat::StopReason::ContentFilter(_)));
+                        let web = end_event.captured_content.as_ref().and_then(deepseek_web_data).cloned();
+                        if filtered { response_content = FILTERED_WEB_REPLY.into(); }
                         let captured_response_id = end_event.captured_response_id.clone();
 
                         let received_end = chrono::Utc::now();
@@ -3146,7 +3167,7 @@ async fn attempt_stream_chat(
                         }
 
                         if response_message_id.is_none()
-                            && (!captured_tool_calls.is_empty() || !captured_binaries.is_empty())
+                            && (!captured_tool_calls.is_empty() || !captured_binaries.is_empty() || web.is_some() || filtered)
                         {
                             let actual_start_time = reasoning_end_time.unwrap_or_else(|| {
                                 let now = chrono::Utc::now();
@@ -3213,6 +3234,15 @@ async fn attempt_stream_chat(
                             }
                         }
 
+                        // A fast client tool may start its continuation immediately. Commit the signed
+                        // block before dispatch so that it belongs to this exact assistant message.
+                        if let Some(id) = response_message_id.filter(|_| web.is_some() || filtered) {
+                            let repo = conversation_db.message_repo()?;
+                            let existing = repo.read(id)?.context("missing response for DeepSeek web tools")?;
+                            let metadata = web_metadata(existing.metadata_json, web.as_ref(), filtered);
+                            repo.update_metadata(id, metadata.as_deref())?;
+                            if filtered { persist_and_emit_update(conversation_db, window, conversation_id, id, "response", &response_content, true)?; }
+                        }
                         let captured_binary_count = captured_binaries.len();
                         if let Some(msg_id) = response_message_id {
                             match persist_response_image_attachments(
@@ -3963,6 +3993,9 @@ pub async fn handle_non_stream_chat(
             let input_tokens = usage.prompt_tokens.unwrap_or(0);
             let output_tokens = usage.completion_tokens.unwrap_or(0);
             let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+            let filtered = chat_options.deepseek_web == Some(true) && matches!(chat_response.stop_reason,
+                Some(genai::chat::StopReason::ContentFilter(_)));
+            if filtered { content = FILTERED_WEB_REPLY.into(); }
             let response_metadata = prepare_empty_model_reply(
                 &mut content,
                 chat_response.reasoning_content.as_deref().unwrap_or(""),
@@ -3975,6 +4008,8 @@ pub async fn handle_non_stream_chat(
                     Some(&billing),
                 ),
             );
+
+            let response_metadata = web_metadata(response_metadata, deepseek_web_data(&chat_response.content), filtered);
 
             // 现在才创建响应消息（在有实际内容后）
             let now = chrono::Utc::now();

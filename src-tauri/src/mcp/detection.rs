@@ -28,6 +28,10 @@ pub(crate) fn should_auto_run_tool(
     {
         return true;
     }
+    // office_edit 只生成新副本，用户发出选区就是在请求修改，不再单独等“运行”确认。
+    if server_command == Some(crate::mcp::builtin_mcp::office::COMMAND) && crate::mcp::builtin_mcp::office::is_tool(tool_name) {
+        return true;
+    }
     if let Some(all_auto_run) = mcp_override_config.and_then(|cfg| cfg.all_tool_auto_run) {
         return all_auto_run;
     }

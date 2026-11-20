@@ -5,6 +5,8 @@ export type LegacyOfficeExtension = "doc" | "xls" | "ppt";
 export type OfficeExtension = ModernOfficeExtension | LegacyOfficeExtension;
 
 export interface OfficePreviewSource {
+    /** office_file_ref 引用号：用户交给助手的文件或 AI 生成的副本。 */
+    refId?: string;
     attachmentId?: number;
     relayToken?: string;
     localPath?: string;
@@ -14,6 +16,8 @@ export interface OfficePreviewTarget {
     title: string;
     source: OfficePreviewSource;
     extension?: OfficeExtension | null;
+    /** 打开预览的会话；“让 AI 修改”把选区发到这个会话（缺省时发到当前窗口正在显示的会话）。 */
+    conversationId?: number | null;
 }
 
 export interface ParsedOfficePreviewError {
@@ -117,9 +121,16 @@ export function parseOfficePreviewError(raw: unknown): ParsedOfficePreviewError 
         file_too_large: "文件大小超出预览限制",
         file_not_found: "找不到目标文件",
         render_timeout: "文档渲染超时",
-        permission_denied: "文件未获预览授权",
+        permission_denied: "文件未获授权",
         read_error: "文件读取失败",
         render_error: "文档渲染失败",
+        stale_selection: "文件已被修改",
+        target_exists: "目标文件已存在",
+        target_dir_missing: "保存位置不存在",
+        invalid_target: "保存位置无效",
+        disk_full: "磁盘空间不足",
+        write_failed: "保存失败",
+        invalid_request: "请求无效",
     };
 
     return {
@@ -163,6 +174,21 @@ export function parseOfficeFileResponse(raw: ArrayBuffer | Uint8Array | number[]
         );
     }
     return { ...header, bytes };
+}
+
+/** 二进制请求：`[u32 LE 头长度][UTF-8 JSON 头][文件字节]`，与读取响应同格式，不经 base64。 */
+export function encodeFramedRequest(header: Record<string, unknown>, bytes: ArrayBuffer | Uint8Array): Uint8Array {
+    const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+    const body = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const out = new Uint8Array(4 + headerBytes.byteLength + body.byteLength);
+    new DataView(out.buffer).setUint32(0, headerBytes.byteLength, true);
+    out.set(headerBytes, 4);
+    out.set(body, 4 + headerBytes.byteLength);
+    return out;
+}
+
+export function officeSourceKey(source: OfficePreviewSource): string {
+    return `${source.refId ?? ""}|${source.attachmentId ?? ""}|${source.relayToken ?? ""}|${source.localPath ?? ""}`;
 }
 
 /** postMessage 的目标 origin；自定义协议（如 macOS 的 aipp-office://）origin 为 "null"，只能用 "*"。 */

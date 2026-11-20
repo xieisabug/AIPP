@@ -7,6 +7,7 @@ import { useVisualViewportInsets } from "./hooks/useVisualViewportInsets";
 import MobileShell from "./mobile/MobileShell";
 import LoadingScreen from "./components/LoadingScreen";
 import { Toaster } from "./components/ui/sonner.tsx";
+import { startOfficeEditRunner } from "./services/officeEditRunner";
 
 // Office 预览窗口只在打开时才需要，懒加载避免增加首屏体积
 const OfficePreviewModal = lazy(() => import("./components/office/OfficePreviewModal"));
@@ -29,6 +30,9 @@ function App() {
     const isMobilePlatform = useIsMobilePlatform();
     useVisualViewportInsets(isMobilePlatform);
     const [winLabel, setWinLabel] = useState<string>("chat_ui");
+
+    // 助手的 office_edit 在应用窗口里的 Office 组件中执行；任一窗口认领即可
+    useEffect(() => startOfficeEditRunner(), []);
 
     useEffect(() => {
         try {

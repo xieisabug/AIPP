@@ -185,6 +185,7 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
                                             attachmentId: attachment.id,
                                             localPath: attachment.attachment_url,
                                         },
+                                        conversationId,
                                     })
                                 }
                                 className="inline-flex min-h-10 max-w-xs items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-card-foreground transition-colors hover:bg-muted/60"

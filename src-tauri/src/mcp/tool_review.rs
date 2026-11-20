@@ -147,6 +147,8 @@ pub fn is_review_exempt_tool(
     match command {
         // 保险箱工具的判定在执行器里：新网站一律暂停问用户，已批准的网站由用户自己决定。
         Some(crate::vault::tool::COMMAND) => crate::vault::tool::is_tool(tool_name),
+        // 只读取用户交给助手的文件，结果写成应用数据目录里的新副本，原文件不变。
+        Some(crate::mcp::builtin_mcp::office::COMMAND) => crate::mcp::builtin_mcp::office::is_tool(tool_name),
         Some("aipp:ui_interaction") => matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file"),
         Some("aipp:agent") => match tool_name {
             "load_skill" | "todo_write" | "load_mcp_server" | "load_mcp_tool" | "spawn_task_conversation" => true,

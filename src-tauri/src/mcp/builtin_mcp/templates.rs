@@ -109,6 +109,8 @@ pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_
         }
         // 注入了就应直接可调用；每次使用值由占位符审批把关。
         Some(crate::vault::tool::COMMAND) => crate::vault::tool::is_tool(tool_name),
+        // 用户把文件选区交给助手后要能直接调用；只写副本，不改原文件。
+        Some(super::office::COMMAND) => super::office::is_tool(tool_name),
         _ => false,
     }
 }
@@ -126,6 +128,16 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             name: "凭据保险箱".into(),
             description: "助手在任何工具参数里写占位符 <vault:键> 使用保险箱中的值，每次使用由用户确认，真实值由 AIPP 在执行前替换，助手看不到；缺少的值可以请用户当场填写。对所有助手可用。".into(),
             command: crate::vault::tool::COMMAND.into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: None,
+        },
+        // Office 文档工具：对所有助手可用，关闭此工具集即停用。
+        BuiltinTemplateInfo {
+            id: "office".into(),
+            name: "Office 文档工具".into(),
+            description: "修改用户交给助手的 Word/Excel/PowerPoint 文件（在预览里选中内容后点“让 AI 修改”），结果另存为新副本，原文件不会被改动。对所有助手可用。".into(),
+            command: super::office::COMMAND.into(),
             transport_type: "stdio".into(),
             required_envs: vec![],
             default_timeout: None,
@@ -462,6 +474,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
         Some("vault") => crate::vault::tool::definitions(),
+        Some("office") => super::office::definitions(),
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             crate::api::butler_memory::definition(),
             BuiltinToolInfo {

@@ -84,6 +84,14 @@ use crate::api::office_api::{
     open_office_file_externally, read_authorized_office_file,
     OFFICE_PREVIEW_SCHEME,
 };
+use crate::api::office_save::{
+    get_office_file_ref_status, office_save_copy, office_write_copy, register_office_selection_ref,
+    suggest_office_copy_path,
+};
+use crate::mcp::builtin_mcp::office::{
+    claim_office_edit_job, complete_office_edit_job, fail_office_edit_job, read_office_edit_job_source,
+    OfficeEditState,
+};
 use crate::api::operation_api::{confirm_agent_interaction, confirm_acp_elicitation, confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
@@ -997,6 +1005,7 @@ pub fn run() {
         .manage(TodoState::new())
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
+        .manage(OfficeEditState::new())
         .manage(PreviewResourceState::new())
         .manage(crate::sync::SyncState::new())
         .manage(FeishuButlerState::default());
@@ -1474,6 +1483,15 @@ pub fn run() {
             enable_office_preview_plugin,
             read_authorized_office_file,
             open_office_file_externally,
+            register_office_selection_ref,
+            get_office_file_ref_status,
+            suggest_office_copy_path,
+            office_save_copy,
+            office_write_copy,
+            claim_office_edit_job,
+            read_office_edit_job_source,
+            complete_office_edit_job,
+            fail_office_edit_job,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

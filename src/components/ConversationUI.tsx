@@ -110,6 +110,7 @@ import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { useMobileConversationDetails } from "@/hooks/useMobileConversationDetails";
+import { registerOfficeSelectionReceiver } from "@/services/officeSelectionReceiver";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -1698,6 +1699,24 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             },
             [executionModeChoice, handleAcpConfigChange, isPlanMode, planModeChoice, planModeOption]
         );
+
+        // Office 预览里“让 AI 修改”：把修改要求连同选区作为一条消息发到这个会话（不动输入框里的草稿）
+        const handleSendRef = useRef(handleSend);
+        handleSendRef.current = handleSend;
+        const officeReceiverConversationId = conversation?.id ?? null;
+        const officeReceiverLabel = conversation
+            ? `当前对话「${conversation.name || conversation.assistant_name || "未命名"}」`
+            : "当前新对话";
+        useEffect(() => {
+            if (readOnly) return;
+            return registerOfficeSelectionReceiver({
+                conversationId: officeReceiverConversationId,
+                label: officeReceiverLabel,
+                send: async (prompt: string) => {
+                    handleSendRef.current(undefined, "queue", { prompt });
+                },
+            });
+        }, [readOnly, officeReceiverConversationId, officeReceiverLabel]);
 
         const pendingPlanExecutionRef = useRef(false);
         const planExecutionPrompt = "通过";

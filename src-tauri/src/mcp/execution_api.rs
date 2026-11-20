@@ -3601,6 +3601,8 @@ async fn execute_builtin_tool(
     let skip_outer_timeout = (command == "aipp:ui_interaction"
         && matches!(tool_name, "ask_user_question" | "preview_code"))
         || (command == "aipp:operation" && tool_name == "execute_bash")
+        // Office 修改有自己的认领 / 执行超时（首次使用可能要下载 Office 组件）。
+        || (command == crate::mcp::builtin_mcp::office::COMMAND && crate::mcp::builtin_mcp::office::is_tool(tool_name))
         // 填写卡片等用户输入（自带 10 分钟超时）；HTTP 请求自带请求超时（30–120 秒）。
         || (command == crate::vault::tool::COMMAND
             && matches!(tool_name, crate::vault::tool::INPUT_TOOL | crate::vault::tool::REQUEST_TOOL));

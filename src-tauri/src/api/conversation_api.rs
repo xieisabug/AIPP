@@ -588,6 +588,7 @@ pub fn delete_conversation(
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.conversation_repo().map_err(|e| e.to_string())?
         .delete(conversation_id).map_err(|e| e.to_string())?;
+    crate::api::office_save::remove_conversation_outputs(&app_handle, conversation_id);
 
     // 发送删除事件通知前端更新列表
     let _ = app_handle.emit("conversation_deleted", conversation_id);

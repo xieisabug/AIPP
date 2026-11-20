@@ -2,6 +2,7 @@ import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
 import FetchUrlToolCall from "@/components/mcp-tool-components/FetchUrlToolCall";
 import LoadMcpCatalogToolCall from "@/components/mcp-tool-components/LoadMcpCatalogToolCall";
 import MessagePreviewToolCall from "@/components/mcp-tool-components/MessagePreviewToolCall";
+import OfficeEditToolCall from "@/components/mcp-tool-components/OfficeEditToolCall";
 import SearchWebToolCall from "@/components/mcp-tool-components/SearchWebToolCall";
 import VaultRequestToolCall, { VAULT_CARD_STATUSES } from "@/components/mcp-tool-components/VaultRequestToolCall";
 import {
@@ -47,6 +48,15 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
         match: [{ toolName: "preview_message" }],
         priority: 110,
         render: (props: McpToolComponentProps) => <MessagePreviewToolCall {...props} />,
+    });
+
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.office-edit",
+        label: "office_edit 文件成果卡",
+        description: "用于 office_edit 工具：显示修改后另存的 Office 文件，可预览、外部打开或另存",
+        match: [{ toolName: "office_edit" }],
+        priority: 110,
+        render: (props: McpToolComponentProps) => <OfficeEditToolCall {...props} />,
     });
 
     mcpToolComponentRegistry.register("builtin", {
