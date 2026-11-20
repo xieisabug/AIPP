@@ -366,20 +366,55 @@ pub fn install_local_archive(path: &Path, skills_dir: &Path) -> Result<Vec<Strin
     Ok(result.installed_skills.into_iter().map(|skill| skill.display_name).collect())
 }
 
+/// 解压上限。Skills 与插件共用同一套路径/符号链接安全检查，只是体积上限不同。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ZipExtractLimits {
+    pub label: &'static str,
+    pub max_archive_bytes: u64,
+    pub max_expanded_bytes: u64,
+    pub max_entries: usize,
+}
+
+pub(crate) const SKILL_ARCHIVE_LIMITS: ZipExtractLimits = ZipExtractLimits {
+    label: "Skill",
+    max_archive_bytes: 20 * 1024 * 1024,
+    max_expanded_bytes: 50 * 1024 * 1024,
+    max_entries: 4096,
+};
+
 pub(crate) fn extract_zip_bytes_to_dir(bytes: &[u8], output_dir: &Path) -> Result<(), String> {
-    if bytes.len() > 20 * 1024 * 1024 { return Err("Skill archive exceeds 20 MiB".into()); }
+    extract_zip_bytes_to_dir_with_limits(bytes, output_dir, SKILL_ARCHIVE_LIMITS)
+}
+
+pub(crate) fn extract_zip_bytes_to_dir_with_limits(
+    bytes: &[u8],
+    output_dir: &Path,
+    limits: ZipExtractLimits,
+) -> Result<(), String> {
+    let mib = |value: u64| value / (1024 * 1024);
+    if bytes.len() as u64 > limits.max_archive_bytes {
+        return Err(format!("{} archive exceeds {} MiB", limits.label, mib(limits.max_archive_bytes)));
+    }
     let cursor = Cursor::new(bytes);
     let mut zip =
         zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip archive: {}", e))?;
 
-    if zip.len() > 4096 { return Err("Skill archive exceeds 4096 entries".into()); }
+    if zip.len() > limits.max_entries {
+        return Err(format!("{} archive exceeds {} entries", limits.label, limits.max_entries));
+    }
     let mut expanded_size = 0u64;
     for i in 0..zip.len() {
         let mut file =
             zip.by_index(i).map_err(|e| format!("Failed to get file from zip: {}", e))?;
         expanded_size = expanded_size.checked_add(file.size()).ok_or("Archive size overflow")?;
-        if expanded_size > 50 * 1024 * 1024 { return Err("Expanded skill archive exceeds 50 MiB".into()); }
-        validate_archive_entry(file.name(), file.unix_mode(), expanded_size)?;
+        if expanded_size > limits.max_expanded_bytes {
+            return Err(format!(
+                "Expanded {} archive exceeds {} MiB",
+                limits.label.to_ascii_lowercase(),
+                mib(limits.max_expanded_bytes)
+            ));
+        }
+        validate_archive_entry_path(file.name(), file.unix_mode())?;
         let enclosed = file.enclosed_name().ok_or("Skill archive contains an unsafe path")?;
         let file_path = output_dir.join(enclosed);
 
@@ -416,7 +451,12 @@ pub(crate) fn extract_zip_bytes_to_dir(bytes: &[u8], output_dir: &Path) -> Resul
 }
 
 pub(crate) fn validate_archive_entry(name: &str, mode: Option<u32>, expanded_size: u64) -> Result<(), String> {
-    if expanded_size > 50 * 1024 * 1024 { return Err("Expanded skill archive exceeds 50 MiB".into()); }
+    if expanded_size > SKILL_ARCHIVE_LIMITS.max_expanded_bytes { return Err("Expanded skill archive exceeds 50 MiB".into()); }
+    validate_archive_entry_path(name, mode)
+}
+
+/// 与体积无关的条目安全检查：拒绝符号链接、绝对路径、盘符、反斜杠与 `..`。
+pub(crate) fn validate_archive_entry_path(name: &str, mode: Option<u32>) -> Result<(), String> {
     if mode.is_some_and(|mode| mode & 0o170000 == 0o120000) {
         return Err("Skill archives cannot contain symbolic links".into());
     }

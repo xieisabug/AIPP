@@ -14,7 +14,7 @@
     "interfaceType"
   ],
   "permissions": [],
-  "minAippVersion": "1.6.1",
+  "minAippVersion": "1.6.2",
   "mobile": {
     "supported": true,
     "apiVersion": 1

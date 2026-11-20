@@ -2,7 +2,9 @@ use crate::db::assistant_db::{AssistantDatabase, AssistantPrompt};
 use crate::db::conversation_db::{
     AttachmentType, ConversationDatabase, Message, MessageAttachment, Repository,
 };
-use crate::skills::installer::{copy_dir_recursive, extract_zip_bytes_to_dir};
+use crate::skills::installer::{
+    copy_dir_recursive, extract_zip_bytes_to_dir_with_limits, ZipExtractLimits,
+};
 use crate::NameCacheState;
 use chrono::Utc;
 use base64::Engine;
@@ -33,6 +35,13 @@ const OFFICIAL_PLUGINS_API: &str = "https://aipp-helper.xiejingyang.com/api/plug
 const OFFICIAL_PLUGINS_TIMEOUT_SECS: u64 = 5;
 const PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const PLUGIN_ARCHIVE_MAX_DISCOVERY_DEPTH: usize = 6;
+/// 插件包可能自带 WASM 与字体（如 Office 预览约 42 MiB 压缩 / 85 MiB 解压），上限高于 Skills。
+pub(crate) const PLUGIN_ARCHIVE_LIMITS: ZipExtractLimits = ZipExtractLimits {
+    label: "Plugin",
+    max_archive_bytes: 128 * 1024 * 1024,
+    max_expanded_bytes: 256 * 1024 * 1024,
+    max_entries: 4096,
+};
 const COMFYUI_IMAGE_MAX_BYTES: usize = 20 * 1024 * 1024;
 const COMFYUI_GENERATION_TIMEOUT_SECS: u64 = 120;
 const IGNORED_PLUGIN_DISCOVERY_SEGMENTS: &[&str] = &[
@@ -1585,7 +1594,7 @@ async fn download_and_extract_plugin_source(
         "正在解压插件包到本地目录...".to_string(),
     );
     let temp_dir = TempPluginExtractDir::new("plugin_archive_extract")?;
-    extract_zip_bytes_to_dir(&archive_bytes, &temp_dir.path)?;
+    extract_zip_bytes_to_dir_with_limits(&archive_bytes, &temp_dir.path, PLUGIN_ARCHIVE_LIMITS)?;
     let repo_root = resolve_plugin_archive_root(&temp_dir.path)?;
     Ok(DownloadedPluginArchive {
         _temp_dir: temp_dir,
@@ -3585,6 +3594,37 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_archive_limits_accept_archives_above_skill_limit() {
+        use std::io::Write;
+        // 21 MiB 不压缩条目：超过 Skills 的 20 MiB 上限，但在插件上限内
+        let payload = vec![0u8; 21 * 1024 * 1024];
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("big-plugin/dist/core.wasm", opts).unwrap();
+            zip.write_all(&payload).unwrap();
+            zip.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let skill_err = crate::skills::installer::extract_zip_bytes_to_dir(&bytes, temp_dir.path()).unwrap_err();
+        assert!(skill_err.contains("20 MiB"), "{skill_err}");
+
+        extract_zip_bytes_to_dir_with_limits(&bytes, temp_dir.path(), PLUGIN_ARCHIVE_LIMITS).unwrap();
+        assert_eq!(
+            fs::metadata(temp_dir.path().join("big-plugin/dist/core.wasm")).unwrap().len(),
+            payload.len() as u64
+        );
+
+        let tiny = ZipExtractLimits { max_expanded_bytes: 1024 * 1024, ..PLUGIN_ARCHIVE_LIMITS };
+        let expanded_err = extract_zip_bytes_to_dir_with_limits(&bytes, temp_dir.path(), tiny).unwrap_err();
+        assert!(expanded_err.contains("Expanded plugin archive"), "{expanded_err}");
+    }
+
+    #[test]
     fn test_official_zip_layout_resolves_plugin_root_with_dot_and_legacy_dirs() {
         use std::io::Write;
         // 与 scripts/package-official-plugins.js 一致：zip 顶层只有 `<code>/`
@@ -3600,7 +3640,7 @@ mod tests {
             zip.finish().unwrap();
         }
         let temp_dir = tempfile::tempdir().unwrap();
-        extract_zip_bytes_to_dir(buf.get_ref(), temp_dir.path()).unwrap();
+        extract_zip_bytes_to_dir_with_limits(buf.get_ref(), temp_dir.path(), PLUGIN_ARCHIVE_LIMITS).unwrap();
         let repo_root = resolve_plugin_archive_root(temp_dir.path()).unwrap();
 
         for from in [".", "office-preview-plugin"] {
