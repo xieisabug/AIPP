@@ -21,7 +21,21 @@ interface SetupOptions {
     /** detect_native_agent_environment：已安装的原生智能体 */
     installedNative?: string[];
     defaults?: Record<string, unknown>;
+    vaultAvailable?: boolean;
+    servers?: unknown[];
+    searchError?: string;
+    balanceError?: string;
 }
+
+const VAULT_ID = "3f2a9c1e-0b7d-4e5f-9a12-6c8d0e1f2a3b";
+const SEARCH_TEMPLATE = {
+    id: "search", name: "搜索工具", description: "网络搜索", command: "aipp:search", transport_type: "stdio", default_timeout: 60000,
+    required_envs: [
+        { key: "HTTP_SEARCH_PROVIDER", default_value: "disabled" },
+        { key: "SEARCH_ENGINE", default_value: "google" },
+        { key: "FETCH_PROVIDER", default_value: "local" },
+    ],
+};
 
 function nativeEnvironment(driver: string, installed: boolean) {
     const program = { path: `/bin/${driver}`, source: "PATH", version: "1.2.3", ok: installed, warning: null, error: installed ? null : "missing" };
@@ -46,7 +60,22 @@ function setup(options: SetupOptions = {}) {
         nativeEnvironment(String(args?.driver), options.installedNative?.includes(String(args?.driver)) ?? false));
     mockInvokeHandler("read_local_agent_defaults", (args) =>
         options.defaults?.[String(args?.apiType)] ?? { source: null, found: false, settings: {}, info: [], notes: [] });
-    mockInvokeHandler("vault_capability", () => ({ available: false }));
+    mockInvokeHandler("vault_capability", () => ({ available: options.vaultAvailable ?? false }));
+    mockInvokeHandler("vault_list", () => []);
+    mockInvokeHandler("vault_create", () => ({ id: VAULT_ID, key: "deepseek_api_key", name: "DeepSeek · API Key" }));
+    mockInvokeHandler("get_mcp_servers", () => options.servers ?? []);
+    mockInvokeHandler("list_aipp_builtin_templates", () => [SEARCH_TEMPLATE]);
+    mockInvokeHandler("add_or_update_aipp_builtin_server", () => {
+        if (options.searchError) throw options.searchError;
+        return 7;
+    });
+    mockInvokeHandler("get_deepseek_balance", () => {
+        if (options.balanceError) throw options.balanceError;
+        return { available: true, currency: "CNY", total: "19.00" };
+    });
+    mockInvokeHandler("update_mcp_server", () => {
+        if (options.searchError) throw options.searchError;
+    });
     mockInvokeHandler("add_llm_provider", () => DRAFT_ID);
     mockInvokeHandler("update_llm_provider", () => undefined);
     mockInvokeHandler("update_llm_provider_config", () => undefined);
@@ -152,8 +181,11 @@ describe("NewProviderWizard", () => {
         fireEvent.keyDown(screen.getByLabelText("自定义模型"), { key: "Enter" });
         expect(screen.getByText("已选 2 个模型")).toBeInTheDocument();
 
+        // 只验证模型流程：不一并接入搜索
+        fireEvent.click(screen.getByRole("checkbox", { name: "同时用于搜索工具" }));
         fireEvent.click(screen.getByRole("button", { name: "完成" }));
         await waitFor(() => expect(onCreated).toHaveBeenCalledWith(DRAFT_ID));
+        expect(invoke).not.toHaveBeenCalledWith("add_or_update_aipp_builtin_server", expect.anything());
         const selection = invoke.mock.calls.find(([command]) => command === "update_selected_models")?.[1] as {
             selectedModels: Array<{ code: string; is_selected: boolean }>;
         };
@@ -362,5 +394,140 @@ describe("providerApiTypes helpers", () => {
         expect(newProviderNameError("  ", [])).toBe("请填写提供商名称");
         expect(newProviderNameError(" A ", ["A"])).toBe("已有同名提供商");
         expect(newProviderNameError("B", ["A"])).toBeNull();
+    });
+});
+
+describe("NewProviderWizard · DeepSeek 全家桶", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        invoke.mockClear();
+    });
+
+    async function reachModelStep(apiKey = "sk-deep") {
+        fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: apiKey } });
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        await screen.findByRole("checkbox", { name: "gpt-a" });
+    }
+
+    const builtinEnvs = () => (invoke.mock.calls.find(([command]) => command === "add_or_update_aipp_builtin_server")?.[1] as {
+        envs: Record<string, string>;
+    } | undefined)?.envs;
+
+    it("connects the built-in search with the same key by default", async () => {
+        const { onClose, onCreated } = setup();
+        await reachModelStep();
+        const option = screen.getByRole("checkbox", { name: "同时用于搜索工具" });
+        expect(option).toBeChecked();
+        expect(screen.getByText(/每千次 5 元/)).toBeInTheDocument();
+        expect(screen.getByText(/此设备不支持凭据保险箱/)).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await waitFor(() => expect(onClose).toHaveBeenCalled());
+        expect(onCreated).toHaveBeenCalledWith(DRAFT_ID);
+        // 模板默认值保留，HTTP 搜索与抓取切到 DeepSeek；官方地址不写自定义地址
+        expect(builtinEnvs()).toEqual({
+            HTTP_SEARCH_PROVIDER: "deepseek",
+            SEARCH_ENGINE: "google",
+            FETCH_PROVIDER: "deepseek",
+            HTTP_SEARCH_API_KEY: "sk-deep",
+        });
+    });
+
+    it("stores a plain key in the vault and shares the reference", async () => {
+        const { onClose } = setup({ vaultAvailable: true });
+        await reachModelStep();
+        expect(screen.getByText(/API Key 将存入凭据保险箱/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await waitFor(() => expect(onClose).toHaveBeenCalled());
+
+        const created = invoke.mock.calls.find(([command]) => command === "vault_create")?.[1] as { input: { value: string } };
+        expect(created.input.value).toBe("sk-deep");
+        // 服务商经设置页保存命令改为引用（记录服务商一侧的确认），搜索引用同一条目
+        expect(configWrites()).toContainEqual(["api_key", `vault://${VAULT_ID}`]);
+        expect(builtinEnvs()?.HTTP_SEARCH_API_KEY).toBe(`vault://${VAULT_ID}`);
+    });
+
+    it("updates an existing search server and keeps its other settings", async () => {
+        const server = {
+            id: 9, name: "搜索", description: null, transport_type: "stdio", command: "aipp:search",
+            environment_variables: "HTTP_SEARCH_PROVIDER=tavily\nHTTP_SEARCH_API_KEY=tvly-x\nSEARCH_ENGINE=bing",
+            url: null, timeout: 60000, is_long_running: false, is_enabled: false, is_builtin: true, is_deletable: true, created_time: "",
+        };
+        const { onClose } = setup({ servers: [server] });
+        await reachModelStep();
+        expect(await screen.findByText(/当前使用 Tavily，将改为 DeepSeek/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await waitFor(() => expect(onClose).toHaveBeenCalled());
+        const update = invoke.mock.calls.find(([command]) => command === "update_mcp_server")?.[1] as {
+            id: number; request: { environment_variables: string; is_enabled: boolean };
+        };
+        expect(update.id).toBe(9);
+        expect(update.request.is_enabled).toBe(true);
+        expect(update.request.environment_variables.split("\n")).toEqual([
+            "SEARCH_ENGINE=bing",
+            "HTTP_SEARCH_PROVIDER=deepseek",
+            "HTTP_SEARCH_API_KEY=sk-deep",
+            "FETCH_PROVIDER=deepseek",
+        ]);
+    });
+
+    it("keeps the enabled provider when search fails, then retries or skips", async () => {
+        const { onClose, onCreated } = setup({ searchError: "db locked sk-deep" });
+        await reachModelStep();
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+
+        const alert = await screen.findByRole("alert");
+        expect(alert).toHaveTextContent("提供商已添加；接入搜索工具失败");
+        expect(alert).not.toHaveTextContent("sk-deep");
+        expect(onCreated).toHaveBeenCalledWith(DRAFT_ID);
+        expect(onClose).not.toHaveBeenCalled();
+        // 已启用后不能回到第二步（会把启用的服务商改回草稿）
+        expect(screen.getByRole("button", { name: /上一步/ })).toBeDisabled();
+
+        const enableCalls = () => invoke.mock.calls.filter(([command]) => command === "update_llm_provider").length;
+        const before = enableCalls();
+        fireEvent.click(screen.getByRole("button", { name: "重试" }));
+        await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === "add_or_update_aipp_builtin_server")).toHaveLength(2));
+        expect(enableCalls()).toBe(before);
+
+        fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "跳过" }));
+        expect(onClose).toHaveBeenCalled();
+    });
+
+    it("verifies the saved key by showing the account balance", async () => {
+        setup();
+        await reachModelStep();
+        expect(await screen.findByTestId("wizard-deepseek-balance")).toHaveTextContent("账户余额 ¥19.00");
+        expect(invoke).toHaveBeenCalledWith("get_deepseek_balance", { llmProviderId: DRAFT_ID });
+    });
+
+    it("reports an invalid key through the balance query without blocking the wizard", async () => {
+        setup({ balanceError: "API Key 无效或已吊销" });
+        await reachModelStep();
+        expect(await screen.findByTestId("wizard-deepseek-balance")).toHaveTextContent("查询失败：API Key 无效或已吊销");
+        expect(screen.getByRole("button", { name: "完成" })).toBeEnabled();
+    });
+
+    it("does not offer search without an API key", async () => {
+        const { onClose } = setup();
+        fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
+        fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+        await screen.findByRole("checkbox", { name: "gpt-a" });
+        expect(screen.getByRole("checkbox", { name: "同时用于搜索工具" })).toBeDisabled();
+        expect(screen.queryByTestId("wizard-deepseek-balance")).toBeNull();
+        expect(invoke).not.toHaveBeenCalledWith("get_deepseek_balance", expect.anything());
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await waitFor(() => expect(onClose).toHaveBeenCalled());
+        expect(invoke).not.toHaveBeenCalledWith("add_or_update_aipp_builtin_server", expect.anything());
+    });
+
+    it("does not show the DeepSeek options for other API types", async () => {
+        setup();
+        fireEvent.click(screen.getByRole("button", { name: /OpenAI API/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "sk-x" } });
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        await screen.findByRole("checkbox", { name: "gpt-a" });
+        expect(screen.queryByRole("checkbox", { name: "同时用于搜索工具" })).not.toBeInTheDocument();
     });
 });

@@ -254,21 +254,42 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - `src/services/mcpToolComponentRegistry.tsx` - 工具调用组件注册表
 
 
-## HTTP 搜索（手机与桌面）
+## 搜索服务（手机与桌面）
 
-内置「搜索工具」（`aipp:search`）提供 `search_http`，不依赖浏览器。设置 → MCP → 搜索工具中选择服务：
+内置「搜索工具」（`aipp:search`）在设置 → 应用与工具 → 搜索工具中选择一个**搜索服务**，`search_web` 与 `search_http` 都按它执行：
 
+- **本地搜索（浏览器）**：默认，仅桌面。用浏览器打开所选搜索引擎（Google、Bing、DuckDuckGo、Kagi）。选择 Kagi 时才出现「Kagi 会话链接」。
+- **DeepSeek**：填写 DeepSeek API Key；默认地址 `https://api.deepseek.com/v1/tools/search`。结果摘要使用 DeepSeek 给模型准备的长摘要（`summary`），关键词最多 128 个字符。按成功次数计费（每千次 5 元，无结果、失败不计费）。
 - **Tavily**：填写 API Key；默认地址 `https://api.tavily.com/search`。
 - **Brave Search**：填写 API Key；默认地址 `https://api.search.brave.com/res/v1/web/search`。
 - **SearXNG**：填写实例的完整 `/search` 地址，实例须开启 JSON 输出；API Key 可留空，填写时以 Bearer 发送。
 
-HTTP 搜索默认未启用，须明确选择服务；不会在失败时自动换服务。服务可能有费用或配额，以所选服务为准。API Key 在配置界面遮蔽显示。超时可设为 1000–60000 毫秒，默认 30000 毫秒。
+设置项随搜索服务联动：搜索引擎只在本地搜索时出现；API 地址、API Key、超时只在 HTTP 搜索服务时出现；「网页抓取方式」只在 DeepSeek 时出现。浏览器设置（数据目录、代理、无头模式、等待等）由本地搜索与 `fetch_url` 的本机抓取共用，收在「浏览器设置」里：本地搜索时默认展开，HTTP 搜索服务时收起（本机抓取仍会用到），搜索与抓取都用 DeepSeek 时不显示。隐藏的设置保留原值，切回时恢复，但不会生效。旧配置的「未配置」（`disabled`）按本地搜索处理。
+
+选了 HTTP 搜索服务后，`search_web` 也走该服务（返回 Markdown 或结果列表）；选本地搜索时，桌面上的 `search_http` 改用浏览器搜索并按 HTTP 结果格式返回，移动端提示改选 HTTP 搜索服务。不会在失败时自动换服务。服务可能有费用或配额，以所选服务为准。API Key 在配置界面遮蔽显示，也可以引用凭据保险箱条目（见下文「DeepSeek 一键接入」）。超时可设为 1000–60000 毫秒，默认 30000 毫秒。
 
 调用参数为 `query`（1–600 字符）及可选 `max_results`（1–20，默认 5）；返回标题、URL、摘要和排名。真正的空结果与鉴权失败、配额不足、限流、超时及协议错误分别返回。SearXNG 全部引擎失败时报告失败，部分结果以 `partial` 标识。响应上限 2 MiB，拒绝重定向，错误中保留服务、主机、阶段和会话标识并遮蔽配置密钥。
 
 桌面端原有 `search_web` 继续使用浏览器，移动端只展示 `search_http` 和 `fetch_url`，MCP 工具列表、助手工具配置和数量统计均隐藏依赖桌面浏览器的 `search_web`；已有桌面工具配置仍保留。移动端发送前检查、模型工具列表及动态工具发现也排除该工具，因此桌面保存的启用状态不会阻止手机聊天；显式调用旧的浏览器工具仍会被拒绝。升级后刷新内置搜索工具列表，并在助手 MCP 工具授权中选用 `search_http`。
 
-协议参考：[Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/api-reference/web/search/get)、[SearXNG](https://docs.searxng.org/dev/search_api.html)。
+### 网页抓取方式
+
+「网页抓取方式」决定 `fetch_url` 怎么取网页：
+
+- **本机抓取**（默认）：桌面先 HTTP、需要时用浏览器；移动端只做 HTTP 抓取。
+- **DeepSeek Fetch**：由 DeepSeek 服务端渲染网页并返回 Markdown，移动端也能抓取需要 JavaScript 的页面。只在搜索服务为 DeepSeek 时可选、生效（换成其他服务后自动回到本机抓取），使用同一地址（搜索地址同目录下的 `fetch`）和同一个 Key；每千次成功抓取 5 元。失败直接报错，不改用本机抓取。
+
+### DeepSeek 一键接入
+
+新增 DeepSeek 服务商时，向导第三步「一并启用 → 同时用于搜索工具」默认勾选（需要已填写 API Key）。完成后：
+
+- 服务商照常添加并启用；
+- API Key 不是保险箱引用且本机支持保险箱时，存入保险箱（名称「<服务商名> · API Key」），服务商改为引用该条目；
+- 内置搜索的 HTTP 搜索服务、网页抓取方式设为 DeepSeek，API Key 引用同一条目，并启用内置搜索；其他设置（浏览器搜索引擎等）保留。服务商用的是中转地址时，搜索也发往该中转地址的源站。
+
+第三步会查询账户余额（「一并启用」右侧），同时验证刚保存的 Key 是否可用；Key 无效时显示原因，但不阻止完成。接入搜索失败时服务商不回滚，向导显示原因，可以「重试」或「跳过」。已有的 DeepSeek 服务商在详情页「能力」中显示账户余额（可刷新；中转地址通常不支持余额查询），并在「搜索工具」中显示这把 Key 与内置搜索的关系（已使用 / 使用另一把 Key / 使用其他服务 / 未启用），并可一键接入。具体参数仍在搜索工具设置中修改。
+
+协议参考：[DeepSeek](https://api-docs.deepseek.com/zh-cn/guides/search)、[Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/api-reference/web/search/get)、[SearXNG](https://docs.searxng.org/dev/search_api.html)。
 
 ### 使用 API Key 连接 HTTP 应用
 

@@ -84,8 +84,44 @@ fn test_mcp_target_only_for_user_configured_transports() {
     assert_eq!(mcp_target("http", None, Some("https://api.githubcopilot.com/mcp/"), None).unwrap(), Target::Site("https://api.githubcopilot.com".into()));
     assert!(matches!(mcp_target("stdio", Some("npx x"), None, Some("A=1")).unwrap(), Target::Program { .. }));
     assert!(mcp_target("stdio", Some("aipp:search"), None, None).is_err());
+    assert!(mcp_target("stdio", Some("aipp:agent"), None, Some(&format!("X=vault://{ID}"))).is_err());
     assert!(mcp_target("stdio", Some("agent-plugin-stdio:{}"), None, None).is_err());
     assert!(mcp_target("sse", None, Some("https://x.example"), None).is_err());
+}
+
+#[test]
+fn test_builtin_search_target_is_the_configured_search_origin() {
+    let deepseek = format!("HTTP_SEARCH_PROVIDER=deepseek\nHTTP_SEARCH_API_KEY=vault://{ID}\nSEARCH_ENGINE=google");
+    assert_eq!(mcp_target("stdio", Some("aipp:search"), None, Some(&deepseek)).unwrap(), Target::Site("https://api.deepseek.com".into()));
+    // A custom endpoint is where the key actually goes, so it is the destination to confirm.
+    let relay = format!("HTTP_SEARCH_PROVIDER=deepseek\nHTTP_SEARCH_ENDPOINT=https://relay.example/v1/tools/search\nHTTP_SEARCH_API_KEY=vault://{ID}");
+    assert_eq!(builtin_search_target(&relay).unwrap(), Target::Site("https://relay.example".into()));
+    let tavily = format!("HTTP_SEARCH_PROVIDER=tavily\nHTTP_SEARCH_API_KEY=vault://{ID}");
+    assert_eq!(builtin_search_target(&tavily).unwrap(), Target::Site("https://api.tavily.com".into()));
+}
+
+#[test]
+fn test_builtin_search_rejects_references_outside_the_api_key() {
+    for env in [
+        format!("HTTP_SEARCH_PROVIDER=deepseek\nPROXY_SERVER=vault://{ID}"),
+        format!("HTTP_SEARCH_PROVIDER=deepseek\nKAGI_SESSION_URL=https://kagi.com/search?token=vault://{ID}"),
+        format!("HTTP_SEARCH_PROVIDER=searxng\nHTTP_SEARCH_ENDPOINT=vault://{ID}"),
+        format!("HTTP_SEARCH_API_KEY=vault://{ID}"),
+    ] {
+        assert_eq!(builtin_search_target(&env).unwrap_err().code, "invalid_target", "{env}");
+    }
+}
+
+#[test]
+fn test_builtin_search_key_resolves_only_for_the_confirmed_origin() {
+    let env = format!("HTTP_SEARCH_PROVIDER=deepseek\nHTTP_SEARCH_API_KEY=vault://{ID}");
+    let target = builtin_search_target(&env).unwrap();
+    let raw = format!("vault://{ID}");
+    let confirmed = BTreeMap::from([(ID.to_string(), item(ID, TOKEN, &["https://api.deepseek.com"]))]);
+    assert_eq!(resolve_with_items(vec![raw.clone()], &confirmed, &target, "c").unwrap().0, vec![TOKEN.to_string()]);
+    // Pointing the search at another host (e.g. a SuperAdmin edit) is a different, unconfirmed target.
+    let moved = builtin_search_target(&format!("HTTP_SEARCH_PROVIDER=deepseek\nHTTP_SEARCH_ENDPOINT=https://evil.example/search\nHTTP_SEARCH_API_KEY=vault://{ID}")).unwrap();
+    assert_eq!(resolve_with_items(vec![raw], &confirmed, &moved, "c").unwrap_err().code, "site_not_approved");
 }
 
 fn provider_configs(api_key: &str, guard_sites: Option<&[&str]>) -> Vec<LLMProviderConfig> {

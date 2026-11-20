@@ -1060,6 +1060,7 @@ pub fn run() {
             update_llm_provider_config,
             get_llm_models,
             fetch_model_list,
+            crate::api::deepseek_api::get_deepseek_balance,
             preview_model_list,
             update_llm_model_request_mode,
             update_selected_models,

@@ -1,5 +1,5 @@
 import AppIcon from './apps/AppIcon';
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Label } from "../ui/label";
@@ -9,7 +9,26 @@ import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
 import { Card, CardContent } from "../ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
+import { ChevronDown } from "lucide-react";
 import { useFeatureAvailableOnPlatform, BROWSER_SEARCH_ENV_KEYS } from "@/lib/mobileUnsupported";
+import { useVaultItems } from "@/hooks/useVaultItems";
+import VaultRefField from "./vault/VaultRefField";
+import {
+    SEARCH_PROVIDER_KEY,
+    browserSettingsOpenByDefault,
+    displayedSearchProvider,
+    searchFieldPlacement,
+    searchProviderOptions,
+} from "./searchToolFields";
+
+/** 内置搜索里唯一可以引用保险箱的设置（后端 vault::config_ref 只为它解析引用）。 */
+const SEARCH_VAULT_KEY = "HTTP_SEARCH_API_KEY";
+const HTTP_SEARCH_DEFAULT_ORIGINS: Record<string, string> = {
+    deepseek: "https://api.deepseek.com",
+    tavily: "https://api.tavily.com",
+    brave: "https://api.search.brave.com",
+};
 
 type EnvVarOption = {
     label: string;
@@ -79,6 +98,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
 
     // 浏览器模式搜索依赖仅桌面编译的 chromiumoxide，移动端隐藏其专属环境变量字段
     const browserSearchAvailable = useFeatureAvailableOnPlatform("browser_search");
+    const vault = useVaultItems();
 
     const selected = useMemo(() => templates.find((t) => t.id === selectedId), [templates, selectedId]);
 
@@ -244,20 +264,51 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
 
         const fieldId = `env-${env.key}`;
 
+        if (env.field_type === "password" && templateForFields?.id === "search" && env.key === SEARCH_VAULT_KEY) {
+            // 保存时确认：凭据只发往当前配置的搜索 API 地址
+            let target: string | null = HTTP_SEARCH_DEFAULT_ORIGINS[envValues.HTTP_SEARCH_PROVIDER ?? ""] ?? null;
+            try {
+                if (envValues.HTTP_SEARCH_ENDPOINT?.trim()) target = new URL(envValues.HTTP_SEARCH_ENDPOINT.trim()).origin;
+            } catch {
+                target = null;
+            }
+            return (
+                <div key={env.key} className="space-y-2">
+                    <Label htmlFor={fieldId} className="text-sm font-medium">
+                        {env.label}
+                        {env.required && <span className="text-red-500 ml-1">*</span>}
+                    </Label>
+                    <VaultRefField
+                        vault={vault}
+                        id={fieldId}
+                        ariaLabel={env.label}
+                        value={value}
+                        onChange={(next) => handleEnvValueChange(env.key, next)}
+                        suggestedName="搜索 API Key"
+                        targetHint={target}
+                    />
+                    {env.tip && <p className="text-xs text-muted-foreground">{env.tip}</p>}
+                </div>
+            );
+        }
+
         switch (env.field_type) {
-            case "select":
+            case "select": {
+                const isSearchProvider = isSearchTemplate && env.key === SEARCH_PROVIDER_KEY;
+                const selectValue = isSearchProvider ? displayedSearchProvider(value, browserSearchAvailable) : value;
+                const options = isSearchProvider ? searchProviderOptions(env.options ?? [], browserSearchAvailable) : env.options;
                 return (
                     <div key={env.key} className="space-y-2">
                         <Label htmlFor={fieldId} className="text-sm font-medium">
                             {env.label}
                             {env.required && <span className="text-red-500 ml-1">*</span>}
                         </Label>
-                        <Select value={value} onValueChange={(val) => handleEnvValueChange(env.key, val)}>
-                            <SelectTrigger>
+                        <Select value={selectValue} onValueChange={(val) => handleEnvValueChange(env.key, val)}>
+                            <SelectTrigger id={fieldId} aria-label={env.label}>
                                 <SelectValue placeholder={env.placeholder || `选择${env.label}`} />
                             </SelectTrigger>
                             <SelectContent>
-                                {env.options?.map((option) => (
+                                {options?.map((option) => (
                                     <SelectItem key={option.value} value={option.value}>
                                         {option.label}
                                     </SelectItem>
@@ -267,6 +318,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                         {env.tip && <p className="text-xs text-muted-foreground">{env.tip}</p>}
                     </div>
                 );
+            }
 
             case "boolean":
                 return (
@@ -354,6 +406,21 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
         }
         return selected;
     }, [editing, initialCommand, templates, selected]);
+
+    // 搜索工具：设置项随「搜索服务」联动（searchToolFields.ts）
+    const isSearchTemplate = templateForFields?.id === "search";
+    const browserFields = isSearchTemplate
+        ? (templateForFields?.required_envs ?? []).filter((env) => searchFieldPlacement(env.key, envValues, browserSearchAvailable) === "browser")
+        : [];
+    const browserOpenDefault = browserSettingsOpenByDefault(envValues);
+    const [browserOpen, setBrowserOpen] = useState(browserOpenDefault);
+    // 切换搜索服务时按新服务重置展开状态；用户手动展开/收起后不打扰
+    const lastProviderRef = useRef(envValues[SEARCH_PROVIDER_KEY]);
+    useEffect(() => {
+        if (lastProviderRef.current === envValues[SEARCH_PROVIDER_KEY]) return;
+        lastProviderRef.current = envValues[SEARCH_PROVIDER_KEY];
+        setBrowserOpen(browserOpenDefault);
+    }, [envValues, browserOpenDefault]);
 
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -451,11 +518,41 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                         <Card className="shadow-none">
                             <CardContent className="p-4 sm:p-6">
                                 {templateForFields?.required_envs?.length ? (
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                        {templateForFields.required_envs
-                                            .filter((env) => browserSearchAvailable || !BROWSER_SEARCH_ENV_KEYS.has(env.key))
-                                            .map(renderEnvField)}
-                                    </div>
+                                    isSearchTemplate ? (
+                                        <div className="space-y-6">
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                {templateForFields.required_envs
+                                                    .filter((env) => searchFieldPlacement(env.key, envValues, browserSearchAvailable) === "main")
+                                                    .map(renderEnvField)}
+                                            </div>
+                                            {browserFields.length > 0 && (
+                                                <Collapsible open={browserOpen} onOpenChange={setBrowserOpen} className="border-t border-border pt-4">
+                                                    <CollapsibleTrigger asChild>
+                                                        <button type="button" className="flex w-full items-center justify-between gap-3 text-left">
+                                                            <span>
+                                                                <span className="block text-sm font-medium">浏览器设置</span>
+                                                                <span className="block text-xs text-muted-foreground">
+                                                                    {browserOpenDefault ? "本地搜索与本机网页抓取共用" : "搜索不使用浏览器；fetch_url 本机抓取网页时使用"}
+                                                                </span>
+                                                            </span>
+                                                            <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${browserOpen ? "rotate-180" : ""}`} />
+                                                        </button>
+                                                    </CollapsibleTrigger>
+                                                    <CollapsibleContent className="pt-4">
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                            {browserFields.map(renderEnvField)}
+                                                        </div>
+                                                    </CollapsibleContent>
+                                                </Collapsible>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            {templateForFields.required_envs
+                                                .filter((env) => browserSearchAvailable || !BROWSER_SEARCH_ENV_KEYS.has(env.key))
+                                                .map(renderEnvField)}
+                                        </div>
+                                    )
                                 ) : (
                                     <p className="text-muted-foreground text-center py-4">
                                         {templateForFields ? "该工具无需配置环境变量" : "加载环境变量配置中..."}

@@ -214,42 +214,28 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
         BuiltinTemplateInfo {
             id: "search".into(),
             name: "搜索工具".into(),
-            description: "网络搜索与网页访问：HTTP 搜索支持 Tavily、Brave、SearXNG（手机和桌面）；浏览器搜索仅桌面可用。".into(),
+            description: "网络搜索与网页访问：HTTP 搜索支持 DeepSeek、Tavily、Brave、SearXNG（手机和桌面）；浏览器搜索仅桌面可用。".into(),
             command: "aipp:search".into(),
             transport_type: "stdio".into(),
             default_timeout: Some(super::search::recovery::SEARCH_TIMEOUT_MS), // 搜索和抓取默认 60 秒
         required_envs: vec![
             BuiltinTemplateEnvVar {
-                key: "HTTP_SEARCH_PROVIDER".into(), label: "HTTP 搜索服务".into(), required: false,
-                tip: Some("search_http 使用所选服务；失败不切换服务。Tavily/Brave 需要 API Key，费用和配额由服务商决定；SearXNG 需启用 JSON API。".into()),
-                field_type: "select".into(), default_value: Some("disabled".into()), placeholder: None,
+                key: "HTTP_SEARCH_PROVIDER".into(), label: "搜索服务".into(), required: true,
+                tip: Some("search_web 与 search_http 都用这里的服务，失败不切换。本地搜索用浏览器打开搜索引擎（仅桌面）；DeepSeek/Tavily/Brave 需要 API Key，按服务商计费（DeepSeek 每千次成功搜索 5 元）；SearXNG 需开启 JSON API。".into()),
+                field_type: "select".into(), default_value: Some("local".into()), placeholder: None,
                 options: Some(vec![
-                    EnvVarOption { label: "未配置".into(), value: "disabled".into() },
+                    EnvVarOption { label: "本地搜索（浏览器）".into(), value: "local".into() },
+                    EnvVarOption { label: "DeepSeek".into(), value: "deepseek".into() },
                     EnvVarOption { label: "Tavily".into(), value: "tavily".into() },
                     EnvVarOption { label: "Brave Search".into(), value: "brave".into() },
                     EnvVarOption { label: "SearXNG（自建）".into(), value: "searxng".into() },
                 ]),
             },
             BuiltinTemplateEnvVar {
-                key: "HTTP_SEARCH_ENDPOINT".into(), label: "HTTP 搜索 API 地址".into(), required: false,
-                tip: Some("Tavily/Brave 留空使用所选服务官方地址；SearXNG 必填完整 /search 地址。自定义地址错误时直接报错。".into()),
-                field_type: "text".into(), default_value: None, placeholder: Some("https://search.example.com/search".into()), options: None,
-            },
-            BuiltinTemplateEnvVar {
-                key: "HTTP_SEARCH_API_KEY".into(), label: "HTTP 搜索 API Key".into(), required: false,
-                tip: Some("Tavily/Brave 必填；SearXNG 可选 Bearer Token。仅发送给配置的 API 地址。".into()),
-                field_type: "password".into(), default_value: None, placeholder: None, options: None,
-            },
-            BuiltinTemplateEnvVar {
-                key: "HTTP_SEARCH_TIMEOUT_MS".into(), label: "HTTP 搜索超时（毫秒）".into(), required: false,
-                tip: Some("1000–60000 毫秒；默认 30000。".into()), field_type: "number".into(),
-                default_value: Some("30000".into()), placeholder: None, options: None,
-            },
-            BuiltinTemplateEnvVar {
                 key: "SEARCH_ENGINE".into(),
                 label: "搜索引擎".into(),
-                required: true,
-                tip: Some("搜索使用的搜索引擎，默认使用 Google".into()),
+                required: false,
+                tip: Some("本地搜索在浏览器中使用的搜索引擎，默认 Google。".into()),
                 field_type: "select".into(),
                 default_value: Some("google".into()),
                 placeholder: None,
@@ -261,10 +247,44 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 ]),
             },
             BuiltinTemplateEnvVar {
+                key: "KAGI_SESSION_URL".into(),
+                label: "Kagi 会话链接".into(),
+                required: false,
+                tip: Some("Kagi 是付费搜索引擎，需要带 token 的会话链接，格式如 https://kagi.com/search?token=xxxxx。填写后直接用该链接拼接搜索参数。".into()),
+                field_type: "text".into(),
+                default_value: None,
+                placeholder: Some("https://kagi.com/search?token=xxxxx".into()),
+                options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_ENDPOINT".into(), label: "搜索 API 地址".into(), required: false,
+                tip: Some("DeepSeek/Tavily/Brave 留空使用所选服务官方地址；SearXNG 必填完整 /search 地址。自定义地址错误时直接报错。".into()),
+                field_type: "text".into(), default_value: None, placeholder: Some("https://search.example.com/search".into()), options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_API_KEY".into(), label: "搜索 API Key".into(), required: false,
+                tip: Some("DeepSeek/Tavily/Brave 必填；SearXNG 可选 Bearer Token。仅发送给配置的 API 地址；可引用凭据保险箱（与模型服务商共用同一条目）。".into()),
+                field_type: "password".into(), default_value: None, placeholder: None, options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_TIMEOUT_MS".into(), label: "搜索超时（毫秒）".into(), required: false,
+                tip: Some("1000–60000 毫秒；默认 30000。".into()), field_type: "number".into(),
+                default_value: Some("30000".into()), placeholder: None, options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "FETCH_PROVIDER".into(), label: "网页抓取方式".into(), required: false,
+                tip: Some("fetch_url 读取网页的方式，失败不切换。DeepSeek Fetch 由服务端渲染网页并返回 Markdown（手机上也能抓取需要 JavaScript 的页面），每千次成功抓取 5 元；本机抓取使用下方浏览器设置。".into()),
+                field_type: "select".into(), default_value: Some("local".into()), placeholder: None,
+                options: Some(vec![
+                    EnvVarOption { label: "本机抓取".into(), value: "local".into() },
+                    EnvVarOption { label: "DeepSeek Fetch".into(), value: "deepseek".into() },
+                ]),
+            },
+            BuiltinTemplateEnvVar {
                 key: "USER_DATA_DIR".into(),
                 label: "浏览器数据目录".into(),
                 required: false,
-                tip: Some("使用的浏览器 profile 目录，用于共享登录状态和配置".into()),
+                tip: Some("浏览器 profile 目录，用于共享登录状态和配置。本地搜索与本机网页抓取共用。".into()),
                 field_type: "text".into(),
                 default_value: None,
                 placeholder: Some("/path/to/browser/profile".into()),
@@ -288,16 +308,6 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
                 field_type: "boolean".into(),
                 default_value: Some("true".into()),
                 placeholder: None,
-                options: None,
-            },
-            BuiltinTemplateEnvVar {
-                key: "KAGI_SESSION_URL".into(),
-                label: "Kagi 会话链接".into(),
-                required: false,
-                tip: Some("仅在使用 Kagi 搜索引擎时需要填写。Kagi 是付费搜索引擎，需要提供带 token 的会话链接才能搜索。格式如：https://kagi.com/search?token=xxxxx。如果填写了此配置，搜索时将直接使用该链接拼接搜索参数，而不是模拟在首页输入搜索。注意：此配置仅对 Kagi 生效，其他搜索引擎请勿填写，否则可能导致搜索失败。".into()),
-                field_type: "text".into(),
-                default_value: None,
-                placeholder: Some("https://kagi.com/search?token=xxxxx".into()),
                 options: None,
             },
             BuiltinTemplateEnvVar {
@@ -1039,7 +1049,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("search") => vec![
             BuiltinToolInfo {
                 name: "search_http".into(),
-                description: "通过用户配置的 Tavily、Brave 或 SearXNG HTTP API 搜索网络，支持手机和桌面。返回标题、URL、摘要及排名；缺配置或服务失败直接报错，不自动切换服务。使用 fetch_url 读取结果页面。".into(),
+                description: "使用搜索工具设置中选择的搜索服务（DeepSeek、Tavily、Brave、SearXNG，桌面也可以是本地浏览器搜索）搜索网络，支持手机和桌面。返回结构化的标题、URL、摘要及排名；缺配置或服务失败直接报错，不自动切换服务。使用 fetch_url 读取结果页面。".into(),
                 input_schema: serde_json::json!({"type":"object","properties":{
                     "query":{"type":"string","minLength":1,"maxLength":600,"description":"搜索关键词"},
                     "max_results":{"type":"integer","minimum":1,"maximum":20,"default":5}
@@ -1047,7 +1057,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "search_web".into(),
-                description: "搜索网络内容，当进行事实性验证、实事信息、研究特定主题等情况时使用最佳。当搜索结果没有可用时，可以尝试更改关键字进行搜索；当搜索结果的简介有限但判断该结果有可用性时，请进一步通过fetch_url工具获取到页面完整的信息。".into(),
+                description: "搜索网络内容（使用搜索工具设置中选择的搜索服务），当进行事实性验证、实事信息、研究特定主题等情况时使用最佳。当搜索结果没有可用时，可以尝试更改关键字进行搜索；当搜索结果的简介有限但判断该结果有可用性时，请进一步通过fetch_url工具获取到页面完整的信息。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1616,6 +1626,15 @@ pub async fn add_or_update_aipp_builtin_server(
             m.into_iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("\n")
         });
 
+        // Settings save: vault references must be allowed for this builtin and exist (confirmed below).
+        let env_has_refs = env_str.as_deref().is_some_and(crate::vault::config_ref::contains);
+        if env_has_refs {
+            crate::vault::config_ref::mcp_target(&tpl.transport_type, Some(&tpl.command), None, env_str.as_deref())
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            crate::vault::config_ref::validate(&app_handle, &[env_str.as_deref().unwrap_or_default()])
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+
         let db = MCPDatabase::new(&app_handle).context("Create MCPDatabase failed")?;
         let server_id = db
             .upsert_mcp_server_with_builtin(
@@ -1634,6 +1653,13 @@ pub async fn add_or_update_aipp_builtin_server(
                 false, // proxy_enabled - builtin 不使用代理
             )
             .context("Upsert builtin server failed")?;
+
+        // Saving in Settings is the user's confirmation of where the referenced credential goes.
+        if env_has_refs {
+            crate::vault::config_ref::confirm_mcp(&app_handle, server_id, name.as_deref().unwrap_or(&tpl.name),
+                &tpl.transport_type, Some(&tpl.command), None, env_str.as_deref(), None)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
 
         // 注册工具
         for tool in get_builtin_tools_for_command(&tpl.command) {
@@ -1957,7 +1983,8 @@ mod tests {
         assert!(engine_env.is_some(), "SEARCH_ENGINE env should exist");
 
         let env = engine_env.unwrap();
-        assert!(env.required, "SEARCH_ENGINE should be required");
+        // The engine only applies to local search; the search service is the required choice.
+        assert!(!env.required, "SEARCH_ENGINE belongs to local search and is not required");
         assert_eq!(env.default_value, Some("google".into()));
 
         let options = env.options.as_ref().unwrap();
@@ -1965,6 +1992,20 @@ mod tests {
         assert!(options.iter().any(|o| o.value == "bing"));
         assert!(options.iter().any(|o| o.value == "duckduckgo"));
         assert!(options.iter().any(|o| o.value == "kagi"));
+    }
+
+    #[test]
+    fn test_search_template_service_comes_first_and_defaults_to_local() {
+        let templates = builtin_templates();
+        let search = templates.iter().find(|t| t.id == "search").unwrap();
+        let keys: Vec<&str> = search.required_envs.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(&keys[..3], ["HTTP_SEARCH_PROVIDER", "SEARCH_ENGINE", "KAGI_SESSION_URL"]);
+        let service = &search.required_envs[0];
+        assert!(service.required);
+        assert_eq!(service.default_value, Some("local".into()));
+        let values: Vec<&str> = service.options.as_ref().unwrap().iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(values, ["local", "deepseek", "tavily", "brave", "searxng"]);
+        assert_eq!(search.required_envs.iter().filter(|e| e.required).count(), 1, "only the search service is required");
     }
 
     #[test]

@@ -114,3 +114,101 @@ async fn test_http_search_enforces_timeout_and_size_limit() {
     assert!(search(&config("brave", &endpoint), "test", 5).await.unwrap_err().contains("2 MiB"));
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn test_deepseek_search_posts_count_and_prefers_long_summary() {
+    let body = r#"{"results":[{"rerank_score":2.4,"title":"DeepSeek","url":"https://api-docs.deepseek.com/","snippet":"短","summary":"给模型读的长摘要","content":"","site_name":null,"site_icon":null,"date":null,"authority":3},{"title":"B","url":"https://b.example/","snippet":"只有短摘要","summary":""}]}"#;
+    let (endpoint, handle) = server("200 OK", "application/json; charset=utf-8", body, "").await;
+    let result = search(&config("deepseek", &endpoint), "DeepSeek 全家桶", 2).await.unwrap();
+    assert_eq!(result["provider"], "deepseek");
+    assert_eq!(result["items"][0]["snippet"], "给模型读的长摘要");
+    assert_eq!(result["items"][1]["snippet"], "只有短摘要");
+    let request = handle.await.unwrap();
+    assert!(request.starts_with("POST /search "));
+    assert!(request.to_lowercase().contains("authorization: bearer test-secret"));
+    let sent: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(sent, json!({"query": "DeepSeek 全家桶", "count": 2}));
+}
+
+#[tokio::test]
+async fn test_deepseek_search_rejects_queries_over_128_chars_before_sending() {
+    let error = search(&config("deepseek", "http://127.0.0.1:9/search"), &"字".repeat(129), 5).await.unwrap_err();
+    assert!(error.contains("stage=validate"));
+    assert!(error.contains("128"));
+}
+
+#[test]
+fn test_deepseek_default_endpoint_and_fetch_selection() {
+    let env = HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "deepseek".into())]);
+    assert_eq!(configured_endpoint(&env).unwrap().1.as_str(), DEEPSEEK_SEARCH_ENDPOINT);
+    assert!(!uses_deepseek_fetch(&env));
+    let both = HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "deepseek".into()), ("FETCH_PROVIDER".into(), "deepseek".into())]);
+    assert!(uses_deepseek_fetch(&both));
+    // A leftover fetch setting is hidden in Settings once the service changes, so it must not apply.
+    let leftover = HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "tavily".into()), ("FETCH_PROVIDER".into(), "deepseek".into())]);
+    assert!(!uses_deepseek_fetch(&leftover));
+    assert!(!uses_deepseek_fetch(&HashMap::from([("FETCH_PROVIDER".into(), "deepseek".into())])));
+}
+
+#[test]
+fn test_search_service_local_covers_unset_and_legacy_disabled() {
+    for value in [None, Some(""), Some("disabled"), Some("local"), Some(" local ")] {
+        let env: HashMap<String, String> = value.map(|v| ("HTTP_SEARCH_PROVIDER".to_string(), v.to_string())).into_iter().collect();
+        assert!(uses_local_search(&env), "{value:?}");
+        assert!(configured_endpoint(&env).unwrap_err().contains("本地搜索"));
+    }
+    for value in ["deepseek", "tavily", "brave", "searxng"] {
+        assert!(!uses_local_search(&HashMap::from([("HTTP_SEARCH_PROVIDER".into(), value.into())])), "{value}");
+    }
+}
+
+#[test]
+fn test_http_items_render_as_markdown_for_search_web() {
+    let items = vec![
+        SearchItem { title: "Rust [lang]".into(), url: "https://www.rust-lang.org/".into(), snippet: "系统编程语言".into(), rank: 1, display_url: None },
+        SearchItem { title: "Docs".into(), url: "https://doc.rust-lang.org/".into(), snippet: "  ".into(), rank: 2, display_url: None },
+    ];
+    let text = items_to_markdown("rust", "deepseek", &items);
+    assert!(text.starts_with("# 搜索：rust
+
+来源：deepseek
+"));
+    assert!(text.contains("## 1. [Rust lang](https://www.rust-lang.org/)
+系统编程语言
+"));
+    assert!(text.contains("## 2. [Docs](https://doc.rust-lang.org/)
+"));
+    assert!(items_to_markdown("x", "tavily", &[]).contains("没有返回匹配结果"));
+}
+
+#[tokio::test]
+async fn test_deepseek_fetch_uses_sibling_endpoint_and_returns_markdown() {
+    let (endpoint, handle) = server("200 OK", "application/json", r#"{"title":"Example","content":"Body text."}"#, "").await;
+    let page = fetch_deepseek(&config("deepseek", &endpoint), "https://example.com/a").await.unwrap();
+    assert_eq!(page, "# Example\n\nBody text.");
+    let request = handle.await.unwrap();
+    assert!(request.starts_with("POST /fetch "));
+    assert!(request.to_lowercase().contains("authorization: bearer test-secret"));
+    let sent: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(sent, json!({"url": "https://example.com/a"}));
+}
+
+#[tokio::test]
+async fn test_deepseek_fetch_requires_deepseek_search_and_valid_url() {
+    let error = fetch_deepseek(&config("tavily", "http://127.0.0.1:9/search"), "https://example.com/").await.unwrap_err();
+    assert!(error.contains("HTTP 搜索服务也设为 DeepSeek"));
+    for bad in ["file:///etc/passwd", "https://u:p@example.com/", "not a url"] {
+        assert!(fetch_deepseek(&config("deepseek", "http://127.0.0.1:9/search"), bad).await.is_err(), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn test_provider_errors_drop_masked_key_tails() {
+    let body = r#"{"error":{"message":"Authentication Fails, Your api key: ****cret is invalid","type":"authentication_error"}}"#;
+    let (endpoint, handle) = server("401 Unauthorized", "application/json", body, "").await;
+    let error = search(&config("deepseek", &endpoint), "test", 5).await.unwrap_err();
+    assert!(error.contains("401"));
+    assert!(error.contains("*[redacted]"));
+    assert!(!error.contains("cret"), "{error}");
+    handle.await.unwrap();
+}

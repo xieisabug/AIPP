@@ -27,6 +27,7 @@ pub mod copilot_api;
 pub mod copilot_lsp;
 pub mod copilot_token_manager;
 pub mod export_api;
+pub mod deepseek_api;
 pub mod genai_client;
 #[cfg(test)]
 pub(crate) mod live_test_client;

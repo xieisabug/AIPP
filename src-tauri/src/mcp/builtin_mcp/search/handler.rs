@@ -87,10 +87,84 @@ pub struct SearchHandler {
 }
 
 impl SearchHandler {
+    /// `search_http` follows the configured search service: an HTTP API, or (desktop) the local browser
+    /// search when the service is local. Results keep the HTTP shape (`provider` / `items`).
     pub async fn search_http(&self, query: &str, limit: usize) -> Result<serde_json::Value, String> {
         let env = load_search_config_from_db(&self.app_handle, self.server_id)?;
-        let config = super::http_search::HttpSearchConfig::from_env(&env)?;
+        if super::http_search::uses_local_search(&env) {
+            return self.search_local_items(query, limit).await;
+        }
+        let config = self.http_search_config().await?;
         super::http_search::search(&config, query, limit).await
+    }
+
+    /// `search_web` follows the configured search service too: with an HTTP API selected it searches
+    /// there instead of opening a browser, so the hidden engine setting never silently applies.
+    pub async fn search_web_with_type(&self, request: SearchRequest) -> Result<SearchResponse, String> {
+        let env = load_search_config_from_db(&self.app_handle, self.server_id)?;
+        if super::http_search::uses_local_search(&env) {
+            return self.search_web_local(request).await;
+        }
+        let config = self.http_search_config().await?;
+        let value = super::http_search::search(&config, &request.query, 10).await?;
+        let provider = value.get("provider").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let items: Vec<super::types::SearchItem> = serde_json::from_value(value.get("items").cloned().unwrap_or_default())
+            .map_err(|e| format!("search_web: 解析搜索结果失败: {e}"))?;
+        Ok(match request.result_type {
+            super::types::SearchResultType::Items => SearchResponse::ItemsOnly(items),
+            _ => SearchResponse::Markdown {
+                markdown_content: super::http_search::items_to_markdown(&request.query, &provider, &items),
+                message: value.get("message").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                query: request.query,
+                homepage_url: String::new(),
+                engine_id: provider.clone(),
+                search_engine: provider,
+                search_time_ms: 0,
+            },
+        })
+    }
+
+    #[cfg(desktop)]
+    async fn search_local_items(&self, query: &str, limit: usize) -> Result<serde_json::Value, String> {
+        use super::types::SearchResultType;
+        let response = self
+            .search_web_local(SearchRequest { query: query.to_string(), result_type: SearchResultType::Items })
+            .await
+            .map_err(|e| format!("search_http: provider=local; stage=browser; {e}"))?;
+        let (engine, items) = match response {
+            SearchResponse::Items(results) => (results.search_engine, results.items),
+            SearchResponse::ItemsOnly(items) => (String::new(), items),
+            _ => return Err("search_http: provider=local; stage=decode; 浏览器搜索没有返回结构化结果".into()),
+        };
+        let items: Vec<_> = items.into_iter().take(limit).enumerate()
+            .map(|(index, mut item)| { item.rank = index + 1; item }).collect();
+        Ok(serde_json::json!({
+            "provider": "local", "engine": engine, "query": query, "items": items, "partial": false,
+            "message": if items.is_empty() { "搜索完成，没有匹配结果" } else { "搜索完成" },
+        }))
+    }
+
+    #[cfg(mobile)]
+    async fn search_local_items(&self, _query: &str, _limit: usize) -> Result<serde_json::Value, String> {
+        Err("search_http: provider=local; stage=config; 本地搜索（浏览器）仅桌面可用，请在搜索工具设置中把搜索服务改为 DeepSeek、Tavily、Brave 或 SearXNG".into())
+    }
+
+    /// HTTP search settings with a vault-referenced API key resolved for the configured endpoint.
+    async fn http_search_config(&self) -> Result<super::http_search::HttpSearchConfig, String> {
+        let mut env = load_search_config_from_db(&self.app_handle, self.server_id)?;
+        crate::vault::config_ref::resolve_builtin_search_key(&self.app_handle, &mut env).await?;
+        super::http_search::HttpSearchConfig::from_env(&env)
+    }
+
+    /// `fetch_url`: DeepSeek Fetch when selected in the search settings, otherwise the local fetcher.
+    /// No fallback between them: a failing configured service reports its own error.
+    pub async fn fetch_url_with_type(&self, url: &str, result_type: &str) -> Result<String, String> {
+        let env = load_search_config_from_db(&self.app_handle, self.server_id)?;
+        if super::http_search::uses_deepseek_fetch(&env) {
+            let config = self.http_search_config().await?;
+            return super::http_search::fetch_deepseek(&config, url).await;
+        }
+        self.fetch_url_local(url, result_type).await
     }
 
     pub fn new(app_handle: AppHandle, server_id: Option<i64>) -> Self {
@@ -140,7 +214,7 @@ impl SearchHandler {
     /// 执行带结果类型的网络搜索
     #[cfg(desktop)]
     #[instrument(skip(self), fields(query = %request.query, result_type = ?request.result_type))]
-    pub async fn search_web_with_type(
+    async fn search_web_local(
         &self,
         request: SearchRequest,
     ) -> Result<SearchResponse, String> {
@@ -181,7 +255,7 @@ impl SearchHandler {
 
     /// 执行带结果类型的网络搜索（移动端不支持浏览器搜索）
     #[cfg(mobile)]
-    pub async fn search_web_with_type(
+    async fn search_web_local(
         &self,
         _request: SearchRequest,
     ) -> Result<SearchResponse, String> {
@@ -310,7 +384,7 @@ impl SearchHandler {
     /// 抓取指定URL的内容，支持多种格式
     #[cfg(desktop)]
     #[instrument(skip(self), fields(url = %url, result_type = %result_type))]
-    pub async fn fetch_url_with_type(
+    async fn fetch_url_local(
         &self,
         url: &str,
         result_type: &str,
@@ -354,7 +428,7 @@ impl SearchHandler {
 
     /// 抓取指定URL的内容（移动端：仅进程内 HTTP 抓取，不启动浏览器）
     #[cfg(mobile)]
-    pub async fn fetch_url_with_type(
+    async fn fetch_url_local(
         &self,
         url: &str,
         result_type: &str,
@@ -459,18 +533,7 @@ fn load_search_config_from_db(app_handle: &AppHandle, server_id: Option<i64>) ->
     use crate::db::mcp_db::MCPDatabase;
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let env_text = super::recovery::load_server_environment(&db.conn, server_id)?;
-    let mut config = HashMap::new();
-    if let Some(text) = env_text {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                config.insert(k.trim().to_string(), v.trim().to_string());
-            }
-        }
-    }
+    let mut config = parse_search_env(env_text.as_deref().unwrap_or_default());
     if let Some(legacy_browser_type) = config.remove("BROWSER_TYPE") {
         tracing::warn!(
             browser_type = %legacy_browser_type,
@@ -479,5 +542,21 @@ fn load_search_config_from_db(app_handle: &AppHandle, server_id: Option<i64>) ->
     }
     debug!(?server_id, "Loaded search config");
     Ok(config)
+}
+
+/// `KEY=VALUE` lines of the search server's environment, as the handler reads them. The vault
+/// reference check computes the destination from the same parse.
+pub(crate) fn parse_search_env(text: &str) -> HashMap<String, String> {
+    let mut config = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            config.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    config
 }
 

@@ -34,6 +34,7 @@ import { getProviderEndpointStatus } from "@/utils/providerEndpoint";
 import { ACP_CLI_OPTIONS, CODEX_APPROVAL_OPTIONS, CODEX_SANDBOX_OPTIONS } from "./providerApiTypes";
 import { useVaultItems } from "@/hooks/useVaultItems";
 import VaultRefField from "./vault/VaultRefField";
+import DeepSeekCapabilities from "./DeepSeekCapabilities";
 import { containsVaultRef } from "./vault/vaultRefs";
 import {
     LLMModel,
@@ -182,7 +183,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const endpoint = form.watch("endpoint");
     const endpointStatus = useMemo(() => getProviderEndpointStatus(endpoint), [endpoint]);
     const vault = useVaultItems();
-    const apiKeyIsVaultRef = containsVaultRef(form.watch("api_key"));
+    const apiKeyValue = form.watch("api_key") ?? "";
+    const apiKeyIsVaultRef = containsVaultRef(apiKeyValue);
+    // DeepSeek：Key 存入保险箱后改显示引用（已由设置页保存命令写入，不再触发保存）
+    const handleKeyShared = useCallback((value: string) => form.setValue("api_key", value), [form]);
     // 保存配置后被确认的目标：自定义地址的 origin，或该类型的默认地址。
     const vaultTarget = useMemo(() => {
         try {
@@ -913,6 +917,25 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     ),
                 },
             },
+            ...(apiType === "deepseek" ? [{
+                key: "deepseek_capabilities",
+                config: {
+                    type: "custom" as const,
+                    label: "能力",
+                    hint: <span>同一把 Key 可供内置搜索使用；搜索参数在「应用与工具 → 搜索工具」中调整。</span>,
+                    value: "",
+                    customRender: () => (
+                        <DeepSeekCapabilities
+                            providerId={Number(id)}
+                            providerName={name}
+                            apiKey={apiKeyValue}
+                            endpoint={endpoint ?? ""}
+                            vault={vault}
+                            onKeyShared={handleKeyShared}
+                        />
+                    ),
+                },
+            }] : []),
             {
                 key: "tagInput",
                 config: {
@@ -933,7 +956,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name]);
+    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name, apiKeyValue, endpoint, handleKeyShared]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

@@ -147,11 +147,47 @@ fn reference_capable_command(command: Option<&str>) -> bool {
 pub fn mcp_target(transport_type: &str, command: Option<&str>, url: Option<&str>, env_text: Option<&str>) -> Result<Target, RefError> {
     match transport_type {
         "http" => Target::site(url.unwrap_or_default()),
+        "stdio" if command == Some(BUILTIN_SEARCH_COMMAND) => builtin_search_target(env_text.unwrap_or_default()),
         "stdio" if reference_capable_command(command) => {
             Ok(Target::program(command.unwrap_or_default(), env_text.unwrap_or_default()))
         }
         _ => Err(RefError::new("invalid_target", "此连接不支持保险箱引用")),
     }
+}
+
+// ---------- built-in search ----------
+
+pub const BUILTIN_SEARCH_COMMAND: &str = "aipp:search";
+/// The only built-in search setting that may hold a reference: AIPP sends it to the HTTP search API.
+const BUILTIN_SEARCH_KEY: &str = "HTTP_SEARCH_API_KEY";
+const BUILTIN_SEARCH_CONTEXT: &str = "内置搜索工具";
+
+fn builtin_search_env_target(env: &std::collections::HashMap<String, String>) -> Result<Target, RefError> {
+    if env.iter().any(|(name, value)| contains(name) || (name != BUILTIN_SEARCH_KEY && contains(value))) {
+        return Err(RefError::new("invalid_target", "内置搜索工具只有「HTTP 搜索 API Key」可以引用保险箱"));
+    }
+    let (_, endpoint) = crate::mcp::builtin_mcp::search::http_search::configured_endpoint(env)
+        .map_err(|e| RefError::new("invalid_target", e))?;
+    Target::site(endpoint.as_str())
+}
+
+/// Built-in search sends its API key to the configured HTTP search endpoint (DeepSeek Fetch uses the
+/// same origin), so that origin is the destination to confirm. Computed from the handler's own parse.
+pub fn builtin_search_target(env_text: &str) -> Result<Target, RefError> {
+    builtin_search_env_target(&crate::mcp::builtin_mcp::search::handler::parse_search_env(env_text))
+}
+
+/// Resolve a referenced `HTTP_SEARCH_API_KEY` in place, for the endpoint the request will go to.
+/// Fails closed when the credential was not confirmed for that endpoint (e.g. a model changed it).
+pub(crate) async fn resolve_builtin_search_key(app: &AppHandle, env: &mut std::collections::HashMap<String, String>) -> Result<(), String> {
+    if !env.values().chain(env.keys()).any(|v| contains(v)) { return Ok(()); }
+    let target = builtin_search_env_target(env).map_err(|e| e.message)?;
+    let raw = env.get(BUILTIN_SEARCH_KEY).cloned().unwrap_or_default();
+    let app = app.clone();
+    let (mut values, _secrets) = tokio::task::spawn_blocking(move || resolve_blocking(&app, vec![raw], &target, BUILTIN_SEARCH_CONTEXT))
+        .await.map_err(|e| e.to_string())?.map_err(|e| e.message)?;
+    env.insert(BUILTIN_SEARCH_KEY.into(), values.pop().unwrap_or_default());
+    Ok(())
 }
 
 /// HTTP MCP: a copy of the server with references in headers and env resolved for the URL's origin.

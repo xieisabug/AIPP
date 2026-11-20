@@ -24,6 +24,10 @@ import {
 } from "./providerApiTypes";
 import { useLocalAgentDetection, type LocalAgentStatus } from "./useLocalAgentDetection";
 import LocalAgentSetup, { type DefaultsState } from "./LocalAgentSetup";
+import type { MCPServer } from "@/data/MCP";
+import { connectDeepSeekSearch, findSearchServer, hideKey, searchServiceLabel } from "./deepseekSuite";
+import { parseVaultValue } from "./vault/vaultRefs";
+import { describeBalance, useDeepSeekBalance, type BalanceState } from "./useDeepSeekBalance";
 
 export interface NewProviderWizardProps {
     open: boolean;
@@ -41,6 +45,7 @@ type FetchState = { status: "idle" | "loading" | "done" } | { status: "error"; m
 
 /**
  * 新增模型提供商向导：① 选择 API 类型 → ② 名称 / 接口地址 / API Key → ③ 获取并勾选模型。
+ * DeepSeek 在第三步可一并把内置搜索（Search / Fetch）接到同一把 Key 上（需求 335）。
  *
  * 第二步「下一步」时创建一个未启用的草稿提供商并写入连接信息，第三步复用已有的
  * `preview_model_list`（保险箱引用、代理、各类型路由都沿用设置页链路）；完成时写入模型并启用。
@@ -102,6 +107,10 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     const pinyinReady = usePinyinReady(search.trim().length > 0);
     const vault = useVaultItems();
     const detection = useLocalAgentDetection(apiTypes);
+    // DeepSeek 全家桶：一并接入内置搜索
+    const [suiteSearch, setSuiteSearch] = useState(true);
+    const [searchServers, setSearchServers] = useState<MCPServer[] | null>(null);
+    const [suiteError, setSuiteError] = useState<string | null>(null);
     // 本地智能体写入新提供商的设置；初值与详情页表单默认值一致，读到智能体自身配置后覆盖
     const [localValues, setLocalValues] = useState<Record<string, string>>(LOCAL_DEFAULT_VALUES);
     const [defaultsByType, setDefaultsByType] = useState<Record<string, DefaultsState>>({});
@@ -256,13 +265,36 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         return id;
     }, [endpoint, apiKey, proxyEnabled, localValues]);
 
-    const enableProvider = useCallback(async (id: number, type: ProviderApiTypeOption, trimmedName: string) => {
+    const enableProvider = useCallback(async (id: number, type: ProviderApiTypeOption, trimmedName: string, close = true) => {
         await invoke("update_llm_provider", { id, name: trimmedName, apiType: type.value, description: "", isEnabled: true });
         finishedRef.current = true;
         toast.success("添加大模型提供商成功");
         onCreated(id);
-        onClose();
+        if (close) onClose();
     }, [onCreated, onClose]);
+
+    const isDeepSeek = apiType?.value === "deepseek";
+    // 第三步时草稿与 Key 已保存：查余额同时验证 Key 是否可用
+    const balance = useDeepSeekBalance(step === 3 && isDeepSeek && apiKey.trim() ? draftRef.current?.id ?? null : null, true);
+    useEffect(() => {
+        if (step !== 3 || !isDeepSeek || searchServers) return;
+        // 仅用于提示「当前使用 X」；读不到时不提示，不影响向导
+        invoke<MCPServer[]>("get_mcp_servers")
+            .then((list) => setSearchServers(Array.isArray(list) ? list : []))
+            .catch(() => setSearchServers([]));
+    }, [step, isDeepSeek, searchServers]);
+
+    /** 能力单独执行、单独报告：失败不回滚已启用的服务商，可重试或跳过。 */
+    const connectSuite = useCallback(async (providerId: number) => {
+        setSuiteError(null);
+        try {
+            await connectDeepSeekSearch({ providerId, providerName: name.trim(), apiKey, endpoint, vault });
+            toast.success("内置搜索已改用 DeepSeek");
+            onClose();
+        } catch (error) {
+            setSuiteError(hideKey(String(error), apiKey));
+        }
+    }, [name, apiKey, endpoint, vault, onClose]);
 
     const submitConnection = useCallback(async () => {
         if (!apiType || busy) return;
@@ -295,23 +327,28 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     const finish = useCallback(async () => {
         const draft = draftRef.current;
         if (!apiType || !draft || busy) return;
+        const withSearch = apiType.value === "deepseek" && suiteSearch && !!apiKey.trim();
         setBusy(true);
         try {
-            if (models.some((model) => model.is_selected)) {
-                await invoke("update_selected_models", { llmProviderId: draft.id, selectedModels: models });
+            // 服务商已启用（能力接入失败后重试）时只重试能力
+            if (!finishedRef.current) {
+                if (models.some((model) => model.is_selected)) {
+                    await invoke("update_selected_models", { llmProviderId: draft.id, selectedModels: models });
+                }
+                for (const code of customCodes) {
+                    if (addedCustomRef.current.has(code)) continue;
+                    await invoke("add_llm_model", { code, llmProviderId: draft.id });
+                    addedCustomRef.current.add(code);
+                }
+                await enableProvider(draft.id, apiType, name.trim(), !withSearch);
             }
-            for (const code of customCodes) {
-                if (addedCustomRef.current.has(code)) continue;
-                await invoke("add_llm_model", { code, llmProviderId: draft.id });
-                addedCustomRef.current.add(code);
-            }
-            await enableProvider(draft.id, apiType, name.trim());
+            if (withSearch) await connectSuite(draft.id);
         } catch (error) {
             toast.error(`保存模型失败: ${String(error)}`);
         } finally {
             setBusy(false);
         }
-    }, [apiType, busy, models, customCodes, enableProvider, name]);
+    }, [apiType, busy, models, customCodes, enableProvider, name, suiteSearch, apiKey, connectSuite]);
 
     const addCustomModel = useCallback(() => {
         const code = customInput.trim();
@@ -671,6 +708,21 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                                 </>
                             )
                         )}
+
+                        {isDeepSeek && (
+                            <DeepSeekSuiteOptions
+                                checked={suiteSearch}
+                                onCheckedChange={setSuiteSearch}
+                                disabled={busy || finishedRef.current}
+                                hasKey={!!apiKey.trim()}
+                                keyIsRef={!!parseVaultValue(apiKey.trim())}
+                                vaultAvailable={vault.available}
+                                currentSearch={searchServers ? searchServiceLabel(findSearchServer(searchServers)) : null}
+                                error={suiteError}
+                                onSkip={onClose}
+                                balance={apiKey.trim() ? balance.state : null}
+                            />
+                        )}
                     </div>
                 )}
             </div>
@@ -678,7 +730,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             {step > 1 && (
                 // 底部内边距 = 顶部 + 安全区；不用 .safe-bottom（未分层 CSS 会把 pb 覆盖成 0）
                 <div className="flex shrink-0 items-center gap-2 border-t border-border px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
-                    <Button type="button" variant="ghost" className="min-h-11 gap-1 px-3 sm:min-h-9" disabled={busy} onClick={() => setStep(step === 3 ? 2 : 1)}>
+                    <Button type="button" variant="ghost" className="min-h-11 gap-1 px-3 sm:min-h-9" disabled={busy || finishedRef.current} onClick={() => setStep(step === 3 ? 2 : 1)}>
                         <ChevronLeft className="h-4 w-4" />
                         上一步
                     </Button>
@@ -694,7 +746,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                         ) : (
                             <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={busy || fetchState.status === "loading"} onClick={() => void finish()}>
                                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                                完成
+                                {suiteError ? "重试" : "完成"}
                             </Button>
                         )}
                     </div>
@@ -705,6 +757,63 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
 };
 
 export default NewProviderWizard;
+
+/** 第三步底部「一并启用」：目前只有搜索工具；对话内联网、语音等后续能力加在这里。 */
+const DeepSeekSuiteOptions: React.FC<{
+    checked: boolean;
+    onCheckedChange: (checked: boolean) => void;
+    disabled: boolean;
+    hasKey: boolean;
+    keyIsRef: boolean;
+    vaultAvailable: boolean;
+    currentSearch: string | null;
+    error: string | null;
+    onSkip: () => void;
+    /** 账户余额（同时说明 Key 是否可用）；没有 Key 时为 null。 */
+    balance: BalanceState | null;
+}> = ({ checked, onCheckedChange, disabled, hasKey, keyIsRef, vaultAvailable, currentSearch, error, onSkip, balance }) => {
+    const notes: string[] = ["助手的 search_http 与 fetch_url 改用 DeepSeek Search / Fetch，按成功次数计费（每千次 5 元）。"];
+    if (!hasKey) notes.push("需要先在上一步填写 API Key。");
+    else if (!keyIsRef) notes.push(vaultAvailable ? "API Key 将存入凭据保险箱，模型与搜索共用同一条目。" : "此设备不支持凭据保险箱，搜索设置中会保存一份 Key。");
+    if (currentSearch && currentSearch !== "DeepSeek") notes.push("当前使用 " + currentSearch + "，将改为 DeepSeek。");
+    return (
+        <section className="shrink-0 space-y-1.5 border-t border-border pt-3" data-aipp-slot="deepseek-suite-options">
+            <div className="flex items-baseline justify-between gap-3">
+                <h3 className="text-xs font-medium text-muted-foreground">一并启用</h3>
+                {balance && balance.status !== "idle" && (
+                    <span className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground" data-testid="wizard-deepseek-balance">
+                        {balance.status === "done" && balance.balance.available && <Check className="h-3 w-3 shrink-0" />}
+                        <span className="truncate">账户余额 {describeBalance(balance)}</span>
+                    </span>
+                )}
+            </div>
+            <label className={cn("flex items-start gap-2.5 rounded-md border border-border px-2.5 py-2", checked && hasKey && "border-foreground/40 bg-muted/60")}>
+                <Checkbox
+                    aria-label="同时用于搜索工具"
+                    className="mt-0.5"
+                    checked={checked && hasKey}
+                    disabled={disabled || !hasKey}
+                    onCheckedChange={(value) => onCheckedChange(value === true)}
+                />
+                <span className="min-w-0 flex-1">
+                    <span className="block text-sm">同时用于搜索工具</span>
+                    <span className="block text-xs text-muted-foreground">{notes.join(" ")}</span>
+                </span>
+            </label>
+            {error && (
+                <div role="alert" className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-2 text-xs">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 break-words">
+                        提供商已添加；接入搜索工具失败：{error}
+                    </span>
+                    <button type="button" className="shrink-0 text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={onSkip}>
+                        跳过
+                    </button>
+                </div>
+            )}
+        </section>
+    );
+};
 
 /** 类型卡片上的「本机已安装」「已添加」标识。 */
 const TypeBadges: React.FC<{ installed: LocalAgentStatus | undefined; added: number }> = ({ installed, added }) => {
