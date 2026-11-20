@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Check, Loader2, RefreshCw } from "lucide-react";
+import { Switch } from "../ui/switch";
 import { Button } from "../ui/button";
 import type { MCPServer } from "@/data/MCP";
 import type { VaultItem } from "@/data/Vault";
@@ -10,6 +11,8 @@ import { connectDeepSeekSearch, deepSeekSearchStatus, hideKey, type DeepSeekSear
 import { describeBalance, useDeepSeekBalance } from "./useDeepSeekBalance";
 
 interface DeepSeekCapabilitiesProps {
+    webEnabled?: boolean;
+    onWebChange?: (enabled: boolean) => void;
     providerId: number;
     providerName: string;
     /** 表单里当前的 API Key（明文或保险箱引用）。 */
@@ -40,7 +43,7 @@ function describe(status: DeepSeekSearchStatus | null, hasKey: boolean): { text:
  * DeepSeek 服务商详情页的「能力」区块：展示这把 Key 被哪些能力共用，并可一键接入。
  * 只做总览与接入，具体参数在「应用与工具 → 搜索工具」里改，不在这里重复表单。
  */
-const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({ providerId, providerName, apiKey, endpoint, vault, onKeyShared }) => {
+const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({ providerId, providerName, apiKey, endpoint, vault, onKeyShared, webEnabled, onWebChange }) => {
     const [servers, setServers] = useState<MCPServer[] | null>(null);
     const [busy, setBusy] = useState(false);
     // Key 改动后等保存落库再查余额，避免逐字查询
@@ -82,6 +85,11 @@ const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({ providerId,
 
     return (
         <div className="divide-y divide-border rounded-lg border border-border" data-aipp-slot="deepseek-capabilities">
+            {onWebChange && <div className="flex min-h-11 items-center gap-3 px-3 py-2">
+                <div className="flex-1"><div className="text-sm font-medium">对话内联网</div>
+                    <div className="text-xs text-muted-foreground">允许 deepseek-flash 在对话中搜索和阅读网页</div></div>
+                <Switch aria-label="对话内联网" checked={!!webEnabled} onCheckedChange={onWebChange} />
+            </div>}
             {hasKey && (
                 <div className="flex min-h-11 items-center gap-3 px-3 py-2">
                     <div className="min-w-0 flex-1">

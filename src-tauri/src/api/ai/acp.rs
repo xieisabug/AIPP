@@ -2153,7 +2153,7 @@ fn build_acp_prompt_blocks(
                     }
                 }
             }
-            AttachmentType::Skill => {}
+            AttachmentType::Skill | AttachmentType::DeepSeekReplay => {}
         }
     }
 

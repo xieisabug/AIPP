@@ -388,6 +388,7 @@ pub async fn create_conversation_with_messages(
         model_id,
         model_code,
         &messages,
+        None,
     )?;
 
     // 更新对话名称（如果提供）

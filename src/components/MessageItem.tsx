@@ -1,5 +1,8 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { ButlerMessageQuoteLabel } from "./butler/ButlerQuote";
+import { emit } from "@tauri-apps/api/event";
+import { DeepSeekWebProcess } from "./message-item/DeepSeekWebProcess";
+import { readWebReport, withWebCitations } from "@/utils/deepSeekWeb";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import { ReasoningDisplay } from "./ReasoningDisplay";
 import ErrorMessage from "./message-item/ErrorMessage";
@@ -429,9 +432,12 @@ const MessageItem = React.memo<MessageItemProps>(
             await resendMessageToFeishuDebug(message.id);
         }, [canResendToFeishuDebug, isFeishuDebugSending, message.id, resendMessageToFeishuDebug]);
 
+        const web = useMemo(() => shouldMaskContent || message.message_type !== "response" ? undefined :
+            readWebReport(message.metadata_json), [message.metadata_json, message.message_type, shouldMaskContent]);
+        const citedContent = useMemo(() => withWebCitations(renderedDisplayContent, web), [renderedDisplayContent, web]);
         const richMessageContent = (
             <RichMessageContent
-                displayContent={renderedDisplayContent}
+                displayContent={citedContent}
                 onCodeRun={onCodeRun}
                 isUserMessage={isUserMessage}
                 isUserMessageMarkdownEnabled={isUserMessageMarkdownEnabled}
@@ -509,7 +515,12 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const messageBodyContent = <>
             {obsoleteGoal && <div role="note" className="mb-2 text-xs text-muted-foreground">旧目标的历史回复，不是当前结果</div>}
-            {rawMessageBodyContent}
+            {web && web.steps.length > 0 && <DeepSeekWebProcess report={web} />}
+            {web?.filtered ? <span className="text-sm text-muted-foreground">DeepSeek 已停止回答此问题。</span> : rawMessageBodyContent}
+            {!!web?.sources.length && <button type="button" className="mt-2 rounded bg-muted px-2 py-1 text-xs text-muted-foreground"
+                onClick={() => void emit("sidebar-focus-context", { id: `deepseek-web-${message.id}`, conversationId: message.conversation_id })}>
+                来源 {web.sources.length}
+            </button>}
         </>;
 
         // 定时任务结果前的触发消息：显示成一行分隔提示，不当成用户发言

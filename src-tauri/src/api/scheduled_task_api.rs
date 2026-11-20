@@ -1402,6 +1402,7 @@ async fn execute_run_inner(
         model_detail.model.id,
         model_detail.model.code.clone(),
         &init_messages,
+        None,
     )
     .map_err(|e| RunError::Failed(e.to_string()))?;
     let conversation_id = conversation.id;

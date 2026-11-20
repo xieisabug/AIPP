@@ -551,10 +551,14 @@ fn deepseek_web_data(content: &genai::chat::MessageContent) -> Option<&serde_jso
     })
 }
 
-fn web_metadata(existing: Option<String>, web: Option<&serde_json::Value>, filtered: bool) -> Option<String> {
+fn web_metadata(existing: Option<String>, web: Option<&serde_json::Value>, filtered: bool, reasoning: Option<&str>) -> Option<String> {
     if web.is_none() && !filtered { return existing; }
     let mut data = metadata_object_from_raw(existing.as_deref());
-    if let Some(web) = web { data.insert("deepseek_web".into(), web.clone()); }
+    if let Some(web) = web {
+        let mut web = web.clone();
+        if let Some(reasoning) = reasoning { web["final_reasoning"] = reasoning.into(); }
+        data.insert("deepseek_web".into(), web);
+    }
     if filtered { data.insert("deepseek_filtered".into(), true.into()); }
     Some(serde_json::Value::Object(data).to_string())
 }
@@ -3239,7 +3243,15 @@ async fn attempt_stream_chat(
                         if let Some(id) = response_message_id.filter(|_| web.is_some() || filtered) {
                             let repo = conversation_db.message_repo()?;
                             let existing = repo.read(id)?.context("missing response for DeepSeek web tools")?;
-                            let metadata = web_metadata(existing.metadata_json, web.as_ref(), filtered);
+                            let mut final_reasoning = reasoning_content.as_str();
+                            if let Some(steps) = web.as_ref().and_then(|w| w["server_tool_calls"].as_array()) {
+                                for step in steps {
+                                    if let Some(prefix) = step["reasoning_content"].as_str() {
+                                        final_reasoning = final_reasoning.strip_prefix(prefix).unwrap_or(final_reasoning);
+                                    }
+                                }
+                            }
+                            let metadata = web_metadata(existing.metadata_json, web.as_ref(), filtered, Some(final_reasoning));
                             repo.update_metadata(id, metadata.as_deref())?;
                             if filtered { persist_and_emit_update(conversation_db, window, conversation_id, id, "response", &response_content, true)?; }
                         }
@@ -3415,7 +3427,7 @@ async fn attempt_stream_chat(
 
 
                         // 正常 stop/DONE 且零正文：展示明确说明；保留原问题；不伪造回答、不自动切模型。
-                        if should_announce_empty_model_reply(
+                        if web.is_none() && should_announce_empty_model_reply(
                             &response_content,
                             captured_tool_calls.len(),
                             captured_binary_count,
@@ -3999,7 +4011,7 @@ pub async fn handle_non_stream_chat(
             let response_metadata = prepare_empty_model_reply(
                 &mut content,
                 chat_response.reasoning_content.as_deref().unwrap_or(""),
-                chat_response.tool_calls().len(),
+                chat_response.tool_calls().len() + usize::from(deepseek_web_data(&chat_response.content).is_some()),
                 response_binaries.len(),
                 merge_chat_response_metadata(
                     None,
@@ -4009,7 +4021,7 @@ pub async fn handle_non_stream_chat(
                 ),
             );
 
-            let response_metadata = web_metadata(response_metadata, deepseek_web_data(&chat_response.content), filtered);
+            let response_metadata = web_metadata(response_metadata, deepseek_web_data(&chat_response.content), filtered, chat_response.reasoning_content.as_deref());
 
             // 现在才创建响应消息（在有实际内容后）
             let now = chrono::Utc::now();

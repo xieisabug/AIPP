@@ -125,6 +125,7 @@ interface InputAreaProps {
     planMode?: boolean;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
+    deepSeekWeb?: ReturnType<typeof import('@/hooks/useDeepSeekWeb').useDeepSeekWeb>;
     /** 输入框顶部的附加条（如管家引用回复的引用对象），仅桌面端展示 */
     topChip?: ReactNode;
     /**
@@ -168,6 +169,7 @@ const InputArea = React.memo(
                 planMode = false,
                 planModeSwitching = false,
                 onPlanModeToggle,
+                deepSeekWeb,
                 topChip,
                 permissionConversationIds,
                 mentionCandidates,
@@ -1445,7 +1447,7 @@ const InputArea = React.memo(
             return (
                 <div
                     ref={rootRef}
-                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeToggle ? 'has-footer' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeToggle || deepSeekWeb ? 'has-footer' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
                     data-attachment-count={attachmentCount}
@@ -1518,6 +1520,16 @@ const InputArea = React.memo(
                         />
                     </div>
 
+                    {deepSeekWeb && <div className="input-area-footer gap-3">
+                        <label className="input-area-plan-mode">
+                            <Switch aria-label="联网" checked={deepSeekWeb.mode !== "off"}
+                                onCheckedChange={on => deepSeekWeb.change(on ? "search" : "off")} />联网
+                        </label>
+                        {deepSeekWeb.mode !== "off" && <label className="input-area-plan-mode" title="使用原生工具时会自动开启思考。思考模式忽略温度和 top-p。">
+                            <Switch aria-label="深度思考搜索" disabled={deepSeekWeb.requiresThinking} checked={deepSeekWeb.requiresThinking || deepSeekWeb.mode === "deep"}
+                                onCheckedChange={on => deepSeekWeb.change(on ? "deep" : "search")} />{deepSeekWeb.requiresThinking ? "原生工具已开启思考" : "深度思考"}
+                        </label>}
+                    </div>}
                     {showPlanModeToggle ? (
                         <div
                             className="input-area-footer"

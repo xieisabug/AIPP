@@ -757,3 +757,22 @@ fn test_butler_output_without_source_is_rejected_but_normal_chat_is_unchanged() 
     let created = repo.create(&create_test_message(2, "response", "ordinary", None, None)).unwrap();
     assert_eq!(created.parent_id, None);
 }
+
+#[test]
+fn test_deepseek_web_history_reloads_signed_calls_with_client_tool_from_database() {
+    use crate::api::ai::conversation::{build_chat_request_from_messages, build_message_list_with_metadata_from_db, BranchSelection, ToolCallStrategy};
+    use serde_json::json;
+    let (_, _, repo, conversation) = create_shared_test_db();
+    let group = new_group_id();
+    let hint = r#"<!-- MCP_TOOL_CALL:{"server_name":"notes","tool_name":"save","parameters":"{}","llm_call_id":"note1"} -->"#;
+    let calls = json!([{"index":0,"calls":[{"kind":"read_link","signature":"opaque signed page"}]}]);
+    let response = repo.create(&create_test_message(conversation.id, "response", hint, None, Some(group.clone()))).unwrap();
+    repo.update_metadata(response.id, Some(&json!({"deepseek_web":{"server_tool_calls":calls,"annotations":[]}}).to_string())).unwrap();
+    repo.create(&create_test_message(conversation.id, "tool_result", "Tool Call ID: note1\nResult:\nok", None, Some(group))).unwrap();
+    let history = repo.list_by_conversation_id(conversation.id).unwrap();
+    let (messages, _) = build_message_list_with_metadata_from_db(&history, BranchSelection::LatestBranch);
+    let request = build_chat_request_from_messages(&messages, ToolCallStrategy::NativeWithToolResponsePairing, None).chat_request;
+    let replay = &request.messages[0].content;
+    assert_eq!(replay.custom_parts()[0].data["server_tool_calls"], calls);
+    assert_eq!(replay.tool_calls()[0].call_id, "note1");
+}

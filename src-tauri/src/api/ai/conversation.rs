@@ -792,20 +792,24 @@ pub fn build_message_list_from_selected_messages(
             let mut attachments: Vec<_> = msg_to_attachment.get(&message.id).cloned().flatten().into_iter().collect();
             // The context fitter carries per-message attachments through branch selection,
             // compaction and plugin reordering. Keep the replay part attached to its owner.
+            let mut content = message.content.clone();
             if message.message_type == "response" {
-                if let Some(calls) = message.metadata_json.as_deref()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                    .and_then(|v| v.pointer("/deepseek_web/server_tool_calls").cloned()) {
+                let metadata = message.metadata_json.as_deref()
+                    .filter(|raw| raw.contains("deepseek_"))
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+                if metadata.as_ref().is_some_and(|m| m["deepseek_filtered"] == true) { content.clear(); }
+                if let Some(web) = metadata.as_ref().and_then(|m| m.get("deepseek_web")).filter(|w| w["server_tool_calls"].is_array()) {
+                    let replay = serde_json::json!({"type":"deepseek_web","server_tool_calls":web["server_tool_calls"]});
                     attachments.push(MessageAttachment {
-                        id: 0, message_id: message.id, attachment_type: AttachmentType::Text,
-                        attachment_url: Some(DEEPSEEK_REPLAY.into()), attachment_content: Some(calls.to_string()),
+                        id: 0, message_id: message.id, attachment_type: AttachmentType::DeepSeekReplay,
+                        attachment_url: None, attachment_content: Some(serde_json::json!({"part":replay, "reasoning":web["final_reasoning"]}).to_string()),
                         attachment_hash: None, use_vector: false, token_count: None,
                     });
                 }
             }
             (
                 message.message_type.clone(),
-                message.content.clone(),
+                content,
                 attachments,
             )
         })
@@ -968,13 +972,15 @@ pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Opti
     reconstruct_assistant_with_tool_calls_and_reasoning(content, None)
 }
 
-const DEEPSEEK_REPLAY: &str = "aipp:deepseek-server-tool-calls";
-
 fn build_assistant_message_from_content(
     content: &str,
     reasoning_content: Option<&str>,
     attachments: &[MessageAttachment],
 ) -> ChatMessage {
+    let replay = attachments.iter().find(|a| a.attachment_type == AttachmentType::DeepSeekReplay)
+        .and_then(|a| a.attachment_content.as_deref())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let reasoning_content = replay.as_ref().and_then(|v| v["reasoning"].as_str()).or(reasoning_content);
     let mut message = reconstruct_assistant_with_tool_calls_and_reasoning(content, reasoning_content).unwrap_or_else(
         || {
             let mut message = ChatMessage::assistant(content);
@@ -986,11 +992,9 @@ fn build_assistant_message_from_content(
             message
         },
     );
-    for attachment in attachments.iter().filter(|a| a.id == 0 && a.attachment_url.as_deref() == Some(DEEPSEEK_REPLAY)) {
-        if let Some(calls) = attachment.attachment_content.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) {
-            message.content.push(ContentPart::from_custom(serde_json::json!({"type":"deepseek_web","server_tool_calls":calls}),
-                Some(genai::ModelIden::new(genai::adapter::AdapterKind::DeepSeek, "deepseek-flash"))));
-        }
+    if let Some(mut replay) = replay {
+        message.content.push(ContentPart::from_custom(replay["part"].take(),
+            Some(genai::ModelIden::new(genai::adapter::AdapterKind::DeepSeek, "deepseek-flash"))));
     }
     message
 }
@@ -1289,7 +1293,8 @@ pub fn init_conversation(
     assistant_id: i64,
     llm_model_id: i64,
     llm_model_code: String,
-    messages: &Vec<(String, String, Vec<MessageAttachment>)>,
+    messages: &[(String, String, Vec<MessageAttachment>)],
+    user_metadata: Option<&str>,
 ) -> Result<(Conversation, Vec<Message>), AppError> {
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
     let conversation = db
@@ -1335,7 +1340,7 @@ pub fn init_conversation(
                 generation_group_id: None,
                 parent_group_id: None,
                 tool_calls_json: None,
-                metadata_json: None,
+                metadata_json: user_metadata.filter(|_| message_type == "user").map(str::to_owned),
                 first_token_time: None,
                 ttft_ms: None,
             })

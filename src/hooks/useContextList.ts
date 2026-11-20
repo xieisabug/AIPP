@@ -1,3 +1,4 @@
+import { readWebReport } from '@/utils/deepSeekWeb';
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { FileInfo, MCPToolCallUpdateEvent, Message } from '../data/Conversation';
@@ -530,6 +531,12 @@ export function useContextList({
         // Add attachments from messages (sent files)
         if (messages && messages.length > 0) {
             for (const message of messages) {
+                const web = message.message_type === "response" && readWebReport(message.metadata_json);
+                if (web && web.sources.length) {
+                    items.push({ id: `deepseek-web-${message.id}`, type: "search", source: "assistant", name: `来源 ${web.sources.length}`,
+                        searchResults: web.sources, previewStatus: "ready",
+                        previewData: { title: "DeepSeek 联网来源", items: web.sources.map(s => ({label: s.title, url: s.url, description: s.snippet})) } });
+                }
                 if (!message.attachment_list || message.attachment_list.length === 0) continue;
 
                 const attachmentSource = message.message_type === 'user' ? 'user' : 'assistant';

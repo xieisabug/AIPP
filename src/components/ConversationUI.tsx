@@ -76,6 +76,8 @@ import { useButlerInteractions, type InteractionRow } from "@/components/butler/
 import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
+import { webQuestionToResend } from "@/utils/deepSeekWeb";
+import { useDeepSeekWeb } from "@/hooks/useDeepSeekWeb";
 import { useConversationOperations } from "@/hooks/useConversationOperations";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
@@ -1167,14 +1169,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // when the separate sidebar window is NOT open — otherwise the sidebar
         // window handles its own focus/scroll/highlight.
         useEffect(() => {
-            const unlisten = listen<{ id: string }>("sidebar-focus-context", (event) => {
+            const unlisten = listen<{ id: string; conversationId?: number }>("sidebar-focus-context", (event) => {
+                if (event.payload.conversationId && event.payload.conversationId !== Number(conversationId)) return;
                 if (sidebarWindowOpen) return;
                 setFocusedContextId(event.payload.id);
             });
             return () => {
                 unlisten.then((f) => f());
             };
-        }, [sidebarWindowOpen]);
+        }, [sidebarWindowOpen, conversationId]);
 
         // Auto-clear inline highlight after 1s to match the sidebar window behavior
         useEffect(() => {
@@ -1200,8 +1203,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             invoke("open_sidebar_window");
         }, []);
 
+        // 打开已有会话时只认“已加载的这个会话”的助手。加载期间（包括切换会话后 conversation 仍是上一个的那一帧）
+        // 不回退到新建页残留的 selectedAssistant，否则会拿别的助手去判断/连接当前会话的 Agent。
+        const loadedConversation = conversationId && conversation?.id === Number(conversationId) ? conversation : null;
+        const activeAssistantId = conversationId ? (loadedConversation?.assistant_id ?? null) : selectedAssistant;
+        const deepSeekWeb = useDeepSeekWeb(activeAssistantId, conversationId || "", conversationId ? "" : selectedAgentModel || "");
+
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
+            webMode: deepSeekWeb?.mode,
             conversation,
             selectedAssistant,
             inputText,
@@ -1253,6 +1263,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             openTitleEditDialog,
             closeTitleEditDialog,
         } = useConversationOperations({
+            webMode: deepSeekWeb?.mode,
             quote: butlerQuote?.quote ?? null,
             clearQuote: clearButlerQuote,
             quietRuntimeErrors: resultOnly,
@@ -1302,6 +1313,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             enabled: mobilePlatform,
             previewFileOpen,
         });
+
+        useEffect(() => {
+            if (isMobile && focusedContextId?.startsWith("deepseek-web-")) setMobileDetailsOpen(true);
+        }, [focusedContextId, isMobile, setMobileDetailsOpen]);
 
         // 暴露给外部的方法
         useImperativeHandle(
@@ -1537,10 +1552,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ),
         });
 
-        // 打开已有会话时只认“已加载的这个会话”的助手。加载期间（包括切换会话后 conversation 仍是上一个的那一帧）
-        // 不回退到新建页残留的 selectedAssistant，否则会拿别的助手去判断/连接当前会话的 Agent。
-        const loadedConversation = conversationId && conversation?.id === Number(conversationId) ? conversation : null;
-        const activeAssistantId = conversationId ? (loadedConversation?.assistant_id ?? null) : selectedAssistant;
         // true/false：助手列表里查得到；null：助手列表未加载（如直接打开会话的窗口），无法判断
         const activeAssistantIsAgent = useMemo<boolean | null>(() => {
             if (!activeAssistantId || activeAssistantId < 0) {
@@ -2457,6 +2468,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <ChevronDown className="h-4 w-4" />回到底部
                         </Button>}
                         {!readOnly && <InputArea
+                            deepSeekWeb={deepSeekWeb}
                             permissionConversationIds={Number(conversationId)}
                             ref={inputAreaRef}
                             inputText={inputText}
@@ -2465,7 +2477,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             handleChooseFile={handleChooseFile}
                             handleDeleteFile={handleDeleteFile}
                             handlePaste={handlePaste}
-                            handleSend={handleSend}
+                            handleSend={(emptyPrompt, ...args) => {
+                                const original = emptyPrompt === "继续你的工作" && !inputText.trim() && !effectiveAiIsResponsing
+                                    ? webQuestionToResend(allDisplayMessages, Number(conversationId)) : undefined;
+                                if (original) handleMessageRegenerate(original);
+                                else handleSend(emptyPrompt, ...args);
+                            }}
                             busySendBehavior={busySendBehavior}
                             aiIsResponsing={effectiveAiIsResponsing}
                             placement="bottom"

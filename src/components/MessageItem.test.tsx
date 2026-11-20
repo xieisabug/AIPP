@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { emit } from '@tauri-apps/api/event';
 import MessageItem from './MessageItem';
 import type { AgentActivityEvent, Message } from '@/data/Conversation';
 import {
@@ -140,6 +141,31 @@ it('should interleave ordinary reasoning and tool operations before response tex
     expect(text.indexOf('reasoning')).toBeLessThan(text.indexOf('echo hi'));
     expect(text.indexOf('echo hi')).toBeLessThan(text.indexOf('final answer'));
     expect(container.querySelector('[data-agent-activity-list]')?.textContent).not.toContain('reasoning');
+});
+
+describe('DeepSeek historical responses', () => {
+    it('should expand saved search steps and focus their sources when clicked', async () => {
+        const url = 'https://example.org/source';
+        const metadata = { deepseek_web: {
+            server_tool_calls: [{ calls: [{ action: { type: 'search', queries: ['首条', '次条'] } }] }],
+            annotations: [{ url_citation: { url, title: '资料', start_index: 0, end_index: 2 } }],
+        } };
+        render(<MessageItem mergedMode message={createMessage({ id: 19, content: '甲😀乙', metadata_json: JSON.stringify(metadata) })} />);
+        const toggle = screen.getByRole('button', { name: '搜索了 2 次 · 阅读 0 个网页 · 1 个来源' });
+        expect(toggle).toHaveAttribute('aria-expanded', 'false');
+        await userEvent.click(toggle);
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        expect(screen.getByText('搜索 · 首条、次条')).toBeInTheDocument();
+        expect(screen.getByText('甲😀[⁽¹⁾](<https://example.org/source>)乙')).toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', { name: '来源 1' }));
+        expect(emit).toHaveBeenCalledWith('sidebar-focus-context', { id: 'deepseek-web-19', conversationId: 1 });
+    });
+
+    it('should replace filtered text with the muted provider notice', () => {
+        render(<MessageItem message={createMessage({ content: '未完成的正文', metadata_json: '{"deepseek_filtered":true}' })} />);
+        expect(screen.queryByText('未完成的正文')).not.toBeInTheDocument();
+        expect(screen.getByText('DeepSeek 已停止回答此问题。')).toHaveClass('text-muted-foreground');
+    });
 });
 
 describe('MessageItem attachment updates', () => {

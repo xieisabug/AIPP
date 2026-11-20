@@ -24,6 +24,9 @@ pub enum AttachmentType {
     PowerPoint = 5,
     Excel = 6,
     Skill = 7,
+    /// In-memory assistant context part. Persisted in message metadata, never in the files table.
+    #[serde(skip)]
+    DeepSeekReplay,
 }
 
 impl TryFrom<i64> for AttachmentType {

@@ -56,6 +56,7 @@ use tauri::State;
 use tracing::{debug, error, info, instrument, warn};
 
 pub(crate) mod native_queue;
+pub mod deepseek_web;
 
 const QUEUE_KIND_NORMAL: &str = "normal";
 const QUEUE_KIND_INTERRUPT: &str = "interrupt";
@@ -818,7 +819,7 @@ pub async fn enqueue_conversation_message(
         if let Some(config) = override_model_config {
             // Only native composer controls may be stored with a queued turn.
             let settings: serde_json::Map<_, _> = config.into_iter().filter(|(key, _)| matches!(key.as_str(),
-                "reasoning_effort" | "claude_effort" | "approval_policy" | "sandbox" | "collaboration_mode" | "permission_mode")).collect();
+                "deepseek_web_mode" | "reasoning_effort" | "claude_effort" | "approval_policy" | "sandbox" | "collaboration_mode" | "permission_mode")).collect();
             payload["override_model_config"] = settings.into();
         }
         let request_json = payload.to_string();
@@ -1695,11 +1696,24 @@ pub async fn ask_ai(
     );
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
+    let requested_web = override_model_config.as_ref().and_then(|c| c.get("deepseek_web_mode"));
+    let web_mode = if requested_web.is_some() && assistant_detail.assistant.assistant_type != Some(4) {
+        let db = LLMDatabase::new(&app_handle)?;
+        let model = resolve_ask_model_detail(&db, processed_request.override_model_id.as_deref(), &assistant_detail)
+            .map_err(AppError::UnknownError)?;
+        deepseek_web::selected(&model, requested_web)
+    } else { deepseek_web::WebMode::Off };
+    let mut turn_metadata = work_context.metadata.clone();
+    if web_mode != deepseek_web::WebMode::Off {
+        turn_metadata.get_or_insert_with(|| serde_json::json!({}))["deepseek_web_mode"] = serde_json::json!(web_mode);
+    }
     let (assistant_prompt_result, native_butler_role, butler_mode_conversation) = compose_conversation_instructions(
         &app_handle, &assistant_detail, assistant_prompt_result, &mcp_info, existing_conversation.as_ref(),
         &processed_request.conversation_id, override_prompt.as_deref(),
     ).await?;
 
+    let mut mcp_info = mcp_info;
+    let search_servers = deepseek_web::filter_search(&mut mcp_info, web_mode);
     let _need_generate_title = processed_request.conversation_id.is_empty();
     let request_prompt_result = if group_turn.is_some() {
         processed_request.prompt.clone()
@@ -1795,7 +1809,7 @@ pub async fn ask_ai(
         override_prompt.clone(),
         active_skill_attachments,
         relay_origin.as_deref(),
-        work_context.metadata.as_ref().map(|value| value.to_string()),
+        turn_metadata.as_ref().map(|value| value.to_string()),
     )
     .await?;
     if let Some(revision)=processed_request.butler_goal_revision {
@@ -2046,7 +2060,7 @@ pub async fn ask_ai(
             && has_available_tools
             && config_map.contains_key("reasoning_effort");
 
-        let chat_config = ChatConfig {
+        let mut chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
@@ -2186,8 +2200,9 @@ pub async fn ask_ai(
         )
         .await?;
 
-        let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+        let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+        deepseek_web::configure(web_mode, &search_servers, provider_api_type == "deepseek" && model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
         let chat_request = apply_openai_responses_stateful_request_options(
             chat_request,
             previous_response_id,
@@ -2485,6 +2500,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         .get_llm_model_detail(provider_id, model_code)
         .context("Failed to get LLM model detail")?;
 
+    let web_mode = deepseek_web::from_history(&model_detail, latest_branch.iter().rev().find(|m| m.message_type == "user"));
+    let mut mcp_info = mcp_info;
+    let search_servers = deepseek_web::filter_search(&mut mcp_info, web_mode);
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
     let provider_id = model_detail.provider.id;
@@ -2605,7 +2623,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         && has_available_tools
         && config_map.contains_key("reasoning_effort");
 
-    let chat_config = ChatConfig {
+    let mut chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
@@ -2726,8 +2744,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     )
     .await?;
 
-    let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+    let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+    deepseek_web::configure(web_mode, &search_servers, provider_api_type == "deepseek" && model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
     let chat_request = apply_openai_responses_stateful_request_options(
         chat_request,
         previous_response_id,
@@ -2891,6 +2910,9 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         .get_llm_model_detail(provider_id, model_code)
         .context("Failed to get LLM model detail")?;
 
+    let web_mode = deepseek_web::from_history(&model_detail, latest_branch.iter().rev().find(|m| m.message_type == "user"));
+    let mut mcp_info = mcp_info;
+    let search_servers = deepseek_web::filter_search(&mut mcp_info, web_mode);
     let window_clone = window.clone();
     let model_id = model_detail.model.id;
     let provider_id = model_detail.provider.id;
@@ -3010,7 +3032,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         && has_available_tools
         && config_map.contains_key("reasoning_effort");
 
-    let chat_config = ChatConfig {
+    let mut chat_config = ChatConfig {
         model_name,
         stream,
         chat_options: chat_options
@@ -3116,8 +3138,9 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let request_message_list =
         backfill_request_message_list(&app_handle, conversation_id, request_message_list, false).await?;
 
-    let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+    let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+    deepseek_web::configure(web_mode, &search_servers, provider_api_type == "deepseek" && model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
     let chat_request = apply_openai_responses_stateful_request_options(
         chat_request,
         previous_response_id,
@@ -3438,6 +3461,11 @@ pub async fn regenerate_ai(
         .get_llm_model_detail(provider_id, model_code)
         .context("Failed to get LLM model detail")?;
 
+    let web_mode = deepseek_web::from_history(&model_detail, filtered_messages.iter().rev()
+        .map(|(message, _)| message).find(|message| message.message_type == "user"));
+    let mut mcp_info = mcp_info;
+    let search_servers = deepseek_web::filter_search(&mut mcp_info, web_mode);
+
     if message.message_type == "user" {
         activity_manager.set_user_pending(&app_handle, conversation_id, message_id).await;
     } else {
@@ -3588,7 +3616,7 @@ pub async fn regenerate_ai(
             && has_available_tools
             && config_map.contains_key("reasoning_effort");
 
-        let chat_config = ChatConfig {
+        let mut chat_config = ChatConfig {
             model_name,
             stream,
             chat_options: chat_options
@@ -3682,8 +3710,9 @@ pub async fn regenerate_ai(
             true,
         )
         .await?;
-        let ChatRequestBuildResult { chat_request, tool_name_mapping } =
+        let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
+        deepseek_web::configure(web_mode, &search_servers, regenerate_provider_api_type == "deepseek" && regenerate_model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
         let chat_request = apply_openai_responses_stateful_request_options(
             chat_request,
             None,
@@ -4029,6 +4058,7 @@ async fn initialize_conversation(
             assistant_detail.model[0].id,
             assistant_detail.model[0].model_code.clone(),
             &db_init_message_list,
+            user_metadata.as_deref(),
         )?;
         // 获取用户消息的 ID（第二条消息是 user 类型）
         let user_msg_id =
