@@ -100,8 +100,18 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
     const [reloadToken, setReloadToken] = useState(0);
 
     const iframeRef = useRef<HTMLIFrameElement | null>(null);
+    // 错误页会卸载 iframe；重新挂载的新 iframe 要重新发 viewer-ready 才能接收文档
+    const setIframe = useCallback((node: HTMLIFrameElement | null) => {
+        iframeRef.current = node;
+        if (!node) {
+            viewerReadyRef.current = false;
+            setViewerReady(false);
+        }
+    }, []);
     const loadSeqRef = useRef(0);
     const sentSeqRef = useRef(-1);
+    /** 已收到 loaded/error 回执的 requestId；看门狗只在仍未收到回执时报超时。 */
+    const settledSeqRef = useRef(-1);
     const viewerReadyRef = useRef(false);
     const autoInstallTriedRef = useRef(false);
     const viewerUrl = useMemo(() => resolveOfficeViewerUrl(), []);
@@ -256,10 +266,11 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
             if (!sent) return;
             sentSeqRef.current = seq;
         }
+        if (settledSeqRef.current === seq) return;
         setRendering(true);
 
         const timer = window.setTimeout(() => {
-            if (loadSeqRef.current !== seq) return;
+            if (loadSeqRef.current !== seq || settledSeqRef.current === seq) return;
             setRendering(false);
             setPreviewError({
                 code: "render_timeout",
@@ -292,9 +303,11 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
             if (data.requestId !== loadSeqRef.current) return;
 
             if (data.type === "aipp-office:loaded") {
+                settledSeqRef.current = data.requestId;
                 setRendering(false);
                 setPreviewError(null);
             } else if (data.type === "aipp-office:error") {
+                settledSeqRef.current = data.requestId;
                 setRendering(false);
                 setPreviewError(
                     parseOfficePreviewError(
@@ -503,7 +516,7 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
                 </div>
             )}
             <iframe
-                ref={iframeRef}
+                ref={setIframe}
                 src={viewerUrl}
                 title={title || "Office 文档预览"}
                 className="block h-full w-full flex-1 border-0 bg-background"

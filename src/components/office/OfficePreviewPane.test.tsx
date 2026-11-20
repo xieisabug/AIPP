@@ -199,6 +199,81 @@ describe("OfficePreviewPane", () => {
         });
     });
 
+    function mockReadyWithFile() {
+        mockInvoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") return READY_STATUS;
+            if (cmd === "read_authorized_office_file") {
+                return encodeOfficeResponse("a.docx", new Uint8Array([80, 75, 3, 4]));
+            }
+            return null;
+        });
+    }
+
+    /** 模拟查看器 iframe 发给宿主的消息，并拦截宿主发给查看器的消息。 */
+    async function mountViewer() {
+        const iframe = (await screen.findByTitle("a.docx")) as HTMLIFrameElement;
+        const frameWindow = iframe.contentWindow as Window;
+        const posted = vi.fn();
+        frameWindow.postMessage = posted as unknown as Window["postMessage"];
+        const fromViewer = (data: Record<string, unknown>) =>
+            act(() => {
+                window.dispatchEvent(new MessageEvent("message", { data, source: frameWindow }));
+            });
+        return { posted, fromViewer };
+    }
+
+    it("should keep showing the document when the watchdog deadline passes after a successful render", async () => {
+        mockReadyWithFile();
+        render(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", expect.anything()));
+        const { posted, fromViewer } = await mountViewer();
+
+        vi.useFakeTimers();
+        try {
+            await fromViewer({ type: "aipp-office:viewer-ready" });
+            const load = posted.mock.calls.find(([msg]) => msg.type === "aipp-office:load")?.[0];
+            expect(load).toBeTruthy();
+            await fromViewer({ type: "aipp-office:loaded", requestId: load.requestId, format: "docx" });
+            expect(screen.queryByTestId("office-preview-loading")).toBeNull();
+
+            act(() => {
+                vi.advanceTimersByTime(60_000);
+            });
+            expect(screen.queryByTestId("office-preview-error")).toBeNull();
+            expect(screen.getByTitle("a.docx").tagName).toBe("IFRAME");
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("should report a render timeout only when the viewer never answers and resend after retry", async () => {
+        mockReadyWithFile();
+        render(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", expect.anything()));
+        const first = await mountViewer();
+
+        vi.useFakeTimers();
+        try {
+            await first.fromViewer({ type: "aipp-office:viewer-ready" });
+            act(() => {
+                vi.advanceTimersByTime(46_000);
+            });
+            expect(screen.getByTestId("office-preview-error")).toHaveAttribute("data-error-code", "render_timeout");
+        } finally {
+            vi.useRealTimers();
+        }
+
+        fireEvent.click(screen.getByText("重试"));
+        const second = await mountViewer();
+        // 新 iframe 尚未就绪前不能发送文档（否则消息会丢失）
+        await waitFor(() => expect(mockInvoke.mock.calls.filter(([c]) => c === "read_authorized_office_file")).toHaveLength(2));
+        expect(second.posted.mock.calls.some(([msg]) => msg.type === "aipp-office:load")).toBe(false);
+        await second.fromViewer({ type: "aipp-office:viewer-ready" });
+        await waitFor(() =>
+            expect(second.posted.mock.calls.some(([msg]) => msg.type === "aipp-office:load")).toBe(true),
+        );
+    });
+
     it("should reject legacy .doc/.xls/.ppt immediately without downloading the plugin", async () => {
         mockInvoke.mockResolvedValue(MISSING_STATUS);
 
