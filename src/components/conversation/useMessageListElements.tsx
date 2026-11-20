@@ -18,6 +18,7 @@ import MergedAssistantGroup, {
     type MergedAssistantGroupProps,
 } from "./MergedAssistantGroup";
 import { splitMergedGroupMessages } from "./mergedGroupSegments";
+import { MessageTurnContext } from "./messageTurnContext";
 import { LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX } from "./layoutConstants";
 import { findLastReplyStartIndex } from "./lastReplyLayout";
 import {
@@ -87,12 +88,19 @@ export interface MessageElementEntry {
     groupControl: any;
 }
 
-function exchangeEntry(message: Message): MessageElementEntry {
+function exchangeEntry(message: Message, isLatestTurn: boolean): MessageElementEntry {
     if (message.message_type === "butler_report") return {
         messageId: message.id, groupControl: null,
         messageElement: <ReportBubble text={message.content} />,
     };
-    if (message.butler_interaction) return { messageId: message.id, groupControl: null, messageElement: <div className="w-full">{message.butler_interaction}</div> };
+    if (message.butler_interaction) return {
+        messageId: message.id, groupControl: null,
+        messageElement: (
+            <MessageTurnContext.Provider value={isLatestTurn}>
+                <div className="w-full">{message.butler_interaction}</div>
+            </MessageTurnContext.Provider>
+        ),
+    };
     if (message.message_type === "butler_processing") {
         return {
             messageId: message.id, groupControl: null, estimatedHeight: 32,
@@ -420,6 +428,18 @@ export function useMessageListElements({
                 : null,
         [allDisplayMessages],
     );
+    // 最近一条真实用户消息之后的内容属于最新一轮；管家时间线里的交互卡片据此决定是否默认收起。
+    const latestTurnMessages = useMemo(() => {
+        let start = 0;
+        for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
+            const message = allDisplayMessages[index];
+            if (message.message_type === "user" && !message.content?.startsWith("Tool execution results:\n")) {
+                start = index + 1;
+                break;
+            }
+        }
+        return new Set(allDisplayMessages.slice(start));
+    }, [allDisplayMessages]);
     // Bucketed so window resizes do not re-estimate every message per pixel.
     const estimateListWidthPx = listWidthPx && listWidthPx > 0
         ? Math.round(listWidthPx / 40) * 40
@@ -524,7 +544,7 @@ export function useMessageListElements({
         if (!isMergeAssistantMessages) {
             // 非合并模式：每条消息单独渲染
             const entries = allDisplayMessages.map((message) => {
-                if (message.message_type === "butler_report" || message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
+                if (message.message_type === "butler_report" || message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message, latestTurnMessages.has(message));
                 const custom = customEntry(message);
                 if (custom) return custom;
                 const streamEvent = streamingMessages.get(message.id);
@@ -678,7 +698,7 @@ export function useMessageListElements({
         for (const message of allDisplayMessages) {
             if (message.message_type === "butler_report" || message.butler_interaction || message.butler_posts || message.message_type === "butler_processing") {
                 flushGroup({ keepExpanded: false });
-                result.push(exchangeEntry(message));
+                result.push(exchangeEntry(message, latestTurnMessages.has(message)));
                 continue;
             }
             const custom = customEntry(message);
@@ -746,6 +766,7 @@ export function useMessageListElements({
         return result;
     }, [
         allDisplayMessages,
+        latestTurnMessages,
         streamingMessages,
         getGenerationGroupControl,
         shiningMessageIds,

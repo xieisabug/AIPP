@@ -20,6 +20,7 @@ import {
     openOfficePreviewModal,
 } from "@/utils/officeFile";
 import OfficePreviewPane, { OfficeFormatIcon } from "@/components/office/OfficePreviewPane";
+import { useIsLatestMessageTurn } from "@/components/conversation/messageTurnContext";
 
 export interface AskUserQuestionOption {
     label: string;
@@ -595,8 +596,10 @@ export function PreviewFileCard({
     request,
     isOpen,
 }: PreviewFileCardProps) {
+    // 与 preview_code 一致：只有最新一轮的预览默认展开，进入新一轮后旧预览自动收起。
+    const isLatestTurn = useIsLatestMessageTurn();
     const [activeTab, setActiveTab] = useState(0);
-    const [collapsed, setCollapsed] = useState(false);
+    const [collapsed, setCollapsed] = useState(!isLatestTurn);
     const [currentRequest, setCurrentRequest] = useState<PreviewFileRequest | null>(request);
     const [isResourceDialogOpen, setIsResourceDialogOpen] = useState(false);
     const bodyId = useId();
@@ -605,9 +608,12 @@ export function PreviewFileCard({
         if (request?.files.length) {
             setActiveTab(0);
         }
-        setCollapsed(false);
         setCurrentRequest(request);
     }, [request]);
+
+    useEffect(() => {
+        setCollapsed(!isLatestTurn);
+    }, [isLatestTurn, request?.request_id]);
 
     if (!currentRequest || !isOpen) return null;
 

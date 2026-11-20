@@ -12,6 +12,7 @@ import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent, readScheduledTaskMetadata } from "../data/Conversation";
 import { AgentActivityTranscript } from "./conversation/AgentActivityTranscript";
 import { AgentPlanCard } from "./conversation/AgentPlanCard";
+import { MessageTurnContext } from "./conversation/messageTurnContext";
 import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
 import { useCopyHandler } from "../hooks/useCopyHandler";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
@@ -760,4 +761,13 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
 MessageItem.displayName = "MessageItem";
 
-export default React.memo(MessageItem, areEqual);
+// 让消息内的卡片（preview_file 等）知道自己是否属于最新一轮，进入新一轮后自动收起。
+const MessageItemWithTurn = (props: MessageItemProps) => props.isLastMessage === undefined
+    ? <MessageItem {...props} />
+    : (
+        <MessageTurnContext.Provider value={props.isLastMessage}>
+            <MessageItem {...props} />
+        </MessageTurnContext.Provider>
+    );
+
+export default React.memo(MessageItemWithTurn, areEqual);
