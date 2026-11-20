@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
 import { cn } from '@/utils/utils';
 import MCP from '@/assets/mcp.svg?react';
+import { detectOfficeExtension, isOfficeFileName, openOfficePreviewModal } from '@/utils/officeFile';
 
 interface ContextListProps {
     items: ContextItem[];
@@ -278,6 +279,20 @@ const ContextList: React.FC<ContextListProps> = ({
             } catch (e) {
                 console.error('Open image failed', e);
             }
+        } else if (
+            type === 'Word' ||
+            type === 'Excel' ||
+            type === 'PowerPoint' ||
+            isOfficeFileName(item.name) ||
+            isOfficeFileName(url)
+        ) {
+            openOfficePreviewModal({
+                title: item.name || url || 'Office 文档',
+                extension: detectOfficeExtension(item.name) ?? detectOfficeExtension(url),
+                source: {
+                    localPath: url,
+                },
+            });
         } else if (url) {
             // Open file using system default application
             try {

@@ -2,9 +2,16 @@ name: Package official plugins
 
 on:
   workflow_dispatch:
+    inputs:
+      plugins:
+        description: "Comma-separated plugin codes to package (empty = all)"
+        required: false
+        default: ""
   push:
     tags:
       - "plugins-v*"
+      # Single-plugin release, e.g. plugin-office-preview-plugin-v0.1.0
+      - "plugin-*-v*"
 
 jobs:
   package-plugins:
@@ -14,19 +21,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
+          node-version: 22
+          cache: pnpm
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Ensure zip is available
         run: sudo apt-get update && sudo apt-get install -y zip
 
+      - name: Resolve plugin filter
+        id: filter
+        env:
+          INPUT_PLUGINS: ${{ github.event.inputs.plugins }}
+        run: |
+          plugins="$INPUT_PLUGINS"
+          if [[ "$GITHUB_REF_NAME" =~ ^plugin-(.+)-v[0-9] ]]; then
+            plugins="${BASH_REMATCH[1]}"
+          fi
+          echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
+
       - name: Package official plugins
         run: node scripts/package-official-plugins.js
+        env:
+          AIPP_PLUGINS: ${{ steps.filter.outputs.plugins }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -34,6 +57,6 @@ jobs:
           path: dist-official-plugins/**
 
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/plugins-v')
+        if: startsWith(github.ref, 'refs/tags/plugins-v') || startsWith(github.ref, 'refs/tags/plugin-')
         with:
           files: dist-official-plugins/**

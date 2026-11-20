@@ -55,7 +55,12 @@ import { ComposerPermissionSlot } from "./ComposerPermissionSlot";
 import CircleButton from "../CircleButton";
 import { Switch } from "@/components/ui/switch";
 import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
-import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
+import { AcpAvailableCommand, AttachmentType, FileInfo } from "../../data/Conversation";
+import {
+    detectOfficeExtension,
+    isOfficeFileName,
+    openOfficePreviewModal,
+} from "@/utils/officeFile";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -262,6 +267,25 @@ const InputArea = React.memo(
             );
 
             const handleOpenFile = (fileId: number) => {
+                const matched = fileInfoList?.find((f) => f.id === fileId);
+                if (
+                    matched &&
+                    (matched.type === AttachmentType.Word ||
+                        matched.type === AttachmentType.Excel ||
+                        matched.type === AttachmentType.PowerPoint ||
+                        isOfficeFileName(matched.name) ||
+                        isOfficeFileName(matched.path))
+                ) {
+                    openOfficePreviewModal({
+                        title: matched.name || "Office 文档",
+                        extension: detectOfficeExtension(matched.name) ?? detectOfficeExtension(matched.path),
+                        source: {
+                            attachmentId: fileId > 0 ? fileId : undefined,
+                            localPath: matched.path,
+                        },
+                    });
+                    return;
+                }
                 invoke("open_attachment_with_default_app", { id: fileId });
             };
             const { renderFiles } = useFileList(fileInfoList, handleDeleteFile, handleOpenFile);

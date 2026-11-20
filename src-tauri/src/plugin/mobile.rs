@@ -1,7 +1,12 @@
 use crate::api::plugin_api::ResolvedPluginManifest;
 
+/// `viewer` 运行时只在隔离 iframe 里渲染（如 Office 预览），宿主窗口不执行插件代码。
+fn is_mobile_runtime(runtime_type: &str) -> bool {
+    matches!(runtime_type, "js" | "viewer")
+}
+
 pub(crate) fn declaration_issue(value: &serde_json::Value) -> Option<String> {
-    if value.pointer("/runtime/type").and_then(|v| v.as_str()).unwrap_or("js") != "js" {
+    if !is_mobile_runtime(value.pointer("/runtime/type").and_then(|v| v.as_str()).unwrap_or("js")) {
         return Some("进程或 WASM 插件尚不支持此移动运行时".to_string());
     }
     if value.pointer("/mobile/supported").and_then(|v| v.as_bool()) != Some(true)
@@ -27,7 +32,7 @@ pub(crate) fn declaration_issue(value: &serde_json::Value) -> Option<String> {
 }
 
 pub(crate) fn compatibility_issue(manifest: &ResolvedPluginManifest) -> Option<String> {
-    if manifest.runtime.runtime_type != "js" || manifest.plugin_type.iter().any(|kind| kind == "assistantType") {
+    if !is_mobile_runtime(&manifest.runtime.runtime_type) || manifest.plugin_type.iter().any(|kind| kind == "assistantType") {
         return Some("此设备暂不执行进程、WASM 或插件助手类型".to_string());
     }
     match std::fs::read(manifest.plugin_dir.join("plugin.json")) {

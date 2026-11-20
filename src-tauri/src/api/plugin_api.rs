@@ -31,7 +31,7 @@ const DEFAULT_PLUGIN_QUERY_MAX_ROWS: usize = 1000;
 const ABSOLUTE_PLUGIN_QUERY_MAX_ROWS: usize = 10000;
 const OFFICIAL_PLUGINS_API: &str = "https://aipp-helper.xiejingyang.com/api/plugins";
 const OFFICIAL_PLUGINS_TIMEOUT_SECS: u64 = 5;
-const PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+const PLUGIN_ARCHIVE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 const PLUGIN_ARCHIVE_MAX_DISCOVERY_DEPTH: usize = 6;
 const COMFYUI_IMAGE_MAX_BYTES: usize = 20 * 1024 * 1024;
 const COMFYUI_GENERATION_TIMEOUT_SECS: u64 = 120;
@@ -782,14 +782,14 @@ fn default_hook_active() -> bool {
     true
 }
 
-fn emit_plugin_registry_changed(app_handle: &tauri::AppHandle, reason: &str) {
+pub(crate) fn emit_plugin_registry_changed(app_handle: &tauri::AppHandle, reason: &str) {
     let payload = PluginRegistryChangedEvent { reason: reason.to_string() };
     if let Err(e) = app_handle.emit("plugin_registry_changed", payload) {
         warn!(error = %e, "Failed to emit plugin_registry_changed");
     }
 }
 
-fn get_plugin_root_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn get_plugin_root_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let plugin_root = app_data_dir.join("plugin");
     fs::create_dir_all(&plugin_root).map_err(|e| e.to_string())?;
@@ -1469,18 +1469,54 @@ fn build_plugin_archive_http_client(proxy_url: Option<&str>) -> Result<reqwest::
     builder.build().map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallProgressEvent {
+    pub plugin_code: String,
+    pub stage: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub percent: Option<u8>,
+    pub message: String,
+}
+
 async fn download_and_extract_plugin_source(
+    app_handle: Option<&tauri::AppHandle>,
+    progress_plugin_code: Option<&str>,
     source: &PluginInstallRecipeSource,
     expected_sha256: Option<&str>,
     proxy_url: Option<&str>,
 ) -> Result<DownloadedPluginArchive, String> {
+    let emit_progress = |stage: &str, downloaded: u64, total: Option<u64>, msg: String| {
+        if let (Some(app), Some(code)) = (app_handle, progress_plugin_code) {
+            let percent = total
+                .filter(|t| *t > 0)
+                .map(|t| ((downloaded.saturating_mul(100)) / t).min(100) as u8);
+            let _ = app.emit(
+                "plugin_install_progress",
+                PluginInstallProgressEvent {
+                    plugin_code: code.to_string(),
+                    stage: stage.to_string(),
+                    downloaded_bytes: downloaded,
+                    total_bytes: total,
+                    percent,
+                    message: msg,
+                },
+            );
+        }
+    };
+
     source.validate()?;
     let download_url = source.archive_url()?;
-    let archive_bytes = if source.source_type == PluginInstallRecipeSourceType::LocalZip {
+    let archive_bytes: Vec<u8> = if source.source_type == PluginInstallRecipeSourceType::LocalZip {
+        emit_progress("downloading", 0, None, "正在读取本地插件压缩包...".to_string());
         let bytes = fs::read(&download_url)
             .map_err(|e| format!("读取本地插件 ZIP 失败：{}（{}）", download_url, e))?;
-        bytes.into()
+        let total = bytes.len() as u64;
+        emit_progress("downloading", total, Some(total), "已读取本地插件压缩包".to_string());
+        bytes
     } else {
+        emit_progress("downloading", 0, None, "正在连接插件下载源...".to_string());
         let client = build_plugin_archive_http_client(proxy_url)?;
         let response = client
             .get(&download_url)
@@ -1497,18 +1533,59 @@ async fn download_and_extract_plugin_source(
             ));
         }
 
-        response
-            .bytes()
-            .await
-            .map_err(|e| format!("读取下载的插件压缩包失败：{}（{}）", download_url, e))?
+        let total_bytes = response.content_length();
+        let mut buffer = Vec::with_capacity(total_bytes.unwrap_or(1024 * 1024) as usize);
+        let mut stream = response.bytes_stream();
+        let mut last_emitted_percent: i16 = -1;
+        let mut last_emitted_bytes: u64 = 0;
+
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res
+                .map_err(|e| format!("读取下载的插件压缩包失败：{}（{}）", download_url, e))?;
+            buffer.extend_from_slice(&chunk);
+            let downloaded = buffer.len() as u64;
+            let cur_pct = total_bytes
+                .filter(|t| *t > 0)
+                .map(|t| ((downloaded.saturating_mul(100)) / t).min(100) as i16)
+                .unwrap_or(-1);
+            if cur_pct != last_emitted_percent
+                || downloaded.saturating_sub(last_emitted_bytes) >= 512 * 1024
+            {
+                last_emitted_percent = cur_pct;
+                last_emitted_bytes = downloaded;
+                let mb_done = (downloaded as f64) / (1024.0 * 1024.0);
+                let msg = if let Some(total) = total_bytes {
+                    let mb_total = (total as f64) / (1024.0 * 1024.0);
+                    format!("正在下载插件包 ({:.1} / {:.1} MiB)...", mb_done, mb_total)
+                } else {
+                    format!("正在下载插件包 ({:.1} MiB)...", mb_done)
+                };
+                emit_progress("downloading", downloaded, total_bytes, msg);
+            }
+        }
+        buffer
     };
-    let actual_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(archive_bytes.as_ref())));
+
+    let total_len = archive_bytes.len() as u64;
+    emit_progress(
+        "verifying",
+        total_len,
+        Some(total_len),
+        "正在校验插件包完整性 (SHA-256)...".to_string(),
+    );
+    let actual_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&archive_bytes)));
     if let Some(expected_sha256) = expected_sha256.filter(|value| !value.trim().is_empty()) {
         verify_sha256_value(&actual_sha256, expected_sha256)?;
     }
 
+    emit_progress(
+        "extracting",
+        total_len,
+        Some(total_len),
+        "正在解压插件包到本地目录...".to_string(),
+    );
     let temp_dir = TempPluginExtractDir::new("plugin_archive_extract")?;
-    extract_zip_bytes_to_dir(archive_bytes.as_ref(), &temp_dir.path)?;
+    extract_zip_bytes_to_dir(&archive_bytes, &temp_dir.path)?;
     let repo_root = resolve_plugin_archive_root(&temp_dir.path)?;
     Ok(DownloadedPluginArchive {
         _temp_dir: temp_dir,
@@ -1702,7 +1779,15 @@ fn collect_plugin_directory_entries(path: &Path) -> Result<Vec<PathBuf>, String>
 
 fn resolve_plugin_recipe_dir(repo_root: &Path, from: &str) -> Result<PathBuf, String> {
     validate_relative_source_path(from)?;
-    let resolved = if from.trim() == "." { repo_root.to_path_buf() } else { repo_root.join(from) };
+    let resolved = if from.trim() == "." {
+        repo_root.to_path_buf()
+    } else {
+        let joined = repo_root.join(from);
+        // 官方 zip 顶层是单个 `<code>/` 目录，`resolve_plugin_archive_root` 已剥掉这一层；
+        // 旧版目录数据仍写 `from: <code>`，此时它指的就是归档根本身。
+        let names_stripped_root = repo_root.file_name().and_then(|n| n.to_str()) == Some(from.trim());
+        if !joined.exists() && names_stripped_root { repo_root.to_path_buf() } else { joined }
+    };
     if !resolved.exists() {
         return Err(format!("Configured plugin directory {} does not exist in archive", from));
     }
@@ -1894,7 +1979,7 @@ fn build_plugin_preview(source_dir: &Path, fallback: Option<String>) -> Result<O
     Ok(fallback)
 }
 
-fn install_plugin_dir_atomic(source_dir: &Path, plugin_root: &Path, code: &str) -> Result<(), String> {
+pub(crate) fn install_plugin_dir_atomic(source_dir: &Path, plugin_root: &Path, code: &str) -> Result<(), String> {
     fs::create_dir_all(plugin_root)
         .map_err(|e| format!("Failed to create plugin root {}: {}", plugin_root.display(), e))?;
     let staging_dir = plugin_root.join(format!("{}.installing-{}", code, uuid::Uuid::new_v4()));
@@ -2323,7 +2408,7 @@ fn sync_discovered_plugins(
     Ok(())
 }
 
-fn sync_registry(db: &PluginDatabase, app_handle: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn sync_registry(db: &PluginDatabase, app_handle: &tauri::AppHandle) -> Result<(), String> {
     ensure_default_plugins(db, app_handle)?;
     sync_discovered_plugins(db, app_handle)
 }
@@ -2434,7 +2519,13 @@ pub async fn inspect_plugin_archive_source(
 ) -> Result<PluginArchiveInspection, String> {
     let plugin_root = get_plugin_root_path(&app_handle)?;
     let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
+    let progress_code = dirs
+        .as_ref()
+        .and_then(|d| d.first())
+        .map(|d| d.to.as_str());
     let archive = download_and_extract_plugin_source(
+        Some(&app_handle),
+        progress_code,
         &source,
         expected_sha256.as_deref(),
         proxy_url.as_deref(),
@@ -2463,7 +2554,10 @@ pub async fn install_plugin_archive_source(
     validate_plugin_install_dirs(&selections, false)?;
     let plugin_root = get_plugin_root_path(&app_handle)?;
     let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
+    let progress_code = selections.first().map(|d| d.to.clone());
     let archive = download_and_extract_plugin_source(
+        Some(&app_handle),
+        progress_code.as_deref(),
         &source,
         expected_sha256.as_deref(),
         proxy_url.as_deref(),
@@ -2477,6 +2571,20 @@ pub async fn install_plugin_archive_source(
             plugin.to,
             plugin.validation.errors.join("；")
         ));
+    }
+
+    if let Some(code) = progress_code.as_deref() {
+        let _ = app_handle.emit(
+            "plugin_install_progress",
+            PluginInstallProgressEvent {
+                plugin_code: code.to_string(),
+                stage: "installing".to_string(),
+                downloaded_bytes: 100,
+                total_bytes: Some(100),
+                percent: Some(95),
+                message: "正在写入并注册插件...".to_string(),
+            },
+        );
     }
 
     for plugin in &plugins {
@@ -2498,6 +2606,20 @@ pub async fn install_plugin_archive_source(
         }
     }
     emit_plugin_registry_changed(&app_handle, "archive-installed");
+
+    if let Some(code) = progress_code.as_deref() {
+        let _ = app_handle.emit(
+            "plugin_install_progress",
+            PluginInstallProgressEvent {
+                plugin_code: code.to_string(),
+                stage: "done".to_string(),
+                downloaded_bytes: 100,
+                total_bytes: Some(100),
+                percent: Some(100),
+                message: "插件安装完成".to_string(),
+            },
+        );
+    }
 
     Ok(PluginArchiveInstallResult {
         source: source.clone(),
@@ -3448,6 +3570,45 @@ pub async fn plugin_execute_image_task(app_handle: tauri::AppHandle, plugin_id: 
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_resolve_plugin_recipe_dir_accepts_legacy_code_for_stripped_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // 官方 zip 解压后是 `<extract>/demo-plugin/...`，归档根已被剥到 demo-plugin
+        let root = temp_dir.path().join("demo-plugin");
+        fs::create_dir_all(root.join("dist")).unwrap();
+
+        assert_eq!(resolve_plugin_recipe_dir(&root, ".").unwrap(), root);
+        assert_eq!(resolve_plugin_recipe_dir(&root, "demo-plugin").unwrap(), root);
+        assert_eq!(resolve_plugin_recipe_dir(&root, "dist").unwrap(), root.join("dist"));
+        assert!(resolve_plugin_recipe_dir(&root, "other-plugin").is_err());
+    }
+
+    #[test]
+    fn test_official_zip_layout_resolves_plugin_root_with_dot_and_legacy_dirs() {
+        use std::io::Write;
+        // 与 scripts/package-official-plugins.js 一致：zip 顶层只有 `<code>/`
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.add_directory("office-preview-plugin/", opts).unwrap();
+            zip.start_file("office-preview-plugin/plugin.json", opts).unwrap();
+            zip.write_all(br#"{"code":"office-preview-plugin"}"#).unwrap();
+            zip.start_file("office-preview-plugin/dist/viewer/index.html", opts).unwrap();
+            zip.write_all(b"<html></html>").unwrap();
+            zip.finish().unwrap();
+        }
+        let temp_dir = tempfile::tempdir().unwrap();
+        extract_zip_bytes_to_dir(buf.get_ref(), temp_dir.path()).unwrap();
+        let repo_root = resolve_plugin_archive_root(temp_dir.path()).unwrap();
+
+        for from in [".", "office-preview-plugin"] {
+            let dir = resolve_plugin_recipe_dir(&repo_root, from).unwrap();
+            assert!(dir.join("plugin.json").is_file(), "from={from}");
+            assert!(dir.join("dist/viewer/index.html").is_file(), "from={from}");
+        }
+    }
 
     #[test]
     fn resolve_manifest_reads_permissions_and_bangs() {

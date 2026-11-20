@@ -47,7 +47,10 @@ class MobileFilesPlugin(private val activity: Activity) : Plugin(activity) {
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val types = mapOf("png" to "image/png", "jpg" to "image/jpeg", "jpeg" to "image/jpeg",
         "gif" to "image/gif", "webp" to "image/webp", "txt" to "text/plain", "md" to "text/markdown",
-        "csv" to "text/csv", "json" to "application/json", "zip" to "application/zip")
+        "csv" to "text/csv", "json" to "application/json", "zip" to "application/zip",
+        "docx" to "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" to "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" to "application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
     private fun fail(invoke: Invoke, stage: String, ex: Exception) {
         invoke.reject("MOBILE_FILE $stage: ${ex.javaClass.simpleName}: ${ex.message ?: "native layer supplied no detail"}")
@@ -123,7 +126,7 @@ class MobileFilesPlugin(private val activity: Activity) : Plugin(activity) {
                         }
                         name = name.substringAfterLast('/').substringAfterLast('\\').replace(Regex("[\\x00-\\x1f]"), "_").take(160)
                         val ext = name.substringAfterLast('.', "").lowercase()
-                        val mime = types[ext] ?: error("unsupported format: $name; supported: PNG/JPEG/GIF/WebP, UTF-8 TXT/MD/CSV/JSON")
+                        val mime = types[ext] ?: error("unsupported format: $name; supported: PNG/JPEG/GIF/WebP, UTF-8 TXT/MD/CSV/JSON, DOCX/XLSX/PPTX")
                         require((ext == "zip") == args.payload.optBoolean("skill", false)) { "ZIP is only accepted by Skills import" }
                         require(declaredSize <= singleLimit) { "$name exceeds 20 MiB" }
                         require(declaredSize < 0 || total + declaredSize <= batchLimit) { "batch exceeds 50 MiB" }
@@ -186,7 +189,19 @@ class MobileFilesPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun validateExportType(payload: JSObject) {
-        val mime = mapOf("md" to "text/markdown", "txt" to "text/plain", "docx" to "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "png" to "image/png", "jpg" to "image/jpeg", "jpeg" to "image/jpeg", "gif" to "image/gif", "webp" to "image/webp", "pdf" to "application/pdf")
+        val mime = mapOf(
+            "md" to "text/markdown",
+            "txt" to "text/plain",
+            "docx" to "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx" to "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "pptx" to "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "png" to "image/png",
+            "jpg" to "image/jpeg",
+            "jpeg" to "image/jpeg",
+            "gif" to "image/gif",
+            "webp" to "image/webp",
+            "pdf" to "application/pdf"
+        )
         val name = payload.getString("name")
         val expected = mime[name.substringAfterLast('.', "").lowercase()]
         require(expected != null && expected == payload.getString("mime")) { "unsupported export extension or MIME: $name" }

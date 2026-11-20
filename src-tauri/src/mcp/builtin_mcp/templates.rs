@@ -933,7 +933,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "preview_file".into(),
-                description: "Display file content or rich media in a specialized UI component. Supports markdown, text, image, pdf and html, including multi-file tab/grid/list views.".into(),
+                description: "Display file content or rich media in a specialized UI component. Supports markdown, text, image, pdf, html, and read-only Word/Excel/PowerPoint (docx/xlsx/pptx, local file path in `url`), including multi-file tab/grid/list views.".into(),
                 input_schema: serde_json::json!({
                     "$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object",
@@ -952,8 +952,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                                     },
                                     "type": {
                                         "type": "string",
-                                        "enum": ["markdown", "text", "image", "pdf", "html"],
-                                        "description": "Content format used by the renderer."
+                                        "enum": ["markdown", "text", "image", "pdf", "html", "docx", "xlsx", "pptx"],
+                                        "description": "Content format used by the renderer. docx/xlsx/pptx need `url` set to a local file path."
                                     },
                                     "content": {
                                         "type": "string",

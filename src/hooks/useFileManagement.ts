@@ -24,19 +24,50 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         setFileInfoList(null);
     }, []);
 
-    const isSupportedFile = useCallback((file: File) => {
-        return file.type.startsWith("image/") || file.type === "text/plain";
+    const getOfficeAttachmentTypeByName = useCallback((nameOrMime: string): AttachmentType | null => {
+        const lower = nameOrMime.toLowerCase();
+        if (lower.endsWith(".docx") || lower.includes("wordprocessingml.document")) {
+            return AttachmentType.Word;
+        }
+        if (lower.endsWith(".xlsx") || lower.includes("spreadsheetml.sheet")) {
+            return AttachmentType.Excel;
+        }
+        if (lower.endsWith(".pptx") || lower.includes("presentationml.presentation")) {
+            return AttachmentType.PowerPoint;
+        }
+        return null;
     }, []);
 
-    const getAttachmentType = useCallback((fileType: string) => {
-        if (fileType.startsWith("image/")) {
-            return AttachmentType.Image;
-        } else if (fileType === "text/plain") {
-            return AttachmentType.Text;
-        } else {
-            return AttachmentType.Text;
-        }
-    }, []);
+    const isSupportedFile = useCallback(
+        (file: File) => {
+            return (
+                file.type.startsWith("image/") ||
+                file.type === "text/plain" ||
+                getOfficeAttachmentTypeByName(file.name) !== null ||
+                getOfficeAttachmentTypeByName(file.type) !== null
+            );
+        },
+        [getOfficeAttachmentTypeByName],
+    );
+
+    const getAttachmentType = useCallback(
+        (fileType: string, fileName?: string) => {
+            const officeByMime = getOfficeAttachmentTypeByName(fileType);
+            if (officeByMime !== null) return officeByMime;
+            if (fileName) {
+                const officeByName = getOfficeAttachmentTypeByName(fileName);
+                if (officeByName !== null) return officeByName;
+            }
+            if (fileType.startsWith("image/")) {
+                return AttachmentType.Image;
+            } else if (fileType === "text/plain") {
+                return AttachmentType.Text;
+            } else {
+                return AttachmentType.Text;
+            }
+        },
+        [getOfficeAttachmentTypeByName],
+    );
 
     const processFiles = useCallback(
         async (files: File[]) => {
@@ -122,9 +153,13 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                     try {
                         const res = await invoke<AddAttachmentResponse>("add_attachment", { fileUrl: file.path });
                         if (res.attachment_id <= 0) throw new Error("附件登记未返回有效 ID");
-                        newFiles.push({ id: res.attachment_id, name: file.name, path: file.path,
-                            type: file.mime.startsWith("image/") ? AttachmentType.Image : AttachmentType.Text,
-                            thumbnail: file.thumbnail });
+                        newFiles.push({
+                            id: res.attachment_id,
+                            name: file.name,
+                            path: file.path,
+                            type: getAttachmentType(file.mime, file.name),
+                            thumbnail: file.thumbnail,
+                        });
                     } catch (error) {
                         toast.error(`附件 ${file.name} 登记失败: ${fileErrorMessage(error)}`);
                     }
@@ -146,7 +181,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                     const contents = await readFile(path);
 
                     let thumbnail = undefined;
-                    let type = AttachmentType.Text;
+                    let type = getAttachmentType("", name);
 
                     if (name.match(/\.(jpg|jpeg|png|gif)$/i)) {
                         const blob = new Blob([contents]);

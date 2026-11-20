@@ -8,6 +8,9 @@ import MobileShell from "./mobile/MobileShell";
 import LoadingScreen from "./components/LoadingScreen";
 import { Toaster } from "./components/ui/sonner.tsx";
 
+// Office 预览窗口只在打开时才需要，懒加载避免增加首屏体积
+const OfficePreviewModal = lazy(() => import("./components/office/OfficePreviewModal"));
+
 // 按需加载各个窗口，避免一次性打包全部页面导致移动端首屏加载过慢
 const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {
     ask: () => import("./windows/AskWindow"),
@@ -47,6 +50,9 @@ function App() {
     return (
         <>
             <Suspense fallback={<LoadingScreen />}>{isMobilePlatform ? <MobileShell /> : WindowComponent ? <WindowComponent /> : <div>未知窗口类型: {winLabel}</div>}</Suspense>
+            <Suspense fallback={null}>
+                <OfficePreviewModal />
+            </Suspense>
             <Toaster richColors />
         </>
     );

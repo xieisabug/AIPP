@@ -1,0 +1,30 @@
+{
+  "name": "@aipp/office-preview-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Official AIPP Office preview runtime plugin powered by BetterOffice 0.5.1",
+  "scripts": {
+    "build": "node scripts/build-plugin.mjs",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
+  },
+  "dependencies": {
+    "@betteroffice/docx": "0.5.1",
+    "@betteroffice/docx-react": "0.5.1",
+    "@betteroffice/fonts": "0.4.2",
+    "@betteroffice/fonts-cjk": "0.4.2",
+    "@betteroffice/pptx": "0.5.1",
+    "@betteroffice/pptx-react": "0.5.1",
+    "@betteroffice/xlsx": "0.5.1",
+    "@betteroffice/xlsx-react": "0.5.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "office-preview-plugin",
+  "code": "office-preview-plugin",
+  "name": "Office 文档预览",
+  "version": "0.1.0",
+  "description": "在 AIPP 内只读预览 Word (.docx)、Excel (.xlsx)、PowerPoint (.pptx)，基于 BetterOffice 本地离线渲染，内置简中与拉丁开源字体，文档不上传。",
+  "author": "AIPP",
+  "entry": "dist/main.js",
+  "runtime": {
+    "type": "viewer",
+    "entry": "dist/main.js"
+  },
+  "pluginTypes": [
+    "interfaceType"
+  ],
+  "permissions": [],
+  "minAippVersion": "1.6.1",
+  "mobile": {
+    "supported": true,
+    "apiVersion": 1
+  }
+}

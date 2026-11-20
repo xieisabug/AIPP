@@ -5,6 +5,8 @@ fn test_mobile_plugin_requires_declaration_and_known_dependencies() {
     assert!(declaration_issue(&serde_json::json!({})).is_some());
     let mut manifest = serde_json::json!({"mobile":{"supported":true,"apiVersion":1},"runtime":{"type":"js"},"permissions":["network.image-generation"]});
     assert!(declaration_issue(&manifest).is_none());
+    manifest["runtime"]["type"] = "viewer".into();
+    assert!(declaration_issue(&manifest).is_none(), "iframe viewer runtime runs no host code");
     manifest["runtime"]["type"] = "process".into();
     assert!(declaration_issue(&manifest).is_some());
     manifest["runtime"]["type"] = "js".into();

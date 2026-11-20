@@ -29,7 +29,18 @@ export function fileErrorMessage(error: unknown): string {
 
 export const exportMime = (name: string): string => {
     const extension = name.split(".").pop()?.toLowerCase();
-    const types: Record<string, string> = { md: "text/markdown", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", png: "image/png", pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+    const types: Record<string, string> = {
+        md: "text/markdown",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        png: "image/png",
+        pdf: "application/pdf",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        gif: "image/gif",
+        webp: "image/webp",
+    };
     if (!extension || !types[extension]) throw new Error(`不支持的导出格式：${name}`);
     return types[extension];
 };

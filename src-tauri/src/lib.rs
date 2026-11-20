@@ -78,6 +78,12 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_model_request_mode, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
+use crate::api::office_api::{
+    enable_office_preview_plugin, get_office_preview_plugin_status,
+    handle_office_preview_protocol_request, install_office_preview_plugin,
+    open_office_file_externally, read_authorized_office_file,
+    OFFICE_PREVIEW_SCHEME,
+};
 use crate::api::operation_api::{confirm_agent_interaction, confirm_acp_elicitation, confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
@@ -711,6 +717,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(crate::api::ai::agent_driver::lifecycle::AgentSessionBindings::default())
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
+        .register_uri_scheme_protocol(OFFICE_PREVIEW_SCHEME, handle_office_preview_protocol_request)
         .plugin(tauri_plugin_notification::init())
         .plugin(mobile_files::init())
         .plugin(mobile_system_ui::init())
@@ -1461,6 +1468,12 @@ pub fn run() {
             // Export commands
             markdown_to_docx,
             markdown_to_pdf,
+            // Office preview commands
+            get_office_preview_plugin_status,
+            install_office_preview_plugin,
+            enable_office_preview_plugin,
+            read_authorized_office_file,
+            open_office_file_externally,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

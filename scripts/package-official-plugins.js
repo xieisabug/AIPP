@@ -47,7 +47,33 @@ function inferTags(manifest) {
     if (manifest.code === "benchmark-plugin") {
         tags.add("experimental");
     }
+    if (manifest.code === "office-preview-plugin") {
+        tags.add("office");
+        tags.add("preview");
+    }
     return Array.from(tags);
+}
+
+/**
+ * Plugins that declare their own dependencies (e.g. office-preview-plugin bundles BetterOffice
+ * with its own Vite build) need them installed before `build`; the rest build with root tooling.
+ */
+async function installPluginDependencies(pluginDir) {
+    const packageJsonPath = path.join(pluginDir, "package.json");
+    if (!(await pathExists(packageJsonPath))) {
+        return;
+    }
+    const pkg = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
+    const hasDeps = Object.keys(pkg.dependencies || {}).length + Object.keys(pkg.devDependencies || {}).length > 0;
+    if (!hasDeps) {
+        return;
+    }
+    const frozen = existsSync(path.join(pluginDir, "pnpm-lock.yaml")) ? ["--frozen-lockfile"] : [];
+    execFileSync("pnpm", ["install", "--ignore-workspace", ...frozen], {
+        cwd: pluginDir,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+    });
 }
 
 async function copyRuntimePackage(pluginDir, packageDir, manifest, entryChecksum) {
@@ -89,7 +115,8 @@ async function packagePlugin(pluginDirName) {
         throw new Error(`Plugin directory and manifest code mismatch: ${pluginDirName} != ${code}`);
     }
 
-    execFileSync("npm", ["--prefix", pluginDir, "run", "build"], { stdio: "inherit" });
+    await installPluginDependencies(pluginDir);
+    execFileSync("npm", ["--prefix", pluginDir, "run", "build"], { stdio: "inherit", shell: process.platform === "win32" });
 
     const entry = manifest.runtime?.entry || manifest.entry || "dist/main.js";
     const entryPath = path.join(pluginDir, ...entry.split("/"));
@@ -128,9 +155,11 @@ async function packagePlugin(pluginDirName) {
             type: "zip",
             url: `${releaseBaseUrl}/${zipName}`,
         },
+        // The zip holds a single top-level `<code>/` folder, which the installer strips,
+        // so the plugin lives at the archive root.
         dirs: [
             {
-                from: code,
+                from: ".",
                 to: code,
             },
         ],
@@ -144,9 +173,17 @@ async function main() {
     await fs.mkdir(stagingRoot, { recursive: true });
 
     const entries = await fs.readdir(pluginRoot, { withFileTypes: true });
+    // AIPP_PLUGINS=office-preview-plugin,foo packages only the listed plugins.
+    const only = new Set(
+        (process.env.AIPP_PLUGINS || "")
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+    );
     const pluginDirs = entries
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
+        .filter((name) => only.size === 0 || only.has(name))
         .sort();
     const officialPlugins = [];
 

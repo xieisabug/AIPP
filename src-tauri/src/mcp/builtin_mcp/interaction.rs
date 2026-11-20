@@ -202,12 +202,24 @@ impl PreviewFileRequest {
                 return Err(format!("File #{} title cannot be empty", index + 1));
             }
 
-            let supported =
-                matches!(file.file_type.as_str(), "markdown" | "text" | "image" | "pdf" | "html");
+            let file_type = file.file_type.as_str();
+            let supported = matches!(
+                file_type,
+                "markdown" | "text" | "image" | "pdf" | "html" | "docx" | "xlsx" | "pptx"
+            );
             if !supported {
                 return Err(format!(
                     "Unsupported file type '{}' for file '{}'",
                     file.file_type, file.title
+                ));
+            }
+            // Office 预览只读取本机文件，不接受内联内容
+            if matches!(file_type, "docx" | "xlsx" | "pptx")
+                && file.url.as_deref().map(str::trim).unwrap_or_default().is_empty()
+            {
+                return Err(format!(
+                    "File '{}' of type '{}' requires `url` set to a local file path",
+                    file.title, file.file_type
                 ));
             }
         }
@@ -333,6 +345,15 @@ impl PreviewFileRelayState {
             self.entries.lock().map_err(|_| "Preview relay state poisoned".to_string())?;
         Self::prune_expired_locked(&mut entries);
         Ok(entries.get(token).cloned())
+    }
+
+    pub(crate) fn get_authorized_file_path(
+        &self,
+        token: &str,
+    ) -> Result<Option<(PathBuf, String)>, String> {
+        Ok(self
+            .get_entry(token)?
+            .map(|entry| (entry.file_path, entry.file_type)))
     }
 }
 
@@ -560,11 +581,16 @@ fn rewrite_local_preview_urls(
         }
 
         match file.file_type.as_str() {
-            "image" | "pdf" | "html" => {
+            "image" | "pdf" | "html" | "docx" | "xlsx" | "pptx" => {
+                let max_bytes = if matches!(file.file_type.as_str(), "docx" | "xlsx" | "pptx") {
+                    crate::api::office_api::DESKTOP_MAX_OFFICE_BYTES
+                } else {
+                    PREVIEW_FILE_RELAY_MAX_BYTES
+                };
                 let metadata = std::fs::metadata(&local_path).map_err(|e| {
                     format!("Failed to read metadata for '{}': {}", local_path.display(), e)
                 })?;
-                if metadata.len() > PREVIEW_FILE_RELAY_MAX_BYTES {
+                if metadata.len() > max_bytes {
                     return Err(format!(
                         "Local preview file is too large ({} bytes): {}",
                         metadata.len(),
@@ -1383,6 +1409,7 @@ mod tests {
     use super::{
         inline_local_text_preview_files, inline_text_file_content, is_allowed_preview_relay_origin,
         resolve_local_file_path, unfinished_ask_user_call_ids, PreviewCodeRequest, PreviewFileItem,
+        PreviewFileRequest,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1450,6 +1477,29 @@ mod tests {
         };
 
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn test_preview_file_validate_office_types_require_local_url() {
+        let item = |file_type: &str, url: Option<&str>| PreviewFileItem {
+            title: "报告".to_string(),
+            file_type: file_type.to_string(),
+            content: None,
+            url: url.map(str::to_string),
+            language: None,
+            description: None,
+        };
+        let request = |files: Vec<PreviewFileItem>| PreviewFileRequest {
+            files,
+            view_mode: None,
+            metadata: None,
+        };
+
+        for file_type in ["docx", "xlsx", "pptx"] {
+            assert!(request(vec![item(file_type, Some("C:/out/report.x"))]).validate().is_ok());
+            assert!(request(vec![item(file_type, None)]).validate().is_err());
+        }
+        assert!(request(vec![item("doc", Some("C:/out/old.doc"))]).validate().is_err());
     }
 
     #[test]

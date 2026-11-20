@@ -82,12 +82,19 @@ fn add_attachment_by_path(
     }
 
     // 3. 解析文件类型
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
     let file_type = from_path(&file_path).first_or_octet_stream().to_string();
     let mut file_type_classify = String::new();
 
-    debug!(file_type, "detected file type");
+    debug!(file_type, ext, "detected file type");
 
-    if file_type.starts_with("text/") || file_type == "application/json" {
+    if matches!(ext.as_str(), "docx" | "xlsx" | "pptx") {
+        file_type_classify = ext.clone();
+    } else if file_type.starts_with("text/") || file_type == "application/json" {
         file_type_classify = "text".to_string();
     } else if file_type.starts_with("image/") {
         file_type_classify = "image".to_string();
@@ -96,26 +103,44 @@ fn add_attachment_by_path(
 
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
-    // 4. 使用不同类型的文件读取方式来进行读取
-    let reader = match file_type_classify.as_str() {
+    // 4. 使用不同类型的文件读取方式来进行读取（Office 文件只校验并算 SHA-256，不把二进制转为文本）
+    let (reader, hash_str) = match file_type_classify.as_str() {
         "image" => {
             // 入库前规整一次（缩放/压缩/转成模型支持的格式），不保留原图
             let bytes = std::fs::read(&file_path)?;
-            prepare_image_for_prompt(&bytes, &file_url)?
+            let prepared = prepare_image_for_prompt(&bytes, &file_url)?;
+            let mut hasher = Sha256::new();
+            hasher.update(prepared.as_bytes());
+            (Some(prepared), hex::encode(hasher.finalize()))
         }
         "text" => {
             // 读取文本文件
             let mut file = File::open(file_path)?;
             let mut content = String::new();
             file.read_to_string(&mut content)?;
-            content
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            (Some(content), hex::encode(hasher.finalize()))
+        }
+        "docx" | "xlsx" | "pptx" => {
+            let bytes = std::fs::read(&file_path)?;
+            let max_bytes = if cfg!(mobile) {
+                crate::api::office_api::MOBILE_MAX_OFFICE_BYTES
+            } else {
+                crate::api::office_api::DESKTOP_MAX_OFFICE_BYTES
+            };
+            let file_name = file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("document.docx");
+            crate::api::office_api::validate_office_bytes(file_name, &bytes, max_bytes)
+                .map_err(|e| AppError::Anyhow(e.message))?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            (None, hex::encode(hasher.finalize()))
         }
         _ => return Err(AppError::Anyhow(anyhow!("Unsupported file type").to_string())),
     };
-
-    let mut hasher = Sha256::new();
-    hasher.update(reader.as_bytes());
-    let hash_str = hex::encode(hasher.finalize());
 
     debug!(hash = %hash_str, "computed file hash");
 
@@ -139,39 +164,26 @@ fn add_attachment_by_path(
         None => {
             // 5. 保存到数据库
             // todo: 添加数据库配置和 CRUD 操作
-            let attachment_id = match file_type_classify.as_str() {
-                "image" => {
-                    // 使用 BufReader 读取图片文件
-                    let message_attachment =
-                        db.attachment_repo().unwrap().create(&MessageAttachment {
-                            id: 0,
-                            message_id: -1,
-                            attachment_type: AttachmentType::Image,
-                            attachment_url: Some(file_url),
-                            attachment_content: Some(reader),
-                            attachment_hash: Some(hash_str),
-                            use_vector: false,
-                            token_count: Some(0),
-                        })?;
-                    message_attachment.id
-                }
-                "text" => {
-                    // 使用 BufReader 读取图片文件
-                    let message_attachment =
-                        db.attachment_repo().unwrap().create(&MessageAttachment {
-                            id: 0,
-                            message_id: -1,
-                            attachment_type: AttachmentType::Text,
-                            attachment_url: Some(file_url),
-                            attachment_content: Some(reader),
-                            attachment_hash: Some(hash_str),
-                            use_vector: false,
-                            token_count: Some(0),
-                        })?;
-                    message_attachment.id
-                }
+            let attachment_type = match file_type_classify.as_str() {
+                "image" => AttachmentType::Image,
+                "text" => AttachmentType::Text,
+                "docx" => AttachmentType::Word,
+                "pptx" => AttachmentType::PowerPoint,
+                "xlsx" => AttachmentType::Excel,
                 _ => return Err(AppError::Anyhow(anyhow!("Unsupported file type").to_string())),
             };
+            let message_attachment =
+                db.attachment_repo().unwrap().create(&MessageAttachment {
+                    id: 0,
+                    message_id: -1,
+                    attachment_type,
+                    attachment_url: Some(file_url),
+                    attachment_content: reader,
+                    attachment_hash: Some(hash_str),
+                    use_vector: false,
+                    token_count: Some(0),
+                })?;
+            let attachment_id = message_attachment.id;
 
             // 6. 返回到前端 attachment_id，等待之后的 message 创建和更新
             Ok(AttachmentResult { attachment_id })
@@ -256,6 +268,45 @@ pub async fn open_attachment_with_default_app(
 
     #[cfg(target_os = "android")]
     {
+        if matches!(
+            attachment.attachment_type,
+            AttachmentType::Word | AttachmentType::Excel | AttachmentType::PowerPoint
+        ) {
+            let raw_url = attachment
+                .attachment_url
+                .as_deref()
+                .ok_or_else(|| AppError::Anyhow(format!("Attachment {id}: local path missing")))?;
+            let path = Path::new(raw_url);
+            crate::mobile_files::require_attachment_path(&app_handle, path)
+                .map_err(AppError::Anyhow)?;
+            let bytes = std::fs::read(path)?;
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("document.docx")
+                .to_string();
+            let mime = match attachment.attachment_type {
+                AttachmentType::Word => {
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                }
+                AttachmentType::Excel => {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                }
+                AttachmentType::PowerPoint => {
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                }
+                _ => "application/octet-stream",
+            };
+            crate::mobile_files::mobile_file_action(
+                app_handle,
+                "open".into(),
+                serde_json::json!({"name": name, "mime": mime, "data": STANDARD.encode(&bytes)}),
+            )
+            .await
+            .map_err(AppError::Anyhow)?;
+            return Ok(());
+        }
+
         let content = attachment.attachment_content.as_deref()
             .ok_or_else(|| AppError::Anyhow(format!("Attachment {id}: local content missing; restore attachment before opening")))?;
         let (data, mime, name) = if content.starts_with("data:image/") {
@@ -270,9 +321,19 @@ pub async fn open_attachment_with_default_app(
         return Ok(());
     }
 
-    let file_path =
-        Path::new("attachments").join(attachment.attachment_url.as_ref().ok_or_else(|| AppError::Anyhow(format!("Attachment {id}: path missing")))?);
-    let file_path = file_path.to_str().unwrap();
+    let raw_url = attachment
+        .attachment_url
+        .as_ref()
+        .ok_or_else(|| AppError::Anyhow(format!("Attachment {id}: path missing")))?;
+    let direct_path = Path::new(raw_url);
+    let resolved_path = if direct_path.exists() {
+        direct_path.to_path_buf()
+    } else {
+        Path::new("attachments").join(raw_url)
+    };
+    let file_path = resolved_path
+        .to_str()
+        .ok_or_else(|| AppError::Anyhow("Invalid attachment path".into()))?;
     debug!(file_path, "opening attachment with default app");
 
     let opener = app_handle.opener();

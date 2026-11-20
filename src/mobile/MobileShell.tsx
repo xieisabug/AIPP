@@ -32,7 +32,7 @@ export default function MobileShell() {
         // In particular, component frames must not navigate to local services.
         const framePolicy = document.createElement("meta");
         framePolicy.httpEquiv = "Content-Security-Policy";
-        framePolicy.content = "frame-src 'self'";
+        framePolicy.content = "frame-src 'self' aipp-office: http://aipp-office.localhost aipp-preview: http://aipp-preview.localhost";
         document.head.append(framePolicy);
         const navigate = (event: Event) => {
             const route = (event as CustomEvent).detail;

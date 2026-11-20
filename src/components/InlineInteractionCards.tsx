@@ -6,13 +6,20 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Button } from "@/components/ui/button";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import { cn } from "@/utils/utils";
-import { Check, ChevronDown, CircleCheck, FileText, Files, Globe, ImageIcon, MessageCircleQuestion } from "lucide-react";
+import { Check, ChevronDown, CircleCheck, FileText, Files, Globe, ImageIcon, Maximize2, MessageCircleQuestion } from "lucide-react";
 import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
 import {
     hasActionablePreviewResources,
     PreviewExternalResourcesPayload,
     PreviewResourceAuthorizationResult,
 } from "@/utils/previewExternalResources";
+import {
+    detectOfficeExtension,
+    extractPreviewRelayToken,
+    isOfficeFileName,
+    openOfficePreviewModal,
+} from "@/utils/officeFile";
+import OfficePreviewPane, { OfficeFormatIcon } from "@/components/office/OfficePreviewPane";
 
 export interface AskUserQuestionOption {
     label: string;
@@ -462,7 +469,30 @@ export function AskUserQuestionCard({
     );
 }
 
-const fileTypeIcon = (type: string) => {
+const isOfficePreviewFile = (file: PreviewFileItem): boolean => {
+    const t = file.type?.toLowerCase();
+    return (
+        t === "docx" ||
+        t === "xlsx" ||
+        t === "pptx" ||
+        isOfficeFileName(file.title) ||
+        isOfficeFileName(file.url)
+    );
+};
+
+const getOfficeSourceFromPreviewFile = (file: PreviewFileItem) => {
+    const token = extractPreviewRelayToken(file.url);
+    return {
+        relayToken: token ?? undefined,
+        localPath: !token ? file.url : undefined,
+    };
+};
+
+const fileTypeIcon = (type: string, title?: string) => {
+    const officeExt = detectOfficeExtension(type.startsWith(".") ? type : `file.${type}`) ?? detectOfficeExtension(title);
+    if (officeExt) {
+        return <OfficeFormatIcon ext={officeExt} className="h-3.5 w-3.5 shrink-0" />;
+    }
     switch (type) {
         case "image":
             return <ImageIcon className="h-3.5 w-3.5 shrink-0" />;
@@ -543,6 +573,16 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
             return <iframe src={file.url} title={file.title} className={FRAME_CLASS} />;
         }
         return <iframe srcDoc={file.content ?? ""} title={file.title} className={FRAME_CLASS} />;
+    }
+
+    if (isOfficePreviewFile(file)) {
+        return (
+            <OfficePreviewPane
+                title={file.title}
+                source={getOfficeSourceFromPreviewFile(file)}
+                heightClassName="h-[60vh]"
+            />
+        );
     }
 
     return <div className="px-3 py-2 text-sm text-muted-foreground">不支持的文件类型：{file.type}</div>;
@@ -680,6 +720,25 @@ export function PreviewFileCard({
                         </span>
                     )}
                     <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                        {((activeFile && isOfficePreviewFile(activeFile)) ||
+                            (files.length === 1 && isOfficePreviewFile(files[0]))) && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 gap-1 px-2 text-xs has-[>svg]:px-2"
+                                onClick={() => {
+                                    const targetFile = activeFile ?? files[0];
+                                    openOfficePreviewModal({
+                                        title: targetFile.title,
+                                        source: getOfficeSourceFromPreviewFile(targetFile),
+                                    });
+                                }}
+                            >
+                                <Maximize2 className="size-3.5" />
+                                窗口预览
+                            </Button>
+                        )}
                         {showExternalResourceButton && (
                             <Button
                                 type="button"
