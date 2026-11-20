@@ -33,6 +33,7 @@ pub mod butler_exchange_context;
 pub mod connection;
 pub(crate) mod cascade_delete;
 pub mod conversation_db;
+pub(crate) mod conversation_identity;
 pub mod llm_db;
 pub mod mcp_db;
 pub mod plugin_db;

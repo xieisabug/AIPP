@@ -2020,6 +2020,13 @@ impl ConversationDatabase {
         let conn = self.get_connection().unwrap();
 
         ensure_conversation_table(&conn)?;
+        if !super::conversation_identity::installed(&conn)? {
+            let path = self.db_path.with_file_name("sync.db");
+            let legacy = if path.try_exists().map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))? {
+                Some(Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?)
+            } else { None };
+            super::conversation_identity::initialize(&conn, legacy.as_ref())?;
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS message (
                 id              INTEGER

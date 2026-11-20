@@ -43,8 +43,11 @@ pub(super) fn pristine_condition(table: &str) -> Option<String> {
     }
 }
 
-/// Number of rows of `spec` that are user data (not official, not a pristine seed).
-pub(super) fn user_row_count(conn: &Connection, spec: &SyncTableSpec) -> Result<i64, String> {
+/// Whether the table contains user data beyond the installed seeds.
+pub(super) fn has_user_rows(conn: &Connection, spec: &SyncTableSpec) -> Result<bool, String> {
+    if spec.object_type == personal_vault::OBJECT_TYPE && existing_columns(conn, spec.table, &["id"])?.is_empty() {
+        return Ok(false);
+    }
     let mut conditions: Vec<String> = spec.where_clause.map(|w| format!("({w})")).into_iter().collect();
     if let Some(column) = spec.official_column {
         conditions.push(format!("COALESCE({column}, 0) = 0"));
@@ -57,7 +60,7 @@ pub(super) fn user_row_count(conn: &Connection, spec: &SyncTableSpec) -> Result<
         conditions.push(format!("NOT ({seed})"));
     }
     let where_sql = if conditions.is_empty() { String::new() } else { format!(" WHERE {}", conditions.join(" AND ")) };
-    conn.query_row(&format!("SELECT COUNT(*) FROM {}{}", spec.table, where_sql), [], |row| row.get(0))
+    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {}{})", spec.table, where_sql), [], |row| row.get(0))
         .map_err(|e| e.to_string())
 }
 
@@ -72,7 +75,7 @@ pub(super) fn local_scope_is_empty<C: Borrow<Connection>>(
             continue;
         }
         let conn = open(spec.db_name)?;
-        if user_row_count(conn.borrow(), &spec)? > 0 {
+        if has_user_rows(conn.borrow(), &spec)? {
             return Ok(false);
         }
     }

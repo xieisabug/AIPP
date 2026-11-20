@@ -24,6 +24,9 @@ use crate::db::get_db_path;
 use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 
 mod divergence;
+mod incremental;
+#[cfg(test)]
+mod incremental_tests;
 mod persistence;
 mod quick_assistant;
 mod seed;
@@ -2138,7 +2141,7 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
     ensure_sync_db(app_handle)?;
     recover_pending_business_applies(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
-    let mut sync_conn = open_sync_db(app_handle)?;
+    let sync_conn = open_sync_db(app_handle)?;
     let assistant_db = open_data_db(&get_db_path(app_handle, "assistant.db")?)?;
     // Finish any interrupted duplicate-provider merge before reading references.
     finish_provider_merge_redirects(app_handle, &sync_conn, &assistant_db)?;
@@ -2154,7 +2157,6 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
             .and_then(|()| vault::state(app_handle)),
     );
     vault_sync::discard_obsolete_outbox(&sync_conn, secret_state.ready_key())?;
-    let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
     let mut dangling = DanglingFkScanReport::default();
@@ -2166,22 +2168,12 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
             if secrets::server_wins_pending(&sync_conn) { continue; }
             Some(key)
         } else { None };
-        let (snapshots, present_ids) =
-            read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
-        let snapshots = match secret_key {
-            Some(key) if spec.object_type == vault::OBJECT_TYPE => vault_sync::seal_snapshots(&sync_conn, key, snapshots)?,
-            Some(key) if spec.object_type == personal_vault::OBJECT_TYPE => personal_vault::seal_snapshots(&sync_conn, key, snapshots)?,
-            Some(key) => secrets::seal_snapshots(&sync_conn, key, snapshots)?,
-            None => snapshots,
-        };
-        for snapshot in snapshots {
-            if enqueue_snapshot_if_changed(&sync_conn, &snapshot, &device_id)? {
-                enqueued += 1;
-            }
-        }
-        enqueued += scan_local_deletes(app_handle, &sync_conn, &spec, &present_ids)?;
+        let data = open_data_db(&get_db_path(app_handle, spec.db_name)?)?;
+        let mut dependencies = HashMap::new();
+        enqueued += incremental::scan(&data, &sync_conn, &spec, &device_id, secret_key, &mut dangling,
+            |kind, id| dependency_row_exists(app_handle, kind, id, &mut dependencies),
+            |object| local_row_exists_in_db(&sync_conn, &data, &spec, object))?;
     }
-    sync_conn.commit().map_err(|e| e.to_string())?;
     log_dangling_fk_summary(&dangling);
     Ok((enqueued, dangling))
 }
@@ -2189,25 +2181,21 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
 /// 删除检测：shadow 中已同步（非墓碑）但本轮快照里不存在的对象，
 /// 确认本地行确实不存在后入队 delete 事件。
 /// 同时清理"本地行已删除但 outbox 里还留着 upsert"的过期事件。
-fn scan_local_deletes(
-    app_handle: &AppHandle,
-    sync_conn: &Connection,
-    spec: &SyncTableSpec,
-    present_ids: &HashSet<String>,
-) -> Result<usize, String> {
-    scan_local_deletes_in_db(sync_conn, spec, present_ids, |object_id| {
-        local_row_exists(app_handle, sync_conn, spec, object_id)
-    })
-}
-
 fn scan_local_deletes_in_db(
     sync_conn: &Connection, spec: &SyncTableSpec, present_ids: &HashSet<String>,
     mut exists: impl FnMut(&str) -> Result<bool, String>,
 ) -> Result<usize, String> {
+    let candidates = find_deleted_candidates(sync_conn, spec.object_type, present_ids)?;
+    let stale_upserts = find_stale_pending_upserts(sync_conn, spec.object_type, present_ids)?;
+    reconcile_missing_objects(sync_conn, spec, candidates, stale_upserts, &mut exists)
+}
+
+fn reconcile_missing_objects(
+    sync_conn: &Connection, spec: &SyncTableSpec, candidates: Vec<(String, i64)>,
+    stale_upserts: Vec<String>, mut exists: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<usize, String> {
     let device_id = ensure_device_id(sync_conn)?;
     let mut enqueued = 0;
-
-    let candidates = find_deleted_candidates(sync_conn, spec.object_type, present_ids)?;
     for (object_id, base_version) in candidates {
         // 行可能只是被 where_clause 过滤出同步范围，必须确认行真的不存在
         if exists(&object_id)? {
@@ -2220,7 +2208,6 @@ fn scan_local_deletes_in_db(
 
     // 新增后未推送即删除：没有 shadow，但 outbox 可能残留 pending/failed upsert，
     // 不清理的话会把已删除的对象推上服务器（幽灵复活）。
-    let stale_upserts = find_stale_pending_upserts(sync_conn, spec.object_type, present_ids)?;
     for object_id in stale_upserts {
         if exists(&object_id)? {
             continue;
@@ -2299,17 +2286,6 @@ fn find_stale_pending_upserts(
 
 /// 确认本地行是否仍然存在（忽略普通 where_clause 的同步范围过滤）。
 /// 保险箱条目主动关闭同步是例外：保留本机行，但撤回已同步的副本。
-fn local_row_exists(
-    app_handle: &AppHandle,
-    sync_conn: &Connection,
-    spec: &SyncTableSpec,
-    object_id: &str,
-) -> Result<bool, String> {
-    let path = get_db_path(app_handle, spec.db_name)?;
-    let conn = open_data_db(&path)?;
-    local_row_exists_in_db(sync_conn, &conn, spec, object_id)
-}
-
 fn local_row_exists_in_db(
     sync_conn: &Connection, conn: &Connection, spec: &SyncTableSpec, object_id: &str,
 ) -> Result<bool, String> {
@@ -2358,6 +2334,13 @@ fn enqueue_delete_event(
     base_version: i64,
     device_id: &str,
 ) -> Result<bool, String> {
+    conn.execute_batch("SAVEPOINT enqueue_local_delete").map_err(|err| err.to_string())?;
+    let result = enqueue_delete_in_transaction(conn, spec, object_id, base_version, device_id);
+    persistence::finish_savepoint(conn, "enqueue_local_delete", result)
+}
+
+fn enqueue_delete_in_transaction(conn: &Connection, spec: &SyncTableSpec, object_id: &str,
+    base_version: i64, device_id: &str) -> Result<bool, String> {
     let mut base_version = base_version;
     if matches!(spec.object_type, "system.feature_config" | "assistant.model_config") {
         conn.execute("DELETE FROM sync_outbox WHERE object_type=?1 AND object_id=?2
@@ -2424,36 +2407,34 @@ fn enqueue_delete_event(
     Ok(true)
 }
 
-fn read_local_snapshots(
-    app_handle: &AppHandle,
-    spec: &SyncTableSpec,
-    sync_conn: &Connection,
-    dangling: &mut DanglingFkScanReport,
-) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
-    let path = get_db_path(app_handle, spec.db_name)?;
-    let conn = open_data_db(&path)?;
-    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
-    read_local_snapshots_from_db(&conn, spec, sync_conn, dangling, |object_type, value| {
-        dependency_row_exists(app_handle, object_type, value, &mut dep_conns)
-    })
-}
-
 fn read_local_snapshots_from_db(
     conn: &Connection,
     spec: &SyncTableSpec,
     sync_conn: &Connection,
     dangling: &mut DanglingFkScanReport,
+    dependency_exists: impl FnMut(&str, i64) -> Result<bool, String>,
+) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
+    read_snapshot_rows(conn, spec, sync_conn, dangling, None, |_, _| {}, dependency_exists)
+}
+
+fn read_snapshot_rows(
+    conn: &Connection, spec: &SyncTableSpec, sync_conn: &Connection, dangling: &mut DanglingFkScanReport,
+    ids: Option<&[i64]>, mut record_refs: impl FnMut(i64, &HashMap<String, JsonValue>),
     mut dependency_exists: impl FnMut(&str, i64) -> Result<bool, String>,
 ) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let columns = existing_columns(&conn, spec.table, spec.columns)?;
     if columns.is_empty() || !columns.iter().any(|c| c == "id") {
         return Ok((Vec::new(), HashSet::new()));
     }
+    let mut filters: Vec<String> = spec.where_clause.map(|filter| format!("({filter})")).into_iter().collect();
+    if let Some(ids) = ids {
+        filters.push(format!("id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")));
+    }
     let sql = format!(
         "SELECT {} FROM {} {} ORDER BY {}",
         columns.join(", "),
         spec.table,
-        spec.where_clause.map(|w| format!("WHERE {w}")).unwrap_or_default(),
+        if filters.is_empty() { String::new() } else { format!("WHERE {}", filters.join(" AND ")) },
         spec.order_by
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -2480,6 +2461,7 @@ fn read_local_snapshots_from_db(
         }
 
         let local_id = local_id.ok_or_else(|| format!("{} row missing id", spec.table))?;
+        record_refs(local_id, &raw_values);
         if spec.object_type == vault::OBJECT_TYPE {
             fields.insert("vault_local_id".into(), raw_values.get("server_id").cloned().unwrap_or(JsonValue::Null));
         }
@@ -2525,7 +2507,11 @@ fn read_local_snapshots_from_db(
             remap_sync_object_map(sync_conn, spec.object_type, spec.table, local_id, &id)?;
             id
         } else {
-            ensure_object_id(sync_conn, spec.object_type, spec.table, local_id)?
+            if spec.object_type == "conversation" {
+                map_conversation_identity(conn, sync_conn, local_id)?
+            } else {
+                ensure_object_id(sync_conn, spec.object_type, spec.table, local_id)?
+            }
         };
         // 无论本行是否因外键未决而跳过，都要计入 present 集合，
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
@@ -3464,6 +3450,13 @@ fn apply_change_to_db_inner(
         }
     }
 
+    if spec.object_type == "conversation" && crate::db::conversation_identity::installed(conn).map_err(|err| err.to_string())? {
+        if let Some(id) = find_local_id_by_object_id(sync_conn, "conversation", &change.object_id)? {
+            let canonical = find_object_id(sync_conn, "conversation", id)?.ok_or("缺少会话同步映射")?;
+            conn.execute("UPDATE conversation_identity SET uuid=?1 WHERE conversation_id=?2", params![canonical, id])
+                .map_err(|err| err.to_string())?;
+        }
+    }
     if spec.object_type == vault::CONNECTION_TYPE { vault_sync::connection_headers(conn)?; }
     provider_merge::record_origin(sync_conn, change)?;
     upsert_shadow_from_remote_with_fields(sync_conn, &spec, change, &field_values)?;
@@ -3944,7 +3937,7 @@ fn maybe_fork_message_in_db(
     let forked_id = fork(conversation_id, fork_point)?;
 
     // Ensure the forked conversation has a sync_id so subsequent local scan uploads C'.
-    let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
+    map_conversation_identity(data_conn, sync_conn, forked_id)?;
     remember_sync_branch(sync_conn, conversation_id, field_values, forked_id)?;
     field_values.insert(
         "conversation_id".to_string(),
@@ -4073,7 +4066,7 @@ fn try_fork_message_conflict_in_db(sync_conn: &Connection, data_conn: &Connectio
     let forked_id = if routed {
         field_as_i64(&field_values, "conversation_id").expect("routed conversation")
     } else { fork_sync_conversation_in_db(data_conn, conversation_id, fork_point)? };
-    let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
+    map_conversation_identity(data_conn, sync_conn, forked_id)?;
     remember_sync_branch(sync_conn, conversation_id, &field_values, forked_id)?;
 
     // Keep local tip: detach this sync_id from the local row so scan will re-id it,
@@ -4336,15 +4329,21 @@ fn remap_sync_object_map(
     local_id: i64,
     sync_id: &str,
 ) -> Result<(), String> {
+    if find_object_id(conn, object_type, local_id)?.as_deref() == Some(sync_id) {
+        return Ok(());
+    }
+    conn.execute_batch("SAVEPOINT remap_object").map_err(|err| err.to_string())?;
+    let result = remap_object_inner(conn, object_type, local_table, local_id, sync_id);
+    persistence::finish_savepoint(conn, "remap_object", result)
+}
+
+fn remap_object_inner(conn: &Connection, object_type: &str, local_table: &str, local_id: i64, sync_id: &str) -> Result<(), String> {
     conn.execute(
         "INSERT OR REPLACE INTO sync_object_alias (object_type, sync_id, local_id)
          SELECT object_type, sync_id, local_id FROM sync_object_map
          WHERE object_type = ?1 AND local_id = ?2 AND sync_id != ?3",
         params![object_type, local_id, sync_id],
     ).map_err(|e| e.to_string())?;
-    if find_object_id(conn, object_type, local_id)?.as_deref() == Some(sync_id) {
-        return Ok(());
-    }
     conn.execute(
         "DELETE FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2",
         params![object_type, sync_id],
@@ -5209,6 +5208,31 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             object_type TEXT NOT NULL, object_id TEXT NOT NULL, values_json TEXT NOT NULL,
             PRIMARY KEY (object_type, object_id)
         );
+        CREATE TABLE IF NOT EXISTS sync_scan_reference (
+            kind TEXT NOT NULL,id INTEGER NOT NULL,parent TEXT NOT NULL,parent_id INTEGER NOT NULL,
+            PRIMARY KEY(kind,id,parent,parent_id)) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS sync_scan_parent ON sync_scan_reference(parent,parent_id);
+        CREATE TABLE IF NOT EXISTS sync_scan_retry(kind TEXT NOT NULL,id INTEGER NOT NULL,rev INTEGER NOT NULL,
+            PRIMARY KEY(kind,id)) WITHOUT ROWID;
+        CREATE TRIGGER IF NOT EXISTS sync_scan_map_insert AFTER INSERT ON sync_object_map BEGIN
+            INSERT INTO sync_scan_retry SELECT kind,id,random() FROM sync_scan_reference
+                WHERE parent=NEW.object_type AND parent_id=NEW.local_id
+                ON CONFLICT(kind,id) DO UPDATE SET rev=excluded.rev;
+        END;
+        CREATE TRIGGER IF NOT EXISTS sync_scan_map_delete AFTER DELETE ON sync_object_map BEGIN
+            INSERT INTO sync_scan_retry VALUES(OLD.object_type,OLD.local_id,random()) ON CONFLICT(kind,id) DO UPDATE SET rev=excluded.rev;
+            INSERT INTO sync_scan_retry SELECT kind,id,random() FROM sync_scan_reference
+                WHERE parent=OLD.object_type AND parent_id=OLD.local_id
+                ON CONFLICT(kind,id) DO UPDATE SET rev=excluded.rev;
+        END;
+        CREATE TRIGGER IF NOT EXISTS sync_scan_map_update AFTER UPDATE ON sync_object_map
+            WHEN OLD.local_id!=NEW.local_id OR OLD.sync_id!=NEW.sync_id BEGIN
+            INSERT INTO sync_scan_retry VALUES(OLD.object_type,OLD.local_id,random()),(NEW.object_type,NEW.local_id,random())
+                ON CONFLICT(kind,id) DO UPDATE SET rev=excluded.rev;
+            INSERT INTO sync_scan_retry SELECT kind,id,random() FROM sync_scan_reference
+                WHERE parent=NEW.object_type AND parent_id IN (OLD.local_id,NEW.local_id)
+                ON CONFLICT(kind,id) DO UPDATE SET rev=excluded.rev;
+        END;
         CREATE TABLE IF NOT EXISTS sync_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -5311,6 +5335,7 @@ fn clear_sync_state(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "SAVEPOINT reset_sync_transport;
          DELETE FROM sync_cursor;
+         DELETE FROM sync_meta WHERE key GLOB 'scan_v1:*';
          DELETE FROM sync_dead_letter;
          UPDATE sync_outbox SET status = 'pending', next_retry_at = NULL
              WHERE status IN ('pushing', 'failed') AND provider_conflict_version IS NULL;
@@ -5482,15 +5507,20 @@ fn set_cursor(app_handle: &AppHandle, cursor: i64) -> Result<(), String> {
 }
 
 pub(crate) fn conversation_sync_id(app: &AppHandle, id: i64) -> Result<String, String> {
-    let conn = open_data_db(&get_db_path(app, "sync.db")?)?;
-    // A send only needs the identity map. Do not reconfigure the running
-    // sync connection's journal or run schema migrations on every request.
-    let initialized: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_object_map')",
-        [], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if !initialized { ensure_sync_db(app)?; }
-    ensure_object_id(&conn, "conversation", "conversation", id)
+    let data = open_data_db(&get_db_path(app, "conversation.db")?)?;
+    crate::db::conversation_identity::get(&data, id).map_err(|err| format!("读取 conversation.db 会话 {id} 的 UUID 失败: {err}"))
+}
+
+fn map_conversation_identity(data: &Connection, sync: &Connection, id: i64) -> Result<String, String> {
+    use crate::db::conversation_identity;
+    if !conversation_identity::installed(data).map_err(|err| err.to_string())? {
+        return ensure_object_id(sync, "conversation", "conversation", id);
+    }
+    let uuid = conversation_identity::get(data, id).map_err(|err| err.to_string())?;
+    if find_object_id(sync, "conversation", id)?.as_ref() != Some(&uuid) {
+        remap_sync_object_map(sync, "conversation", "conversation", id, &uuid)?;
+    }
+    Ok(uuid)
 }
 
 fn ensure_object_id(

@@ -182,6 +182,7 @@ pub async fn inspect_sync_server_switch(app_handle: AppHandle, request: InspectS
 // Rebuild transport state, never business data or stable object identities.
 fn prepare_new_target(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("DELETE FROM sync_cursor; DELETE FROM sync_shadow;
+        DELETE FROM sync_meta WHERE key GLOB 'scan_v1:*';
         DELETE FROM sync_dead_letter; DELETE FROM sync_secret_pending; DELETE FROM sync_secret_server;
         DELETE FROM sync_bootstrap_attempt; DELETE FROM sync_branch_route;
         DELETE FROM sync_outbox WHERE operation='upsert' OR status NOT IN ('pending','pushing','failed');
