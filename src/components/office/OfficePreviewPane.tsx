@@ -35,6 +35,7 @@ import {
     getOfficePreviewPluginStatus,
     installOfficePreviewPlugin,
     isOfficePreviewPluginReady,
+    officePreviewPluginNeedsInstall,
     recentOfficePluginInstallFailure,
     type OfficePreviewPluginStatus,
     type PluginInstallProgressPayload,
@@ -201,7 +202,7 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
 
     // 未安装时自动下载安装（每个面板只自动触发一次；冷却期内的失败不自动重试，由用户点重试）
     useEffect(() => {
-        if (isLegacy || !pluginStatus || pluginStatus.installed || autoInstallTriedRef.current) return;
+        if (isLegacy || !officePreviewPluginNeedsInstall(pluginStatus) || autoInstallTriedRef.current) return;
         autoInstallTriedRef.current = true;
         const recentFailure = recentOfficePluginInstallFailure();
         if (recentFailure) {
@@ -431,7 +432,7 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
     }
 
     // 已安装但被用户在插件中心停用：尊重用户选择，不自动启用
-    if (pluginStatus.installed && !pluginStatus.enabled) {
+    if (pluginStatus.installed && !pluginStatus.enabled && !pluginStatus.updateRequired) {
         return (
             <div className={`${shell} bg-muted/15`} data-testid="office-plugin-disabled">
                 <OfficeFormatIcon ext={ext} className="h-6 w-6 text-muted-foreground" />
@@ -464,7 +465,11 @@ export const OfficePreviewPane: React.FC<OfficePreviewPaneProps> = ({
                 <OfficeFormatIcon ext={ext} className="h-6 w-6 text-muted-foreground" />
                 <div className="max-w-md space-y-1">
                     <div className="text-sm font-medium text-foreground">
-                        {installError ? "Office 预览组件下载失败" : "首次预览需要下载 Office 预览组件"}
+                        {installError
+                            ? "Office 预览组件下载失败"
+                            : pluginStatus.updateRequired
+                              ? "正在更新 Office 预览组件"
+                              : "首次预览需要下载 Office 预览组件"}
                     </div>
                     <div className="text-xs leading-5 text-muted-foreground">
                         组件约 42 MB，只需下载一次；文档全程在本机解析，不会上传。

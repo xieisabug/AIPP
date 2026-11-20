@@ -140,3 +140,12 @@ fn test_load_office_file_blocking_rejects_missing_and_reads_valid_file() {
     // 只读：源文件字节不变
     assert_eq!(fs::read(&path).unwrap(), before);
 }
+
+#[test]
+fn test_office_plugin_version_satisfies_compares_numerically() {
+    assert!(office_plugin_version_satisfies("0.1.1", "0.1.1"));
+    assert!(office_plugin_version_satisfies("0.1.10", "0.1.9"));
+    assert!(office_plugin_version_satisfies("v1.0.0-beta", "0.1.1"));
+    assert!(!office_plugin_version_satisfies("0.1.0", "0.1.1"));
+    assert!(!office_plugin_version_satisfies("garbage", "0.1.1"));
+}

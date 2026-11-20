@@ -151,6 +151,22 @@ describe("OfficePreviewPane", () => {
         expect(screen.getByText("用外部应用打开")).toBeInTheDocument();
     });
 
+    it("should auto update an outdated plugin even when it is installed and enabled", async () => {
+        mockInvoke.mockImplementation((cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") {
+                return Promise.resolve({ ...READY_STATUS, version: "0.1.0", updateRequired: true });
+            }
+            if (cmd === "install_office_preview_plugin") return new Promise(() => {});
+            return Promise.resolve(null);
+        });
+
+        render(<OfficePreviewPane title="a.docx" source={{ attachmentId: 1 }} />);
+
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("install_office_preview_plugin", {}));
+        expect(screen.getByText("正在更新 Office 预览组件")).toBeInTheDocument();
+        expect(mockInvoke).not.toHaveBeenCalledWith("read_authorized_office_file", expect.anything());
+    });
+
     it("should not auto install when the plugin was disabled by the user", async () => {
         mockInvoke.mockImplementation((cmd: string) => {
             if (cmd === "get_office_preview_plugin_status") {

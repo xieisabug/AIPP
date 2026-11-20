@@ -7,6 +7,8 @@ export interface OfficePreviewPluginStatus {
     viewerReady: boolean;
     version?: string | null;
     localDevAvailable: boolean;
+    /** 已安装但低于宿主要求的版本，需要重新下载。 */
+    updateRequired?: boolean;
 }
 
 export interface PluginInstallProgressPayload {
@@ -25,7 +27,12 @@ let inflightInstall: Promise<OfficePreviewPluginStatus> | null = null;
 let lastFailure: { at: number; message: string } | null = null;
 
 export function isOfficePreviewPluginReady(status?: OfficePreviewPluginStatus | null): boolean {
-    return Boolean(status?.installed && status.enabled && status.viewerReady);
+    return Boolean(status?.installed && status.enabled && status.viewerReady && !status.updateRequired);
+}
+
+/** 未安装或版本过旧：都需要（重新）下载插件。 */
+export function officePreviewPluginNeedsInstall(status?: OfficePreviewPluginStatus | null): boolean {
+    return Boolean(status && (!status.installed || status.updateRequired));
 }
 
 export function getOfficePreviewPluginStatus(): Promise<OfficePreviewPluginStatus> {

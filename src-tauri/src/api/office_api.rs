@@ -103,6 +103,8 @@ pub struct OfficePreviewPluginStatus {
     pub viewer_ready: bool,
     pub version: Option<String>,
     pub local_dev_available: bool,
+    /// 已安装但版本低于宿主要求（查看器协议随宿主演进），需要重新下载新版。
+    pub update_required: bool,
 }
 
 pub fn classify_office_extension(file_name_or_path: &str) -> Result<OfficeFormat, OfficePreviewError> {
@@ -209,12 +211,29 @@ pub fn validate_office_bytes(
     Ok(format)
 }
 
+/// 宿主要求的最低插件版本。查看器与宿主通过 postMessage 协作，协议或查看器行为修复后
+/// 提高此值，已安装的旧版会在下次预览时自动更新。
+pub const OFFICE_PLUGIN_REQUIRED_VERSION: &str = "0.1.1";
+
+/// `a.b.c` 数值比较；无法解析的版本视为过旧。
+pub fn office_plugin_version_satisfies(installed: &str, required: &str) -> bool {
+    let parse = |raw: &str| -> Option<(u64, u64, u64)> {
+        let core = raw.trim().trim_start_matches('v').split(['-', '+']).next()?;
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    };
+    match (parse(installed), parse(required)) {
+        (Some(have), Some(need)) => have >= need,
+        _ => false,
+    }
+}
+
 /// 串行化安装：多个预览面板同时触发时只下载一次。
 static OFFICE_PLUGIN_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 官方插件目录不可用时的兜底下载地址（插件发布到 GitHub Releases，避开 Cloudflare 单文件上限）。
 const OFFICE_PLUGIN_FALLBACK_URL: &str =
-    "https://github.com/xieisabug/AIPP/releases/download/plugin-office-preview-plugin-v0.1.0/office-preview-plugin-0.1.0.aipp-plugin.zip";
+    "https://github.com/xieisabug/AIPP/releases/download/plugin-office-preview-plugin-v0.1.1/office-preview-plugin-0.1.1.aipp-plugin.zip";
 
 /// 插件运行时需要的文件；本地开发安装只复制这些，不带 node_modules / 源码。
 const OFFICE_PLUGIN_RUNTIME_ENTRIES: &[&str] = &["plugin.json", "dist", "assets"];
@@ -290,13 +309,20 @@ fn read_office_plugin_status(app_handle: &AppHandle) -> Result<OfficePreviewPlug
         None => false,
     };
 
+    let installed = record.is_some() && viewer_ready;
+    let version = record.map(|r| r.version);
+    let update_required = installed
+        && !version
+            .as_deref()
+            .is_some_and(|v| office_plugin_version_satisfies(v, OFFICE_PLUGIN_REQUIRED_VERSION));
     Ok(OfficePreviewPluginStatus {
         plugin_code: OFFICE_PREVIEW_PLUGIN_CODE.to_string(),
-        installed: record.is_some() && viewer_ready,
+        installed,
         enabled: is_active && viewer_ready,
         viewer_ready,
-        version: record.map(|r| r.version),
+        version,
         local_dev_available: find_local_dev_plugin_dir().is_some(),
+        update_required,
     })
 }
 
@@ -402,7 +428,7 @@ pub async fn install_office_preview_plugin(
     let _guard = OFFICE_PLUGIN_INSTALL_LOCK.lock().await;
 
     let current = read_office_plugin_status(&app_handle)?;
-    if current.installed {
+    if current.installed && !current.update_required {
         if !current.enabled {
             set_office_plugin_active(&app_handle, "office-plugin-enabled")?;
         }
@@ -433,6 +459,13 @@ pub async fn install_office_preview_plugin(
             return Err(
                 "插件已安装，但缺少查看器文件 dist/viewer/index.html，插件包可能不完整".to_string(),
             );
+        }
+        if status.update_required {
+            return Err(format!(
+                "已安装的 Office 预览插件版本 {} 低于所需的 {}，下载源可能尚未发布新版",
+                status.version.as_deref().unwrap_or("未知"),
+                OFFICE_PLUGIN_REQUIRED_VERSION
+            ));
         }
         Ok(status)
     }

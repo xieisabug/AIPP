@@ -84,10 +84,18 @@ export default function ViewerApp() {
   const [docxZoom, setDocxZoom] = useState<number>(1);
   const [pptxSlide, setPptxSlide] = useState<{ current: number; total: number }>({ current: 1, total: 0 });
   const activeRequestIdRef = useRef<number>(0);
+  /** requestId already reported to the host as loaded (report once per document). */
+  const loadedReportedRef = useRef<number>(0);
   const docxRef = useRef<DocxEditorRef | null>(null);
   const pptxApiRef = useRef<PptxAsyncEditorApi | null>(null);
   const xlsxApiRef = useRef<XlsxAsyncEditorApi | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const reportLoaded = useCallback((reqId: number, format: OfficeFormat, meta: Record<string, unknown>) => {
+    if (activeRequestIdRef.current !== reqId || loadedReportedRef.current === reqId) return;
+    loadedReportedRef.current = reqId;
+    postToHost({ type: "aipp-office:loaded", requestId: reqId, format, meta });
+  }, []);
 
   const computeDocxInitialZoom = useCallback((isMobile: boolean) => {
     const width = containerRef.current?.clientWidth || window.innerWidth || 1024;
@@ -163,7 +171,10 @@ export default function ViewerApp() {
     };
   }, [computeDocxInitialZoom]);
 
-  // Wait for DOCX layout completion and notify host (discarding stale requestIds).
+  // DOCX reports "loaded" as soon as its first page is painted (onFirstPagePainted).
+  // Full layout keeps running in the background only to learn the page count: it waits for
+  // layout the editor runs on its own and may take long or never settle for some documents,
+  // so it must not gate the loading state or turn an already visible document into an error.
   useEffect(() => {
     if (!activeDoc || activeDoc.format !== "docx") return;
     const reqId = activeDoc.requestId;
@@ -177,6 +188,7 @@ export default function ViewerApp() {
       if (cancelled || activeRequestIdRef.current !== reqId) return;
       const ref = docxRef.current;
       if (!ref) {
+        if (loadedReportedRef.current === reqId) return;
         postToHost({
           type: "aipp-office:error",
           requestId: reqId,
@@ -189,14 +201,14 @@ export default function ViewerApp() {
         const total = await ref.whenLayoutComplete({ timeoutMs: 45000 });
         if (cancelled || activeRequestIdRef.current !== reqId) return;
         setDocxPages({ current: ref.getCurrentPage() || 1, total });
-        postToHost({
-          type: "aipp-office:loaded",
-          requestId: reqId,
-          format: "docx",
-          meta: { pages: total },
-        });
+        reportLoaded(reqId, "docx", { pages: total });
       } catch (err) {
         if (cancelled || activeRequestIdRef.current !== reqId) return;
+        if (loadedReportedRef.current === reqId) {
+          // Already visible: keep showing it; page count falls back to getTotalPages().
+          console.warn("[office-viewer] whenLayoutComplete did not settle:", err);
+          return;
+        }
         const classified = classifyRenderError(err);
         postToHost({ type: "aipp-office:error", requestId: reqId, ...classified });
       }
@@ -206,7 +218,7 @@ export default function ViewerApp() {
     return () => {
       cancelled = true;
     };
-  }, [activeDoc]);
+  }, [activeDoc, reportLoaded]);
 
   const handleDocxZoom = (delta: number) => {
     const ref = docxRef.current;
@@ -218,10 +230,11 @@ export default function ViewerApp() {
 
   const handleDocxPageStep = (delta: number) => {
     const ref = docxRef.current;
-    if (!ref || docxPages.total <= 0) return;
-    const next = Math.max(1, Math.min(docxPages.total, docxPages.current + delta));
+    const total = docxPages.total || ref?.getTotalPages() || 0;
+    if (!ref || total <= 0) return;
+    const next = Math.max(1, Math.min(total, docxPages.current + delta));
     ref.scrollToPage(next);
-    setDocxPages((prev) => ({ ...prev, current: next }));
+    setDocxPages({ current: next, total });
   };
 
   const handlePptxStep = async (delta: number) => {
@@ -271,7 +284,7 @@ export default function ViewerApp() {
               <button
                 type="button"
                 onClick={() => handleDocxPageStep(1)}
-                disabled={docxPages.total <= 0 || docxPages.current >= docxPages.total}
+                disabled={docxPages.total > 0 && docxPages.current >= docxPages.total}
                 style={btnStyle}
               >
                 下一页
@@ -301,6 +314,11 @@ export default function ViewerApp() {
               downloadOnSave={false}
               initialZoom={docxZoom}
               colorMode={activeDoc.colorMode}
+              onFirstPagePainted={() => {
+                const pages = docxRef.current?.getTotalPages() || 0;
+                if (pages > 0) setDocxPages((prev) => ({ ...prev, total: pages }));
+                reportLoaded(activeDoc.requestId, "docx", { pages: pages || null, firstPaint: true });
+              }}
               onError={(err) => {
                 if (activeRequestIdRef.current !== activeDoc.requestId) return;
                 const classified = classifyRenderError(err);
@@ -325,22 +343,12 @@ export default function ViewerApp() {
               try {
                 const catalog = await api.readCells({ ranges: [] });
                 if (activeRequestIdRef.current !== activeDoc.requestId) return;
-                postToHost({
-                  type: "aipp-office:loaded",
-                  requestId: activeDoc.requestId,
-                  format: "xlsx",
-                  meta: {
+                reportLoaded(activeDoc.requestId, "xlsx", {
                     sheets: catalog.ok ? catalog.sheets.map((s) => s.name) : [],
-                  },
-                });
+                  });
               } catch {
                 if (activeRequestIdRef.current !== activeDoc.requestId) return;
-                postToHost({
-                  type: "aipp-office:loaded",
-                  requestId: activeDoc.requestId,
-                  format: "xlsx",
-                  meta: {},
-                });
+                reportLoaded(activeDoc.requestId, "xlsx", {});
               }
             })()}
             onError={(err) => {
@@ -406,12 +414,7 @@ export default function ViewerApp() {
                 }
                 if (activeRequestIdRef.current !== activeDoc.requestId) return;
                 setPptxSlide({ current: 1, total: slideCount });
-                postToHost({
-                  type: "aipp-office:loaded",
-                  requestId: activeDoc.requestId,
-                  format: "pptx",
-                  meta: { slides: slideCount },
-                });
+                reportLoaded(activeDoc.requestId, "pptx", { slides: slideCount });
               })()}
               onError={(err) => {
                 if (activeRequestIdRef.current !== activeDoc.requestId) return;
