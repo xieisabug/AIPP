@@ -19,8 +19,10 @@ export interface ProviderApiTypeOption {
 }
 
 export const PROVIDER_API_TYPES: readonly ProviderApiTypeOption[] = [
-    { value: "openai_api", label: "OpenAI API", description: "OpenAI 及兼容接口", kind: "http", defaultEndpoint: "https://api.openai.com/v1/" },
+    { value: "openai_api", label: "OpenAI API", description: "OpenAI、New API 等兼容接口（支持对话与 Decisions）", kind: "http", defaultEndpoint: "https://api.openai.com/v1/" },
     { value: "anthropic", label: "Anthropic API", description: "Claude 系列模型接口", kind: "http", defaultEndpoint: "https://api.anthropic.com/" },
+    { value: "gemini", label: "Google Gemini", description: "Gemini 对话与 Decisions 决策模型", kind: "http", defaultEndpoint: "https://generativelanguage.googleapis.com/v1beta/" },
+    { value: "typesafe_jev", label: "TypeSafe Jev", description: "System One 决策模型（/v1/systemone）", kind: "http", defaultEndpoint: "https://api.typesafe.ai/v1/" },
     { value: "deepseek", label: "DeepSeek API", description: "DeepSeek 官方接口", kind: "http", defaultEndpoint: "https://api.deepseek.com/" },
     { value: "ollama", label: "Ollama API", description: "本机或局域网 Ollama", kind: "http", defaultEndpoint: "http://localhost:11434/v1/" },
     { value: "cohere", label: "Cohere API", description: "Cohere 模型接口", kind: "http", defaultEndpoint: "https://api.cohere.ai/v1/" },

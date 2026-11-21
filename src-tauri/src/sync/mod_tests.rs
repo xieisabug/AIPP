@@ -287,6 +287,7 @@ fn test_legacy_provider_conflict_waits_for_changed_selection() {
 fn test_canonical_provider_settings_restore_receiver_ids() {
     for (kind, fields, expected) in [
         ("system.feature_config", json!({"feature_code":"experimental","key":"butler_helper_model_id","value":"deepseek-v4.1-flash%%@ref"}), "deepseek-v4.1-flash%%41"),
+        ("system.feature_config", json!({"feature_code":"experimental","key":"butler_group_dispatch_model_id","value":"jev-latest%%@ref"}), "jev-latest%%41"),
         ("system.feature_config", json!({"feature_code":"conversation_summary","key":"title_provider_id","value":"@ref"}), "41"),
         ("assistant.model_config", json!({"name":"acp_provider","value":"@ref"}), "41"),
     ] {

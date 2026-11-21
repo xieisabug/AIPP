@@ -3055,7 +3055,7 @@ fn embedded_provider_parts<'a>(object_type: &str, fields: &'a Map<String, JsonVa
                     | "auto_review_model" | "conversation_summary_model")
                 | ("experimental", "butler_model_id" | "mcp_summarizer_model_id"
                     | "assistant_summarizer_model_id" | "conversation_summary_model"
-                    | "butler_helper_model_id") => true,
+                    | "butler_helper_model_id" | "butler_group_dispatch_model_id") => true,
                 _ => return None,
             }
         }

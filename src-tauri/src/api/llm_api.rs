@@ -57,6 +57,19 @@ pub struct LlmProviderConfig {
     pub is_addition: Option<bool>,
 }
 
+fn ordered_modes(default_mode: &str, all: &[&str]) -> Vec<String> {
+    let mut modes = Vec::with_capacity(all.len());
+    if all.contains(&default_mode) {
+        modes.push(default_mode.to_string());
+    }
+    for &m in all {
+        if m != default_mode {
+            modes.push(m.to_string());
+        }
+    }
+    modes
+}
+
 fn protocol_choice(db: &LLMDatabase, api_type: &str, provider_id: i64, code: &str, saved: Option<&String>) -> Result<(Option<Vec<String>>, String), String> {
     if api_type == "opencode_go" {
         let modes = crate::api::opencode_go::available_modes(db, code, saved.map(String::as_str)).map_err(|e| e.to_string())?;
@@ -68,7 +81,27 @@ fn protocol_choice(db: &LLMDatabase, api_type: &str, provider_id: i64, code: &st
         let request_mode = crate::api::magpie::selected_mode(&modes, saved);
         return Ok((Some(modes), request_mode));
     }
-    Ok((None, resolve_request_mode_or_default(api_type, code, saved.map(String::as_str)).to_string()))
+    let resolved = resolve_request_mode_or_default(api_type, code, saved.map(String::as_str)).to_string();
+    let default_mode = crate::db::llm_db::default_request_mode_for_model(api_type, code);
+    let available = match api_type.to_lowercase().as_str() {
+        "openai" | "openai_api" => Some(ordered_modes(
+            default_mode,
+            &[
+                "chat_completions",
+                "responses",
+                crate::decision::MODE_OPENAI_DECISIONS,
+                crate::decision::MODE_JEV_SYSTEMONE,
+                crate::decision::MODE_GEMINI_DECISIONS,
+            ],
+        )),
+        "gemini" => Some(ordered_modes(
+            default_mode,
+            &["google_gemini", crate::decision::MODE_GEMINI_DECISIONS],
+        )),
+        "typesafe_jev" => Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
+        _ => None,
+    };
+    Ok((available, resolved))
 }
 
 fn provider_setting<'a>(configs: &'a [crate::db::llm_db::LLMProviderConfig], name: &str) -> Option<&'a str> {
@@ -87,9 +120,27 @@ pub(crate) fn validate_request_mode(db: &LLMDatabase, provider: &crate::db::llm_
             format!("Magpie 模型 {code} 不支持协议 {request_mode}")
         });
     }
-    match request_mode {
-        "chat_completions" | "responses" => Ok(()),
-        _ => Err(format!("Unsupported request_mode: {request_mode}")),
+    match provider.api_type.to_lowercase().as_str() {
+        "openai" | "openai_api" => match request_mode {
+            "chat_completions"
+            | "responses"
+            | crate::decision::MODE_OPENAI_DECISIONS
+            | crate::decision::MODE_JEV_SYSTEMONE
+            | crate::decision::MODE_GEMINI_DECISIONS => Ok(()),
+            _ => Err(format!("Unsupported request_mode: {request_mode}")),
+        },
+        "gemini" => match request_mode {
+            "google_gemini" | "chat_completions" | crate::decision::MODE_GEMINI_DECISIONS => Ok(()),
+            _ => Err(format!("Unsupported request_mode for Gemini: {request_mode}")),
+        },
+        "typesafe_jev" => match request_mode {
+            crate::decision::MODE_JEV_SYSTEMONE => Ok(()),
+            _ => Err(format!("TypeSafe Jev 仅支持 jev_systemone 协议，收到: {request_mode}")),
+        },
+        _ => match request_mode {
+            "chat_completions" | "responses" => Ok(()),
+            _ => Err(format!("Unsupported request_mode: {request_mode}")),
+        },
     }
 }
 
@@ -316,6 +367,30 @@ pub async fn fetch_model_list(
         return Ok(models);
     }
 
+    if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
+        drop(config_feature_map);
+        let result: Vec<LlmModel> = crate::decision::TYPESAFE_JEV_PRESET_MODELS
+            .iter()
+            .map(|(code, label)| LlmModel {
+                id: 0,
+                name: (*label).to_string(),
+                llm_provider_id,
+                code: (*code).to_string(),
+                description: "TypeSafe System One 决策模型".to_string(),
+                vision_support: false,
+                audio_support: false,
+                video_support: false,
+                request_mode: crate::decision::MODE_JEV_SYSTEMONE.to_string(),
+                available_modes: Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
+            })
+            .collect();
+        db.replace_llm_models(llm_provider_id, &result.iter().map(persisted_model).collect::<Vec<_>>(), true)
+            .map_err(|e| e.to_string())?;
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+        emit_llm_provider_changed(&app_handle);
+        return Ok(result);
+    }
+
     // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
     let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
         &app_handle,
@@ -438,6 +513,10 @@ pub struct ModelForSelect {
     code: String,
     id: i64,
     llm_provider_id: i64,
+    #[serde(default)]
+    request_mode: String,
+    #[serde(default)]
+    is_decision: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -514,6 +593,45 @@ pub async fn preview_model_list(
         return Ok(ModelSelectionResponse { available_models, missing_models: missing.into_iter().collect() });
     }
 
+    if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
+        drop(config_feature_map);
+        let mut available_models = Vec::new();
+        let mut seen = HashSet::new();
+        for (code, label) in crate::decision::TYPESAFE_JEV_PRESET_MODELS {
+            seen.insert((*code).to_string());
+            available_models.push(ModelForSelection {
+                name: (*label).to_string(),
+                code: (*code).to_string(),
+                description: "TypeSafe System One 决策模型（/v1/systemone）".to_string(),
+                vision_support: false,
+                audio_support: false,
+                video_support: false,
+                request_mode: crate::decision::MODE_JEV_SYSTEMONE.to_string(),
+                available_modes: Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
+                is_selected: existing_model_codes.contains(*code),
+            });
+        }
+        for (_, name, _, code, desc, _, _, _) in &existing_models {
+            if seen.insert(code.clone()) {
+                available_models.push(ModelForSelection {
+                    name: name.clone(),
+                    code: code.clone(),
+                    description: desc.clone(),
+                    vision_support: false,
+                    audio_support: false,
+                    video_support: false,
+                    request_mode: crate::decision::MODE_JEV_SYSTEMONE.to_string(),
+                    available_modes: Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
+                    is_selected: true,
+                });
+            }
+        }
+        return Ok(ModelSelectionResponse {
+            available_models,
+            missing_models: Vec::new(),
+        });
+    }
+
     // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
     let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
         &app_handle,
@@ -552,14 +670,17 @@ pub async fn preview_model_list(
             for model in &models {
                 let model_code = model.id.to_string();
                 let is_selected = existing_model_codes.contains(&model_code);
-                let request_mode =
-                    request_mode_map.get(&model_code).cloned().unwrap_or_else(|| {
-                        resolve_request_mode_or_default(&llm_provider.api_type, &model_code, None)
-                            .to_string()
-                    });
+                let saved = request_mode_map.get(&model_code);
+                let (available_modes, request_mode) = protocol_choice(
+                    &db,
+                    &llm_provider.api_type,
+                    llm_provider_id,
+                    &model_code,
+                    saved,
+                )?;
 
                 available_models.push(ModelForSelection {
-                    available_modes: None,
+                    available_modes,
                     name: model.name.to_string(),
                     code: model_code,
                     description: format!("Model: {}", model.name),
@@ -586,16 +707,21 @@ pub async fn preview_model_list(
 }
 
 #[tauri::command]
-pub fn get_models_for_select(app_handle: tauri::AppHandle) -> Result<Vec<ModelForSelect>, String> {
+pub fn get_models_for_select(
+    app_handle: tauri::AppHandle,
+    include_decision: Option<bool>,
+) -> Result<Vec<ModelForSelect>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let result = db.get_models_for_select().unwrap();
+    let result = db.get_models_for_select_with_mode(include_decision.unwrap_or(false))?;
     let models = result
-        .iter()
-        .map(|(name, code, id, llm_provider_id)| ModelForSelect {
-            name: name.clone(),
-            code: code.clone(),
-            id: *id,
-            llm_provider_id: *llm_provider_id,
+        .into_iter()
+        .map(|(name, code, id, llm_provider_id, request_mode, is_decision)| ModelForSelect {
+            name,
+            code,
+            id,
+            llm_provider_id,
+            request_mode,
+            is_decision,
         })
         .collect();
     Ok(models)
@@ -603,7 +729,7 @@ pub fn get_models_for_select(app_handle: tauri::AppHandle) -> Result<Vec<ModelFo
 
 /// 根据助手类型获取过滤后的模型列表
 /// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商的模型
-/// 普通助手: 排除 ACP 提供商的模型
+/// 普通助手: 排除 ACP 与决策模型
 #[tauri::command]
 pub fn get_filtered_models_for_select(
     app_handle: tauri::AppHandle,
@@ -618,9 +744,49 @@ pub fn get_filtered_models_for_select(
             code: code.clone(),
             id: *id,
             llm_provider_id: *llm_provider_id,
+            request_mode: String::new(),
+            is_decision: false,
         })
         .collect();
     Ok(models)
+}
+
+/// 决策模型连通性探针：验证端点、鉴权与协议是否匹配（兼容 TypeSafe / OpenAI / Gemini / New API）。
+#[tauri::command]
+pub async fn test_decision_model(
+    app_handle: tauri::AppHandle,
+    provider_id: i64,
+    model_code: String,
+    request_mode_override: Option<String>,
+) -> Result<crate::decision::DecisionProbeResult, String> {
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let detail = db
+        .get_llm_model_detail(&provider_id, &model_code)
+        .map_err(|e| format!("读取模型配置失败（provider={provider_id}, model={model_code}）：{e}"))?;
+    let effective_mode = request_mode_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&detail.model.request_mode);
+    let feature_config_state = app_handle.state::<FeatureConfigState>();
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
+    let network_proxy = get_network_proxy_from_config(&config_feature_map);
+    let prepared_configs = crate::api::copilot_token_manager::prepare_provider_configs(
+        &app_handle,
+        &detail.provider.api_type,
+        &detail.configs,
+        network_proxy.as_deref(),
+    )
+    .await?;
+
+    crate::decision::probe_decision_model(
+        &prepared_configs,
+        effective_mode,
+        &detail.model.code,
+        network_proxy.as_deref(),
+        &config_feature_map,
+    )
+    .await
 }
 
 #[tauri::command]

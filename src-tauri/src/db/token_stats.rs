@@ -15,6 +15,7 @@ use crate::utils::db_utils::get_datetime_from_row;
 
 pub const PURPOSE_CONTEXT_COMPACTION: &str = "context_compaction";
 pub const PURPOSE_GROUP_DISPATCH: &str = "group_dispatch";
+pub const PURPOSE_TOOL_REVIEW: &str = "tool_review";
 
 /// Agent 通道（Claude Code / Codex / ACP）回复行的模型 id 占位。
 /// 一行覆盖整轮（含工具执行），不能用来计算生成速度，也不代表单次请求的上下文大小。

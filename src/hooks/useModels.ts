@@ -9,16 +9,24 @@ export interface ModelForSelect {
     code: string;
     id: number;
     llm_provider_id: number;
+    request_mode?: string;
+    is_decision?: boolean;
 }
 
-export const useModels = (shouldFetch: boolean = true) => {
+export interface UseModelsOptions {
+    /** 为 true 时额外包含决策类模型（Jev / OpenAI Decisions / Gemini Decisions）。 */
+    includeDecision?: boolean;
+}
+
+export const useModels = (shouldFetch: boolean = true, options?: UseModelsOptions) => {
+    const includeDecision = Boolean(options?.includeDecision);
     const [models, setModels] = useState<ModelForSelect[]>([]);
     const [loading, setLoading] = useState(shouldFetch);
     const [error, setError] = useState<string | null>(null);
 
     useDataRefresh({
         events: ["llm_provider_changed"],
-        identity: String(shouldFetch),
+        identity: `${String(shouldFetch)}:${String(includeDecision)}`,
         initial: true,
         refresh: async (isCurrent) => {
         if (!shouldFetch) {
@@ -27,7 +35,10 @@ export const useModels = (shouldFetch: boolean = true) => {
         }
 
         setLoading(true);
-        await invoke<Array<ModelForSelect>>("get_models_for_select")
+        const request = includeDecision
+            ? invoke<Array<ModelForSelect>>("get_models_for_select", { includeDecision: true })
+            : invoke<Array<ModelForSelect>>("get_models_for_select");
+        await request
             .then((modelList) => {
                 const uniqueModels = new Map<string, ModelForSelect>();
                 for (const model of modelList) {

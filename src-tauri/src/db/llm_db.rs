@@ -15,6 +15,12 @@ fn copilot_prefers_responses_by_default(model_code: &str) -> bool {
 }
 
 pub fn default_request_mode_for_model(api_type: &str, model_code: &str) -> &'static str {
+    if let Some(decision_mode) = crate::decision::default_decision_mode_for_model(api_type, model_code) {
+        return decision_mode;
+    }
+    if api_type.eq_ignore_ascii_case("gemini") {
+        return "google_gemini";
+    }
     if api_type.eq_ignore_ascii_case("github_copilot")
         && copilot_prefers_responses_by_default(model_code)
     {
@@ -35,9 +41,16 @@ pub fn resolve_request_mode_or_default(
     if api_type == "magpie" {
         return crate::api::magpie::mode(request_mode).unwrap_or("chat_completions");
     }
+    if api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
+        return crate::decision::MODE_JEV_SYSTEMONE;
+    }
     match request_mode {
         Some("responses") => "responses",
         Some("chat_completions") => "chat_completions",
+        Some("google_gemini") => "google_gemini",
+        Some("jev_systemone") => crate::decision::MODE_JEV_SYSTEMONE,
+        Some("openai_decisions") => crate::decision::MODE_OPENAI_DECISIONS,
+        Some("gemini_decisions") => crate::decision::MODE_GEMINI_DECISIONS,
         _ => default_request_mode_for_model(api_type, model_code),
     }
 }
@@ -223,8 +236,8 @@ impl LLMDatabase {
             // ACP 助手：只要 ACP 提供商
             "api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity')"
         } else {
-            // 普通助手：排除 ACP 提供商
-            "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity')"
+            // 普通助手：排除 ACP 及纯决策类提供商
+            "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity', 'typesafe_jev')"
         };
 
         let sql = format!(
@@ -634,37 +647,67 @@ impl LLMDatabase {
 
     #[instrument(level = "debug", skip(self))]
     pub fn get_models_for_select(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
-        let mut stmt = match self.conn.prepare(
-            "
+        Ok(self
+            .get_models_for_select_with_mode(false)?
+            .into_iter()
+            .map(|(name, code, id, provider_id, _, _)| (name, code, id, provider_id))
+            .collect())
+    }
+
+    /// 返回启用的提供商下的模型及其解析后的请求协议与决策标记。
+    /// `include_decision = false` 时自动排除决策协议模型，避免混入聊天/总结/播报选择器。
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_models_for_select_with_mode(
+        &self,
+        include_decision: bool,
+    ) -> Result<Vec<(String, String, i64, i64, String, bool)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
             SELECT
                 (p.name || ' / ' || m.name) AS name,
                 m.code,
                 m.id,
-                m.llm_provider_id
+                m.llm_provider_id,
+                p.api_type,
+                pref.request_mode
             FROM
                 llm_model m
             JOIN
                 llm_provider p ON m.llm_provider_id = p.id
+            LEFT JOIN
+                llm_model_request_mode_preference pref
+                ON pref.llm_provider_id = m.llm_provider_id AND pref.model_code = m.code
             WHERE p.is_enabled = 1
         ",
-        ) {
-            Ok(stmt) => stmt,
-            Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
-        };
+            )
+            .map_err(|e| e.to_string())?;
 
-        let models = match stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-        {
-            Ok(models) => models,
-            Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
-        };
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
 
         let mut result = Vec::new();
-        for model in models {
-            match model {
-                Ok(model) => result.push(model),
-                Err(e) => return Err(e.to_string()), // Convert rusqlite::Error to String
+        for row in rows {
+            let (name, code, id, provider_id, api_type, saved_mode) =
+                row.map_err(|e| e.to_string())?;
+            let mode =
+                resolve_request_mode_or_default(&api_type, &code, saved_mode.as_deref()).to_string();
+            let is_decision = crate::decision::is_decision_mode(&mode);
+            if !include_decision && is_decision {
+                continue;
             }
+            result.push((name, code, id, provider_id, mode, is_decision));
         }
         Ok(result)
     }
@@ -716,7 +759,7 @@ impl LLMDatabase {
             return Ok(result);
         }
 
-        let where_clause = "p.is_enabled = 1 AND p.api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity')";
+        let where_clause = "p.is_enabled = 1 AND p.api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity', 'typesafe_jev')";
 
         let sql = format!(
             "
@@ -724,11 +767,16 @@ impl LLMDatabase {
                 (p.name || ' / ' || m.name) AS name,
                 m.code,
                 m.id,
-                m.llm_provider_id
+                m.llm_provider_id,
+                p.api_type,
+                pref.request_mode
             FROM
                 llm_model m
             JOIN
                 llm_provider p ON m.llm_provider_id = p.id
+            LEFT JOIN
+                llm_model_request_mode_preference pref
+                ON pref.llm_provider_id = m.llm_provider_id AND pref.model_code = m.code
             WHERE {}
         ",
             where_clause
@@ -739,9 +787,16 @@ impl LLMDatabase {
             Err(e) => return Err(e.to_string()),
         };
 
-        let models = match stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-        {
+        let models = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        }) {
             Ok(models) => models,
             Err(e) => return Err(e.to_string()),
         };
@@ -749,7 +804,13 @@ impl LLMDatabase {
         let mut result = Vec::new();
         for model in models {
             match model {
-                Ok(model) => result.push(model),
+                Ok((name, code, id, provider_id, api_type, saved_mode)) => {
+                    let mode = resolve_request_mode_or_default(&api_type, &code, saved_mode.as_deref());
+                    if crate::decision::is_decision_mode(mode) {
+                        continue;
+                    }
+                    result.push((name, code, id, provider_id));
+                }
                 Err(e) => return Err(e.to_string()),
             }
         }
@@ -819,5 +880,44 @@ mod tests {
             resolve_request_mode_or_default("github_copilot", "gpt-4o", Some("responses")),
             "responses"
         );
+    }
+
+    #[test]
+    fn decision_models_are_isolated_from_default_model_select() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let db = super::LLMDatabase { conn };
+        db.create_tables().unwrap();
+        db.conn.execute(
+            "INSERT INTO llm_provider (id, name, api_type, description, is_official, is_enabled) VALUES
+             (101, 'OpenAI', 'openai_api', '', 1, 1),
+             (102, 'TypeSafe', 'typesafe_jev', '', 0, 1),
+             (103, 'Gemini', 'gemini', '', 0, 1)",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO llm_model (id, name, llm_provider_id, code, description) VALUES
+             (10, 'GPT-4o', 101, 'gpt-4o', ''),
+             (11, 'GPT-6 Luna', 101, 'gpt-6-luna', ''),
+             (12, 'Jev Latest', 102, 'jev-latest', ''),
+             (13, 'Gemini Decision 1', 103, 'gemini-decision-1', '')",
+            [],
+        ).unwrap();
+        db.upsert_model_request_mode(101, "gpt-6-luna", "openai_decisions").unwrap();
+
+        let chat_only = db.get_models_for_select_with_mode(false).unwrap();
+        assert_eq!(chat_only.len(), 1);
+        assert_eq!(chat_only[0].1, "gpt-4o");
+        assert!(!chat_only[0].5);
+
+        let all_models = db.get_models_for_select_with_mode(true).unwrap();
+        assert_eq!(all_models.len(), 4);
+        assert_eq!(all_models.iter().filter(|m| m.5).count(), 3);
+
+        let normal_assistant = db.get_filtered_models_for_select(1).unwrap();
+        assert_eq!(normal_assistant.len(), 1);
+        assert_eq!(normal_assistant[0].1, "gpt-4o");
+
+        let providers = db.get_filtered_providers(1).unwrap();
+        assert!(!providers.iter().any(|p| p.2 == "typesafe_jev"));
     }
 }

@@ -8,6 +8,8 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import { useModels } from "@/hooks/useModels";
+import { DecisionModelProbeButton } from "@/components/config/DecisionModelProbeButton";
+import { isDecisionRequestMode } from "@/components/config/llmModelTypes";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Form, FormControl, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Switch } from "@/components/ui/switch";
@@ -209,6 +211,10 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const { models, loading: modelsLoading, error: modelsError } = useModels(
         dynamicEnabled || assistantSummaryEnabled || conversationSummaryEnabled || butlerEnabled
     );
+    const {
+        models: dispatchModels,
+        loading: dispatchModelsLoading,
+    } = useModels(butlerEnabled, { includeDecision: true });
 
     const modelOptions = useMemo(
         () =>
@@ -217,6 +223,22 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                 label: model.name,
             })),
         [models]
+    );
+    const dispatchModelOptions = useMemo(
+        () =>
+            dispatchModels.map((model) => ({
+                value: `${model.code}%%${model.llm_provider_id}`,
+                label: model.is_decision || isDecisionRequestMode(model.request_mode)
+                    ? `${model.name} [决策]`
+                    : model.name,
+                isDecision: Boolean(model.is_decision || isDecisionRequestMode(model.request_mode)),
+            })),
+        [dispatchModels]
+    );
+    const selectedGroupDispatchModel = String(form.watch("butler_group_dispatch_model_id") || "");
+    const isDecisionDispatchModel = useMemo(
+        () => dispatchModelOptions.some((o) => o.value === selectedGroupDispatchModel && o.isDecision),
+        [dispatchModelOptions, selectedGroupDispatchModel]
     );
     const loadSummaryTaskStatus = useCallback(async () => {
         const status = await invoke<ExperimentalSummaryTaskStatus>("get_experimental_summary_task_status");
@@ -1141,6 +1163,55 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                             </SelectContent>
                                                         </Select>
                                                     </FormControl>
+                                                    <FormMessage />
+                                                </div>
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_group_dispatch_model_id"
+                                        render={({ field }) => (
+                                            <FormItem className={settingRowClassName}>
+                                                <SettingRowText
+                                                    label={
+                                                        <span className="inline-flex items-center gap-1">
+                                                            群聊发言调度模型
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <CircleHelp aria-label="群聊发言调度模型说明" className="size-3.5 cursor-help text-muted-foreground" />
+                                                                </TooltipTrigger>
+                                                                <TooltipContent className="max-w-xs text-xs">
+                                                                    专用于群聊未 @ 成员时的发言选人与讨论轮数判断，支持 Jev / OpenAI Decisions / Gemini Decisions 等决策模型或普通模型；不选时沿用小型辅助模型或总管家模型。
+                                                                </TooltipContent>
+                                                            </Tooltip>
+                                                        </span>
+                                                    }
+                                                    description="可不选。配置决策模型可零输出 Token 快速选人并避免成员名幻觉。"
+                                                />
+                                                <div className="w-64 shrink-0 space-y-2">
+                                                    <FormControl>
+                                                        <Select
+                                                            value={field.value || HELPER_MODEL_NONE}
+                                                            onValueChange={(value) => field.onChange(value === HELPER_MODEL_NONE ? "" : value)}
+                                                            disabled={dispatchModelsLoading}
+                                                        >
+                                                            <SelectTrigger className="w-full">
+                                                                <SelectValue placeholder={dispatchModelsLoading ? "加载中..." : "沿用辅助模型 / 总管家"} />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                <SelectItem value={HELPER_MODEL_NONE}>沿用辅助模型 / 总管家</SelectItem>
+                                                                {dispatchModelOptions.map((option) => (
+                                                                    <SelectItem key={option.value} value={option.value}>
+                                                                        {option.label}
+                                                                    </SelectItem>
+                                                                ))}
+                                                            </SelectContent>
+                                                        </Select>
+                                                    </FormControl>
+                                                    {isDecisionDispatchModel ? (
+                                                        <DecisionModelProbeButton modelValue={selectedGroupDispatchModel} />
+                                                    ) : null}
                                                     <FormMessage />
                                                 </div>
                                             </FormItem>

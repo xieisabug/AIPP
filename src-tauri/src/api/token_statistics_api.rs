@@ -86,6 +86,40 @@ pub(crate) fn auxiliary_usage_from_genai(
     })
 }
 
+/// 把决策模型返回的用量换成辅助调用记录（`output_tokens` 固定为 0）。
+pub(crate) fn auxiliary_usage_from_decision(
+    conversation_id: i64,
+    purpose: &'static str,
+    model_id: Option<i64>,
+    model_name: &str,
+    protocol: crate::decision::DecisionProtocol,
+    usage: &crate::decision::DecisionUsage,
+) -> Option<AuxiliaryUsageInput> {
+    if usage.input_tokens.is_none() && usage.total_tokens.is_none() {
+        return None;
+    }
+    let input = usage.input_tokens.unwrap_or(0);
+    let output = usage.output_tokens;
+    let total = usage.total_tokens.unwrap_or(input + output);
+    let mut metadata = serde_json::json!({
+        "usage_source": "reported",
+        "decision_protocol": protocol.as_request_mode(),
+    });
+    if let Some(cached) = usage.cached_input_tokens {
+        metadata["cached_input_tokens"] = serde_json::json!(cached);
+    }
+    Some(AuxiliaryUsageInput {
+        conversation_id,
+        purpose,
+        model_id,
+        model_name: model_name.to_string(),
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+        metadata_json: Some(metadata.to_string()),
+    })
+}
+
 /// 记录失败只影响统计，不能打断压缩或调度本身；但要留下可追溯的日志。
 pub(crate) fn record_auxiliary_usage(db: &ConversationDatabase, usage: Option<AuxiliaryUsageInput>) {
     let Some(usage) = usage else {

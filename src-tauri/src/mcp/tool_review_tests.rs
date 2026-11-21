@@ -15,6 +15,64 @@ fn test_review_options_reject_adapters_that_ignore_schema() {
     }
 }
 
+#[test]
+fn test_decision_review_enforces_threshold_and_risk_category_fail_closed() {
+    let req = build_decision_review_request("jev-latest", "server: fs\ntool: read_file", true);
+    let safe_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &req,
+        serde_json::json!({
+            "answers": {
+                "safe": { "type": "noul", "noul": 0.96 },
+                "intent_aligned": { "type": "noul", "noul": 0.94 },
+                "risk_category": {
+                    "type": "choice",
+                    "choice": "safe_readonly",
+                    "probabilities": { "safe_readonly": 0.95 }
+                }
+            }
+        }),
+        35,
+    ).unwrap();
+    let draft = evaluate_decision_review(&safe_resp, true, 0.90, "jev-latest", 7, 35);
+    assert_eq!(draft.verdict, "safe");
+    assert!(draft.reason.contains("96%"));
+
+    // 安全概率低于阈值：fail-closed
+    let low_conf_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &req,
+        serde_json::json!({
+            "answers": {
+                "safe": { "type": "noul", "noul": 0.82 },
+                "intent_aligned": { "type": "noul", "noul": 0.95 },
+                "risk_category": { "type": "choice", "choice": "safe_readonly" }
+            }
+        }),
+        28,
+    ).unwrap();
+    let low_draft = evaluate_decision_review(&low_conf_resp, true, 0.90, "jev-latest", 7, 28);
+    assert_eq!(low_draft.verdict, "risky");
+    assert!(low_draft.reason.contains("低于阈值"));
+
+    // 即使 safe 概率高，若风险分类为破坏性操作仍必须拦截
+    let risky_cat_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &req,
+        serde_json::json!({
+            "answers": {
+                "safe": { "type": "noul", "noul": 0.95 },
+                "intent_aligned": { "type": "noul", "noul": 0.95 },
+                "risk_category": { "type": "choice", "choice": "destructive_action" }
+            }
+        }),
+        22,
+    ).unwrap();
+    let risky_draft = evaluate_decision_review(&risky_cat_resp, true, 0.90, "jev-latest", 7, 22);
+    assert_eq!(risky_draft.verdict, "risky");
+    assert!(risky_draft.reason.contains("破坏"), "reason={}", risky_draft.reason);
+}
+
 fn model_response(text: &str) -> ChatResponse {
     ChatResponse {
         content: text.into(),

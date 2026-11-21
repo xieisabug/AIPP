@@ -28,7 +28,10 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
 ];
 
 pub fn supports_model_request_mode(api_type: &str) -> bool {
-    matches!(api_type.to_lowercase().as_str(), "openai" | "openai_api" | "github_copilot" | "opencode_go" | "magpie")
+    matches!(
+        api_type.to_lowercase().as_str(),
+        "openai" | "openai_api" | "gemini" | "typesafe_jev" | "github_copilot" | "opencode_go" | "magpie"
+    )
 }
 
 pub fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
@@ -126,6 +129,12 @@ pub fn provider_destination(api_type: &str, endpoint_raw: Option<&str>) -> Resul
         return Err("此类型的 Provider 不支持保险箱引用".into());
     }
     let resolution = resolve_provider_endpoint(endpoint_raw).map_err(|e| e.to_string())?;
+    if api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
+        return Ok(match resolution {
+            ProviderEndpointResolution::Custom(ep) => ep,
+            ProviderEndpointResolution::Unset => crate::decision::DEFAULT_TYPESAFE_JEV_ENDPOINT.to_string(),
+        });
+    }
     Ok(effective_endpoint_url(&resolution, infer_adapter_kind("", api_type, None)))
 }
 
@@ -256,6 +265,13 @@ fn create_raw_client_with_config(
     is_stream: bool,
     config_feature_map: &std::collections::HashMap<String, std::collections::HashMap<String, crate::db::system_db::FeatureConfig>>,
 ) -> Result<RawClient, AppError> {
+    if api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV)
+        || request_mode.is_some_and(crate::decision::is_decision_mode)
+    {
+        return Err(AppError::ProviderError(format!(
+            "模型 {model_name} 配置为决策协议（System One），不能用于对话生成，请用于自动审核或群聊调度"
+        )));
+    }
     let mut adapter_kind = infer_adapter_kind(model_name, api_type, request_mode);
 
     let mut api_key = String::new();

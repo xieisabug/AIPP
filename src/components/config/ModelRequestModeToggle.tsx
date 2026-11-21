@@ -21,6 +21,9 @@ const shortLabels: Record<string, string> = {
     responses: "Responses",
     anthropic_messages: "Anthropic",
     google_gemini: "Gemini",
+    openai_decisions: "Decisions",
+    jev_systemone: "Jev",
+    gemini_decisions: "Gemini Dec.",
 };
 
 const shortLabel = (mode: string) => shortLabels[mode] ?? requestModeLabels[mode] ?? mode;

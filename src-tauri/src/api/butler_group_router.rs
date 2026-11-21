@@ -10,10 +10,13 @@ use tauri::{AppHandle, Manager};
 use super::butler_group::RosterEntry;
 use crate::db::butler_group::{Member, Message, MAX_DISCUSSION_ROUNDS};
 
+pub const GROUP_DISPATCH_MODEL_KEY: &str = "butler_group_dispatch_model_id";
+
 const RECENT_MESSAGES: usize = 12;
 const RECENT_EXCERPT_CHARS: usize = 300;
 const LATEST_CHARS: usize = 2_000;
 const MAX_AUTO_RESPONDERS: usize = 3;
+const DECISION_SPEAKER_THRESHOLD: f64 = 0.55;
 
 fn excerpt(text: &str, limit: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -138,7 +141,191 @@ fn parse_model(raw: &str) -> Option<(String, i64)> {
     (!code.is_empty()).then(|| (code.to_string(), provider))
 }
 
+pub(super) fn build_decision_dispatch_request(
+    model_code: &str,
+    group: &str,
+    candidates: &[Candidate<'_>],
+    recent: &[Message],
+    latest: &Message,
+    fixed: Option<&[i64]>,
+) -> crate::decision::DecisionRequest {
+    use crate::decision::{ChoiceOption, DecisionQuestion, DecisionRequest};
+
+    let members_text = candidates
+        .iter()
+        .map(|c| {
+            let description = c
+                .entry
+                .map(|e| excerpt(&e.description, 80))
+                .filter(|d| !d.is_empty());
+            match description {
+                Some(description) => format!("- {}：{description}", c.member.name),
+                None => format!("- {}", c.member.name),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let history = recent
+        .iter()
+        .filter(|m| m.seq < latest.seq)
+        .rev()
+        .take(RECENT_MESSAGES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|m| format!("{}：{}", speaker(m), excerpt(&m.body, RECENT_EXCERPT_CHARS)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let quoted = latest
+        .reply_to
+        .and_then(|seq| recent.iter().find(|m| m.seq == seq))
+        .map(|m| format!("（引用了 {}：「{}」）\n", speaker(m), excerpt(&m.body, 120)))
+        .unwrap_or_default();
+    let fixed_note = match fixed {
+        Some(ids) => format!("\n已点名发言成员：{}\n", names(candidates, ids)),
+        None => String::new(),
+    };
+
+    let state = format!(
+        "群聊：{group}\n成员：\n{members_text}{fixed_note}\n最近的聊天：\n{}\n\n用户的最新消息：\n{quoted}{}",
+        if history.is_empty() { "（无）".into() } else { history },
+        latest.body.chars().take(LATEST_CHARS).collect::<String>()
+    );
+
+    let mut questions = Vec::new();
+    if fixed.is_none() {
+        if candidates.len() >= 2 {
+            let options: Vec<ChoiceOption> = candidates
+                .iter()
+                .map(|c| {
+                    let desc = c
+                        .entry
+                        .map(|e| excerpt(&e.description, 80))
+                        .filter(|d| !d.is_empty())
+                        .unwrap_or_else(|| c.member.name.clone());
+                    ChoiceOption::new(
+                        format!("m_{}", c.member.id),
+                        format!("{}：{}", c.member.name, desc),
+                    )
+                })
+                .collect();
+            questions.push(DecisionQuestion::choice(
+                "primary_responder",
+                "Which single group member is the best primary responder for the user's latest message?",
+                options,
+            ));
+        }
+        for c in candidates {
+            let desc = c
+                .entry
+                .map(|e| excerpt(&e.description, 80))
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("（专长：{d}）"))
+                .unwrap_or_default();
+            questions.push(DecisionQuestion::bool(
+                format!("speak_{}", c.member.id),
+                format!(
+                    "Should member 「{}」{} reply to the user's latest message? Say yes if called by name, asked as part of everyone/discussion, directly followed up on, or uniquely needed for expertise.",
+                    c.member.name, desc
+                ),
+            ));
+        }
+    }
+
+    let round_options: Vec<ChoiceOption> = (1..=MAX_DISCUSSION_ROUNDS)
+        .map(|r| {
+            let desc = match r {
+                1 => "Default single round: each selected member replies once without back-and-forth discussion.",
+                2 => "Two rounds: brief follow-up or user asked for 2 rounds.",
+                3 => "Multi-round discussion: user asked members to discuss, debate, review each other, or reach a conclusion.",
+                n => if n == MAX_DISCUSSION_ROUNDS {
+                    "Maximum discussion rounds explicitly requested by the user."
+                } else {
+                    "Extended discussion rounds explicitly requested by the user."
+                },
+            };
+            ChoiceOption::new(r.to_string(), desc)
+        })
+        .collect();
+    questions.push(DecisionQuestion::choice(
+        "discussion_rounds",
+        "How many discussion rounds should take place? Pick 1 unless the user explicitly asks multiple members to discuss, debate, or review each other.",
+        round_options,
+    ));
+
+    DecisionRequest::new(model_code, state, questions)
+}
+
+pub(super) fn plan_from_decision_response(
+    response: &crate::decision::DecisionResponse,
+    candidates: &[Candidate<'_>],
+    fixed: Option<&[i64]>,
+) -> Result<Plan, String> {
+    let rounds = response
+        .choice("discussion_rounds")
+        .and_then(|(val, _)| val.parse::<i64>().ok())
+        .unwrap_or(1)
+        .clamp(1, MAX_DISCUSSION_ROUNDS);
+
+    let build = |responders: Vec<i64>| {
+        let rounds = if responders.len() > 1 { rounds } else { 1 };
+        Plan { responders, rounds }
+    };
+
+    if let Some(ids) = fixed {
+        return Ok(build(ids.to_vec()));
+    }
+
+    let mut scored: Vec<(i64, f64)> = candidates
+        .iter()
+        .filter_map(|c| {
+            let prob = response.bool_probability(&format!("speak_{}", c.member.id))?;
+            Some((c.member.id, prob))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut responders: Vec<i64> = scored
+        .iter()
+        .filter(|(_, prob)| *prob >= DECISION_SPEAKER_THRESHOLD)
+        .take(MAX_AUTO_RESPONDERS)
+        .map(|(id, _)| *id)
+        .collect();
+
+    if responders.is_empty() {
+        if let Some((choice, _)) = response.choice("primary_responder") {
+            if let Some(id_str) = choice.strip_prefix("m_") {
+                if let Ok(id) = id_str.parse::<i64>() {
+                    if candidates.iter().any(|c| c.member.id == id) {
+                        responders.push(id);
+                    }
+                }
+            }
+        }
+    }
+
+    if responders.is_empty() {
+        let fallback_id = candidates
+            .iter()
+            .find(|c| c.entry.is_some_and(|e| e.chief))
+            .or_else(|| candidates.first())
+            .map(|c| c.member.id)
+            .ok_or_else(|| "群聊没有可用候选成员".to_string())?;
+        responders.push(fallback_id);
+    }
+
+    Ok(build(responders))
+}
+
 async fn model(app: &AppHandle) -> Result<(String, i64, &'static str), String> {
+    let dispatch = super::butler_api::get_experimental_config_value(app, GROUP_DISPATCH_MODEL_KEY)
+        .await
+        .filter(|value| !value.trim().is_empty());
+    if let Some(raw) = dispatch {
+        let (code, provider) = parse_model(&raw)
+            .ok_or_else(|| format!("群聊发言调度模型配置无效：{raw}；请在管家设置中重新选择"))?;
+        return Ok((code, provider, "群聊发言调度模型"));
+    }
     let helper = super::butler_api::get_experimental_config_value(app, super::butler_progress::HELPER_MODEL_KEY).await
         .filter(|value| !value.trim().is_empty());
     if let Some(raw) = helper {
@@ -164,6 +351,37 @@ pub(super) async fn choose(app: &AppHandle, group_id: i64, group: &str, members:
     let proxy = super::ai::config::get_network_proxy_from_config(&config);
     let provider_config = super::copilot_token_manager::prepare_provider_configs(app, &detail.provider.api_type, &detail.configs, proxy.as_deref())
         .await.map_err(|e| format!("{source}的供应商配置无效（provider={provider}, model={code}）：{e}"))?;
+
+    if crate::decision::is_decision_mode(&detail.model.request_mode) {
+        let decision_req = build_decision_dispatch_request(&detail.model.code, group, &candidates, recent, latest, fixed);
+        let (response, _endpoint) = crate::decision::execute_for_provider(
+            &provider_config,
+            &detail.model.request_mode,
+            &decision_req,
+            proxy.as_deref(),
+            false,
+            Some(super::ai::config::get_request_timeout_from_config(&config)),
+            &config,
+        )
+        .await
+        .map_err(|e| format!("{source}决策调度调用失败（provider={provider}, model={code}）：{e}"))?;
+        match crate::db::conversation_db::ConversationDatabase::new(app) {
+            Ok(db) => crate::api::token_statistics_api::record_auxiliary_usage(
+                &db,
+                crate::api::token_statistics_api::auxiliary_usage_from_decision(
+                    group_id,
+                    crate::db::token_stats::PURPOSE_GROUP_DISPATCH,
+                    Some(detail.model.id),
+                    &detail.model.name,
+                    response.protocol,
+                    &response.usage,
+                ),
+            ),
+            Err(error) => tracing::warn!(group_id, error = %error, "failed to open conversation db for dispatch usage"),
+        }
+        return plan_from_decision_response(&response, &candidates, fixed);
+    }
+
     let client = super::genai_client::create_client_with_config(Some((app, group_id)), &provider_config, &detail.model.code,
         &detail.provider.api_type, Some(&detail.model.request_mode), proxy.as_deref(), false,
         Some(super::ai::config::get_request_timeout_from_config(&config)), false, &config)

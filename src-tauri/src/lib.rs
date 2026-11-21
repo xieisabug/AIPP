@@ -4,6 +4,7 @@ pub mod acp_mcp_bridge;
 mod api;
 mod artifacts;
 mod db;
+pub mod decision;
 mod errors;
 mod external_channels;
 mod feishu;
@@ -75,7 +76,7 @@ use crate::api::llm_api::{
     add_llm_model, add_llm_provider, delete_llm_model, delete_llm_provider, export_llm_provider,
     fetch_model_list, get_filtered_models_for_select, get_filtered_providers, get_llm_models,
     get_llm_provider_config, get_llm_providers, get_models_for_select, import_llm_provider,
-    preview_model_list, update_llm_model_request_mode, update_llm_provider,
+    preview_model_list, test_decision_model, update_llm_model_request_mode, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
 use crate::api::office_api::{
@@ -1079,6 +1080,7 @@ pub fn run() {
             crate::api::deepseek_api::get_deepseek_balance,
             crate::api::deepseek_api::get_deepseek_chat_balance_provider,
             preview_model_list,
+            test_decision_model,
             update_llm_model_request_mode,
             update_selected_models,
             get_models_for_select,

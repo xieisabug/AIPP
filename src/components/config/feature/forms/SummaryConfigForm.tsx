@@ -14,6 +14,8 @@ import { Switch } from "@/components/ui/switch";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { invoke } from "@tauri-apps/api/core";
+import { DecisionModelProbeButton } from "@/components/config/DecisionModelProbeButton";
+import { isDecisionRequestMode } from "@/components/config/llmModelTypes";
 
 export const ReviewOutputCapability: React.FC<{ model: string; mode: string }> = ({ model, mode }) => {
     const [status, setStatus] = React.useState<{ prompt: boolean; reason: string } | null>(null);
@@ -111,6 +113,7 @@ interface ModelSelectProps {
     placeholder?: string;
     disabled?: boolean;
     allowClear?: boolean;
+    includeDecision?: boolean;
 }
 
 const ModelSelect: React.FC<ModelSelectProps> = ({
@@ -119,13 +122,16 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
     placeholder = "选择模型",
     disabled,
     allowClear = false,
+    includeDecision = false,
 }) => {
-    const { models, loading, error } = useModels(!disabled);
+    const { models, loading, error } = useModels(!disabled, { includeDecision });
 
     const modelOptions = useMemo(() => {
         return models.map((model) => ({
             value: `${model.code}%%${model.llm_provider_id}`,
-            label: model.name,
+            label: model.is_decision || isDecisionRequestMode(model.request_mode)
+                ? `${model.name} [决策]`
+                : model.name,
         }));
     }, [models]);
 
@@ -162,6 +168,17 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
     form,
     onSave,
 }) => {
+    const assistantAiEnabled = Boolean(form.watch("assistant_ai_enabled"));
+    const selectedAutoReviewModel = String(form.watch("auto_review_model") || "");
+    const { models: reviewCandidateModels } = useModels(assistantAiEnabled, { includeDecision: true });
+    const isDecisionReviewModel = useMemo(() => {
+        if (!selectedAutoReviewModel) return false;
+        const found = reviewCandidateModels.find(
+            (m) => `${m.code}%%${m.llm_provider_id}` === selectedAutoReviewModel,
+        );
+        return Boolean(found && (found.is_decision || isDecisionRequestMode(found.request_mode)));
+    }, [reviewCandidateModels, selectedAutoReviewModel]);
+
     const handleSaveSummary = useCallback(async () => {
         try {
             await onSave();
@@ -356,32 +373,69 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                                 onChange={field.onChange}
                                                 placeholder="选择自动审核模型"
                                                 allowClear
+                                                includeDecision
                                                 disabled={!form.watch("assistant_ai_enabled")}
                                             />
                                         </FormControl>
                                         <FormDescription>
-                                            只使用所选模型，不会在缺失时改用其他模型。
+                                            支持普通对话模型与决策模型（如 Jev / OpenAI Decisions / Gemini Decisions，标有 [决策]）。只使用所选模型，不会在缺失时改用其他模型。
                                         </FormDescription>
                                         <FormMessage />
                                     </FormItem>
                                 )}
                             />
-                            <Controller control={form.control} name="auto_review_output_mode" render={({ field }) => (
-                                <FormItem>
-                                    <FormLabel>审核输出方式</FormLabel>
-                                    <Select value={field.value || "auto"} onValueChange={field.onChange} disabled={!form.watch("assistant_ai_enabled")}>
-                                        <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
-                                        <SelectContent>
-                                            <SelectItem value="auto">自动（推荐）</SelectItem>
-                                            <SelectItem value="schema">强制 Format（JSON Schema）</SelectItem>
-                                            <SelectItem value="prompt">仅 Prompt（JSON）</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                    <FormDescription>自动模式优先使用 JSON Schema；仅在明确不支持时，用同一模型以 Prompt 重试一次，校验成功后记忆。所有模式都严格校验结果，失败则等待人工确认。保存配置后生效。</FormDescription>
-                                    <FormMessage />
-                                </FormItem>
-                            )} />
-                            <ReviewOutputCapability model={form.watch("auto_review_model") || ""} mode={form.watch("auto_review_output_mode") || "auto"} />
+                            {isDecisionReviewModel ? (
+                                <>
+                                    <Controller
+                                        control={form.control}
+                                        name="auto_review_decision_threshold"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>决策放行安全阈值</FormLabel>
+                                                <FormControl>
+                                                    <Input
+                                                        type="number"
+                                                        step="0.01"
+                                                        min="0.50"
+                                                        max="0.99"
+                                                        value={field.value || "0.90"}
+                                                        onChange={field.onChange}
+                                                        disabled={!form.watch("assistant_ai_enabled")}
+                                                        placeholder="0.90"
+                                                    />
+                                                </FormControl>
+                                                <FormDescription>
+                                                    决策模型返回的 safe（及用户意图一致）概率均须不低于此阈值，且风险分类为安全项时才自动放行；否则转为人工确认（默认 0.90）。
+                                                </FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <DecisionModelProbeButton
+                                        modelValue={selectedAutoReviewModel}
+                                        disabled={!form.watch("assistant_ai_enabled")}
+                                    />
+                                </>
+                            ) : (
+                                <>
+                                    <Controller control={form.control} name="auto_review_output_mode" render={({ field }) => (
+                                        <FormItem>
+                                            <FormLabel>审核输出方式</FormLabel>
+                                            <Select value={field.value || "auto"} onValueChange={field.onChange} disabled={!form.watch("assistant_ai_enabled")}>
+                                                <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                                                <SelectContent>
+                                                    <SelectItem value="auto">自动（推荐）</SelectItem>
+                                                    <SelectItem value="schema">强制 Format（JSON Schema）</SelectItem>
+                                                    <SelectItem value="prompt">仅 Prompt（JSON）</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                            <FormDescription>自动模式优先使用 JSON Schema；仅在明确不支持时，用同一模型以 Prompt 重试一次，校验成功后记忆。所有模式都严格校验结果，失败则等待人工确认。保存配置后生效。</FormDescription>
+                                            <FormMessage />
+                                        </FormItem>
+                                    )} />
+                                    <ReviewOutputCapability model={selectedAutoReviewModel} mode={form.watch("auto_review_output_mode") || "auto"} />
+                                </>
+                            )}
                         </div>
                     </section>
 

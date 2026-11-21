@@ -50,3 +50,59 @@ fn test_group_router_prompt_lists_members_recent_chat_and_chief_fallback() {
     assert!(user.contains("最近的聊天：\n写作助手：初稿写好了"));
     assert!(user.ends_with("用户的最新消息：\n那再润色一下"));
 }
+
+#[test]
+fn test_decision_group_router_selects_speakers_and_rounds_without_hallucination() {
+    let members = [member(1, "写作助手"), member(2, "Coder"), member(3, "总管家")];
+    let chief = RosterEntry { name: "总管家".into(), description: "统筹协调".into(), chief: true };
+    let candidates = vec![
+        Candidate { member: &members[0], entry: None },
+        Candidate { member: &members[1], entry: None },
+        Candidate { member: &members[2], entry: Some(&chief) },
+    ];
+    let latest = message(1, None, "请写作助手和 Coder 讨论一下方案");
+    let req = build_decision_dispatch_request("jev-latest", "研发群", &candidates, &[latest.clone()], &latest, None);
+    assert!(req.questions.iter().any(|q| q.key() == "primary_responder"));
+    assert!(req.questions.iter().any(|q| q.key() == "speak_1"));
+    assert!(req.questions.iter().any(|q| q.key() == "speak_2"));
+    assert!(req.questions.iter().any(|q| q.key() == "discussion_rounds"));
+
+    let resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &req,
+        serde_json::json!({
+            "answers": {
+                "primary_responder": { "type": "choice", "choice": "m_2", "probabilities": { "m_1": 0.4, "m_2": 0.5, "m_3": 0.1 } },
+                "speak_1": { "type": "noul", "noul": 0.85 },
+                "speak_2": { "type": "noul", "noul": 0.92 },
+                "speak_3": { "type": "noul", "noul": 0.12 },
+                "discussion_rounds": { "type": "choice", "choice": "3" }
+            }
+        }),
+        20,
+    ).unwrap();
+    let plan = plan_from_decision_response(&resp, &candidates, None).unwrap();
+    assert_eq!(plan, Plan { responders: vec![2, 1], rounds: 3 });
+
+    // 全部低于阈值时回退 primary_responder，且单人回复 rounds 强制为 1
+    let low_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &req,
+        serde_json::json!({
+            "answers": {
+                "primary_responder": { "type": "choice", "choice": "m_3" },
+                "speak_1": { "type": "noul", "noul": 0.2 },
+                "speak_2": { "type": "noul", "noul": 0.1 },
+                "speak_3": { "type": "noul", "noul": 0.3 },
+                "discussion_rounds": { "type": "choice", "choice": "3" }
+            }
+        }),
+        18,
+    ).unwrap();
+    let fallback_plan = plan_from_decision_response(&low_resp, &candidates, None).unwrap();
+    assert_eq!(fallback_plan, Plan { responders: vec![3], rounds: 1 });
+
+    // 用户已点名时保留点名名单，仅采用轮数
+    let fixed_plan = plan_from_decision_response(&resp, &candidates, Some(&[1, 3])).unwrap();
+    assert_eq!(fixed_plan, Plan { responders: vec![1, 3], rounds: 3 });
+}
