@@ -87,7 +87,7 @@ const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({ providerId,
         <div className="divide-y divide-border rounded-lg border border-border" data-aipp-slot="deepseek-capabilities">
             {onWebChange && <div className="flex min-h-11 items-center gap-3 px-3 py-2">
                 <div className="flex-1"><div className="text-sm font-medium">对话内联网</div>
-                    <div className="text-xs text-muted-foreground">允许 deepseek-flash 在对话中搜索和阅读网页</div></div>
+                    <div className="text-xs text-muted-foreground">开启后 deepseek-flash 的对话按需联网搜索、阅读消息中的链接</div></div>
                 <Switch aria-label="对话内联网" checked={!!webEnabled} onCheckedChange={onWebChange} />
             </div>}
             {hasKey && (

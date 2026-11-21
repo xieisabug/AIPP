@@ -1,4 +1,3 @@
-import { rememberWebMode, type WebMode } from './useDeepSeekWeb';
 import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -13,7 +12,6 @@ import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
 import { splitTurnContext, withTurnContext } from "../utils/turnContext";
 
 export interface UseConversationOperationsProps {
-    webMode?: WebMode;
     conversation?: Conversation;
     selectedAssistant: number;
     assistants: AssistantListItem[];
@@ -69,7 +67,6 @@ export interface UseConversationOperationsReturn {
 }
 
 export function useConversationOperations({
-    webMode,
     conversation,
     selectedAssistant,
     assistants,
@@ -263,7 +260,6 @@ export function useConversationOperations({
     // 新对话界面的 Agent 会话级覆盖（模型/思考强度/审批策略/沙箱/模式），仅在当前选中助手一致时下发
     const buildAgentOverrides = (parsedAssistantId: number) => {
         const agentOverrideConfig: Record<string, string> = {};
-        if (webMode) agentOverrideConfig.deepseek_web_mode = webMode;
         if (parsedAssistantId === +selectedAssistant) {
             if (selectedAgentEffort) {
                 agentOverrideConfig.reasoning_effort = selectedAgentEffort;
@@ -549,7 +545,6 @@ export function useConversationOperations({
                         console.log("ask ai response", res);
                         // 先切到对话（新对话也能立即出现在列表和消息区），再处理请求前失败
                         if (conversationId != String(res.conversation_id)) {
-                            if (webMode) rememberWebMode(String(res.conversation_id), webMode);
                             onChangeConversationId(String(res.conversation_id));
                         }
                         if (res.error_message) {

@@ -1,4 +1,3 @@
-import { rememberWebMode, type WebMode } from './useDeepSeekWeb';
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useRef } from "react";
@@ -6,7 +5,6 @@ import { Conversation, ConversationWithMessages, Message, FileInfo } from "../da
 import { AssistantDetail } from "../data/Assistant";
 
 export interface UseAssistantRuntimeProps {
-    webMode?: WebMode;
     conversation?: Conversation;
     selectedAssistant: number;
     inputText: string;
@@ -24,7 +22,6 @@ export interface UseAssistantRuntimeReturn {
 }
 
 export function useAssistantRuntime({
-    webMode,
     conversation,
     selectedAssistant,
     inputText,
@@ -118,9 +115,7 @@ export function useAssistantRuntime({
                     override_model_id: overrideModelId,
                     attachment_list: fileInfoListParam?.map((i) => i.id),
                 },
-                overrideModelConfig: webMode && !suppressConversationSwitch
-                    ? { ...(overrideModelConfig instanceof Map ? Object.fromEntries(overrideModelConfig) : overrideModelConfig), deepseek_web_mode: webMode }
-                    : overrideModelConfig,
+                overrideModelConfig: overrideModelConfig,
                 overridePrompt: overrideSystemPrompt,
                 overrideMcpConfig: overrideMcpConfig,
             })
@@ -128,7 +123,6 @@ export function useAssistantRuntime({
                     console.log("ask assistant response", res);
 
                     if (!suppressConversationSwitch && conversationId != res.conversation_id + "") {
-                        if (webMode) rememberWebMode(String(res.conversation_id), webMode);
                         onChangeConversationId(res.conversation_id + "");
                     }
                     // 对话已创建但请求在调用模型前失败（如未配置模型）：错误已写入对话，这里结束响应状态

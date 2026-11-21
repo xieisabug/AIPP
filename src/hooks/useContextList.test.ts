@@ -557,4 +557,27 @@ describe('useContextList', () => {
         });
     });
 
+    it('should list each DeepSeek server call with its own sources so the card can focus it', async () => {
+        const url = 'https://example.org/a';
+        const messages = [{
+            id: 9, conversation_id: 1, message_type: 'response', content: '答复',
+            metadata_json: JSON.stringify({ deepseek_web: { server_tool_calls: [{ calls: [
+                { action: { type: 'search', queries: ['甲', '乙'] }, sources: [{ url, title: '甲页' }] },
+                { action: { type: 'find_in_page', pattern: '无来源' } },
+            ] }] } }),
+        }] as Message[];
+
+        const { result } = renderHook(() => useContextList({
+            conversationId: 1, userFiles: null, mcpToolCallStates: new Map(), messages, acpWorkingDirectory: null,
+        }));
+
+        await waitFor(() => {
+            const web = result.current.contextItems.filter((item) => item.id.startsWith('deepseek-web-'));
+            expect(web).toEqual([expect.objectContaining({
+                id: 'deepseek-web-9-0-0', type: 'search', name: '甲\n乙', details: '网络搜索',
+                searchResults: [expect.objectContaining({ url, title: '甲页' })],
+            })]);
+        });
+    });
+
 });

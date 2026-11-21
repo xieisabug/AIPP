@@ -1,4 +1,4 @@
-import { readWebReport } from '@/utils/deepSeekWeb';
+import { deepSeekWebContextId, readWebReport } from '@/utils/deepSeekWeb';
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { FileInfo, MCPToolCallUpdateEvent, Message } from '../data/Conversation';
@@ -531,11 +531,28 @@ export function useContextList({
         // Add attachments from messages (sent files)
         if (messages && messages.length > 0) {
             for (const message of messages) {
-                const web = message.message_type === "response" && readWebReport(message.metadata_json);
-                if (web && web.sources.length) {
-                    items.push({ id: `deepseek-web-${message.id}`, type: "search", source: "assistant", name: `来源 ${web.sources.length}`,
-                        searchResults: web.sources, previewStatus: "ready",
-                        previewData: { title: "DeepSeek 联网来源", items: web.sources.map(s => ({label: s.title, url: s.url, description: s.snippet})) } });
+                // DeepSeek 服务端联网：每次调用一条，与 search_web / fetch_url 的侧栏条目一致（卡片点击定位到这里）。
+                const web = message.message_type === "response" ? readWebReport(message.metadata_json) : undefined;
+                for (const call of web?.calls ?? []) {
+                    if (!call.sources.length) continue;
+                    const label = call.type === "search" ? "网络搜索" : call.type === "read" ? "阅读网页" : "页内查找";
+                    items.push({
+                        id: deepSeekWebContextId(message.id, call),
+                        type: "search",
+                        name: call.detail,
+                        details: label,
+                        searchResults: call.sources,
+                        source: "assistant",
+                        previewStatus: "ready",
+                        previewData: {
+                            title: call.title,
+                            subtitle: label,
+                            rawValue: call.detail,
+                            contentType: "file-meta",
+                            items: call.sources.map((s) => ({ label: s.title, description: s.snippet, url: s.url })),
+                            metadata: buildMetadata({ 来源: "DeepSeek 联网", 工具: label, 查询: call.type === "read" ? undefined : call.detail }),
+                        },
+                    });
                 }
                 if (!message.attachment_list || message.attachment_list.length === 0) continue;
 

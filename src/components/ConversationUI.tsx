@@ -77,7 +77,6 @@ import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
 import { webQuestionToResend } from "@/utils/deepSeekWeb";
-import { useDeepSeekWeb } from "@/hooks/useDeepSeekWeb";
 import { useConversationOperations } from "@/hooks/useConversationOperations";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
@@ -1207,11 +1206,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 不回退到新建页残留的 selectedAssistant，否则会拿别的助手去判断/连接当前会话的 Agent。
         const loadedConversation = conversationId && conversation?.id === Number(conversationId) ? conversation : null;
         const activeAssistantId = conversationId ? (loadedConversation?.assistant_id ?? null) : selectedAssistant;
-        const deepSeekWeb = useDeepSeekWeb(activeAssistantId, conversationId || "", conversationId ? "" : selectedAgentModel || "");
 
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
-            webMode: deepSeekWeb?.mode,
             conversation,
             selectedAssistant,
             inputText,
@@ -1263,7 +1260,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             openTitleEditDialog,
             closeTitleEditDialog,
         } = useConversationOperations({
-            webMode: deepSeekWeb?.mode,
             quote: butlerQuote?.quote ?? null,
             clearQuote: clearButlerQuote,
             quietRuntimeErrors: resultOnly,
@@ -2468,7 +2464,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <ChevronDown className="h-4 w-4" />回到底部
                         </Button>}
                         {!readOnly && <InputArea
-                            deepSeekWeb={deepSeekWeb}
                             permissionConversationIds={Number(conversationId)}
                             ref={inputAreaRef}
                             inputText={inputText}

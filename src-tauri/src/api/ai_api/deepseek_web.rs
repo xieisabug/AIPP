@@ -1,31 +1,17 @@
 use super::*;
 use genai::chat::{ChatOptions, ChatRequest, ReasoningEffort};
 use crate::db::llm_db::ModelDetail;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WebMode { #[default] Off, Search, Deep }
-
-fn available(detail: &ModelDetail) -> bool {
+/// 对话内联网只由服务商详情里的「对话内联网」开关决定：开了之后该服务商的 deepseek-flash
+/// 每轮都带上服务端搜索/阅读链接，聊天界面不再有单独的开关。
+pub fn enabled(detail: &ModelDetail) -> bool {
     detail.provider.api_type == "deepseek" && detail.model.code == "deepseek-flash"
         && detail.configs.iter().any(|c| c.name == "deepseek_web_enabled" && c.value == "true")
 }
 
-pub fn selected(detail: &ModelDetail, mode: Option<&serde_json::Value>) -> WebMode {
-    if !available(detail) { return WebMode::Off; }
-    mode.and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
-}
-
-pub fn from_history(detail: &ModelDetail, user: Option<&Message>) -> WebMode {
-    let metadata = user.and_then(|m| m.metadata_json.as_deref())
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-    selected(detail, metadata.as_ref().and_then(|v| v.get("deepseek_web_mode")))
-}
-
-pub fn filter_search(info: &mut MCPInfoForAssistant, mode: WebMode) -> Vec<String> {
+pub fn filter_search(info: &mut MCPInfoForAssistant, enabled: bool) -> Vec<String> {
     let mut names = Vec::new();
-    if mode == WebMode::Off { return names; }
+    if !enabled { return names; }
     for server in &mut info.enabled_servers {
         if server.command.as_deref() == Some("aipp:search") {
             names.push(server.name.clone());
@@ -58,7 +44,7 @@ fn remove_search_catalogue(prompt: &mut String, servers: &[String]) {
     }
 }
 
-pub fn configure(mode: WebMode, search_servers: &[String], flash: bool, request: &mut ChatRequest, options: &mut ChatOptions) {
+pub fn configure(enabled: bool, search_servers: &[String], flash: bool, request: &mut ChatRequest, options: &mut ChatOptions) {
     use genai::chat::{ChatRole, ContentPart, MessageContent};
     for message in &mut request.messages {
         if !flash && message.content.iter().any(|p| matches!(p, ContentPart::Custom(c) if c.typ() == Some("deepseek_web"))) {
@@ -66,40 +52,27 @@ pub fn configure(mode: WebMode, search_servers: &[String], flash: bool, request:
             parts.retain(|p| !matches!(p, ContentPart::Custom(c) if c.typ() == Some("deepseek_web")));
             message.content = MessageContent::from_parts(parts);
         }
-        if flash && mode != WebMode::Off && matches!(message.role, ChatRole::System) {
+        if flash && enabled && matches!(message.role, ChatRole::System) {
             for part in message.content.iter_mut() {
                 if let ContentPart::Text(prompt) = part { remove_search_catalogue(prompt, search_servers); }
             }
         }
     }
-    if !flash || mode == WebMode::Off { return; }
+    if !flash || !enabled { return; }
     options.deepseek_web = Some(true);
-    let thinking = mode == WebMode::Deep || request.tools.as_ref().is_some_and(|tools| !tools.is_empty());
-    options.reasoning_effort = Some(if thinking { ReasoningEffort::High } else { ReasoningEffort::Zero });
+    // 思考跟随助手自己的 reasoning_effort。DeepSeek 只在思考模式下允许客户端工具与服务端联网共存，
+    // 所以本轮带原生工具而助手没开思考时补上 High，否则请求会 400。
+    let native_tools = request.tools.as_ref().is_some_and(|tools| !tools.is_empty());
+    if native_tools && matches!(options.reasoning_effort, None | Some(ReasoningEffort::Zero)) {
+        options.reasoning_effort = Some(ReasoningEffort::High);
+    }
+    let thinking = options.reasoning_effort.as_ref().is_some_and(|effort| !matches!(effort, ReasoningEffort::Zero));
     if thinking {
+        // 思考模式下 DeepSeek 忽略温度与 top-p，不发出去以免看起来生效了。
         options.temperature = None;
         options.top_p = None;
     }
-    options.capture_reasoning_content = Some(thinking);
-}
-
-#[derive(Serialize)]
-pub struct WebCapability { native_tools: bool }
-
-#[tauri::command]
-pub async fn get_deepseek_web_capability(app_handle: tauri::AppHandle, assistant_id: i64, override_model_id: Option<String>, conversation_id: Option<i64>) -> Result<Option<WebCapability>, String> {
-    let assistant = get_assistant(app_handle.clone(), assistant_id)?;
-    if assistant.assistant.assistant_type == Some(4) || assistant.model.is_empty() { return Ok(None); }
-    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    if override_model_id.is_none() && assistant.model[0].model_code != "deepseek-flash" { return Ok(None); }
-    let model = resolve_ask_model_detail(&db, override_model_id.as_deref(), &assistant)?;
-    if !available(&model) { return Ok(None); }
-    let mut info = collect_mcp_info_for_conversation(&app_handle, assistant_id, None, None, conversation_id)
-        .await.map_err(|e| e.to_string())?;
-    filter_search(&mut info, WebMode::Search);
-    let native_tools = build_tool_config(&app_handle, &info, info.use_native_toolcall, conversation_id)
-        .is_some_and(|config| !config.tools.is_empty());
-    Ok(Some(WebCapability { native_tools }))
+    options.capture_reasoning_content = Some(!matches!(options.reasoning_effort, Some(ReasoningEffort::Zero)));
 }
 
 #[cfg(test)]

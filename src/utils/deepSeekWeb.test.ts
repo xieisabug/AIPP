@@ -3,16 +3,34 @@ import { readWebReport, webQuestionToResend, withWebCitations } from "./deepSeek
 import type { Message } from "@/data/Conversation";
 
 const page = { url: "https://example.org/page", title: "资料" };
-const metadata = JSON.stringify({deepseek_web: {server_tool_calls: [{calls: [
-    {action: {type: "read_link", url: page.url}, page, signature: "signed"},
-    {action: {type: "search", queries: ["甲", "乙"]}, sources: [page]},
-]}], annotations: [{url_citation: {...page, start_index: 0, end_index: 2}}]}});
+const other = { url: "https://example.org/other", title: "另一篇" };
+const metadata = JSON.stringify({deepseek_web: {server_tool_calls: [
+    {calls: [{action: {type: "read_link", url: page.url}, page, signature: "signed"}]},
+    {calls: [
+        {action: {type: "search", queries: ["甲", "乙"]}, sources: [page, other]},
+        {action: {type: "open_page", url: "https://example.org/broken"}, status: "failed"},
+        {action: {type: "find_in_page", pattern: "高度"}},
+    ]},
+], annotations: [{url_citation: {...page, start_index: 0, end_index: 2}}]}});
 
 describe("DeepSeek web tools", () => {
-    it("should count queries and read links and deduplicate overlapping sources", () => {
+    it("should turn each server call into a card entry with its own sources", () => {
         const report = readWebReport(metadata)!;
-        expect([report.searchCount, report.pageCount, report.sources.length]).toEqual([2, 1, 1]);
+        expect(report.calls.map(c => [c.key, c.type, c.title, c.failed])).toEqual([
+            ["0-0", "read", "资料", false],
+            ["1-0", "search", "甲、乙", false],
+            ["1-1", "read", "https://example.org/broken", true],
+            ["1-2", "find", "高度", false],
+        ]);
+        expect(report.calls[1].detail).toBe("甲\n乙");
+        expect(report.calls[1].sources.map(s => s.url)).toEqual([page.url, other.url]);
+        expect(report.calls[2].sources).toEqual([]);
         expect(JSON.stringify(report)).not.toContain("signed");
+    });
+    it("should number sources once across calls so citations match the sidebar", () => {
+        const report = readWebReport(metadata)!;
+        expect(report.sources.map(s => [s.rank, s.url])).toEqual([[1, page.url], [2, other.url]]);
+        expect(report.calls[1].sources.map(s => s.rank)).toEqual([1, 2]);
     });
     it("should place the citation after a supplementary Unicode character", () => {
         expect(withWebCitations("甲😀乙", readWebReport(metadata))).toBe("甲😀[⁽¹⁾](<https://example.org/page>)乙");

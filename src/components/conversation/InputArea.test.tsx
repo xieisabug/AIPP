@@ -19,7 +19,6 @@ function InputAreaHarness({
     planMode = false,
     planModeSwitching = false,
     onPlanModeToggle,
-    deepSeekWeb,
     isMobile = false,
     placement = "bottom",
     onSend = () => {},
@@ -35,7 +34,6 @@ function InputAreaHarness({
     initialText?: string;
     aiIsResponsing?: boolean;
     planMode?: boolean;
-    deepSeekWeb?: ReturnType<typeof import('@/hooks/useDeepSeekWeb').useDeepSeekWeb>;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
     isMobile?: boolean;
@@ -64,7 +62,6 @@ function InputAreaHarness({
             planMode={planMode}
             planModeSwitching={planModeSwitching}
             onPlanModeToggle={onPlanModeToggle}
-            deepSeekWeb={deepSeekWeb}
         />
     );
 }
@@ -90,17 +87,6 @@ describe("InputArea slash completion", () => {
                 tags: ["react", "frontend"],
             },
         ]);
-    });
-
-    it("should require thinking when native tools participate", () => {
-        const change = vi.fn();
-        const { rerender } = render(<InputAreaHarness />);
-        expect(screen.queryByRole("switch", {name: "联网"})).toBeNull();
-        rerender(<InputAreaHarness deepSeekWeb={{mode: "search", requiresThinking: true, change}} />);
-        expect(screen.getByRole("switch", {name: "深度思考搜索"})).toBeChecked();
-        expect(screen.getByRole("switch", {name: "深度思考搜索"})).toBeDisabled();
-        fireEvent.click(screen.getByRole("switch", {name: "联网"}));
-        expect(change).toHaveBeenCalledWith("off");
     });
 
     it("should request continuation when clicking send with a blank idle draft", async () => {

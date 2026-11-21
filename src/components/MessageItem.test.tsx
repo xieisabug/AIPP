@@ -144,21 +144,26 @@ it('should interleave ordinary reasoning and tool operations before response tex
 });
 
 describe('DeepSeek historical responses', () => {
-    it('should expand saved search steps and focus their sources when clicked', async () => {
+    it('should render each saved server call as a web tool card that focuses its own sources', async () => {
         const url = 'https://example.org/source';
         const metadata = { deepseek_web: {
-            server_tool_calls: [{ calls: [{ action: { type: 'search', queries: ['首条', '次条'] } }] }],
+            server_tool_calls: [{ calls: [
+                { action: { type: 'search', queries: ['首条', '次条'] }, sources: [{ url, title: '资料' }] },
+                { action: { type: 'open_page', url }, page: { url, title: '资料页' } },
+            ] }],
             annotations: [{ url_citation: { url, title: '资料', start_index: 0, end_index: 2 } }],
         } };
-        render(<MessageItem mergedMode message={createMessage({ id: 19, content: '甲😀乙', metadata_json: JSON.stringify(metadata) })} />);
-        const toggle = screen.getByRole('button', { name: '搜索了 2 次 · 阅读 0 个网页 · 1 个来源' });
-        expect(toggle).toHaveAttribute('aria-expanded', 'false');
-        await userEvent.click(toggle);
-        expect(toggle).toHaveAttribute('aria-expanded', 'true');
-        expect(screen.getByText('搜索 · 首条、次条')).toBeInTheDocument();
+        const { container } = render(<MessageItem mergedMode message={createMessage({ id: 19, content: '甲😀乙', metadata_json: JSON.stringify(metadata) })} />);
+        const cards = container.querySelectorAll('[data-aipp-slot="web-tool-card"]');
+        expect([...cards].map(card => card.getAttribute('data-web-tool-kind'))).toEqual(['search', 'read']);
+        expect(screen.getByText('首条、次条')).toBeInTheDocument();
+        expect(screen.getByText('搜索完成')).toBeInTheDocument();
+        expect(screen.getByText('资料页')).toBeInTheDocument();
+        expect(screen.getByText('example.org')).toHaveAttribute('title', url);
         expect(screen.getByText('甲😀[⁽¹⁾](<https://example.org/source>)乙')).toBeInTheDocument();
-        await userEvent.click(screen.getByRole('button', { name: '来源 1' }));
-        expect(emit).toHaveBeenCalledWith('sidebar-focus-context', { id: 'deepseek-web-19', conversationId: 1 });
+        expect(screen.queryByRole('button', { name: '来源 1' })).not.toBeInTheDocument();
+        await userEvent.click(screen.getAllByRole('button', { name: '在侧栏中查看来源' })[0]);
+        expect(emit).toHaveBeenCalledWith('sidebar-focus-context', { id: 'deepseek-web-19-0-0', conversationId: 1 });
     });
 
     it('should replace filtered text with the muted provider notice', () => {
