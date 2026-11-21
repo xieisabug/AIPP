@@ -32,6 +32,23 @@ describe("DeepSeek web tools", () => {
         expect(report.sources.map(s => [s.rank, s.url])).toEqual([[1, page.url], [2, other.url]]);
         expect(report.calls[1].sources.map(s => s.rank)).toEqual([1, 2]);
     });
+    it("should build running calls from live events with the same keys as the final calls", () => {
+        const live = readWebReport(JSON.stringify({deepseek_web: {events: [
+            {type: "step_reasoning_done", step: 0},
+            {type: "call_started", step: 1, call: {index: 0, action: {type: "search", queries: ["甲"]}}},
+            {type: "call_started", step: 1, call: {index: 1, action: {type: "open_page", url: page.url}}},
+            {type: "call_completed", step: 1, call: {index: 1, status: "completed", page}},
+            {type: "call_completed", step: 1, call: {index: 2, status: "failed"}},
+        ]}}))!;
+        expect(live.calls.map(c => [c.key, c.type, c.running, c.failed])).toEqual([
+            ["1-0", "search", true, false],
+            ["1-1", "read", false, false],
+        ]);
+        expect(live.calls[1].sources.map(s => s.url)).toEqual([page.url]);
+        // 结束后完整数据的同一调用沿用相同键；没有 status 的历史数据不算进行中
+        expect(readWebReport(metadata)!.calls.every(c => !c.running)).toBe(true);
+        expect(readWebReport(metadata)!.calls[1].key).toBe("1-0");
+    });
     it("should place the citation after a supplementary Unicode character", () => {
         expect(withWebCitations("甲😀乙", readWebReport(metadata))).toBe("甲😀[⁽¹⁾](<https://example.org/page>)乙");
     });

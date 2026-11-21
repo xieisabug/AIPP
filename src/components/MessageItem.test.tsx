@@ -166,6 +166,23 @@ describe('DeepSeek historical responses', () => {
         expect(emit).toHaveBeenCalledWith('sidebar-focus-context', { id: 'deepseek-web-19-0-0', conversationId: 1 });
     });
 
+    it('should show live server calls as running until the reply settles', () => {
+        const events = [
+            { type: 'call_started', step: 0, call: { index: 0, action: { type: 'search', queries: ['实时'] } } },
+            { type: 'call_started', step: 0, call: { index: 1, action: { type: 'open_page', url: 'https://example.org/p' } } },
+            { type: 'call_completed', step: 0, call: { index: 1, status: 'completed', page: { url: 'https://example.org/p', title: '已读页' } } },
+        ];
+        const metadata_json = JSON.stringify({ deepseek_web: { events } });
+        const { unmount } = render(<MessageItem mergedMode message={createMessage({ id: 21, content: '', finish_time: null, metadata_json })} />);
+        expect(screen.getByText('搜索中')).toBeInTheDocument();
+        expect(screen.getByText('阅读完成')).toBeInTheDocument();
+        // 停止或出错后（finish_time 已写入）仍未完成的调用不再转圈；重新挂载以避开状态徽章的退出动画
+        unmount();
+        render(<MessageItem mergedMode message={createMessage({ id: 21, content: '', metadata_json })} />);
+        expect(screen.queryByText('搜索中')).not.toBeInTheDocument();
+        expect(screen.getByText('搜索失败')).toBeInTheDocument();
+    });
+
     it('should replace filtered text with the muted provider notice', () => {
         render(<MessageItem message={createMessage({ content: '未完成的正文', metadata_json: '{"deepseek_filtered":true}' })} />);
         expect(screen.queryByText('未完成的正文')).not.toBeInTheDocument();

@@ -514,7 +514,8 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const messageBodyContent = <>
             {obsoleteGoal && <div role="note" className="mb-2 text-xs text-muted-foreground">旧目标的历史回复，不是当前结果</div>}
-            {web && web.calls.length > 0 && <DeepSeekWebProcess report={web} messageId={message.id} conversationId={message.conversation_id} />}
+            {web && web.calls.length > 0 && <DeepSeekWebProcess report={web} messageId={message.id} conversationId={message.conversation_id}
+                settled={message.finish_time != null || streamEvent?.is_done === true} />}
             {web?.filtered ? <span className="text-sm text-muted-foreground">DeepSeek 已停止回答此问题。</span> : rawMessageBodyContent}
         </>;
 

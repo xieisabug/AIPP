@@ -563,6 +563,31 @@ fn web_metadata(existing: Option<String>, web: Option<&serde_json::Value>, filte
     Some(serde_json::Value::Object(data).to_string())
 }
 
+/// DeepSeek 服务端联网进行中：把已收到的 server_tool_event 写进回复的 metadata（deepseek_web.events），
+/// 通知界面刷新卡片。结束时由完整的 deepseek_web（含 server_tool_calls）覆盖。
+fn publish_live_web_events(
+    conversation_db: &ConversationDatabase,
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: i64,
+    events: &[serde_json::Value],
+) -> anyhow::Result<()> {
+    let repo = conversation_db.message_repo()?;
+    let existing = repo.read(message_id)?.context("missing response for DeepSeek web progress")?;
+    let metadata = web_metadata(existing.metadata_json, Some(&serde_json::json!({ "events": events })), false, None);
+    repo.update_metadata(message_id, metadata.as_deref())?;
+    send_conversation_event_to_chat_windows(app_handle, conversation_id, ConversationEvent {
+        r#type: "message_metadata_update".into(),
+        data: serde_json::json!({ "message_id": message_id }),
+    });
+    Ok(())
+}
+
+/// 只有调用开始/完成会改变卡片；步骤思考结束等事件不触发界面刷新。
+fn is_live_web_call_event(event: &serde_json::Value) -> bool {
+    matches!(event["type"].as_str(), Some("call_started" | "call_completed"))
+}
+
 fn split_captured_content(
     captured_content: genai::chat::MessageContent,
 ) -> (Vec<ToolCall>, Vec<Binary>) {
@@ -2789,6 +2814,8 @@ async fn attempt_stream_chat(
     let mut response_content = String::new();
     let mut reasoning_message_id: Option<i64> = None;
     let mut response_message_id: Option<i64> = None;
+    // DeepSeek 服务端联网的实时事件（ChatStreamEvent::Custom），用于在正文出现前显示搜索卡片
+    let mut live_web_events: Vec<serde_json::Value> = Vec::new();
     let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
     // 流式工具调用追踪：在 ToolCallChunk 事件中累积，用于实时 UI 反馈
     let mut streaming_tool_calls: HashMap<String, ToolCall> = HashMap::new();
@@ -2825,6 +2852,75 @@ async fn attempt_stream_chat(
             Some(Ok(stream_event)) => {
                 match stream_event {
                     ChatStreamEvent::Start | ChatStreamEvent::Heartbeat => {}
+                    ChatStreamEvent::Custom(part) => {
+                        // DeepSeek 服务端搜索/阅读网页在正文之前进行：与流式工具调用一样先建好回复消息
+                        // （不切换输出类型，思考仍写入思考消息），把进行中的调用写进 metadata，界面即时显示卡片。
+                        let is_web_event = part.typ() == Some("deepseek_web_event")
+                            && part.adapter_kind() == Some(genai::adapter::AdapterKind::DeepSeek);
+                        if is_web_event && is_live_web_call_event(&part.data["event"]) {
+                            live_web_events.push(part.data["event"].clone());
+                            if response_message_id.is_none() {
+                                let actual_start_time = reasoning_end_time.unwrap_or_else(|| {
+                                    let now = chrono::Utc::now();
+                                    response_start_time.get_or_insert(now);
+                                    response_start_time.unwrap()
+                                });
+                                response_start_time = Some(actual_start_time);
+                                let new_id = ensure_stream_message(
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    "response",
+                                    &response_content,
+                                    llm_model_id,
+                                    &llm_model_name,
+                                    &generation_group_id,
+                                    parent_group_id_override.clone(),
+                                    Some(actual_start_time),
+                                    response_first_token_time.clone(),
+                                    None,
+                                )
+                                .await?;
+                                response_message_id = Some(new_id);
+                                spawn_plugin_event(
+                                    app_handle.clone(),
+                                    "chat.onResponseStarted",
+                                    serde_json::json!({
+                                        "conversationId": conversation_id,
+                                        "messageId": new_id,
+                                        "messageType": "response",
+                                        "modelName": llm_model_name,
+                                        "metadata": { "reason": "serverToolEvent" }
+                                    }),
+                                );
+                                // 重新生成时首条消息要通知界面合并版本组，否则后续正文不会再建消息、也就不会再发
+                                if is_regeneration && !group_merge_event_emitted {
+                                    if let Some(ref parent_group_id) = parent_group_id_override {
+                                        send_conversation_event_to_chat_windows(
+                                            window.app_handle(),
+                                            conversation_id,
+                                            ConversationEvent {
+                                                r#type: "group_merge".to_string(),
+                                                data: serde_json::json!({
+                                                    "original_group_id": parent_group_id,
+                                                    "new_group_id": generation_group_id.clone(),
+                                                    "is_regeneration": true,
+                                                    "first_message_id": new_id,
+                                                    "conversation_id": conversation_id
+                                                }),
+                                            },
+                                        );
+                                        group_merge_event_emitted = true;
+                                    }
+                                }
+                            }
+                            if let Some(id) = response_message_id {
+                                if let Err(error) = publish_live_web_events(&conversation_db, app_handle, conversation_id, id, &live_web_events) {
+                                    warn!(%error, conversation_id, "failed to publish DeepSeek web progress");
+                                }
+                            }
+                        }
+                    }
                     ChatStreamEvent::Chunk(chunk) => {
                         response_chunk_count += 1;
                         response_char_count += chunk.content.chars().count();

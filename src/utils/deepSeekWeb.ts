@@ -14,9 +14,36 @@ export interface WebCall {
     /** 悬停看到的完整内容（全部查询、完整网址）。 */
     detail: string;
     url?: string;
+    /** 流式进行中：已开始、还没有结果。 */
+    running: boolean;
     failed: boolean;
     /** 这次调用带回的来源，rank 为全条回复统一编号（与正文角标一致）。 */
     sources: SearchResultItem[];
+}
+
+/**
+ * 回复结束后用完整的 server_tool_calls；流式进行中只有实时事件（call_started / call_completed），
+ * 按「步骤-调用序号」合并成同样的调用列表，键与结束后一致，卡片不会重建。
+ */
+function webCallEntries(web: ObjectValue): {key: string; call: ObjectValue; running: boolean}[] {
+    if (Array.isArray(web.server_tool_calls)) {
+        return list(web.server_tool_calls).flatMap((step, stepIndex) =>
+            list(object(step).calls).map((call, callIndex) => ({ key: `${stepIndex}-${callIndex}`, call: object(call), running: false })));
+    }
+    const calls = new Map<string, {call: ObjectValue; running: boolean}>();
+    for (const entry of list(web.events)) {
+        const event = object(entry);
+        const call = object(event.call);
+        if (typeof event.step !== "number" || typeof call.index !== "number") continue;
+        const key = `${event.step}-${call.index}`;
+        const known = calls.get(key);
+        if (event.type === "call_started") {
+            calls.set(key, { call: { ...call, ...known?.call }, running: known ? known.running : true });
+        } else if (event.type === "call_completed") {
+            calls.set(key, { call: { ...known?.call, ...call }, running: false });
+        }
+    }
+    return [...calls].map(([key, value]) => ({ key, ...value }));
 }
 
 /** 侧栏里这次调用的来源条目 id：卡片点击定位与 useContextList 生成条目共用。 */
@@ -50,34 +77,31 @@ export function readWebReport(metadata?: string | null): WebReport | undefined {
         report.sources.push(source);
         return source;
     }
-    list(web.server_tool_calls).forEach((step, stepIndex) => {
-        list(object(step).calls).forEach((entry, callIndex) => {
-            const call = object(entry);
-            report.usedTools = true;
-            const action = object(call.action);
-            const failed = call.status === "failed";
-            const sources: SearchResultItem[] = [];
-            const collect = (value: unknown) => {
-                const source = addSource(value);
-                if (source && !sources.includes(source)) sources.push(source);
-            };
-            const base = { key: `${stepIndex}-${callIndex}`, failed, sources };
-            if (action.type === "search") {
-                const queries = list(action.queries).filter((q): q is string => typeof q === "string" && q.trim() !== "");
-                report.calls.push({ ...base, type: "search", title: queries.join("、") || "网络搜索", detail: queries.join("\n") || "网络搜索" });
-            } else if (action.type === "open_page" || action.type === "read_link") {
-                const page = object(call.page);
-                const url = typeof action.url === "string" ? action.url : typeof page.url === "string" ? page.url : "";
-                const title = typeof page.title === "string" && page.title ? page.title : url || "阅读网页";
-                report.calls.push({ ...base, type: "read", title, detail: url || title, url: url || undefined });
-                if (!failed) collect({ ...action, ...page });
-            } else if (action.type === "find_in_page") {
-                const pattern = typeof action.pattern === "string" ? action.pattern : "";
-                report.calls.push({ ...base, type: "find", title: pattern || "页内查找", detail: pattern || "页内查找" });
-            }
-            list(call.sources).forEach(collect);
-        });
-    });
+    for (const { key, call, running } of webCallEntries(web)) {
+        report.usedTools = true;
+        const action = object(call.action);
+        const failed = call.status === "failed";
+        const sources: SearchResultItem[] = [];
+        const collect = (value: unknown) => {
+            const source = addSource(value);
+            if (source && !sources.includes(source)) sources.push(source);
+        };
+        const base = { key, running, failed, sources };
+        if (action.type === "search") {
+            const queries = list(action.queries).filter((q): q is string => typeof q === "string" && q.trim() !== "");
+            report.calls.push({ ...base, type: "search", title: queries.join("、") || "网络搜索", detail: queries.join("\n") || "网络搜索" });
+        } else if (action.type === "open_page" || action.type === "read_link") {
+            const page = object(call.page);
+            const url = typeof action.url === "string" ? action.url : typeof page.url === "string" ? page.url : "";
+            const title = typeof page.title === "string" && page.title ? page.title : url || "阅读网页";
+            report.calls.push({ ...base, type: "read", title, detail: url || title, url: url || undefined });
+            if (!failed && !running) collect({ ...action, ...page });
+        } else if (action.type === "find_in_page") {
+            const pattern = typeof action.pattern === "string" ? action.pattern : "";
+            report.calls.push({ ...base, type: "find", title: pattern || "页内查找", detail: pattern || "页内查找" });
+        }
+        list(call.sources).forEach(collect);
+    }
     for (const annotation of list(web.annotations)) {
         const citation = object(object(annotation).url_citation);
         const rank = addSource(citation)?.rank;
