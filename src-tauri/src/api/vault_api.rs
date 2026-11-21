@@ -5,6 +5,7 @@
 //! trusted resolvers (`vault::placeholder`, `vault::config_ref`).
 use crate::sync::personal_vault::{self, Capability, CreateInput, ItemMeta, SecretValue, UpdateInput, UsageEntry};
 use crate::vault::config_ref::{self, ConfigReference};
+use crate::vault::migration::{self, MigrationCandidate};
 use tauri::{AppHandle, Emitter};
 
 pub const VAULT_CHANGED_EVENT: &str = "vault_changed";
@@ -78,4 +79,19 @@ pub async fn vault_references(app_handle: AppHandle, id: String) -> Result<Vec<C
 #[tauri::command]
 pub async fn vault_confirm_reference(app_handle: AppHandle, item_id: String, kind: String, config_id: i64, expected_snapshot: String) -> Result<(), String> {
     blocking(move || config_ref::confirm_reference(&app_handle, &item_id, &kind, config_id, &expected_snapshot)).await
+}
+
+#[tauri::command]
+pub async fn vault_migration_candidates(app_handle: AppHandle) -> Result<Vec<MigrationCandidate>, String> {
+    blocking(move || migration::candidates(&app_handle)).await
+}
+
+#[tauri::command]
+pub async fn vault_migrate_candidate(app_handle: AppHandle, candidate: MigrationCandidate, name: String, key: String) -> Result<ItemMeta, String> {
+    let app = app_handle.clone();
+    let meta = blocking(move || migration::migrate(&app, &candidate, &name, &key)).await?;
+    notify_changed(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
+    let _ = app_handle.emit("llm_provider_changed", ());
+    Ok(meta)
 }

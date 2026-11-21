@@ -320,6 +320,18 @@ pub fn confirm_provider(app: &AppHandle, provider_id: i64) -> Result<(), String>
     confirm(app, &[&row.api_key], &target, &format!("provider:{}", row.id), &provider_context(&row.name))
 }
 
+/// Migration must bind the destination the user inspected, even if the provider endpoint changes
+/// after the API key is replaced. A stale binding remains fail-closed at request time.
+pub(crate) fn confirm_provider_target(app: &AppHandle, provider_id: i64, expected: &Target) -> Result<(), String> {
+    let row = provider_rows(app, Some(provider_id), MARKER)?.into_iter().next()
+        .ok_or_else(|| "Provider 凭据已变化，请重新扫描".to_string())?;
+    let current = provider_target(&row.api_type, row.endpoint.as_deref()).map_err(|e| e.message)?;
+    if current != *expected {
+        return Err("Provider 目标在迁移期间已变化，原配置保持不变，请重新扫描".into());
+    }
+    confirm(app, &[&row.api_key], expected, &format!("provider:{}", row.id), &provider_context(&row.name))
+}
+
 // ---------- provider runtime ----------
 
 #[derive(Serialize, Deserialize)]

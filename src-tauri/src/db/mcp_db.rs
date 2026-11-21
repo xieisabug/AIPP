@@ -793,6 +793,58 @@ impl MCPDatabase {
         Ok(())
     }
 
+    pub fn replace_mcp_credential_if_unchanged(
+        &mut self,
+        expected: &MCPServer,
+        replacement: &MCPServer,
+        update_headers: bool,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_app_connections: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_connection')",
+            [],
+            |row| row.get(0),
+        )?;
+        let is_app_connection = if has_app_connections {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_connection WHERE server_id=?1)",
+                [expected.id],
+                |row| row.get(0),
+            )?
+        } else {
+            false
+        };
+        if is_app_connection {
+            return Err(DbError::InvalidParameterName("应用连接的凭据只能从连接管理修改".into()));
+        }
+
+        let (column_sql, replacement_value) = if update_headers {
+            ("headers", replacement.headers.as_deref())
+        } else {
+            ("environment_variables", replacement.environment_variables.as_deref())
+        };
+        let sql = format!(
+            "UPDATE mcp_server SET {column_sql}=?1
+             WHERE id=?2 AND headers IS ?3 AND environment_variables IS ?4
+             AND command IS ?5 AND url IS ?6 AND transport_type=?7 AND is_builtin=?8"
+        );
+        let changed = tx.execute(
+            &sql,
+            params![
+                replacement_value,
+                expected.id,
+                expected.headers.as_deref(),
+                expected.environment_variables.as_deref(),
+                expected.command.as_deref(),
+                expected.url.as_deref(),
+                expected.transport_type,
+                expected.is_builtin,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
     pub fn pending_app_summary_server_ids(&self) -> Result<std::collections::HashSet<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT c.server_id FROM mcp_tool_catalog c

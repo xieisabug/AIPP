@@ -4,6 +4,7 @@ pub mod approval;
 pub mod config_ref;
 pub mod executor;
 pub mod input;
+pub mod migration;
 pub mod placeholder;
 pub mod tool;
 

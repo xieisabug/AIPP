@@ -15,6 +15,7 @@ import { useDataRefresh } from "@/hooks/useDataRefresh";
 import type { VaultCapability, VaultConfigReference, VaultCreateInput, VaultItem, VaultUsageEntry } from "@/data/Vault";
 import VaultGuide from "./vault/VaultGuide";
 import VaultItemDetail, { type VaultItemPatch } from "./vault/VaultItemDetail";
+import VaultMigrationDialog from "./vault/VaultMigrationDialog";
 import { VaultKeyInput } from "./vault/VaultItemEditDialog";
 import { isSimpleVaultValue, keyError, suggestKey } from "./vault/vaultHelpers";
 
@@ -366,6 +367,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                     emptyState={
                         <VaultGuide onCreate={openCreate}>
                             <SyncNotice capability={capability} />
+                            <VaultMigrationDialog onComplete={() => reload()} />
                             {appCredentialsLink}
                         </VaultGuide>
                     }
@@ -382,6 +384,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                 content={
                     <div className="space-y-4">
                         <SyncNotice capability={capability} />
+                        <VaultMigrationDialog onComplete={() => reload()} />
                         {selected && (
                             <VaultItemDetail
                                 item={selected}

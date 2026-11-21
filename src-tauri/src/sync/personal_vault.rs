@@ -81,6 +81,8 @@ fn migrate_schema(db: &Connection) -> rusqlite::Result<()> {
 pub struct SecretValue(String);
 
 impl SecretValue {
+    pub(crate) fn from_migration(value: String) -> Self { Self(value) }
+
     #[cfg(test)]
     pub(crate) fn new(value: impl Into<String>) -> Self { Self(value.into()) }
     fn checked(&self) -> Result<&str, String> {

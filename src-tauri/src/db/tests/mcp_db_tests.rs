@@ -152,6 +152,42 @@ fn create_test_server(db: &MCPDatabase) -> i64 {
     .unwrap()
 }
 
+#[test]
+fn test_mcp_credential_replace_uses_compare_and_set() {
+    let mut db = create_mcp_db();
+    let id = db.upsert_mcp_server_with_builtin(
+        "credential-server", Some("Test"), "stdio", Some("node server.js"),
+        Some("API_TOKEN=old"), Some(r#"{"Authorization":"Bearer old"}"#), None,
+        Some(30000), false, true, false, true, false,
+    ).unwrap();
+    let expected = db.get_mcp_server(id).unwrap();
+    let mut replacement = expected.clone();
+    replacement.environment_variables = Some("API_TOKEN=vault://id".into());
+
+    assert!(db.replace_mcp_credential_if_unchanged(&expected, &replacement, false).unwrap());
+    let saved = db.get_mcp_server(id).unwrap();
+    assert_eq!(saved.environment_variables.as_deref(), Some("API_TOKEN=vault://id"));
+    assert_eq!(saved.headers, expected.headers);
+    assert!(!db.replace_mcp_credential_if_unchanged(&expected, &replacement, false).unwrap());
+}
+
+#[test]
+fn test_mcp_credential_replace_preserves_app_connection_guard() {
+    let mut db = create_mcp_db();
+    let id = db.upsert_mcp_server_with_builtin(
+        "connected-app", Some("Connected App"), "http", None,
+        Some("API_TOKEN=old"), Some(r#"{"Authorization":"Bearer old"}"#),
+        Some("https://api.example.com/mcp"), Some(30000), false, true, false, true, false,
+    ).unwrap();
+    db.conn.execute("CREATE TABLE app_connection (server_id INTEGER PRIMARY KEY, status TEXT NOT NULL)", []).unwrap();
+    db.conn.execute("INSERT INTO app_connection (server_id, status) VALUES (?1, 'connected')", [id]).unwrap();
+    let expected = db.get_mcp_server(id).unwrap();
+    let mut replacement = expected.clone();
+    replacement.environment_variables = Some("API_TOKEN=vault://id".into());
+
+    assert!(db.replace_mcp_credential_if_unchanged(&expected, &replacement, false).is_err());
+}
+
 // ============================================================================
 // 正常情况测试
 // ============================================================================

@@ -1155,6 +1155,8 @@ pub fn run() {
             crate::api::vault_api::vault_usage,
             crate::api::vault_api::vault_references,
             crate::api::vault_api::vault_confirm_reference,
+            crate::api::vault_api::vault_migration_candidates,
+            crate::api::vault_api::vault_migrate_candidate,
             crate::vault::approval::vault_list_use_requests,
             crate::vault::approval::vault_respond_use_request,
             crate::vault::input::vault_list_input_requests,
