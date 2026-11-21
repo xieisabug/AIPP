@@ -37,3 +37,39 @@ fn test_status_errors_never_include_the_response_body() {
     }
     assert_eq!(status_error(reqwest::StatusCode::UNAUTHORIZED), "API Key 无效或已吊销");
 }
+
+fn provider_config(name: &str, value: &str) -> LLMProviderConfig {
+    LLMProviderConfig {
+        id: 1,
+        name: name.into(),
+        llm_provider_id: 42,
+        value: value.into(),
+        append_location: String::new(),
+        is_addition: false,
+    }
+}
+
+#[test]
+fn test_show_balance_in_chat_requires_deepseek_switch_and_key() {
+    let enabled_configs = vec![
+        provider_config("api_key", "vault://3f2a9c1e-0b7d-4e5f-9a12-6c8d0e1f2a3b"),
+        provider_config(SHOW_BALANCE_IN_CHAT_CONFIG, "true"),
+    ];
+    assert!(show_balance_in_chat_enabled("deepseek", &enabled_configs));
+    assert!(!show_balance_in_chat_enabled("openai_api", &enabled_configs));
+
+    let disabled_configs = vec![
+        provider_config("api_key", "sk-test"),
+        provider_config(SHOW_BALANCE_IN_CHAT_CONFIG, "false"),
+    ];
+    assert!(!show_balance_in_chat_enabled("deepseek", &disabled_configs));
+
+    let missing_switch = vec![provider_config("api_key", "sk-test")];
+    assert!(!show_balance_in_chat_enabled("deepseek", &missing_switch));
+
+    let blank_key = vec![
+        provider_config("api_key", "   "),
+        provider_config(SHOW_BALANCE_IN_CHAT_CONFIG, "true"),
+    ];
+    assert!(!show_balance_in_chat_enabled("deepseek", &blank_key));
+}

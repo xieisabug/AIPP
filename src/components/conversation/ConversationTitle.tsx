@@ -8,6 +8,7 @@ import ConfirmDialog from "../ConfirmDialog";
 import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
 import ConversationExportDialog from "./ConversationExportDialog";
+import DeepSeekBalanceBadge from "./DeepSeekBalanceBadge";
 
 const ConversationTitle: React.FC<{
     conversation: Conversation | undefined;
@@ -80,6 +81,10 @@ const ConversationTitle: React.FC<{
                     <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5" data-aipp-slot="chat-conversation-title-subtext">{displayAssistantName}</div>
                 </div>
                 <div className="flex items-center flex-none shrink-0 justify-end gap-2 pl-4" data-aipp-slot="chat-conversation-title-actions">
+                    <DeepSeekBalanceBadge
+                        conversationId={conversation?.id ?? null}
+                        assistantId={conversation?.assistant_id ?? null}
+                    />
                     {extraActions}
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} externalOpen={statsOpen} onExternalOpenChange={onStatsOpenChange} />
                     <ConversationExportDialog conversationId={conversation?.id.toString() || ""} externalOpen={exportOpen} onExternalOpenChange={onExportOpenChange} />

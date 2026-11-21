@@ -151,6 +151,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             endpoint: "",
             api_key: "",
             deepseek_web_enabled: "false",
+            deepseek_show_balance_in_chat: "false",
             proxy_enabled: "false",
             acp_cli_command: "",
             acp_claude_auth_mode: "claude_settings",
@@ -181,6 +182,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 监听 proxy_enabled 字段变化
     const webEnabled = form.watch("deepseek_web_enabled") === "true";
+    const showBalanceInChat = form.watch("deepseek_show_balance_in_chat") === "true";
     const proxyEnabled = form.watch("proxy_enabled");
     const endpoint = form.watch("endpoint");
     const endpointStatus = useMemo(() => getProviderEndpointStatus(endpoint), [endpoint]);
@@ -933,6 +935,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                 form.setValue("deepseek_web_enabled", String(enabled));
                                 updateField("deepseek_web_enabled", String(enabled));
                             }}
+                            showBalanceInChat={showBalanceInChat}
+                            onShowBalanceInChatChange={enabled => {
+                                form.setValue("deepseek_show_balance_in_chat", String(enabled));
+                                updateField("deepseek_show_balance_in_chat", String(enabled));
+                            }}
                             providerId={Number(id)}
                             providerName={name}
                             apiKey={apiKeyValue}
@@ -963,7 +970,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name, apiKeyValue, endpoint, handleKeyShared, webEnabled, form, updateField]);
+    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name, apiKeyValue, endpoint, handleKeyShared, webEnabled, showBalanceInChat, form, updateField]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

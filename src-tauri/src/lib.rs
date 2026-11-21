@@ -1077,6 +1077,7 @@ pub fn run() {
             get_llm_models,
             fetch_model_list,
             crate::api::deepseek_api::get_deepseek_balance,
+            crate::api::deepseek_api::get_deepseek_chat_balance_provider,
             preview_model_list,
             update_llm_model_request_mode,
             update_selected_models,

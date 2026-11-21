@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { describeBalance, formatBalance } from "./useDeepSeekBalance";
+import { describeBalance, formatBalance, formatBalanceAmount } from "./useDeepSeekBalance";
 
 describe("DeepSeek balance formatting", () => {
     it("formats known currencies with a symbol and keeps the API's precision", () => {
         expect(formatBalance({ available: true, currency: "CNY", total: "19.00" })).toBe("¥19.00");
         expect(formatBalance({ available: true, currency: "USD", total: "1.5" })).toBe("$1.5");
         expect(formatBalance({ available: true, currency: "EUR", total: "2.00" })).toBe("2.00 EUR");
+        expect(formatBalanceAmount({ available: false, currency: "CNY", total: "0.00" })).toBe("¥0.00");
     });
 
     it("explains an unusable balance and query states", () => {

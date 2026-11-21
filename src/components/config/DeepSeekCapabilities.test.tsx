@@ -13,7 +13,7 @@ function server(env: string, enabled = true) {
     };
 }
 
-function renderBlock(apiKey: string, servers: unknown[], vaultAvailable = true) {
+function renderBlock(apiKey: string, servers: unknown[], vaultAvailable = true, initialShowBalanceInChat = false) {
     let current = servers;
     mockInvokeHandler("get_mcp_servers", () => current);
     mockInvokeHandler("update_mcp_server", (args) => {
@@ -24,9 +24,11 @@ function renderBlock(apiKey: string, servers: unknown[], vaultAvailable = true) 
     mockInvokeHandler("update_llm_provider_config", () => undefined);
     mockInvokeHandler("get_deepseek_balance", () => ({ available: true, currency: "CNY", total: "19.00" }));
     const onKeyShared = vi.fn();
+    const onShowBalanceInChatChange = vi.fn();
     // 与服务商表单一致：Key 存入保险箱后表单改为引用，再传回本组件
     function Harness() {
         const [key, setKey] = useState(apiKey);
+        const [showBalanceInChat, setShowBalanceInChat] = useState(initialShowBalanceInChat);
         return (
             <DeepSeekCapabilities
                 providerId={42}
@@ -35,11 +37,16 @@ function renderBlock(apiKey: string, servers: unknown[], vaultAvailable = true) 
                 endpoint="https://api.deepseek.com/"
                 vault={{ available: vaultAvailable, items: [] }}
                 onKeyShared={(value) => { onKeyShared(value); setKey(value); }}
+                showBalanceInChat={showBalanceInChat}
+                onShowBalanceInChatChange={(enabled) => {
+                    onShowBalanceInChatChange(enabled);
+                    setShowBalanceInChat(enabled);
+                }}
             />
         );
     }
     render(<Harness />);
-    return { onKeyShared };
+    return { onKeyShared, onShowBalanceInChatChange };
 }
 
 describe("DeepSeekCapabilities", () => {
@@ -73,9 +80,14 @@ describe("DeepSeekCapabilities", () => {
         expect(invoke).not.toHaveBeenCalledWith("get_deepseek_balance", expect.anything());
     });
 
-    it("shows the account balance and refreshes it on demand", async () => {
-        renderBlock(REF, []);
+    it("shows the account balance, toggles chat display, and refreshes on demand", async () => {
+        const { onShowBalanceInChatChange } = renderBlock(REF, []);
         expect(await screen.findByTestId("deepseek-balance")).toHaveTextContent("¥19.00");
+        const chatToggle = screen.getByRole("switch", { name: "在聊天窗口展示余额" });
+        expect(chatToggle).toHaveAttribute("aria-checked", "false");
+        fireEvent.click(chatToggle);
+        expect(onShowBalanceInChatChange).toHaveBeenCalledWith(true);
+        expect(chatToggle).toHaveAttribute("aria-checked", "true");
         mockInvokeHandler("get_deepseek_balance", () => ({ available: false, currency: "CNY", total: "0.00" }));
         fireEvent.click(screen.getByRole("button", { name: "刷新余额" }));
         await waitFor(() => expect(screen.getByTestId("deepseek-balance")).toHaveTextContent("¥0.00（余额不足，暂不可调用）"));

@@ -80,6 +80,7 @@ import {
     saveExperimentalConfigValues,
 } from "@/components/config/feature/forms/experimentalConfigShared";
 import { ConversationStatsDialog } from "@/components/token-statistics";
+import DeepSeekBalanceBadge from "@/components/conversation/DeepSeekBalanceBadge";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
 import { ButlerQuoteContext, type ButlerQuoteTarget } from "@/components/butler/ButlerQuote";
 import { taskQuestionItems, useButlerTaskQuestions } from "@/components/butler/butlerTaskQuestions";
@@ -1316,6 +1317,11 @@ function ButlerExperimentWindow() {
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1">
+                                    <DeepSeekBalanceBadge
+                                        conversationId={Number(activeConversationId) || null}
+                                        assistantId={contact?.assistantId ?? null}
+                                        className="mr-1"
+                                    />
                                     <IconButton
                                         icon={detailsConversation === activeConversationId
                                             ? <MessageSquareText className="h-4 w-4 text-icon" />

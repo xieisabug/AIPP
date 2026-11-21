@@ -14,10 +14,15 @@ export type BalanceState =
 
 const CURRENCY_SYMBOLS: Record<string, string> = { CNY: "¥", USD: "$" };
 
+/** 仅格式化金额部分，例如「¥19.00」「$1.5」「2.00 EUR」。 */
+export function formatBalanceAmount(balance: DeepSeekBalance): string {
+    const symbol = CURRENCY_SYMBOLS[balance.currency];
+    return symbol ? `${symbol}${balance.total}` : `${balance.total} ${balance.currency}`;
+}
+
 /** 「¥19.00」；余额不可用（欠费或为 0）时附说明。 */
 export function formatBalance(balance: DeepSeekBalance): string {
-    const symbol = CURRENCY_SYMBOLS[balance.currency];
-    const amount = symbol ? `${symbol}${balance.total}` : `${balance.total} ${balance.currency}`;
+    const amount = formatBalanceAmount(balance);
     return balance.available ? amount : `${amount}（余额不足，暂不可调用）`;
 }
 

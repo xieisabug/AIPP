@@ -13,6 +13,8 @@ import { describeBalance, useDeepSeekBalance } from "./useDeepSeekBalance";
 interface DeepSeekCapabilitiesProps {
     webEnabled?: boolean;
     onWebChange?: (enabled: boolean) => void;
+    showBalanceInChat?: boolean;
+    onShowBalanceInChatChange?: (enabled: boolean) => void;
     providerId: number;
     providerName: string;
     /** 表单里当前的 API Key（明文或保险箱引用）。 */
@@ -43,7 +45,18 @@ function describe(status: DeepSeekSearchStatus | null, hasKey: boolean): { text:
  * DeepSeek 服务商详情页的「能力」区块：展示这把 Key 被哪些能力共用，并可一键接入。
  * 只做总览与接入，具体参数在「应用与工具 → 搜索工具」里改，不在这里重复表单。
  */
-const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({ providerId, providerName, apiKey, endpoint, vault, onKeyShared, webEnabled, onWebChange }) => {
+const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({
+    providerId,
+    providerName,
+    apiKey,
+    endpoint,
+    vault,
+    onKeyShared,
+    webEnabled,
+    onWebChange,
+    showBalanceInChat,
+    onShowBalanceInChatChange,
+}) => {
     const [servers, setServers] = useState<MCPServer[] | null>(null);
     const [busy, setBusy] = useState(false);
     // Key 改动后等保存落库再查余额，避免逐字查询
@@ -98,17 +111,29 @@ const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({ providerId,
                             {describeBalance(balance.state)}
                         </div>
                     </div>
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
-                        aria-label="刷新余额"
-                        disabled={balance.state.status === "loading"}
-                        onClick={() => void balance.reload()}
-                    >
-                        <RefreshCw className={balance.state.status === "loading" ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
-                    </Button>
+                    <div className="flex shrink-0 items-center gap-2">
+                        {onShowBalanceInChatChange && (
+                            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground select-none">
+                                <span>聊天窗口展示</span>
+                                <Switch
+                                    aria-label="在聊天窗口展示余额"
+                                    checked={!!showBalanceInChat}
+                                    onCheckedChange={onShowBalanceInChatChange}
+                                />
+                            </label>
+                        )}
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+                            aria-label="刷新余额"
+                            disabled={balance.state.status === "loading"}
+                            onClick={() => void balance.reload()}
+                        >
+                            <RefreshCw className={balance.state.status === "loading" ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
+                        </Button>
+                    </div>
                 </div>
             )}
             <div className="flex min-h-11 items-center gap-3 px-3 py-2">

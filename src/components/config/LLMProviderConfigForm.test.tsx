@@ -19,6 +19,7 @@ vi.mock("../ConfigForm", async () => {
             <input aria-label="endpoint" {...useFormReturn.register("endpoint")} />
             {/* API Key 走真实的 customRender（保险箱引用字段），与 ConfigForm 的 custom 类型一致 */}
             <Controller control={useFormReturn.control} name="api_key" render={({ field }) => apiKey?.customRender(field)} />
+            {config.find(item => item.key === "deepseek_capabilities")?.config.customRender()}
             {config.find(item => item.key === "advanced_config")?.config.customRender()}
             <span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span><span>{apiKey?.hint}</span>
         </div>;
@@ -128,6 +129,29 @@ describe("LLM provider field autosave", () => {
         expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", { llmProviderId: "1", name: "endpoint", value: "new" });
         await act(async () => { resolveRead([{ name: "endpoint", value: "old" }]); await refreshPromise; });
         expect(input).toHaveValue("new");
+    });
+    it("persists the DeepSeek show-balance-in-chat switch", async () => {
+        mocks.invoke.mockImplementation((command: string) => {
+            if (command === "get_llm_provider_config") {
+                return Promise.resolve([
+                    { name: "endpoint", value: "https://api.deepseek.com/" },
+                    { name: "api_key", value: "sk-deepseek" },
+                    { name: "deepseek_show_balance_in_chat", value: "false" },
+                ]);
+            }
+            if (command === "get_llm_models") return Promise.resolve([]);
+            if (command === "get_mcp_servers") return Promise.resolve([]);
+            if (command === "get_deepseek_balance") return Promise.resolve({ available: true, currency: "CNY", total: "19.00" });
+            return Promise.resolve();
+        });
+        render(<LLMProviderConfigForm id="7" index={0} apiType="deepseek" name="DeepSeek" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
+        await refresh();
+        fireEvent.click(await screen.findByRole("switch", { name: "在聊天窗口展示余额" }));
+        await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", {
+            llmProviderId: "7",
+            name: "deepseek_show_balance_in_chat",
+            value: "true",
+        }));
     });
 });
 

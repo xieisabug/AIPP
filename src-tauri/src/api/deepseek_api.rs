@@ -3,6 +3,8 @@
 //! 请求走与模型调用相同的凭据链路：API Key 先经 `vault::config_ref::prepare_provider_configs`
 //! 解析，再用 `check_provider_destination` 核对已确认的网站，未确认的保险箱引用 fail-closed。
 use crate::api::ai::config::get_network_proxy_from_config;
+use crate::db::assistant_db::AssistantDatabase;
+use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::llm_db::{LLMDatabase, LLMProviderConfig};
 use crate::FeatureConfigState;
 use reqwest::Url;
@@ -11,6 +13,7 @@ use serde_json::Value;
 use tauri::Manager;
 
 const BALANCE_TIMEOUT_SECS: u64 = 15;
+pub(crate) const SHOW_BALANCE_IN_CHAT_CONFIG: &str = "deepseek_show_balance_in_chat";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeepSeekBalance {
@@ -54,6 +57,67 @@ pub(crate) fn status_error(status: reqwest::StatusCode) -> String {
 
 fn setting<'a>(configs: &'a [LLMProviderConfig], name: &str) -> Option<&'a str> {
     configs.iter().find(|c| c.name == name).map(|c| c.value.as_str()).filter(|v| !v.trim().is_empty())
+}
+
+/// 仅在 DeepSeek 服务商开启「在聊天窗口展示余额」且已填写 API Key 时展示。
+pub(crate) fn show_balance_in_chat_enabled(api_type: &str, configs: &[LLMProviderConfig]) -> bool {
+    api_type == "deepseek"
+        && setting(configs, SHOW_BALANCE_IN_CHAT_CONFIG) == Some("true")
+        && setting(configs, "api_key").is_some()
+}
+
+/// 查询某个对话或助手是否应在聊天标题栏展示 DeepSeek 余额。
+/// 满足条件时返回对应的 DeepSeek `llm_provider_id`，否则返回 `None`。
+#[tauri::command]
+pub async fn get_deepseek_chat_balance_provider(
+    app_handle: tauri::AppHandle,
+    conversation_id: Option<i64>,
+    assistant_id: Option<i64>,
+) -> Result<Option<i64>, String> {
+    let mut resolved_assistant_id = assistant_id.filter(|id| *id > 0);
+    let mut resolved_provider_id: Option<i64> = None;
+
+    if let Some(cid) = conversation_id.filter(|id| *id > 0) {
+        let conversation = {
+            let conv_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+            let repo = conv_db.conversation_repo().map_err(|e| e.to_string())?;
+            repo.read(cid).map_err(|e| e.to_string())?
+        };
+        if let Some(conversation) = conversation {
+            if conversation.conversation_kind == "butler_main" {
+                resolved_provider_id = crate::api::butler_api::get_butler_model_selection(&app_handle)
+                    .await
+                    .ok()
+                    .map(|selection| selection.provider_id)
+                    .filter(|id| *id > 0);
+            }
+            if resolved_assistant_id.is_none() {
+                resolved_assistant_id = conversation.assistant_id.filter(|id| *id > 0);
+            }
+        }
+    }
+
+    if resolved_provider_id.is_none() {
+        if let Some(aid) = resolved_assistant_id {
+            let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+            let models = assistant_db.get_assistant_model(aid).map_err(|e| e.to_string())?;
+            resolved_provider_id = models.first().map(|m| m.provider_id).filter(|id| *id > 0);
+        }
+    }
+
+    let Some(provider_id) = resolved_provider_id else {
+        return Ok(None);
+    };
+
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let Ok(provider) = llm_db.get_llm_provider(provider_id) else {
+        return Ok(None);
+    };
+    if provider.api_type != "deepseek" {
+        return Ok(None);
+    }
+    let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    Ok(show_balance_in_chat_enabled(&provider.api_type, &configs).then_some(provider_id))
 }
 
 #[tauri::command]
