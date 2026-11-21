@@ -75,16 +75,30 @@ fn substitute_value(value: &mut Value, values: &BTreeMap<String, String>) {
     }
 }
 
-fn keys_for_call(server: &MCPServer, tool_name: &str, args: &Value) -> Result<BTreeSet<String>, UseError> {
-    if matches!(server.transport_type.as_str(), "stdio" | "builtin") {
-        let builtin = server.command.as_deref().and_then(crate::mcp::builtin_mcp::builtin_command_id);
-        // These tools store or forward text. A reference in that text is for a future call.
-        if matches!((builtin.as_deref(), tool_name),
-            (Some("agent"), "butler_memory") | (Some("ui_interaction"), "ask_user_question")) {
-            return Ok(BTreeSet::new());
-        }
+/// Use the same slices for lookup and substitution. Two actions in one batch may name the
+/// same key while only one of them actually consumes it.
+fn expandable_arguments<'a>(server: &MCPServer, tool: &str, args: &'a mut Value) -> Vec<&'a mut Value> {
+    if !matches!(server.transport_type.as_str(), "stdio" | "builtin") {
+        return vec![args];
     }
-    keys_in(args)
+    let builtin = server.command.as_deref().and_then(crate::mcp::builtin_mcp::builtin_command_id);
+    match (builtin.as_deref(), tool) {
+        (Some("agent"), "butler_memory" | "message_bot" | "continue_work" | "spawn_task_conversation"
+            | "task_conversation_operation" | "schedule_task" | "report_progress" | "stop_assistant_exchange")
+        | (Some("ui_interaction"), "ask_user_question") => Vec::new(),
+        (Some("superadmin"), "superadmin_execute") => action_arguments(args).collect(),
+        (Some("superadmin"), "superadmin_batch") => args.get_mut("actions").and_then(Value::as_array_mut)
+            .into_iter().flatten().flat_map(action_arguments).collect(),
+        _ => vec![args],
+    }
+}
+
+fn action_arguments(action: &mut Value) -> impl Iterator<Item = &mut Value> {
+    let sends_instructions = matches!(action["action_id"].as_str(),
+        Some("schedule.create" | "schedule.update" | "task.spawn" | "task.cancel" | "conversation.inject_system_message"));
+    action.as_object_mut().into_iter().flatten().filter_map(move |(key, field)| {
+        (!sends_instructions && key != "action_id").then_some(field)
+    })
 }
 
 // ---------- where the call goes ----------
@@ -280,9 +294,7 @@ pub(crate) fn current_redactor() -> Option<Arc<ResponseRedactor>> {
     REDACTOR.try_with(|redactor| redactor.clone()).ok().flatten()
 }
 
-// Short strings are deliberately not globally replaced in ordinary tool output. JSON credentials
-// can also be echoed as booleans/numbers/objects rather than strings. Audit storage must not retain
-// these ambiguous payloads at all; this policy does not change the tool's normal response.
+// Omit ambiguous payloads entirely from audit storage, including normalized JSON credentials.
 fn needs_opaque_audit(value: &str) -> bool {
     value.len() < 4 || serde_json::from_str::<Value>(value).is_ok()
 }
@@ -389,7 +401,12 @@ fn log_refusal(app: &AppHandle, entries: &BTreeMap<String, Resolved>, conversati
 pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, server: &MCPServer, tool_name: &str, parameters: &str) -> Result<Prepared, String> {
     if !parameters.contains(MARKER) { return Ok(Prepared::default()); }
     let args: Value = match serde_json::from_str(parameters) { Ok(args) => args, Err(_) => return Ok(Prepared::default()) };
-    let keys = keys_for_call(server, tool_name, &args).map_err(|e| e.to_string())?;
+    let mut substituted = args.clone();
+    let expandable = expandable_arguments(server, tool_name, &mut substituted);
+    let mut keys = BTreeSet::new();
+    for part in &expandable {
+        keys.extend(keys_in(part).map_err(|e| e.to_string())?);
+    }
     if keys.is_empty() { return Ok(Prepared::default()); }
     if is_shell(server, tool_name) {
         let mut others = args.clone();
@@ -414,8 +431,9 @@ pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, serve
         }
     };
     let values: BTreeMap<String, String> = entries.iter().map(|(k, e)| (k.clone(), e.value.clone())).collect();
-    let mut substituted = args.clone();
-    substitute_value(&mut substituted, &values);
+    for part in expandable {
+        substitute_value(part, &values);
+    }
     let mut secrets: Vec<String> = values.values().cloned().collect();
     if server.command.as_deref() == Some(super::tool::COMMAND) && tool_name == super::tool::REQUEST_TOOL {
         secrets.extend(super::executor::basic_auth_secret(&args, &substituted));

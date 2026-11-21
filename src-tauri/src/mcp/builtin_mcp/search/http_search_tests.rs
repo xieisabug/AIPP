@@ -6,7 +6,7 @@ fn config(provider: &str, endpoint: &str) -> HttpSearchConfig {
         ("HTTP_SEARCH_PROVIDER".into(), provider.into()),
         ("HTTP_SEARCH_ENDPOINT".into(), endpoint.into()),
         ("HTTP_SEARCH_API_KEY".into(), "test-secret".into()),
-    ])).unwrap()
+    ]), vec![]).unwrap()
 }
 
 async fn server(status: &str, content_type: &str, body: &str, extra: &str) -> (String, tokio::task::JoinHandle<String>) {
@@ -35,12 +35,12 @@ async fn server(status: &str, content_type: &str, body: &str, extra: &str) -> (S
 
 #[test]
 fn test_http_search_config_rejects_missing_invalid_and_embedded_credentials() {
-    assert!(HttpSearchConfig::from_env(&HashMap::new()).is_err());
+    assert!(HttpSearchConfig::from_env(&HashMap::new(), vec![]).is_err());
     for raw in ["bad", "file:///a", "https://u:p@example.com/search", "https://example.com/search?key=secret"] {
         let env = HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "searxng".into()), ("HTTP_SEARCH_ENDPOINT".into(), raw.into())]);
-        assert!(HttpSearchConfig::from_env(&env).is_err());
+        assert!(HttpSearchConfig::from_env(&env, vec![]).is_err());
     }
-    assert!(HttpSearchConfig::from_env(&HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "tavily".into())])).is_err());
+    assert!(HttpSearchConfig::from_env(&HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "tavily".into())]), vec![]).is_err());
 }
 
 #[tokio::test]
@@ -75,7 +75,7 @@ async fn test_http_search_error_status_preserves_reason_and_redacts_key() {
         let (endpoint, handle) = server(status, "application/json", r#"{"error":"quota or key test-secret rejected"}"#, "").await;
         let error = search(&config("tavily", &endpoint), "test", 5).await.unwrap_err();
         assert!(error.contains(status));
-        assert!(error.contains("quota or key [redacted] rejected"));
+        assert!(error.contains("quota or key [REDACTED] rejected"));
         assert!(!error.contains("test-secret"));
         handle.await.unwrap();
     }
@@ -208,7 +208,35 @@ async fn test_provider_errors_drop_masked_key_tails() {
     let (endpoint, handle) = server("401 Unauthorized", "application/json", body, "").await;
     let error = search(&config("deepseek", &endpoint), "test", 5).await.unwrap_err();
     assert!(error.contains("401"));
-    assert!(error.contains("*[redacted]"));
+    assert!(error.contains("*[REDACTED]"));
     assert!(!error.contains("cret"), "{error}");
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_configured_key_is_cleaned_from_search_and_fetch_results() {
+    let body = r#"{"results":[{"title":"test-secret","summary":"dGVzdC1zZWNyZXQ=","url":"https://example.org/test-secret"}]}"#;
+    let (endpoint, handle) = server("200 OK", "application/json", body, "").await;
+    let result = search(&config("deepseek", &endpoint), "lookup", 1).await.unwrap();
+    assert_eq!(result["items"][0], json!({"title":"[REDACTED]","snippet":"[REDACTED]",
+        "url":"https://example.org/[REDACTED]","rank":1,"display_url":null}));
+    handle.await.unwrap();
+
+    let (endpoint, handle) = server("200 OK", "application/json", r#"{"title":"****cret","content":"individual-part"}"#, "").await;
+    let env = HashMap::from([("HTTP_SEARCH_PROVIDER".into(), "deepseek".into()),
+        ("HTTP_SEARCH_ENDPOINT".into(), endpoint), ("HTTP_SEARCH_API_KEY".into(), "individual-part-test-secret".into())]);
+    let settings = HttpSearchConfig::from_env(&env, vec!["individual-part".into()]).unwrap();
+    let page = fetch_deepseek(&settings, "https://example.org").await.unwrap();
+    assert_eq!(page, "# ***[REDACTED]\n\n[REDACTED]");
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_search_error_excerpt_cleans_credentials_before_cutoff() {
+    let body = format!("{}test-secret", ".".repeat(996));
+    let (endpoint, handle) = server("401 Unauthorized", "text/plain", &body, "").await;
+    let error = search(&config("deepseek", &endpoint), "lookup", 1).await.unwrap_err();
+    assert!(error.contains("401"));
+    assert!(!error.contains("test"));
     handle.await.unwrap();
 }

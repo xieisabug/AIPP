@@ -5,8 +5,6 @@ use serde_json::{json, Value};
 /// Protocol keywords can be credentials, but only their occurrences in data are sensitive.
 #[test]
 fn test_content_redaction_preserves_all_mcp_variants_and_protocol_fields() {
-    // Inject the test secret explicitly to isolate schema handling. This does not change
-    // redactor_for's short-value policy or prove complete short-credential leak protection.
     for secret in ["text", "type", "image", "audio", "resource", "resource_link", "data", "mimeType", "uri", "blob", "annotations", "audience", "user", "t"] {
         let redactor = crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter());
         let raw = json!([

@@ -152,8 +152,8 @@ impl SearchHandler {
     /// HTTP search settings with a vault-referenced API key resolved for the configured endpoint.
     async fn http_search_config(&self) -> Result<super::http_search::HttpSearchConfig, String> {
         let mut env = load_search_config_from_db(&self.app_handle, self.server_id)?;
-        crate::vault::config_ref::resolve_builtin_search_key(&self.app_handle, &mut env).await?;
-        super::http_search::HttpSearchConfig::from_env(&env)
+        let secrets = crate::vault::config_ref::resolve_builtin_search_key(&self.app_handle, &mut env).await?;
+        super::http_search::HttpSearchConfig::from_env(&env, secrets)
     }
 
     /// `fetch_url`: DeepSeek Fetch when selected in the search settings, otherwise the local fetcher.

@@ -513,10 +513,9 @@ async fn test_audit_disables_only_undo_with_redacted_inputs() {
     assert_eq!(query_audit_log(&conn, None, None, None, true, 20, 0).unwrap().len(), 2);
 }
 
-/// Short values and JSON scalars must not enter the audit store, but their ambiguous spelling must
-/// not trigger a new global replacement policy for ordinary tool messages.
+/// Ambiguous values omit the whole payload in persistent audit records.
 #[tokio::test]
-async fn test_audit_omits_payload_for_short_or_json_credentials_without_global_redaction() {
+async fn test_audit_omits_payload_for_short_or_json_credentials() {
     use crate::vault::placeholder;
 
     let conn = setup_in_memory_db();
@@ -529,10 +528,6 @@ async fn test_audit_omits_payload_for_short_or_json_credentials_without_global_r
                 assert!(!placeholder::audit_requires_opaque_values());
             }).await;
             assert!(placeholder::audit_requires_opaque_values());
-            if secret == "ab" {
-                // Retain the existing short-value policy outside persistent audit records.
-                assert_eq!(placeholder::current_redactor().unwrap().clean("table ab"), "table ab");
-            }
             insert_audit_log(&conn, &audit_id, "config.set", "config", RiskLevel::MEDIUM,
                 Some(&original), Some(secret), false, true, false, Some(&original), Some(secret),
                 Some(42), "butler", Some(&original)).unwrap();

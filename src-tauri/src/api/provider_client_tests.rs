@@ -215,8 +215,6 @@ fn test_provider_errors_omit_normalized_json_credentials() {
             assert_eq!(detail, &redactor.clean(""));
             assert!(std::error::Error::source(&cleaned).is_none());
         }
-        // This policy is scoped to Provider errors, not successful model/tool messages.
-        assert_eq!(crate::vault::executor::redactor_for(["t".into()]).clean("text"), "text");
     }
 }
 

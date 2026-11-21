@@ -15,6 +15,7 @@ pub struct HttpSearchConfig {
     provider: String,
     endpoint: Url,
     key: String,
+    redactor: crate::mcp::http_transport::ResponseRedactor,
     timeout: Duration,
 }
 
@@ -69,7 +70,7 @@ pub fn items_to_markdown(query: &str, provider: &str, items: &[SearchItem]) -> S
 }
 
 impl HttpSearchConfig {
-    pub fn from_env(env: &HashMap<String, String>) -> Result<Self, String> {
+    pub fn from_env(env: &HashMap<String, String>, mut secrets: Vec<String>) -> Result<Self, String> {
         let (provider, endpoint) = configured_endpoint(env)?;
         let provider = provider.as_str();
         let key = env.get("HTTP_SEARCH_API_KEY").map(|s| s.trim()).unwrap_or("").to_string();
@@ -79,31 +80,35 @@ impl HttpSearchConfig {
         let timeout = env.get("HTTP_SEARCH_TIMEOUT_MS").filter(|s| !s.trim().is_empty())
             .map(|s| s.parse::<u64>()).transpose().map_err(|_| "search_http: stage=config; 超时必须为 1000–60000 毫秒".to_string())?.unwrap_or(30_000);
         if !(1000..=60_000).contains(&timeout) { return Err("search_http: stage=config; 超时必须为 1000–60000 毫秒".into()); }
-        Ok(Self { provider: provider.into(), endpoint, key, timeout: Duration::from_millis(timeout) })
+        secrets.push(key.clone());
+        // Some providers include a masked suffix in diagnostics. Register it along with the
+        // complete header key and its individual vault components.
+        let mut masked_tails = Vec::new();
+        for secret in &secrets {
+            let chars: Vec<_> = secret.chars().collect();
+            for length in [4, 6] {
+                if chars.len() > length {
+                    masked_tails.push(format!("*{}", chars[chars.len() - length..].iter().collect::<String>()));
+                }
+            }
+        }
+        let redactor = crate::vault::executor::redactor_for(secrets)
+            .merged(Some(&crate::mcp::http_transport::ResponseRedactor::new(masked_tails.into_iter())));
+        Ok(Self { provider: provider.into(), endpoint, key, redactor, timeout: Duration::from_millis(timeout) })
     }
 
     fn error(&self, stage: &str, reason: impl std::fmt::Display) -> String {
         let text = format!("search_http: provider={}; host={}; stage={stage}; {reason}", self.provider, self.endpoint.host_str().unwrap_or(""));
-        redact_key(&text, &self.key)
+        self.redactor.clean(&text)
+    }
+
+    fn error_excerpt(&self, body: &str) -> String {
+        self.redactor.clean(body).chars().take(1000).collect()
     }
 }
 
-/// Remove the key and the masked tail some providers echo back (DeepSeek 401: `Your api key: ****ef0f`).
-/// Tool results and logs must not carry any fragment of a credential, including such tails.
-fn redact_key(text: &str, key: &str) -> String {
-    if key.is_empty() { return text.to_string(); }
-    let mut out = text.replace(key, "[redacted]");
-    let chars: Vec<char> = key.chars().collect();
-    for len in [6usize, 4] {
-        if chars.len() > len {
-            let tail: String = chars[chars.len() - len..].iter().collect();
-            out = out.replace(&format!("*{tail}"), "*[redacted]");
-        }
-    }
-    out
-}
-
-fn parse_items(provider: &str, value: &Value, limit: usize) -> Result<Vec<SearchItem>, String> {
+fn parse_items(config: &HttpSearchConfig, value: &Value, limit: usize) -> Result<Vec<SearchItem>, String> {
+    let provider = config.provider.as_str();
     // An explicit empty array is a successful search; a missing array is a protocol error.
     let rows = if provider == "brave" { value.pointer("/web/results") } else { value.get("results") }
         .and_then(Value::as_array).ok_or("响应缺少搜索结果数组，不能将错误响应当作空结果")?;
@@ -124,7 +129,8 @@ fn parse_items(provider: &str, value: &Value, limit: usize) -> Result<Vec<Search
                 _ => return Err("结果摘要不是字符串".into()),
             }
         }
-        Ok(SearchItem { title: title.into(), url: url.into(), snippet: snippet.into(), rank: index + 1, display_url: None })
+        Ok(SearchItem { title: config.redactor.clean(title), url: config.redactor.clean(url),
+            snippet: config.redactor.clean(snippet), rank: index + 1, display_url: None })
     }).collect()
 }
 
@@ -160,7 +166,13 @@ async fn read_json(config: &HttpSearchConfig, response: reqwest::Response, limit
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        let reason = String::from_utf8_lossy(&bytes).chars().take(1000).collect::<String>();
+        let reason = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(mut value) => {
+                config.redactor.clean_json(&mut value);
+                config.error_excerpt(&value.to_string())
+            }
+            Err(_) => config.error_excerpt(&String::from_utf8_lossy(&bytes)),
+        };
         return Err(config.error("response", format!("HTTP {status}; {}", if reason.trim().is_empty() { "服务未返回错误正文" } else { &reason })));
     }
     if !content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json") {
@@ -187,7 +199,8 @@ pub async fn fetch_deepseek(config: &HttpSearchConfig, url: &str) -> Result<Stri
     let content = value.get("content").and_then(Value::as_str).ok_or_else(|| config.error("decode", "响应缺少 content 字符串"))?;
     if content.trim().is_empty() { return Err(config.error("fetch", "网页没有可提取的正文")); }
     let title = value.get("title").and_then(Value::as_str).map(str::trim).unwrap_or("");
-    Ok(if title.is_empty() || content.trim_start().starts_with('#') { content.to_string() } else { format!("# {title}\n\n{content}") })
+    let page = if title.is_empty() || content.trim_start().starts_with('#') { content.to_string() } else { format!("# {title}\n\n{content}") };
+    Ok(config.redactor.clean(&page))
 }
 
 pub async fn search(config: &HttpSearchConfig, query: &str, limit: usize) -> Result<Value, String> {
@@ -212,11 +225,11 @@ pub async fn search(config: &HttpSearchConfig, query: &str, limit: usize) -> Res
     if let Some((name, header)) = auth_header(config)? { request = request.header(name, header); }
     let response = request.send().await.map_err(|e| config.error("request", format!("{:#}", anyhow::Error::new(e.without_url()))))?;
     let value = read_json(config, response, MAX_RESPONSE_BYTES, "服务未返回 application/json；SearXNG 实例须开启 JSON 格式").await?;
-    if value.get("error").is_some() { return Err(config.error("provider", value["error"].to_string().chars().take(1000).collect::<String>())); }
-    let items = parse_items(&config.provider, &value, limit).map_err(|e| config.error("decode", e))?;
+    if let Some(error) = value.get("error") { return Err(config.error("provider", config.error_excerpt(&error.to_string()))); }
+    let items = parse_items(config, &value, limit).map_err(|e| config.error("decode", e))?;
     let engine_errors = value.get("unresponsive_engines").and_then(Value::as_array).filter(|errors| !errors.is_empty());
     if config.provider == "searxng" && items.is_empty() && engine_errors.is_some() {
-        return Err(config.error("provider", format!("搜索引擎未正常响应: {}", value["unresponsive_engines"].to_string().chars().take(1000).collect::<String>())));
+        return Err(config.error("provider", format!("搜索引擎未正常响应: {}", config.error_excerpt(&value["unresponsive_engines"].to_string()))));
     }
     Ok(json!({"provider": config.provider, "query": query, "items": items, "partial": config.provider == "searxng" && engine_errors.is_some(), "message": if items.is_empty() { "搜索完成，没有匹配结果" } else { "搜索完成" }}))
 }

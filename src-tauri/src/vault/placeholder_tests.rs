@@ -33,23 +33,50 @@ fn test_keys_found_anywhere_in_the_arguments() {
 }
 
 #[test]
-fn test_memory_and_questions_keep_literal_references_only_for_builtin_routes() {
+fn test_instructions_keep_literal_references_only_for_builtin_routes() {
     let memory = json!({"action": "remember", "content": "发布时使用 <vault:deploy_key>"});
     let question = json!({"questions": [{"question": "使用 <vault:deploy_key> 吗？"}]});
     for (command, tool, args) in [
         ("aipp:agent", "butler_memory", memory),
         ("aipp:ui_interaction", "ask_user_question", question),
+        ("aipp:agent", "message_bot", json!({"message":"使用 <vault:deploy_key>"})),
+        ("aipp:agent", "spawn_task_conversation", json!({"goal":"使用 <vault:deploy_key>"})),
+        ("aipp:agent", "task_conversation_operation", json!({"action":"reply_prompt","prompt":"使用 <vault:deploy_key>"})),
+        ("aipp:agent", "continue_work", json!({"instruction":"使用 <vault:deploy_key>"})),
+        ("aipp:agent", "schedule_task", json!({"action":"create","prompt":"使用 <vault:deploy_key>"})),
+        ("aipp:superadmin", "superadmin_execute", json!({"action_id":"schedule.update","args":{"task_prompt":"使用 <vault:deploy_key>"}})),
     ] {
         for transport in ["stdio", "builtin"] {
             let builtin = server(transport, Some(command), None);
-            assert!(keys_for_call(&builtin, tool, &args).unwrap().is_empty());
-            assert!(keys_for_call(&builtin, "another_tool", &args).unwrap().contains("deploy_key"));
+            assert!(expandable_arguments(&builtin, tool, &mut args.clone()).is_empty());
+            assert_eq!(expandable_arguments(&builtin, "another_tool", &mut args.clone()), vec![&args]);
         }
         let external = server("stdio", Some("external-mcp"), None);
-        assert!(keys_for_call(&external, tool, &args).unwrap().contains("deploy_key"));
+        assert_eq!(expandable_arguments(&external, tool, &mut args.clone()), vec![&args]);
         let remote = server("http", Some(command), Some("https://example.org"));
-        assert!(keys_for_call(&remote, tool, &args).unwrap().contains("deploy_key"));
+        assert_eq!(expandable_arguments(&remote, tool, &mut args.clone()), vec![&args]);
     }
+}
+
+#[test]
+fn test_batch_keeps_task_references_when_another_step_uses_the_same_key() {
+    let builtin = server("stdio", Some("aipp:superadmin"), None);
+    let reference = "<vault:deploy_key>";
+    let mut args = json!({"actions":[
+        {"action_id":"schedule.create","args":{"prompt":reference}},
+        {"action_id":"task.spawn","args":{"goal":"<vault:future_key>"}},
+        {"action_id":"config.set","args":{"value":reference}}
+    ]});
+    let values = BTreeMap::from([("deploy_key".to_owned(), TOKEN.to_owned())]);
+    let mut keys = BTreeSet::new();
+    for field in expandable_arguments(&builtin, "superadmin_batch", &mut args) {
+        keys.extend(keys_in(field).unwrap());
+        substitute_value(field, &values);
+    }
+    assert_eq!(keys, BTreeSet::from(["deploy_key".to_owned()]));
+    assert_eq!(args["actions"][0]["args"]["prompt"], reference);
+    assert_eq!(args["actions"][1]["args"]["goal"], "<vault:future_key>");
+    assert_eq!(args["actions"][2]["args"]["value"], TOKEN);
 }
 
 #[test]
@@ -65,13 +92,8 @@ fn test_substitution_keeps_json_valid() {
 
 #[test]
 fn test_prepared_final_result_cleanup_preserves_mcp_content_schema() {
-    // Inject the test secret explicitly to isolate schema handling. This does not change
-    // redactor_for's short-value policy or prove complete short-credential leak protection.
-    for secret in ["text", "type", "image", "resource", "t"] {
-        let prepared = Prepared {
-            redactor: Some(Arc::new(crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter()))),
-            ..Default::default()
-        };
+    for secret in ["text", "type", "image", "resource", "t", "ab", "123", "密"] {
+        let prepared = test_prepared(&[secret]);
         let raw = json!([{"type":"text", "text":secret}]).to_string();
         // Verify both initial cleanup and the final defense after transport-level cleanup.
         let output = prepared.clean_result(prepared.clean_result(raw));

@@ -241,8 +241,6 @@ fn test_stdio_response_redacts_plugin_connection_credentials_without_placeholder
 
 #[test]
 fn test_mcp_response_preserves_content_schema_when_credentials_match_protocol() {
-    // Inject the test secret explicitly to isolate schema handling. This does not change
-    // redactor_for's short-value policy or prove complete short-credential leak protection.
     for secret in ["text", "type", "image", "resource", "t"] {
         let redactor = crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter());
         for is_error in [false, true] {
@@ -274,8 +272,6 @@ fn test_mcp_response_preserves_content_schema_when_credentials_match_protocol() 
 
 #[test]
 fn test_builtin_response_preserves_content_schema_when_credentials_match_protocol() {
-    // Inject the test secret explicitly to isolate schema handling. This does not change
-    // redactor_for's short-value policy or prove complete short-credential leak protection.
     for secret in ["text", "type", "content", "is_error", "isError", "t"] {
         let redactor = crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter());
         for flag in ["is_error", "isError"] {

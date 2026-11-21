@@ -111,6 +111,19 @@ fn test_vault_http_validates_arguments() {
 }
 
 #[test]
+fn test_short_credential_is_cleaned_in_numeric_payloads_and_split_output() {
+    let redactor = std::sync::Arc::new(redactor_for(["123".to_string()]));
+    let mut payload = serde_json::json!({"echo":123,"count":42});
+    redactor.clean_json(&mut payload);
+    assert_eq!(payload, serde_json::json!({"echo":"[REDACTED]","count":42}));
+    let mut stream = redactor.stream();
+    let mut text = stream.push("echo: 1");
+    text.push_str(&stream.push("23!"));
+    text.push_str(&stream.finish());
+    assert_eq!(text, "echo: [REDACTED]!");
+}
+
+#[test]
 fn test_vault_redactor_covers_encodings() {
     let secret = "a b/c+d=e\"q";
     let redactor = redactor_for([secret.to_string()]);

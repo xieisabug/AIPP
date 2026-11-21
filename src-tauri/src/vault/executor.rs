@@ -133,7 +133,6 @@ pub(crate) fn redactor_for(secrets: impl IntoIterator<Item = String>) -> crate::
         values.push(query.query().unwrap_or_default().trim_start_matches('=').to_owned());
         values.push(value);
     }
-    values.retain(|v| v.len() >= 4);
     crate::mcp::http_transport::ResponseRedactor::new(values.into_iter())
 }
 

@@ -275,6 +275,11 @@ impl ResponseRedactor {
         match value {
             serde_json::Value::String(text) => *text = self.clean(text),
             serde_json::Value::Array(values) => values.iter_mut().for_each(|value| self.clean_json(value)),
+            serde_json::Value::Number(number) => {
+                let original = number.to_string();
+                let cleaned = self.clean(&original);
+                if cleaned != original { *value = serde_json::Value::String(cleaned); }
+            }
             serde_json::Value::Object(values) => {
                 *values = std::mem::take(values).into_iter().map(|(name, mut value)| {
                     self.clean_json(&mut value);

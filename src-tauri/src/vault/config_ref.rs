@@ -179,15 +179,15 @@ pub fn builtin_search_target(env_text: &str) -> Result<Target, RefError> {
 
 /// Resolve a referenced `HTTP_SEARCH_API_KEY` in place, for the endpoint the request will go to.
 /// Fails closed when the credential was not confirmed for that endpoint (e.g. a model changed it).
-pub(crate) async fn resolve_builtin_search_key(app: &AppHandle, env: &mut std::collections::HashMap<String, String>) -> Result<(), String> {
-    if !env.values().chain(env.keys()).any(|v| contains(v)) { return Ok(()); }
+pub(crate) async fn resolve_builtin_search_key(app: &AppHandle, env: &mut std::collections::HashMap<String, String>) -> Result<Vec<String>, String> {
+    if !env.values().chain(env.keys()).any(|v| contains(v)) { return Ok(Vec::new()); }
     let target = builtin_search_env_target(env).map_err(|e| e.message)?;
     let raw = env.get(BUILTIN_SEARCH_KEY).cloned().unwrap_or_default();
     let app = app.clone();
-    let (mut values, _secrets) = tokio::task::spawn_blocking(move || resolve_blocking(&app, vec![raw], &target, BUILTIN_SEARCH_CONTEXT))
+    let (mut values, secrets) = tokio::task::spawn_blocking(move || resolve_blocking(&app, vec![raw], &target, BUILTIN_SEARCH_CONTEXT))
         .await.map_err(|e| e.to_string())?.map_err(|e| e.message)?;
     env.insert(BUILTIN_SEARCH_KEY.into(), values.pop().unwrap_or_default());
-    Ok(())
+    Ok(secrets)
 }
 
 /// HTTP MCP: a copy of the server with references in headers and env resolved for the URL's origin.
