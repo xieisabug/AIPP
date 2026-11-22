@@ -20,6 +20,8 @@ def pull_changes(
     limit: int = Query(default=500, ge=1, le=1000),
     butler_history: bool = False,
     butler_history_v2: bool = False,
+    butler_history_v3: bool = False,
+    butler_history_v4: bool = False,
     through: int | None = Query(default=None, ge=0),
     auth: AuthContext = Depends(require_auth),
     device_id: str = Depends(require_device_id),
@@ -28,14 +30,18 @@ def pull_changes(
     ensure_device(db, auth, device_id)
 
     query = select(SyncChange).where(SyncChange.account_id == auth.account_id, SyncChange.seq > cursor)
-    if butler_history or butler_history_v2:
+    if butler_history or butler_history_v2 or butler_history_v3 or butler_history_v4:
         kinds = (
             "assistant.appearance", "conversation.group_member", "conversation.group_message",
             "conversation.group_turn", "conversation.read_reply", "conversation.read_group_reply",
         )
-        if butler_history_v2:
+        if butler_history_v2 or butler_history_v3 or butler_history_v4:
             kinds += ("assistant.skill", "assistant.prompt_param", "conversation.butler_memory",
                       "conversation.butler_main", "conversation.butler_goal")
+        if butler_history_v3 or butler_history_v4:
+            kinds += ("conversation.proactive_item", "conversation.proactive_occurrence")
+        if butler_history_v4:
+            kinds += ("conversation.proactive_source",)
         query = query.where(SyncChange.object_type.in_(kinds))
     if through is not None:
         query = query.where(SyncChange.seq <= through)

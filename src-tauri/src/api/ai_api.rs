@@ -1548,7 +1548,8 @@ pub async fn ask_ai(
     let group_turn = relay_origin.as_deref().and_then(|s| s.strip_prefix("butler_group/"))
         .map(|s| s.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{s}；{e}"))))
         .transpose()?;
-    let (actual_assistant_id, cleaned_prompt) = if peer_turn || group_turn.is_some() {
+    let confirmed_proposal = crate::proactive::proposal::ACCEPTANCE.try_with(|_| ()).is_ok();
+    let (actual_assistant_id, cleaned_prompt) = if peer_turn || group_turn.is_some() || confirmed_proposal {
         (request.assistant_id, request.prompt.clone())
     } else {
         extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?
@@ -1556,7 +1557,7 @@ pub async fn ask_ai(
     crate::api::mobile_capability::ensure_assistant_execution(
         &app_handle, actual_assistant_id, "send_preflight", &request.conversation_id,
     ).await.map_err(AppError::UnknownError)?;
-    let slash_parse_result = if group_turn.is_some() {
+    let slash_parse_result = if group_turn.is_some() || confirmed_proposal {
         crate::slash::types::SlashParseResult {
             display_prompt: cleaned_prompt.clone(),
             runtime_user_prompt: cleaned_prompt.clone(),
@@ -1587,6 +1588,15 @@ pub async fn ask_ai(
         .run_guard_filter("chat.beforeSend", before_send_context)
         .await
         .map_err(AppError::UnknownError)?;
+    if confirmed_proposal {
+        let filtered=&before_send_result.context;
+        if filtered["assistantId"].as_i64()!=Some(request.assistant_id)
+            || filtered["prompt"].as_str()!=Some(request.prompt.as_str())
+            || filtered["runtimeUserPromptPrefix"].as_str().is_some_and(|prefix|!prefix.is_empty())
+            || filtered["attachments"].as_array().is_some_and(|files|!files.is_empty()) {
+            return Err(AppError::UnknownError("插件改变了已确认的建议或执行人，请在目标会话中核对后发送".into()));
+        }
+    }
     if let Some(assistant_id) =
         before_send_result.context.get("assistantId").and_then(|value| value.as_i64())
     {
@@ -1725,7 +1735,7 @@ pub async fn ask_ai(
     let mut mcp_info = mcp_info;
     let search_servers = deepseek_web::filter_search(&mut mcp_info, web_enabled);
     let _need_generate_title = processed_request.conversation_id.is_empty();
-    let request_prompt_result = if group_turn.is_some() {
+    let request_prompt_result = if group_turn.is_some() || confirmed_proposal {
         processed_request.prompt.clone()
     } else {
         compose_user_message_with_active_skills(
@@ -1735,7 +1745,7 @@ pub async fn ask_ai(
     };
     // 附加上下文不再作为前缀临时拼接：它由 initialize_conversation 接在正文末尾并一起存储。
     let runtime_prompt_result = request_prompt_result.clone();
-    let display_prompt_result = if group_turn.is_some() {
+    let display_prompt_result = if group_turn.is_some() || confirmed_proposal {
         processed_request.prompt.clone()
     } else {
         compose_user_message_with_active_skills(
@@ -4175,7 +4185,12 @@ async fn initialize_conversation(
             handle.steer(turn, runtime_user_prompt_with_context.clone()).await?;
         }
         // 添加用户消息
-        let user_message = if let Some(turn) = origin.and_then(|s| s.strip_prefix("butler_group/")) {
+        let user_message = if let Ok(key) = crate::proactive::proposal::ACCEPTANCE.try_with(Clone::clone) {
+            let id = crate::proactive::proposal::write_input(&mut db.get_connection()?, &key, conversation_id,
+                request.assistant_id, &display_user_prompt_with_context, assistant_detail.model[0].id, &assistant_detail.model[0].model_code)
+                .map_err(|e| AppError::UnknownError(format!("建议 {key} 派发失败：{e:#}")))?;
+            db.message_repo()?.read(id)?.ok_or_else(|| AppError::UnknownError(format!("建议消息 #{id} 写入后无法读取")))?
+        } else if let Some(turn) = origin.and_then(|s| s.strip_prefix("butler_group/")) {
             let turn = turn.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{turn}；{e}")))?;
             // 写入前再确认这次回复仍在进行：用户已停止或成员已移出时，不把消息送进成员会话。
             let input = crate::db::butler_group::write_turn_input(&mut db.get_connection()?, turn, conversation_id,

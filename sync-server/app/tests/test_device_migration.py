@@ -176,7 +176,7 @@ def test_device_migration_merges_both_deployed_branches(legacy_database, source)
     command.upgrade(config, "head")
     assert device_rows(connection) == original_devices
     assert connection.exec_driver_sql("SELECT * FROM vault_refresh_claim").all() == claims
-    assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0006_provider_settings"
+    assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0007_proactive_owner"
     assert sa.inspect(connection).get_pk_constraint("sync_device")["constrained_columns"] == ["account_id", "id"]
 
 

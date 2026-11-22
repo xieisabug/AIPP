@@ -633,7 +633,7 @@ pub(super) async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), 
     }
 }
 
-async fn load_butler_workspace_config(app_handle: &AppHandle) -> ButlerWorkspaceConfig {
+pub(crate) async fn load_butler_workspace_config(app_handle: &AppHandle) -> ButlerWorkspaceConfig {
     let main_workspace_path =
         get_experimental_config_value(app_handle, "butler_main_workspace_path").await;
     let main_workspace_description =

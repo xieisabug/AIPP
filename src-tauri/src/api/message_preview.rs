@@ -72,6 +72,10 @@ pub(crate) fn excerpt(content: &str) -> String {
 
 /// 解析引用、检查双方范围并读取展示内容。工具执行与界面渲染共用同一套规则。
 pub async fn build(app: &AppHandle, viewer: i64, reference: MessageRef) -> Result<MessagePreview, String> {
+    build_preview(app, viewer, reference, false).await
+}
+
+async fn build_preview(app: &AppHandle, viewer: i64, reference: MessageRef, local_card: bool) -> Result<MessagePreview, String> {
     let names = super::butler_peer::bot_names(app)
         .await
         .map_err(|e| format!("读取助手名称失败: {e:#}"))?;
@@ -87,7 +91,16 @@ pub async fn build(app: &AppHandle, viewer: i64, reference: MessageRef) -> Resul
         let row = message_preview::load(&conn, id)
             .map_err(|e| format!("读取消息 #{id} 失败: {e}"))?
             .ok_or_else(|| format!("消息 #{id} 已删除或不存在"))?;
-        message_preview::ensure_previewable(&row)?;
+        if local_card && matches!(row.conversation_kind.as_str(), "butler_proactive_run" | "butler_proactive_brief") {
+            let delivered = conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_proactive_item i
+                JOIN butler_proactive_delivery_queue q ON q.item_id=i.id WHERE (q.brief_message_id=?1 OR (q.brief_message_id IS NULL AND i.prep_message_id=?1))
+                AND q.conversation_id=?2 AND q.message_id IS NOT NULL)", [id,viewer], |r|r.get::<_,bool>(0)).map_err(|e|e.to_string())?;
+            if !delivered || row.origin.as_deref() != Some("proactive_brief") || row.message_type != "response" {
+                return Err("该简报未交付给此会话".into());
+            }
+        } else {
+            message_preview::ensure_previewable(&row)?;
+        }
         let content = display_content(&row)?;
         let author = row
             .assistant_id
@@ -149,7 +162,7 @@ pub async fn get_message_preview(
     work_ref: Option<String>,
 ) -> Result<MessagePreview, String> {
     let reference = MessageRef::parse(message_id, work_ref.as_deref())?;
-    build(&app_handle, viewer_conversation_id, reference).await
+    build_preview(&app_handle, viewer_conversation_id, reference, true).await
 }
 
 #[cfg(test)]

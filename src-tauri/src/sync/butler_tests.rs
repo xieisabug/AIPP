@@ -6,6 +6,37 @@ struct Device {
     sync: Connection,
 }
 
+#[test]
+fn test_proactive_item_and_night_queue_map_to_receiver_source() {
+    let source=Device::new();
+    let target=Device::new();
+    source.db.execute_batch("INSERT INTO assistant(id,name) VALUES(72,'A');
+        INSERT INTO conversation(id,name,assistant_id,conversation_kind) VALUES(41,'私聊',72,'butler_contact');
+        INSERT INTO message(id,conversation_id,message_type,content) VALUES(83,41,'user','下周提醒我');
+        INSERT INTO butler_proactive_item(id,uuid,kind,title,source_conversation_id,source_message_id,owner_assistant_id,updated_at)
+        VALUES(64,'stable-item','open_loop','复查',41,83,72,1);
+        INSERT INTO butler_proactive_source(uuid,item_id,conversation_id,message_id,quote)
+        VALUES('stable-reference',64,41,83,'下周提醒我');
+        INSERT INTO butler_proactive_delivery_queue(occurrence_key,item_id,occurrence,stage,deliver_after)
+        VALUES('stable-occurrence',64,'2026-11-23','due',1234);").unwrap();
+    let mut changes=source.changes();
+    for kind in ["conversation.proactive_item","conversation.proactive_occurrence","conversation.proactive_source"] {
+        assert!(changes.iter().any(|c|c.object_type==kind),"missing outgoing {kind}");
+    }
+    changes.reverse();
+    target.receive(&changes);
+    let result:(String,String,String,i64)=target.db.query_row("SELECT a.name,m.content,q.status,i.id FROM butler_proactive_item i
+        JOIN assistant a ON a.id=i.owner_assistant_id JOIN message m ON m.id=i.source_message_id AND m.conversation_id=i.source_conversation_id
+        JOIN butler_proactive_delivery_queue q ON q.item_id=i.id WHERE i.uuid='stable-item' AND q.occurrence_key='stable-occurrence'",[],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!((&result.0[..],&result.1[..],&result.2[..]),("A","下周提醒我","queued"));
+    assert_ne!(result.3,64);
+    let valid:bool=target.db.query_row("SELECT EXISTS(SELECT 1 FROM butler_proactive_source s
+        JOIN message m ON m.id=s.message_id AND m.conversation_id=s.conversation_id AND m.content=s.quote
+        WHERE s.uuid='stable-reference' AND s.item_id=?1)",[result.3],|r|r.get(0)).unwrap();
+    assert!(valid);
+}
+
 impl Device {
     fn new() -> Self {
         let db = Connection::open_in_memory().unwrap();
@@ -23,6 +54,7 @@ impl Device {
             ALTER TABLE message ADD COLUMN parent_id INTEGER;").unwrap();
         crate::db::butler_goal::schema(&db).unwrap();
         crate::db::butler_memory::schema(&db).unwrap();
+        db.execute_batch(include_str!("../proactive/schema.sql")).unwrap();
         group::schema(&db).unwrap();
         let sync = Connection::open_in_memory().unwrap();
         sync.execute_batch(SYNC_SCHEMA_SQL).unwrap();
@@ -42,6 +74,9 @@ impl Device {
                     | "conversation.butler_main"
                     | "conversation.butler_goal"
                     | "conversation.butler_memory"
+                    | "conversation.proactive_item"
+                    | "conversation.proactive_occurrence"
+                    | "conversation.proactive_source"
                     | "conversation"
                     | "conversation.message"
                     | "conversation.group_member"

@@ -65,6 +65,13 @@ pub(super) fn specs() -> Vec<SyncTableSpec> {
         &[owner("assistant_id", "assistant"), owner("assistant_prompt_id", "assistant.prompt")];
     const MAIN: &[ForeignKeySpec] = &[owner("butler_conversation_id", "conversation")];
     const GOAL: &[ForeignKeySpec] = &[owner("conversation_id", "conversation")];
+    const OCCURRENCE: &[ForeignKeySpec] = &[owner("item_id","conversation.proactive_item")];
+    const TOPIC_SOURCE: &[ForeignKeySpec] = &[owner("item_id","conversation.proactive_item"),
+        owner("conversation_id","conversation"),owner("message_id","conversation.message"),
+        owner("group_post_id","conversation.group_message")];
+    const PROACTIVE: &[ForeignKeySpec] = &[owner("source_conversation_id","conversation"),
+        owner("owner_assistant_id","assistant"), owner("source_message_id","conversation.message"),
+        owner("source_group_post_id","conversation.group_message")];
     vec![
         SyncTableSpec {
             db_name: "assistant.db",
@@ -130,6 +137,7 @@ pub(super) fn specs() -> Vec<SyncTableSpec> {
                 "source_message_id",
                 "source_group_id",
                 "source_group_seq",
+                "origin",
                 "created_at",
                 "updated_at",
             ],
@@ -227,6 +235,21 @@ pub(super) fn specs() -> Vec<SyncTableSpec> {
             &["message_id"],
             GROUP_READ,
         ),
+        table(
+            "butler_proactive_item", "conversation.proactive_item",
+            &["id","uuid","kind","title","detail","tracking_summary","status","source_conversation_id","source_message_id","source_group_post_id",
+              "owner_assistant_id","event_date","calendar_type","yearly","lead_days","high_priority","next_check_at","action_prompt","revision","updated_at"],
+            &["uuid"], PROACTIVE,
+        ),
+        table("butler_proactive_source","conversation.proactive_source",
+            &["id","uuid","item_id","conversation_id","message_id","group_post_id","quote"],&["uuid"],
+            TOPIC_SOURCE),
+        SyncTableSpec {
+            natural_key_columns: &["occurrence_key"],
+            ..table("butler_proactive_delivery_queue","conversation.proactive_occurrence",
+                &["id","occurrence_key","item_id","occurrence","stage","status","deliver_after","delivered_at","morning","researched","summary"],
+                &["occurrence_key"],OCCURRENCE)
+        },
     ]
 }
 
@@ -341,6 +364,9 @@ pub(super) fn prepare_intent(
             }
         }
         "conversation.butler_memory" => {
+            if fields.get("origin").is_none_or(JsonValue::is_null) {
+                fields.insert("origin".into(),json!("user_turn"));
+            }
             let scope = fields
                 .get("scope_type")
                 .and_then(JsonValue::as_str)
@@ -664,7 +690,7 @@ pub(super) async fn backfill(
     cancel: &CancellationToken,
 ) -> Result<(), String> {
     let sync = open_sync_db(app)?;
-    let key = "butler_history_v2";
+    let key = "butler_history_v4";
     let checkpoint = get_sync_meta(&sync, key)?;
     if checkpoint.as_deref() == Some("done") {
         return Ok(());
@@ -679,7 +705,7 @@ pub(super) async fn backfill(
     while cursor < end {
         ensure_not_cancelled(cancel)?;
         let url = format!(
-            "{}/v1/sync/pull?cursor={cursor}&limit=1000&butler_history_v2=true&through={end}",
+            "{}/v1/sync/pull?cursor={cursor}&limit=1000&butler_history_v4=true&through={end}",
             settings.server_url
         );
         let response = await_or_cancel(

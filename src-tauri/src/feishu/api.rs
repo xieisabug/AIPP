@@ -819,6 +819,20 @@ pub(super) async fn reply_text_message(
     .await
 }
 
+pub(crate) async fn send_proactive_summary(app:&AppHandle,open_id:&str,text:&str,key:&str)->Result<String,String>{
+    let cfg=load_runtime_config(app).await?;
+    if !cfg.enabled || !cfg.butler_enabled || !cfg.allow_p2p || cfg.only_reply_feishu_originated {
+        return Err("飞书当前配置不允许管家主动私聊投递".into());
+    }
+    if !cfg.allowed_open_ids.is_empty() && !cfg.allowed_open_ids.contains(open_id) {
+        return Err("主动提醒接收人不在飞书允许名单内".into());
+    }
+    let token=fetch_tenant_access_token(app,&cfg).await?;
+    let mut body=build_feishu_text_payload(text);
+    body["uuid"]=json!(key);
+    send_message_request(&feishu_http_client(app),&cfg,&token,"open_id",open_id,body).await
+}
+
 pub(super) async fn send_text_message_to_open_id(
     app_handle: &AppHandle,
     config: &FeishuRuntimeConfig,
@@ -1174,6 +1188,12 @@ pub(super) async fn render_message_for_feishu_delivery(
     preview_tool_call: Option<MCPToolCall>,
     relay_origin: &str,
 ) -> Result<Vec<String>, String> {
+    // Proactive messages have a dedicated opt-in recipient, priority gate and delivery receipt.
+    let metadata = delivery_message.metadata_json.as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    if metadata.as_ref().and_then(|value| value["origin"].as_str()) == Some("butler_proactive") {
+        return Ok(Vec::new());
+    }
     if let Some(rendered) = render_preview_message_tool_result_for_feishu(app_handle, delivery_message).await {
         return Ok(rendered);
     }

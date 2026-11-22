@@ -668,7 +668,7 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[],
-            where_clause: Some("feature_code != 'data_sync'"),
+            where_clause: Some("feature_code NOT IN ('data_sync','butler_proactive')"),
             order_by: "feature_code, key",
         },
         SyncTableSpec {
@@ -2470,6 +2470,13 @@ fn read_snapshot_rows(
         return Ok((Vec::new(), HashSet::new()));
     }
     let mut filters: Vec<String> = spec.where_clause.map(|filter| format!("({filter})")).into_iter().collect();
+    if spec.object_type=="conversation" && columns.iter().any(|c|c=="conversation_kind") {
+        filters.push("coalesce(conversation_kind,'normal') NOT IN ('butler_proactive_run','butler_proactive_brief')".into());
+    }
+    if spec.object_type=="conversation.message" && columns.iter().any(|c|c=="conversation_id")
+        && !existing_columns(conn,"conversation",&["conversation_kind"])?.is_empty() {
+        filters.push("conversation_id NOT IN (SELECT id FROM conversation WHERE conversation_kind IN ('butler_proactive_run','butler_proactive_brief'))".into());
+    }
     if let Some(ids) = ids {
         filters.push(format!("id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")));
     }
@@ -2522,7 +2529,11 @@ fn read_snapshot_rows(
                 .and_then(|column| raw_values.get(column))
                 .and_then(JsonValue::as_i64)
                 .is_some_and(|value| value != 0);
-        let object_id = if !spec.natural_key_columns.is_empty() {
+        let object_id = if spec.object_type=="conversation.proactive_item" {
+            let id=raw_values.get("uuid").and_then(JsonValue::as_str).ok_or("主动事项缺少 UUID")?;
+            remap_sync_object_map(sync_conn,spec.object_type,spec.table,local_id,id)?;
+            id.to_owned()
+        } else if !spec.natural_key_columns.is_empty() {
             let id = natural_object_id(spec, &raw_values)?;
             remember_natural_key(sync_conn, spec, &id, &raw_values)?;
             id
@@ -3006,6 +3017,10 @@ fn required_sync_owner(object_type: &str, column: &str) -> bool {
             | ("conversation.group_member", "group_id" | "conversation_id")
             | ("conversation.group_turn", "group_id" | "member_id")
             | ("conversation.group_message", "group_id")
+            | ("conversation.proactive_item","source_conversation_id")
+            | ("conversation.proactive_occurrence","item_id")
+            | ("conversation.proactive_source","item_id")
+            | ("conversation.proactive_source","conversation_id")
             | ("conversation.read_reply" | "conversation.read_group_reply", "message_id")
             | ("assistant.model", "provider_id")
             | ("mcp.server_tool", "server_id")
@@ -5529,6 +5544,56 @@ fn open_sync_db(app_handle: &AppHandle) -> Result<Connection, String> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;")
         .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+/// Account ownership is durable. Only the current owner can release it; disconnecting
+/// a device never causes another machine to take over an offline scheduler.
+pub(crate) async fn proactive_owner(app: &AppHandle, enable: bool) -> Result<(), String> {
+    let settings = load_settings(app)?;
+    if settings.mode == SyncMode::Local { return Ok(()); }
+    ensure_sync_db(app)?;
+    let device = ensure_device_id(&open_sync_db(app)?)?;
+    let token = settings.token.ok_or("请先连接同步服务")?;
+    use sha2::Digest;
+    let signature = format!("{:x}",sha2::Sha256::digest(format!("{}\n{device}\n{token}",settings.server_url).as_bytes()));
+    let local=SystemDatabase::new(app).map_err(|e|e.to_string())?;
+    let cached=local.get_config("butler_proactive_owner").map_err(|e|e.to_string())?;
+    if (enable && cached==signature) || (!enable && cached.is_empty()) {return Ok(())}
+    if !enable {
+        // Persist a release intent before the network call. A crash can never reuse the old grant.
+        local.conn.execute("UPDATE system_config SET value='releasing' WHERE key='butler_proactive_owner'",[]).map_err(|e|e.to_string())?;
+        sync_proactive_handover(app).await?;
+    }
+    let url = format!("{}/v1/sync/proactive/owner",settings.server_url);
+    let client = sync_http_client()?;
+    let req = if enable { client.put(url) } else { client.delete(url) };
+    let response = req.header("X-AIPP-Device-ID",device).bearer_auth(token)
+        .send().await.map_err(|e|format!("主动整理设备登记失败：{}",sync_http_error(e)))?;
+    if !response.status().is_success() {
+        return Err(format!("主动整理设备登记失败：HTTP {} {}",response.status(),response.text().await.unwrap_or_default()));
+    }
+    if enable {
+        // A newly elected scheduler must observe reminders already delivered by its predecessor.
+        local.conn.execute("INSERT INTO system_config(key,value) VALUES('butler_proactive_owner','claiming')
+            ON CONFLICT(key) DO UPDATE SET value='claiming'",[]).map_err(|e|e.to_string())?;
+        sync_proactive_handover(app).await?;
+    }
+    local.conn.execute("INSERT INTO system_config(key,value) VALUES('butler_proactive_owner',?1)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value",[if enable {signature} else {String::new()}]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+async fn sync_proactive_handover(app:&AppHandle)->Result<(),String>{
+    run_sync_once_manual(app).await;
+    let status=sync_status(app).await?;
+    if let Some(error)=status.last_error{return Err(format!("交接主动整理前同步失败：{error}"))}
+    if !status.connected{return Err("交接主动整理前尚未完成同步".into())}
+    let sync=open_sync_db(app)?;
+    let pending:bool=sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN
+        ('conversation.proactive_item','conversation.proactive_occurrence','conversation.proactive_source') AND status IN ('pending','pushing','failed'))
+        OR EXISTS(SELECT 1 FROM sync_dead_letter WHERE object_type IN ('conversation.proactive_item','conversation.proactive_occurrence','conversation.proactive_source'))",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if pending{return Err("仍有跟进事项尚未同步，设备保留执行权，请在同步完成后重试".into())}
+    Ok(())
 }
 
 /// 打开业务数据 DB（读多写少），加 busy_timeout 避免与其他写路径偶发冲突直接报错。

@@ -1052,6 +1052,14 @@ pub(crate) async fn review_round_extension(app: &tauri::AppHandle, conversation:
     review_with_definition(app, conversation, message, 0, "管家协作", "追加协作轮数", details, Some(definition)).await
 }
 
+pub(crate) async fn review_proactive_read(app:&tauri::AppHandle,session:i64,server:&str,op:&crate::mcp::apps::declarative::Operation,args:&serde_json::Value)->ReviewRecordDraft{
+    let definition=ToolReviewDefinition{
+        description:format!("无人值守的管家只读预研，只允许无外部副作用的查询。请检查请求参数是否泄露私人聊天信息、是否会引起状态变更。无法确定时必须拒绝。已安装操作 GET {}。服务描述：{}",op.path,op.description),
+        input_schema:op.input_schema.to_string()
+    };
+    review_with_definition(app,session,None,0,server,&op.name,&args.to_string(),Some(definition)).await
+}
+
 async fn review_with_definition(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,

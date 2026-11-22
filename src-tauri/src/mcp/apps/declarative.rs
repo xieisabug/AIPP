@@ -196,6 +196,20 @@ pub async fn probe(app: &tauri::AppHandle, server: &MCPServer) -> Result<HttpApi
     Ok(api)
 }
 
+pub(crate) fn readonly_operations(app:&tauri::AppHandle,server:&MCPServer)->Result<Vec<Operation>,String>{
+    Ok(installed(app,server)?.tools.into_iter().filter(|op|op.method=="GET" && op.body.is_none()).collect())
+}
+
+pub(crate) async fn proactive_read(app:&tauri::AppHandle,server:&MCPServer,name:&str,args:&Value,session:i64)->Result<String,String>{
+    let api=installed(app,server)?;
+    let op=api.tools.iter().find(|op|op.name==name && op.method=="GET" && op.body.is_none()).ok_or("该操作没有已安装的只读 GET 定义")?;
+    super::access::validate_execution(app,server,name,Some(session))?;
+    let review=crate::mcp::tool_review::review_proactive_read(app,session,&server.name,op,args).await;
+    if review.verdict!="safe" {return Ok(format!("未执行应用查询，审核结果为 {}：{}。如需用户操作，请提出建议。",review.verdict,review.reason))}
+    // The request uses this exact reviewed snapshot. The ordinary transport rechecks the connection before sending.
+    call(app,server,&api,name,args,Some(session),false).await
+}
+
 pub async fn execute(app: &tauri::AppHandle, server: &MCPServer, name: &str, parameters: &str, conversation: Option<i64>) -> Result<String, String> {
     let api = installed(app, server)?;
     let args = Value::Object(crate::mcp::execution_api::parse_tool_arguments(parameters).map_err(|e| format!("工具参数无效：{e:#}"))?);

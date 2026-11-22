@@ -17,6 +17,13 @@ class SyncAccount(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ProactiveOwner(Base):
+    __tablename__ = "proactive_owner"
+
+    account_id: Mapped[str] = mapped_column(String(64), ForeignKey("sync_account.id", ondelete="CASCADE"), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
 class SyncToken(Base):
     __tablename__ = "sync_token"
 

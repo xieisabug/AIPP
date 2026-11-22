@@ -1,4 +1,6 @@
 import React, { useCallback, useMemo, useState } from "react";
+import ProactiveCard from "./butler/ProactiveCard";
+import { deliveryMetadata } from "./butler/proactiveApi";
 import { ButlerMessageQuoteLabel } from "./butler/ButlerQuote";
 import { DeepSeekWebProcess } from "./message-item/DeepSeekWebProcess";
 import { readWebReport, withWebCitations } from "@/utils/deepSeekWeb";
@@ -389,6 +391,7 @@ const MessageItem = React.memo<MessageItemProps>(
             const taskName = typeof metadata.scheduled_task_name === "string" ? metadata.scheduled_task_name : "";
             return Number.isInteger(taskId) && taskId > 0 ? { taskId, taskName } : null;
         }, [message.metadata_json]);
+        const proactive = useMemo(() => deliveryMetadata(message.metadata_json), [message.metadata_json]);
 
         const obsoleteGoal = useMemo(() => {
             if (streamEvent?.end_reason === "goal_superseded") return true;
@@ -644,6 +647,8 @@ const MessageItem = React.memo<MessageItemProps>(
                 )}
 
                 {messageBodyContent}
+                {proactive && (proactive.cards ?? [proactive]).map(card =>
+                    <ProactiveCard key={card.delivery} data={card} grouped={(proactive.cards?.length ?? 0)>1} conversation={Number(message.conversation_id)} message={message.id} />)}
 
                 {shouldCollapseUserMessage && (
                     <button

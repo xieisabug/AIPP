@@ -61,7 +61,7 @@ pub enum Source {
     GroupMessage { group: i64, seq: i64 },
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq)]
 pub struct Memory {
     pub id: i64,
     pub content: String,
@@ -75,6 +75,7 @@ pub struct Memory {
     pub revision: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub origin: String,
 }
 
 impl Memory {
@@ -110,16 +111,20 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
             ON butler_memory(scope_type, scope_id, updated_at DESC, id DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_butler_memory_exact
             ON butler_memory(scope_type, COALESCE(scope_id, 0), content);",
-    )
+    )?;
+    if !conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_memory') WHERE name='origin')", [], |r| r.get::<_, bool>(0))? {
+        conn.execute("ALTER TABLE butler_memory ADD COLUMN origin TEXT NOT NULL DEFAULT 'user_turn'", [])?;
+    }
+    Ok(())
 }
 
-const COLUMNS: &str = "id,content,scope_type,scope_id,author_assistant_id,source_message_id,source_group_id,source_group_seq,revision,created_at,updated_at";
+const COLUMNS: &str = "id,content,scope_type,scope_id,author_assistant_id,source_message_id,source_group_id,source_group_seq,revision,created_at,updated_at,origin";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: r.get(0)?, content: r.get(1)?, scope_type: r.get(2)?, scope_id: r.get(3)?,
         author_assistant_id: r.get(4)?, source_message_id: r.get(5)?, source_group_id: r.get(6)?,
-        source_group_seq: r.get(7)?, revision: r.get(8)?, created_at: r.get(9)?, updated_at: r.get(10)?,
+        source_group_seq: r.get(7)?, revision: r.get(8)?, created_at: r.get(9)?, updated_at: r.get(10)?, origin: r.get(11)?,
     })
 }
 
@@ -456,7 +461,7 @@ pub fn update(conn: &Connection, viewer: Option<Viewer>, id: i64, revision: Opti
     };
     let changed = conn.execute(
         "UPDATE butler_memory SET content=?3, source_message_id=?4, source_group_id=?5, source_group_seq=?6,
-            revision=revision+1, updated_at=?7 WHERE id=?1 AND revision=?2",
+            origin='user_turn', revision=revision+1, updated_at=?7 WHERE id=?1 AND revision=?2",
         params![id, old.revision, content, message, group, seq, now()],
     )?;
     ensure!(changed == 1, "记忆 #{id} 已被修改或删除，请重新读取");

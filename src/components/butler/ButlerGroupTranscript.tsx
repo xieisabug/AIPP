@@ -90,6 +90,8 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
 interface Props {
     groupId: number;
     historyLoaded?: boolean;
+    sourceSeq?: number;
+    onSourceLocated?: () => void;
     messages: ButlerGroupMessage[];
     members: ButlerGroupMember[];
     running: ButlerGroupMember[];
@@ -101,7 +103,7 @@ interface Props {
  * 发送滑动、引用/轮次跳转与高亮、左侧轮次导航、最后一轮布局都来自共享列表；
  * 群聊特有的发言人、时间分隔、系统提示通过自定义行接入，列表的改进会同时作用于私聊和群聊。
  */
-export default function ButlerGroupTranscript({ groupId, historyLoaded = false, messages, members, running, turns }: Props) {
+export default function ButlerGroupTranscript({ groupId, historyLoaded = false, messages, members, running, turns, sourceSeq, onSourceLocated }: Props) {
     const { messagesEndRef, scrollContainerRef, handleUserScrollIntent, syncScrollState, smartScroll } =
         useScrollManagement({ disableTailObservation: true });
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
@@ -250,6 +252,13 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
         setPendingScrollAlign("center");
         setPendingScrollMessageId(messageId);
     }, [chatIdBySeq]);
+
+    useEffect(() => {
+        if (historyLoaded && sourceSeq && chatIdBySeq.has(sourceSeq)) {
+            jumpToQuoted(sourceSeq);
+            onSourceLocated?.();
+        }
+    }, [historyLoaded, sourceSeq, chatIdBySeq, jumpToQuoted, onSourceLocated]);
 
     return <div className="relative flex min-h-0 flex-1 flex-col" data-aipp-slot="butler-group-transcript">
         {useCards.pending.length + inputCards.pending.length > 0 && <p role="status" className="px-6 py-2 text-sm text-muted-foreground" data-aipp-slot="butler-group-vault-pending">

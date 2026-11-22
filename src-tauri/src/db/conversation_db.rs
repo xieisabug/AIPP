@@ -2368,6 +2368,11 @@ impl ConversationDatabase {
         super::token_stats::schema(&conn)?;
         super::butler_work::schema(&conn)?;
         super::butler_memory::schema(&conn)?;
+        conn.execute_batch(include_str!("../proactive/schema.sql"))?;
+        ensure_column_exists(&conn, "butler_proactive_item", "tracking_summary", "TEXT NOT NULL DEFAULT ''")?;
+        ensure_column_exists(&conn, "butler_proactive_delivery_queue", "researched", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column_exists(&conn, "butler_proactive_delivery_queue", "summary", "TEXT NOT NULL DEFAULT ''")?;
+        ensure_column_exists(&conn, "butler_proactive_delivery_queue", "brief_message_id", "INTEGER")?;
         super::butler_goal::initialize_sync_schema(&conn)?;
 
         Ok(())

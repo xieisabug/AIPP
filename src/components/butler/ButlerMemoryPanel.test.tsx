@@ -5,9 +5,10 @@ import ButlerMemoryPanel from "./ButlerMemoryPanel";
 
 const api = vi.hoisted(() => ({
     listButlerMemories: vi.fn(), updateButlerMemory: vi.fn(), deleteButlerMemory: vi.fn(),
-    getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn(),
+    getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn(), undoProactiveMemory: vi.fn(),
 }));
 vi.mock("@/services/butlerMemoryService", () => api);
+vi.mock("./proactiveApi", () => ({undoProactiveMemory:api.undoProactiveMemory}));
 
 function memory(patch: Partial<ButlerMemory>): ButlerMemory {
     return {
@@ -33,6 +34,13 @@ afterEach(() => {
 const item = (text: string) => screen.getByText(text).closest("li") as HTMLElement;
 
 describe("ButlerMemoryPanel", () => {
+    it("should label proactive memories and undo only the version being displayed", async () => {
+        api.listButlerMemories.mockResolvedValueOnce([{...own,origin:"proactive",revision:7}]);
+        render(<ButlerMemoryPanel conversationId={20} scope="assistant" />);
+        expect(await screen.findByText("管家整理")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button",{name:"撤销这次整理"}));
+        await waitFor(()=>expect(api.undoProactiveMemory).toHaveBeenCalledWith(own.id,7));
+    });
     it("should group own and global memories when loaded for a conversation", async () => {
         render(<ButlerMemoryPanel conversationId={20} scope="assistant" />);
         expect(await screen.findByText("用户希望回答先给结论")).toBeInTheDocument();

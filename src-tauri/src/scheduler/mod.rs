@@ -109,6 +109,7 @@ pub fn start_scheduler(app_handle: tauri::AppHandle, scheduler_state: SchedulerS
                 error!(error = %e, "定时任务调度失败");
             }
             // 上一轮总结还没结束时不再叠加新的一轮。
+            crate::proactive::tick(app_handle.clone());
             static SUMMARY_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             if SUMMARY_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
                 continue;

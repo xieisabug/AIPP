@@ -46,7 +46,7 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                     }
                     if (metadata?.origin === "internal") continue;
                     // 定时任务结果前的触发消息不是用户发言；结果本身带「来自定时任务」标签
-                    if (metadata?.origin === "scheduled_task") continue;
+                    if (metadata?.origin === "scheduled_task" || metadata?.origin === "butler_proactive") continue;
                 } catch { /* Historical metadata can be absent or invalid. */ }
             }
         }

@@ -581,7 +581,9 @@ pub async fn list_butler_memories(app_handle: AppHandle, conversation_id: i64) -
 pub async fn update_butler_memory(app_handle: AppHandle, id: i64, content: String, revision: Option<i64>) -> Result<Memory, String> {
     let updated = database(&app_handle, "修改", move |conn| {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let updated = memory::update(&tx, None, id, revision, &content, None)?;
+        let mut updated = memory::update(&tx, None, id, revision, &content, None)?;
+        tx.execute("UPDATE butler_memory SET origin='manual_ui' WHERE id=?1", [id])?;
+        updated.origin = "manual_ui".into();
         tx.commit()?;
         Ok(updated)
     }).await?;

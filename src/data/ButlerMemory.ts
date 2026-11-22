@@ -10,6 +10,7 @@ export interface ButlerMemory {
     source_group_id: number | null;
     source_group_seq: number | null;
     revision: number;
+    origin?: "user_turn" | "proactive" | "manual_ui";
     /** 毫秒时间戳。 */
     created_at: number;
     updated_at: number;

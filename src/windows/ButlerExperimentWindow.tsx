@@ -1,6 +1,7 @@
 import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
 import { resetButlerContactConversation, type ButlerContactResetResult } from "@/services/butlerContactService";
 import ButlerGroupChat from "@/components/butler/ButlerGroupChat";
+import ButlerProactiveSettings from "@/components/butler/ButlerProactiveSettings";
 import ButlerGroupMemberPicker from "@/components/butler/ButlerGroupMemberPicker";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
 import * as butlerGroups from "@/services/butlerGroupService";
@@ -349,6 +350,7 @@ function ButlerExperimentWindow() {
         });
         const reply = listen("butler_reply_received", schedule);
         const scheduled = listen("scheduled_task_delivered", schedule);
+        const proactive = listen("butler_proactive_changed", schedule);
         const peer = listen("butler_peer_changed", schedule);
         const task = listen("butler_task_updated", schedule);
         const sync = listen("conversation_data_changed", schedule);
@@ -356,7 +358,7 @@ function ButlerExperimentWindow() {
         return () => {
             disposed = true;
             clearTimeout(timer);
-            for (const listener of [activity, reply, scheduled, peer, task, sync, read]) void listener.then(stop => stop()).catch(console.warn);
+            for (const listener of [activity, reply, scheduled, proactive, peer, task, sync, read]) void listener.then(stop => stop()).catch(console.warn);
         };
     }, [loadPreviews]);
     const focused = useFocusedWindow();
@@ -417,6 +419,28 @@ function ButlerExperimentWindow() {
     }, [mainConversationId, loadGroups]);
     const [searchOpen, setSearchOpen] = useState(false);
     const [pendingScroll, setPendingScroll] = useState<{ conversationId: string; messageId: number } | null>(null);
+    useEffect(() => {
+        const open = (event: Event) => {
+            const { conversation, position } = (event as CustomEvent<{ conversation: number; position?: number }>).detail;
+            if (!Number.isSafeInteger(conversation) || conversation <= 0) return;
+            setIsSettingsDialogOpen(false);
+            const group = groups.find(g => g.id === conversation);
+            if (group) {
+                selectGroup(group);
+                if (position) setPendingScroll({conversationId:String(conversation),messageId:position});
+                return;
+            }
+            const conversationId = String(conversation);
+            setGroupId(null);
+            if (position) setPendingScroll({ conversationId, messageId: position });
+            if (conversationId === mainConversationId) { void selectContact(undefined); return; }
+            const target = assistants.find(a => a.id === previews.find(p => p.conversationId === conversation)?.assistantId);
+            if (target) { void selectContact(target); return; }
+            setHistoryView({ conversationId, title: "查看会话" });
+        };
+        window.addEventListener("butler-proactive-open", open);
+        return () => window.removeEventListener("butler-proactive-open", open);
+    }, [groups, selectGroup, mainConversationId, selectContact, assistants, previews]);
     const searchMessages = useCallback(
         (query: string, limit: number, offset: number) =>
             searchButlerMessages(query, limit, offset, mainConversationId ? Number(mainConversationId) : undefined),
@@ -1276,6 +1300,8 @@ function ButlerExperimentWindow() {
                         </div>
                     ) : mainConversationId && groupId !== null ? (
                         <ButlerGroupChat key={groupId} groupId={groupId} chiefName={butlerDisplayName} assistants={assistants}
+                            sourceSeq={pendingScroll?.conversationId===String(groupId) ? pendingScroll.messageId : undefined}
+                            onSourceLocated={() => setPendingScroll(null)}
                             onDeleted={() => { setGroupId(null); localStorage.removeItem("butler-last-group"); void loadGroups(); }} />
                     ) : mainConversationId ? (
                         <>
@@ -1444,6 +1470,7 @@ function ButlerExperimentWindow() {
                                 saveFeatureConfig={saveFeatureConfig}
                                 onConfigRefresh={handleOnboardingComplete}
                             />
+                            <ButlerProactiveSettings />
                         </div>
                     </DialogContent>
                 </Dialog>

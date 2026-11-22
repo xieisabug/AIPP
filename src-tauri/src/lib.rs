@@ -12,6 +12,7 @@ mod host_bridge;
 mod mcp;
 mod plugin;
 mod scheduler;
+mod proactive;
 mod skills;
 mod mobile_files;
 mod mobile_system_ui;
@@ -1155,6 +1156,14 @@ pub fn run() {
             crate::api::butler_group::rename_butler_group,
             crate::api::butler_group::delete_butler_group,
             crate::api::butler_memory::list_butler_memories,
+            crate::proactive::get_butler_proactive_config,
+            crate::proactive::save_butler_proactive_config,
+            crate::proactive::run_butler_proactive_now,
+            crate::proactive::get_butler_proactive_center,
+            crate::proactive::get_butler_proactive_card,
+            crate::proactive::update_butler_proactive_item,
+            crate::proactive::undo_butler_proactive_memory,
+            crate::proactive::proposal::accept_butler_proactive_proposal,
             crate::api::vault_api::vault_capability,
             crate::api::vault_api::vault_list,
             crate::api::vault_api::vault_create,

@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Brain, Loader2, Pencil, Quote, Trash2 } from "lucide-react";
+import { undoProactiveMemory } from "./proactiveApi";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { BUTLER_MEMORY_MAX_CHARS, butlerMemoryLength, type ButlerMemory, type ButlerMemorySource } from "@/data/ButlerMemory";
@@ -158,7 +159,15 @@ export default function ButlerMemoryPanel({ conversationId, scope }: Props) {
                     </div>
                 </div>
             </div> : <div className="flex items-start gap-3">
-                <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-6">{memory.content}</p>
+                <div className="min-w-0 flex-1"><p className="whitespace-pre-wrap break-words text-sm leading-6">{memory.content}</p>
+                    {memory.origin === "proactive" && <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                        管家整理 <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={async () => {
+                            setBusyId(memory.id);
+                            try { await undoProactiveMemory(memory.id, memory.revision); await load(); }
+                            catch (error) { setActionError(errorText(error)); }
+                            finally { setBusyId(null); }
+                        }}>撤销这次整理</Button></div>}
+                </div>
                 {/* 操作在悬停或键盘聚焦时出现，平时只看内容。 */}
                 <div className="-mr-2 -mt-1 flex shrink-0 items-center opacity-0 transition-opacity group-hover/memory:opacity-100 group-focus-within/memory:opacity-100">
                     <Button type="button" variant="ghost" size="icon" className={iconButton} title="查看来源" aria-label="查看来源"
