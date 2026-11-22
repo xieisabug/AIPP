@@ -53,9 +53,9 @@ function emit(event: string, payload: unknown) {
     for (const fn of eventListeners.get(event) ?? []) fn({ payload });
 }
 
-function encodeOfficeResponse(fileName: string, bytes: Uint8Array): ArrayBuffer {
+function encodeOfficeResponse(fileName: string, bytes: Uint8Array, copyOriginToken?: string): ArrayBuffer {
     const header = new TextEncoder().encode(
-        JSON.stringify({ fileName, format: "docx", mime: "x", sizeBytes: bytes.length, sha256: "abc" }),
+        JSON.stringify({ fileName, format: "docx", mime: "x", sizeBytes: bytes.length, sha256: "abc", copyOriginToken }),
     );
     const out = new Uint8Array(4 + header.length + bytes.length);
     new DataView(out.buffer).setUint32(0, header.length, true);
@@ -238,6 +238,44 @@ describe("OfficePreviewPane", () => {
             });
         return { posted, fromViewer };
     }
+
+    it("should bind an editable relay source without sending its save handle to the iframe", async () => {
+        const loaded = vi.fn();
+        const source = { relayToken: "preview-token" };
+        mockInvoke.mockImplementation(async (cmd: string, args: { bindCopySource?: boolean }) => {
+            if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, editSupported: true };
+            if (cmd === "read_authorized_office_file") {
+                return encodeOfficeResponse("a.docx", new Uint8Array([80, 75, 3, 4]), args.bindCopySource ? "copy-token" : undefined);
+            }
+            return null;
+        });
+        const ui = render(<OfficePreviewPane title="a.docx" source={source} onFileLoaded={loaded} />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", { source }));
+        ui.rerender(<OfficePreviewPane title="a.docx" source={source} mode="edit" onFileLoaded={loaded} />);
+        await waitFor(() => expect(loaded).toHaveBeenLastCalledWith(expect.objectContaining({ copyOriginToken: "copy-token" })));
+        expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", { source, bindCopySource: true });
+        const { posted, fromViewer } = await mountViewer();
+        await fromViewer({ type: "aipp-office:viewer-ready" });
+        const load = posted.mock.calls.find(([msg]) => msg.type === "aipp-office:load")?.[0];
+        expect(load).not.toHaveProperty("copyOriginToken");
+        ui.unmount();
+        expect(mockInvoke).toHaveBeenCalledWith("release_office_copy_origin", { token: "copy-token" });
+    });
+
+    it("should release an edit binding from a read that completed after the pane closed", async () => {
+        let finishRead: (data: ArrayBuffer) => void = () => {};
+        mockInvoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, editSupported: true };
+            if (cmd === "read_authorized_office_file") return new Promise<ArrayBuffer>(resolve => { finishRead = resolve; });
+            return null;
+        });
+        const source = { relayToken: "preview-token" };
+        const ui = render(<OfficePreviewPane title="a.docx" source={source} mode="edit" />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", { source, bindCopySource: true }));
+        ui.unmount();
+        await act(async () => finishRead(encodeOfficeResponse("a.docx", new Uint8Array([80, 75, 3, 4]), "late-token")));
+        expect(mockInvoke).toHaveBeenCalledWith("release_office_copy_origin", { token: "late-token" });
+    });
 
     it("should keep showing the document when the watchdog deadline passes after a successful render", async () => {
         mockReadyWithFile();

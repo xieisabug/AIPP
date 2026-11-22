@@ -126,6 +126,7 @@ export function parseOfficePreviewError(raw: unknown): ParsedOfficePreviewError 
         render_error: "文档渲染失败",
         stale_selection: "文件已被修改",
         target_exists: "目标文件已存在",
+        protected_source: "不能覆盖原文件",
         target_dir_missing: "保存位置不存在",
         invalid_target: "保存位置无效",
         disk_full: "磁盘空间不足",
@@ -146,6 +147,7 @@ export interface OfficeFilePayload {
     mime: string;
     sizeBytes: number;
     sha256: string;
+    copyOriginToken?: string;
     bytes: ArrayBuffer;
 }
 

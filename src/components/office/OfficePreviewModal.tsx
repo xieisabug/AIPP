@@ -176,6 +176,7 @@ export const OfficePreviewModal: React.FC = () => {
             fileName: loadedFile.fileName,
             format: loadedFile.format,
             purpose: "copy",
+            copyOriginToken: loadedFile.copyOriginToken,
             bytes,
         });
         if (outcome.status === "saved") setDirty(false);

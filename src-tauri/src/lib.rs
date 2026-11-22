@@ -86,7 +86,7 @@ use crate::api::office_api::{
     OFFICE_PREVIEW_SCHEME,
 };
 use crate::api::office_save::{
-    get_office_file_ref_status, office_save_copy, office_write_copy, register_office_selection_ref,
+    get_office_file_ref_status, office_save_copy, office_write_copy, register_office_selection_ref, release_office_copy_origin,
     suggest_office_copy_path,
 };
 use crate::mcp::builtin_mcp::office::{
@@ -1007,6 +1007,12 @@ pub fn run() {
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
         .manage(OfficeEditState::new())
+        .manage(crate::api::office_save::OfficeEditCopyOrigins::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<crate::api::office_save::OfficeEditCopyOrigins>().release_window(window.label());
+            }
+        })
         .manage(PreviewResourceState::new())
         .manage(crate::sync::SyncState::new())
         .manage(FeishuButlerState::default());
@@ -1493,6 +1499,7 @@ pub fn run() {
             suggest_office_copy_path,
             office_save_copy,
             office_write_copy,
+            release_office_copy_origin,
             claim_office_edit_job,
             read_office_edit_job_source,
             complete_office_edit_job,

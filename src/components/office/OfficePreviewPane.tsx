@@ -50,6 +50,7 @@ export interface OfficeLoadedFile {
     format: OfficeFilePayload["format"];
     sha256: string;
     sizeBytes: number;
+    copyOriginToken?: string;
 }
 
 export interface OfficePreviewPaneProps {
@@ -279,16 +280,28 @@ export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePrevi
         callbacksRef.current.onFileLoaded?.(null);
         postToViewer({ type: "aipp-office:unload" });
 
-        invoke<ArrayBuffer>("read_authorized_office_file", { source })
+        const request = !isMobilePlatform && mode === "edit" && source.relayToken
+            ? { source, bindCopySource: true }
+            : { source };
+        let copyOriginToken: string | undefined;
+        const releaseOrigin = (token?: string) => {
+            if (token) void invoke("release_office_copy_origin", { token }).catch(console.warn);
+        };
+        invoke<ArrayBuffer>("read_authorized_office_file", request)
             .then((raw) => {
-                if (loadSeqRef.current !== seq) return;
                 const payload = parseOfficeFileResponse(raw);
+                if (loadSeqRef.current !== seq) {
+                    releaseOrigin(payload.copyOriginToken);
+                    return;
+                }
+                copyOriginToken = payload.copyOriginToken;
                 setFilePayload({ ...payload, seq });
                 callbacksRef.current.onFileLoaded?.({
                     fileName: payload.fileName,
                     format: payload.format,
                     sha256: payload.sha256,
                     sizeBytes: payload.sizeBytes,
+                    ...(copyOriginToken ? { copyOriginToken } : {}),
                 });
                 setLoadingFile(false);
                 setRendering(true);
@@ -303,12 +316,13 @@ export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePrevi
         return () => {
             // 切换文件 / 模式或关闭时作废进行中的读取，并通知查看器卸载文档、释放 Worker 内存
             loadSeqRef.current++;
+            releaseOrigin(copyOriginToken);
             postToViewer({ type: "aipp-office:unload" });
             pendingSavesRef.current.forEach((pending) => pending.reject(new Error("文档已关闭或重新加载，保存已取消")));
             pendingSavesRef.current.clear();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- sourceKey 代表 source 的内容
-    }, [isLegacy, pluginReady, sourceKey, reloadToken, postToViewer, mode]);
+    }, [isLegacy, pluginReady, sourceKey, reloadToken, postToViewer, mode, isMobilePlatform]);
 
     // 文件读取完成且查看器就绪后，把字节转交给 iframe 内的 Worker 渲染
     useEffect(() => {

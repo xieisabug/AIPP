@@ -10,7 +10,7 @@ use crate::mcp::builtin_mcp::interaction::PreviewFileRelayState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 #[cfg(target_os = "android")]
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::path::{Component, Path, PathBuf};
@@ -95,6 +95,17 @@ pub struct OfficePreviewSource {
     pub attachment_id: Option<i64>,
     pub relay_token: Option<String>,
     pub local_path: Option<String>,
+}
+
+impl OfficePreviewSource {
+    /// Match resolve_authorized_office_path's precedence for actual relay-backed sources.
+    pub(crate) fn relay_origin_key(&self) -> Option<&str> {
+        let has_ref = self.ref_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+        if has_ref || self.attachment_id.is_some() {
+            return None;
+        }
+        self.relay_token.as_deref().map(str::trim).filter(|token| !token.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -648,6 +659,8 @@ pub struct OfficeFileHeader {
     pub mime: String,
     pub size_bytes: u64,
     pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_origin_token: Option<String>,
 }
 
 /// 二进制响应格式：`[u32 LE 头长度][UTF-8 JSON 头][文件字节]`。
@@ -683,23 +696,30 @@ fn file_too_large_error(actual: u64, max_bytes: u64) -> OfficePreviewError {
 }
 
 /// 读取、校验并编码已授权的 Office 文件（阻塞 IO，调用方放到 blocking 线程）。
-fn load_office_file_blocking(file_path: &Path, file_name: &str) -> Result<Vec<u8>, OfficePreviewError> {
+fn load_office_file_blocking(
+    file_path: &Path,
+    file_name: &str,
+    bind_copy_source: impl FnOnce(fs::File) -> Result<Option<String>, OfficePreviewError>,
+) -> Result<Vec<u8>, OfficePreviewError> {
     if file_path.is_dir() {
         return Err(OfficePreviewError::new("invalid_request", "目标路径是目录而非文件"));
     }
     let max_bytes = office_preview_max_bytes();
-    let metadata = fs::metadata(file_path).map_err(|e| {
+    let mut file = fs::File::open(file_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             OfficePreviewError::new("file_not_found", format!("找不到文件：{}", file_name))
         } else {
             OfficePreviewError::new("read_error", format!("读取文件信息失败：{}", e))
         }
     })?;
-    // 先按元数据拦截超限文件，避免整个读进内存
+    let metadata = file.metadata()
+        .map_err(|e| OfficePreviewError::new("read_error", format!("读取文件信息失败：{}", e)))?;
+    // 先按元数据拦截超限文件；读取也限长，以防元数据检查后文件增长。
     if metadata.len() > max_bytes {
         return Err(file_too_large_error(metadata.len(), max_bytes));
     }
-    let bytes = fs::read(file_path)
+    let mut bytes = Vec::new();
+    (&mut file).take(max_bytes + 1).read_to_end(&mut bytes)
         .map_err(|e| OfficePreviewError::new("read_error", format!("读取文件失败：{}", e)))?;
     let format = validate_office_bytes(file_name, &bytes, max_bytes)?;
     let header = OfficeFileHeader {
@@ -708,6 +728,7 @@ fn load_office_file_blocking(file_path: &Path, file_name: &str) -> Result<Vec<u8
         mime: format.mime().to_string(),
         size_bytes: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),
+        copy_origin_token: bind_copy_source(file)?,
     };
     encode_office_file_response(&header, &bytes)
         .map_err(|e| OfficePreviewError::new("read_error", e))
@@ -717,11 +738,24 @@ fn load_office_file_blocking(file_path: &Path, file_name: &str) -> Result<Vec<u8
 #[tauri::command]
 pub async fn read_authorized_office_file(
     app_handle: AppHandle,
+    window: tauri::WebviewWindow,
     source: OfficePreviewSource,
+    bind_copy_source: Option<bool>,
 ) -> Result<tauri::ipc::Response, String> {
     let (file_path, file_name) =
         resolve_authorized_office_path(&app_handle, &source).map_err(|e| e.to_wire_string())?;
-    let body = tokio::task::spawn_blocking(move || load_office_file_blocking(&file_path, &file_name))
+    let body = tokio::task::spawn_blocking(move || {
+        load_office_file_blocking(&file_path, &file_name, |file| {
+            if bind_copy_source == Some(true) {
+                if let Some(relay) = source.relay_origin_key() {
+                    let token = app_handle.state::<super::office_save::OfficeEditCopyOrigins>()
+                        .remember(window.label(), relay, file_path.clone(), file)?;
+                    return Ok(Some(token));
+                }
+            }
+            Ok(None)
+        })
+    })
         .await
         .map_err(|e| {
             OfficePreviewError::new("read_error", format!("读取线程异常退出：{}", e)).to_wire_string()

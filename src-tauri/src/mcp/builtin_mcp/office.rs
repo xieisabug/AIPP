@@ -578,6 +578,7 @@ pub async fn read_office_edit_job_source(app_handle: AppHandle, job_id: String) 
         mime: format.mime().to_string(),
         size_bytes: bytes.len() as u64,
         sha256,
+        copy_origin_token: None,
     };
     Ok(tauri::ipc::Response::new(encode_office_file_response(&header, &bytes)?))
 }

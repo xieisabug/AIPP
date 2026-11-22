@@ -51,6 +51,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",
+ "same-file",
  "scraper",
  "semver",
  "serde",

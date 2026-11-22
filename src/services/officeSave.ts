@@ -25,12 +25,13 @@ export interface OfficeSaveResult {
 export type OfficeCopyPurpose = "copy" | "output";
 
 export interface OfficeSaveRequest {
-    /** 已授权的来源：用于默认路径，以及 AI 副本直接复制。 */
+    /** 已授权的来源：用于默认路径、保护原文件，以及 AI 副本直接复制。 */
     source: OfficePreviewSource;
     fileName: string;
     format: ModernOfficeExtension;
     /** copy：手动编辑后的内容（需 bytes）；output：AI 生成的副本文件本身。 */
     purpose: OfficeCopyPurpose;
+    copyOriginToken?: string;
     bytes?: ArrayBuffer;
 }
 
@@ -79,7 +80,9 @@ export async function writeOfficeCopy(request: OfficeSaveRequest, targetPath: st
     try {
         if (request.purpose === "copy") {
             if (!request.bytes) throw new Error("OFFICE_PREVIEW_ERROR:invalid_request:没有可保存的文档内容");
-            const body = encodeFramedRequest({ targetPath, overwrite }, request.bytes);
+            const body = encodeFramedRequest({
+                source: request.source, copyOriginToken: request.copyOriginToken, targetPath, overwrite,
+            }, request.bytes);
             return await invoke<OfficeSaveResult>("office_write_copy", body);
         }
         return await invoke<OfficeSaveResult>("office_save_copy", { source: request.source, targetPath, overwrite });
