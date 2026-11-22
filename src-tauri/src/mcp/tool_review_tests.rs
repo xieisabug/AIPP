@@ -73,6 +73,25 @@ fn test_decision_review_enforces_threshold_and_risk_category_fail_closed() {
     assert!(risky_draft.reason.contains("破坏"), "reason={}", risky_draft.reason);
 }
 
+#[test]
+fn test_decision_review_identifies_low_intent_on_safe_scoped_write() {
+    let request = build_decision_review_request("jev-latest", "修改相关模块", true);
+    let response = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &request,
+        serde_json::json!({ "answers": {
+            "safe": { "type": "noul", "noul": 0.95 },
+            "intent_aligned": { "type": "noul", "noul": 0.47 },
+            "risk_category": { "type": "choice", "choice": "safe_scoped_write" }
+        }}),
+        10,
+    ).unwrap();
+    let review = evaluate_decision_review(&response, true, 0.90, "jev-latest", 7, 10);
+    assert_eq!(review.verdict, "risky");
+    assert!(review.reason.contains("安全概率 95%，意图一致 47% 低于阈值 90%"));
+    assert!(!review.reason.contains("符合授权"));
+}
+
 fn model_response(text: &str) -> ChatResponse {
     ChatResponse {
         content: text.into(),
