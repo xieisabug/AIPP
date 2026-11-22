@@ -16,7 +16,7 @@ const existing = new Map([["butler_appearance", new Map([
 
 describe("EditAssistantDialog shared profile", () => {
     beforeEach(() => { vi.clearAllMocks(); mocks.load.mockResolvedValue(existing); mocks.save.mockResolvedValue(undefined); });
-    it("should load the Butler appearance and preserve other profiles when saving assistant edits", async () => {
+    it("should load the Butler appearance and send only the edited profile to the per-key save", async () => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         const onClose = vi.fn();
         render(<EditAssistantDialog isOpen currentAssistant={assistant} onSave={onSave} onClose={onClose} onAssistantUpdated={vi.fn()} />);
@@ -28,7 +28,6 @@ describe("EditAssistantDialog shared profile", () => {
         expect(onSave).toHaveBeenCalledWith({ assistant: { ...assistant.assistant, description: "新描述" } });
         expect(mocks.save).toHaveBeenCalledWith("butler_appearance", {
             butler_appearance_7: JSON.stringify({ ...defaultAppearance, shape: "pebble" }),
-            butler_appearance_chief: "chief-profile",
         });
     });
     it("should retain the draft and explain partial failure when appearance persistence fails", async () => {

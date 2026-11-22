@@ -1,6 +1,47 @@
 use super::*;
 use crate::db::butler_group as group;
 
+#[test]
+fn test_legacy_appearance_migration_retains_offline_edit_without_adopting_foreign_ids() {
+    for (writer, expected) in [("local-device", Some("new-avatar")), ("other-device", None)] {
+        let device = Device::new();
+        let key = "butler_appearance_42";
+        let object = "legacy-avatar-object";
+        device.db.execute_batch("INSERT INTO assistant(id,name) VALUES(42,'Local assistant');
+            CREATE TABLE assistant_appearance_foreign_legacy(key TEXT PRIMARY KEY);").unwrap();
+        let confirmed: PullChange = serde_json::from_value(json!({
+            "seq": 10, "event_id": "legacy-avatar-write", "device_id": writer,
+            "object_type": "system.feature_config", "object_id": object, "operation": "upsert",
+            "version": 1, "payload": {"fields": {"value": "old-avatar"}, "refs": {}},
+            "deleted_at": null, "created_at": "now"
+        })).unwrap();
+        let local = legacy_appearance_written_here(&confirmed, 10, object, "local-device");
+        migrate_legacy_appearance(&device.db, 42, key, "new-avatar", local).unwrap();
+        let value: Option<String> = device.db.query_row(
+            "SELECT value FROM assistant_appearance WHERE assistant_id=42", [], |r| r.get(0),
+        ).optional().unwrap();
+        assert_eq!(value.as_deref(), expected);
+        let hidden: bool = device.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_appearance_foreign_legacy WHERE key=?1)", [key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(hidden, expected.is_none());
+        let changes = device.changes();
+        let uploaded = changes.iter().find(|change| change.object_type == "assistant.appearance");
+        assert_eq!(
+            uploaded.and_then(|change| change.payload.as_ref())
+                .and_then(|payload| payload.pointer("/fields/value")).and_then(JsonValue::as_str),
+            expected,
+        );
+        if let Some(uploaded) = uploaded {
+            let parent = changes.iter().find(|change| change.object_type == "assistant").unwrap();
+            assert_eq!(
+                uploaded.payload.as_ref().unwrap().pointer("/refs/assistant_id").and_then(JsonValue::as_str),
+                Some(parent.object_id.as_str()),
+            );
+        }
+    }
+}
+
 struct Device {
     db: Connection,
     sync: Connection,
@@ -208,6 +249,95 @@ fn test_group_history_appearance_and_read_receipts_survive_device_id_remap() {
     assert_ne!(read, 75);
     let group_read: String = target.db.query_row("SELECT body FROM butler_read_group_reply r JOIN butler_chat_group_message m ON m.id=r.message_id",[],|r|r.get(0)).unwrap();
     assert_eq!(group_read, "Answer");
+}
+
+#[test]
+fn test_pulled_inactive_group_membership_cancels_local_open_turns() {
+    for case in ["inactive", "duplicate_invitation", "raw_tombstone"] {
+        let mut source = Device::new();
+        let mut target = Device::new();
+        source.db.execute_batch("INSERT INTO assistant VALUES(17,'Writer'),(18,'Reviewer');").unwrap();
+        let room = group::create(&mut source.db, "Design", &[(17, "Writer".into()), (18, "Reviewer".into())]).unwrap();
+        let writer = group::active_members(&source.db, room.id).unwrap().into_iter().find(|m| m.name == "Writer").unwrap();
+        let initial = source.changes();
+        let writer_snapshot = initial.iter().find(|change| {
+            change.object_type == "conversation.group_member"
+                && change.payload.as_ref().and_then(|p| p.pointer("/fields/name")).and_then(JsonValue::as_str) == Some("Writer")
+        }).unwrap();
+        target.receive(&initial);
+        let room_on_target = group::list(&target.db).unwrap().remove(0);
+        let members = group::active_members(&target.db, room_on_target.id).unwrap();
+        let target_writer = members.iter().find(|m| m.name == "Writer").unwrap();
+        let target_reviewer = members.iter().find(|m| m.name == "Reviewer").unwrap();
+        let prompt = group::post_user(&mut target.db, room_on_target.id, "queued", "Question", None).unwrap();
+        let turns = group::route(&mut target.db, room_on_target.id, prompt.seq, &[target_writer.id, target_reviewer.id], 1).unwrap();
+        let running = turns.iter().copied().find(|id| group::turn(&target.db, *id).unwrap().member_id == target_writer.id).unwrap();
+        let unrelated = turns.into_iter().find(|id| *id != running).unwrap();
+        target.db.execute("UPDATE butler_chat_group_turn SET state='running' WHERE id=?1", [running]).unwrap();
+        target.db.execute("INSERT INTO butler_chat_group_turn(group_id,member_id,trigger_seq,origin_seq,state)
+            VALUES(?1,?2,?3,?3,'queued')", params![room_on_target.id,target_writer.id,prompt.seq]).unwrap();
+        let queued = target.db.last_insert_rowid();
+
+        // An older, unmapped alias for the same member conversation must be
+        // discarded before its newer-looking join position can displace the writer.
+        let mut stale = writer_snapshot.clone();
+        stale.seq -= 1;
+        stale.event_id = Uuid::new_v4().to_string();
+        stale.object_id = Uuid::new_v4().to_string();
+        let stale_payload = stale.payload.as_mut().unwrap();
+        stale_payload["fields"]["joined_after"] = json!(20);
+        stale_payload["refs"]["joined_after"] = json!("0123456789abcdef0123456789abcdef");
+        target.receive(&[stale]);
+        assert!(group::member(&target.db, target_writer.id).unwrap().active);
+        assert_eq!(group::turn(&target.db, running).unwrap().state, "running");
+        assert_eq!(group::turn(&target.db, queued).unwrap().state, "queued");
+
+        if case == "raw_tombstone" {
+            let mut tombstone = writer_snapshot.clone();
+            tombstone.seq = initial.len() as i64 + 1;
+            tombstone.event_id = Uuid::new_v4().to_string();
+            tombstone.operation = "delete".into();
+            tombstone.version += 1;
+            tombstone.payload = None;
+            tombstone.deleted_at = Some(now_string());
+            target.receive(&[tombstone]);
+            assert!(group::member(&target.db, target_writer.id).is_err());
+            assert!(group::turn(&target.db, running).is_err());
+            assert!(group::turn(&target.db, queued).is_err());
+            assert_eq!(group::turn(&target.db, unrelated).unwrap().state, "queued");
+            assert!(group::finish_turn(&mut target.db, running, group::Outcome::Reply("Late reply".into())).is_err());
+            assert!(group::messages(&target.db, room_on_target.id, None, 50).unwrap().iter().all(|message| message.body != "Late reply"));
+            continue;
+        }
+
+        let duplicate_invitation = case == "duplicate_invitation";
+        group::remove_member(&mut source.db, room.id, writer.id, "Writer removed").unwrap();
+        if duplicate_invitation {
+            group::add_members(&mut source.db, room.id, &[(17, "Writer".into())]).unwrap();
+        }
+        let initial_ids = initial.iter().map(|change| change.object_id.as_str()).collect::<std::collections::HashSet<_>>();
+        let mut changes = source.changes().into_iter().filter(|change| {
+            if duplicate_invitation {
+                // Apply a winning invitation while the previous membership is still active locally.
+                !initial_ids.contains(change.object_id.as_str())
+            } else {
+                change.object_type == "conversation.group_member"
+                    && change.payload.as_ref().and_then(|v| v.pointer("/fields/active")).and_then(JsonValue::as_i64) == Some(0)
+            }
+        }).collect::<Vec<_>>();
+        assert!(!changes.is_empty());
+        for (idx, change) in changes.iter_mut().enumerate() {
+            change.seq = initial.len() as i64 + idx as i64 + 1;
+            if !duplicate_invitation { change.version = 2; }
+        }
+        target.receive(&changes);
+        assert!(!group::member(&target.db, target_writer.id).unwrap().active);
+        assert_eq!(group::turn(&target.db, running).unwrap().state, "cancelled");
+        assert_eq!(group::turn(&target.db, queued).unwrap().state, "cancelled");
+        assert_eq!(group::turn(&target.db, unrelated).unwrap().state, "queued");
+        assert!(group::finish_turn(&mut target.db, running, group::Outcome::Reply("Late reply".into())).unwrap().is_none());
+        assert!(group::messages(&target.db, room_on_target.id, None, 50).unwrap().iter().all(|message| message.body != "Late reply"));
+    }
 }
 
 #[test]

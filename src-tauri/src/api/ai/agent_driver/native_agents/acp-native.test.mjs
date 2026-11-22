@@ -378,3 +378,32 @@ test('should discover and switch models advertised through legacy ACP session mo
     assert.deepEqual(f.commands.find(frame => frame.method === 'session/set_model').params, { sessionId: 's1', modelId: 'b' });
   } finally { await runtime.close(); }
 });
+
+test('should preserve a modern model option advertised while a legacy switch is in flight', async () => {
+  const modern = select('model', ['b', 'c'], 'b');
+  const f = fixture({
+    options: [modern],
+    respond(frame, { write }) {
+      if (frame.method === 'session/new') return { result: {
+        sessionId: 's1', modes: { availableModes: [{ id: 'default' }] },
+        models: { currentModelId: 'a', availableModels: [{ modelId: 'a', name: 'A' }, { modelId: 'b', name: 'B' }] },
+      } };
+      if (frame.method === 'session/set_model') {
+        write({ method: 'session/update', params: {
+          sessionId: 's1', update: { sessionUpdate: 'config_option_update', configOptions: [modern] },
+        } });
+        return { result: {} };
+      }
+    },
+  });
+  const runtime = await f.open('antigravity');
+  try {
+    await runtime.configure('model', 'b');
+    assert.deepEqual(await runtime.models(), [{ id: 'b', name: 'b' }, { id: 'c', name: 'c' }]);
+    assert.equal(runtime.configOptions.find(option => option.id === 'model').current_value, 'b');
+    await runtime.configure('model', 'c');
+    assert.deepEqual(f.commands.filter(frame => frame.method.startsWith('session/set_')).map(frame => frame.method),
+      ['session/set_mode', 'session/set_model', 'session/set_config_option']);
+    assert.equal(runtime.configOptions.find(option => option.id === 'model').current_value, 'c');
+  } finally { await runtime.close(); }
+});

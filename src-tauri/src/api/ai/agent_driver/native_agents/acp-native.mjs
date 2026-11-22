@@ -254,9 +254,13 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     // sent to Kiro itself; rejected values fail, never select another model.
     if (!(driver === 'kiro' && key === 'model') && (!option || !choices(option).some(choice => choice.value === value))) throw new Error(`${driver} unavailable configuration ${key}=${value}`);
     if (key === 'model' && legacyModels) {
+      const selectedCatalog = legacyModels;
       await request('session/set_model', { sessionId: session, modelId: value });
-      legacyModels.currentModelId = value;
-      updateOptions(options.filter(option => option.id !== 'model'));
+      // A modern model option may have arrived while the legacy request was in flight.
+      if (legacyModels === selectedCatalog) {
+        selectedCatalog.currentModelId = value;
+        updateOptions(options.filter(option => option.id !== 'model'));
+      }
       return;
     }
     const result = await request('session/set_config_option', { sessionId: session, configId: key, value });

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 
-from app.models import Base
+from app.models import Base, ProactiveOwner, SyncAccount
 
 
 def migration_config(connection: sa.Connection) -> Config:
@@ -190,3 +191,33 @@ def test_device_migration_matches_fresh_metadata():
     Base.metadata.create_all(engine)
     assert sa.inspect(engine).get_pk_constraint("sync_device") == migrated
     engine.dispose()
+
+
+def test_proactive_owner_upgrade_preserves_a_row_created_before_the_revision():
+    engine = sa.create_engine("sqlite:///:memory:")
+    with engine.connect() as connection:
+        config = migration_config(connection)
+        command.upgrade(config, "0006_provider_settings")
+        # Match startup on a database still stamped at 0006.
+        Base.metadata.create_all(connection)
+        connection.execute(SyncAccount.__table__.insert().values(
+            id="account", created_at=datetime(2026, 11, 22),
+        ))
+        connection.execute(ProactiveOwner.__table__.insert().values(
+            account_id="account", device_id="existing-scheduler",
+        ))
+        connection.commit()
+
+        command.upgrade(config, "head")
+
+        assert connection.execute(sa.select(ProactiveOwner.device_id)).scalar_one() == "existing-scheduler"
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0007_proactive_owner"
+    engine.dispose()
+
+
+def test_proactive_owner_migration_can_emit_offline_sql():
+    output = StringIO()
+    config = Config(output_buffer=output)
+    config.set_main_option("script_location", str(Path(__file__).resolve().parents[2] / "alembic"))
+    command.upgrade(config, "0006_provider_settings:0007_proactive_owner", sql=True)
+    assert "CREATE TABLE proactive_owner" in output.getvalue()

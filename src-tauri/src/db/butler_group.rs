@@ -616,7 +616,7 @@ pub fn add_members(conn: &mut Connection, group: i64, invited: &[(i64, String)])
     Ok(added)
 }
 
-fn cancel_member_turns(tx: &Connection, member_id: i64, reason: &str) -> Result<Vec<Turn>> {
+pub(crate) fn cancel_member_turns(tx: &Connection, member_id: i64, reason: &str) -> Result<Vec<Turn>> {
     let running = collect(tx, &format!("SELECT {TURN_COLUMNS} FROM butler_chat_group_turn WHERE member_id=?1 AND state='running'"), [member_id], turn_row)?;
     tx.execute("UPDATE butler_chat_group_turn SET state='cancelled', error=?2, updated_at=?3
         WHERE member_id=?1 AND state IN ('queued','running')", params![member_id, reason, now()])?;
@@ -973,6 +973,11 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
         return Ok(None);
     }
     let m = member(&tx, t.member_id)?;
+    if !m.active {
+        cancel_member_turns(&tx, m.id, "成员已移出群聊")?;
+        tx.commit()?;
+        return Ok(None);
+    }
     let mut finished = Finished::default();
     if !matches!(outcome, Outcome::Failed(_)) || received_input(&tx, &t, &m)? {
         confirm_delivery(&tx, &t)?;

@@ -468,8 +468,27 @@ pub(super) fn merge_member(
         if incoming > (joined, identity.as_str()) {
             data.execute("UPDATE butler_chat_group_member SET active=0 WHERE id=?1", [id])
                 .map_err(|e| e.to_string())?;
+            crate::db::butler_group::cancel_member_turns(data, id, "成员已被同步移出群聊")
+                .map_err(|e| e.to_string())?;
         } else {
             fields.insert("active".into(), json!(0));
+        }
+    }
+    Ok(())
+}
+
+/// A pulled, inactive membership must withdraw local queued/running work in
+/// the same transaction as the membership update. Terminal history is untouched.
+pub(super) fn cancel_inactive_member_turns(
+    sync: &Connection,
+    data: &Connection,
+    change: &PullChange,
+    fields: &Map<String, JsonValue>,
+) -> Result<(), String> {
+    if change.object_type == "conversation.group_member" && field_as_i64(fields, "active") == Some(0) {
+        if let Some(id) = find_local_id_by_object_id(sync, &change.object_type, &change.object_id)? {
+            crate::db::butler_group::cancel_member_turns(data, id, "成员已被同步移出群聊")
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -590,6 +609,31 @@ pub(super) fn decode_positions(
     Ok(())
 }
 
+fn legacy_appearance_written_here(change: &PullChange, seq: i64, object: &str, device: &str) -> bool {
+    change.seq == seq
+        && change.object_type == "system.feature_config"
+        && change.object_id == object
+        && change.device_id == device
+        && change.operation == "upsert"
+        && change.payload.as_ref().and_then(|p| p.pointer("/fields/value"))
+            .and_then(JsonValue::as_str).is_some()
+}
+
+fn migrate_legacy_appearance(
+    assistant: &Connection, id: i64, key: &str, value: &str, local: bool,
+) -> Result<(), String> {
+    if local {
+        assistant.execute("INSERT INTO assistant_appearance(assistant_id,value) SELECT id,?2 FROM assistant WHERE id=?1
+            ON CONFLICT(assistant_id) DO NOTHING", params![id,value]).map_err(|e|e.to_string())?;
+    } else {
+        assistant.execute(
+            "INSERT OR IGNORE INTO assistant_appearance_foreign_legacy(key) VALUES(?1)",
+            [key],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Numeric keys in older releases could already have been downloaded from a different
 /// device. Only their writer can interpret the number. An unsynced local value has no
 /// shadow; a confirmed one has an indexed server sequence whose event names the writer.
@@ -645,30 +689,13 @@ pub(super) async fn migrate_appearances(
                     response.error_for_status().map_err(|e| e.to_string())?.json(),
                 )
                 .await?;
-                page.changes.iter().any(|c| {
-                    c.seq == seq
-                        && c.object_id == object
-                        && c.device_id == device
-                        && c.payload
-                            .as_ref()
-                            .and_then(|p| p.pointer("/fields/value"))
-                            .and_then(JsonValue::as_str)
-                            == Some(&value)
-                })
+                // The confirmed writer identifies whose numeric assistant ID this is.
+                // Migrate the current local value even if it was edited offline after that write.
+                page.changes.iter().any(|c| legacy_appearance_written_here(c, seq, &object, device))
             }
             _ => false,
         };
-        if local {
-            assistant.execute("INSERT INTO assistant_appearance(assistant_id,value) SELECT id,?2 FROM assistant WHERE id=?1
-                ON CONFLICT(assistant_id) DO NOTHING",params![id,value]).map_err(|e|e.to_string())?;
-        } else {
-            assistant
-                .execute(
-                    "INSERT OR IGNORE INTO assistant_appearance_foreign_legacy(key) VALUES(?1)",
-                    [&key],
-                )
-                .map_err(|e| e.to_string())?;
-        }
+        migrate_legacy_appearance(&assistant, id, &key, &value, local)?;
         app.emit("feature_config_changed", ()).map_err(|e| e.to_string())?;
         set_sync_meta(&sync, &marker, if local { "local" } else { "foreign" })?;
     }

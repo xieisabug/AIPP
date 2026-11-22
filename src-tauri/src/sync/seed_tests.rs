@@ -42,6 +42,7 @@ fn fresh_install() -> Connection {
         CREATE TABLE IF NOT EXISTS artifacts_collection(id INTEGER PRIMARY KEY, name TEXT, assistant_id INTEGER);").unwrap();
     crate::db::butler_group::schema(&conn).unwrap();
     crate::db::butler_memory::schema(&conn).unwrap();
+    conn.execute_batch(include_str!("../proactive/schema.sql")).unwrap();
     crate::db::butler_goal::initialize_sync_schema(&conn).unwrap();
     conn
 }

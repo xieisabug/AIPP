@@ -166,6 +166,85 @@ fn test_proactive_acceptance_commits_one_receipt() {
 }
 
 #[test]
+fn test_proactive_malformed_date_keeps_valid_sibling_and_scan_cursor() {
+    let mut db = db();
+    let cfg = Config::default();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+    let rows = delta::read(&db, &cfg, true).unwrap();
+    let source = &rows[0];
+    let drafts = || {
+        [
+            ("无效日期事项", "not-a-date-private-marker"),
+            ("有效待办", "2026-12-09"),
+        ]
+        .into_iter()
+        .map(|(title, date)| {
+            let finding = serde_json::from_value(json!({
+                "source":0,"quote":source.text,"kind":"open_loop","title":title,"date":date
+            })).unwrap();
+            (0, finding)
+        })
+        .collect()
+    };
+    for _ in 0..2 {
+        let (valid, rejected) = runner::split_finding_dates(drafts(), today);
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0].1.title, "有效待办");
+        assert_eq!(rejected.len(), 1);
+        let tx = db.transaction().unwrap();
+        runner::record_rejected_dates(&tx, &rows, &rejected).unwrap();
+        for (index, finding) in valid {
+            runner::persist_at(&tx, &rows[index], &finding, 8, 10, &cfg, today).unwrap();
+        }
+        delta::advance(&tx, &rows, true).unwrap();
+        tx.commit().unwrap();
+    }
+    let (items, date, evidence, cursor): (u32, String, u32, i64) = db.query_row(
+        "SELECT count(*),min(event_date),(SELECT count(*) FROM butler_proactive_evidence),
+            (SELECT digest_position FROM butler_proactive_cursor WHERE conversation_id=?1) FROM butler_proactive_item",
+        [source.conversation],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).unwrap();
+    assert_eq!((items, date.as_str(), evidence, cursor), (1, "2026-12-09", 1, source.position));
+    let diagnostics: Vec<String> = db.prepare("SELECT summary FROM butler_proactive_run WHERE trigger_kind='finding'").unwrap()
+        .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(diagnostics, vec![format!("来源 #{} / {} 的事项日期无效", source.conversation, source.position)]);
+    db.execute("UPDATE message SET content='源消息已编辑' WHERE id=?1", [source.position]).unwrap();
+    let (_, rejected) = runner::split_finding_dates(drafts(), today);
+    assert!(runner::record_rejected_dates(&db, &rows, &rejected).is_err());
+}
+
+#[tokio::test]
+async fn test_proactive_recovery_skips_busy_conversation_without_reordering_its_proposals() {
+    let mut db = db();
+    db.execute("UPDATE conversation SET conversation_kind='butler_contact',is_hidden_from_normal_chat_list=1 WHERE id=11", []).unwrap();
+    for (key, conversation, assistant, time) in [
+        ("a", 10, 8, 0), ("b", 10, 8, 1), ("d", 11, 9, 2), ("c", 11, 9, 2),
+    ] {
+        db.execute(
+            "INSERT INTO butler_proactive_item(uuid,kind,title,action_prompt,source_conversation_id,source_position,updated_at)
+             VALUES(?1,'proposal',?1,?1,?2,1,0)",
+            rusqlite::params![key, conversation],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO butler_proactive_acceptance(uuid,conversation_id,assistant_id,prompt,accepted_at,status)
+             VALUES(?1,?2,?3,?1,?4,'pending')",
+            rusqlite::params![key, conversation, assistant, time],
+        ).unwrap();
+    }
+    let heads = proposal::pending_conversation_heads(&db).unwrap();
+    assert_eq!(heads, vec![("a".to_string(), 10), ("c".to_string(), 11)]);
+    assert_eq!(proposal::first_idle_head(heads.clone(), |cid| async move { cid == 10 }).await.as_deref(), Some("c"));
+    assert!(proposal::first_idle_head(heads, |_| async { true }).await.is_none());
+    let sent = proposal::write_input(&mut db, "c", 11, 9, "c", 1, "m").unwrap();
+    assert!(proposal::write_input(&mut db, "c", 11, 9, "c", 1, "m").is_err());
+    let heads = proposal::pending_conversation_heads(&db).unwrap();
+    assert_eq!(heads, vec![("a".to_string(), 10), ("d".to_string(), 11)]);
+    assert_eq!(proposal::first_idle_head(heads, |_| async { false }).await.as_deref(), Some("a"));
+    assert!(sent > 0);
+}
+
+#[test]
 fn test_proactive_quiet_window_and_budget_independent_digest() {
     let cfg = Config::default();
     assert!(cfg.quiet("23:00"));
