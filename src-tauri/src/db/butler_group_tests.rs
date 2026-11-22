@@ -34,6 +34,7 @@ fn run(conn: &mut Connection, id: i64) -> (Turn, Member, String) {
             (super::turn(conn, turn.id).unwrap(), member, input)
         }
         Start::Skipped => panic!("turn {id} unexpectedly skipped"),
+        Start::Review(_) => panic!("turn {id} still requires relay review"),
     }
 }
 
@@ -222,26 +223,57 @@ fn test_group_turn_for_already_delivered_trigger_is_skipped() {
 }
 
 #[test]
-fn test_group_member_mentions_relay_with_depth_limit() {
+fn test_group_member_mentions_review_each_tenth_relay_and_only_pause_confirmed_branch() {
     let mut conn = setup();
-    let (group, members) = group_with(&mut conn, &["张三", "李四"]);
+    let (group, members) = group_with(&mut conn, &["张三", "李四", "王五"]);
     let question = post_user(&mut conn, group.id, "q", "开始", None).unwrap();
     let mut current = route(&mut conn, group.id, question.seq, &[members[0].id], 1).unwrap()[0];
-    let mut speakers = Vec::new();
-    for _ in 0..=MAX_RELAY_DEPTH {
+    for depth in 0..=30 {
+        if depth == 17 {
+            let separate = post_user(&mut conn, group.id, "other", "@王五 单独核对", None).unwrap();
+            let separate_turn = route(&mut conn, group.id, separate.seq, &[members[2].id], 1).unwrap()[0];
+            run(&mut conn, separate_turn);
+            finish_turn(&mut conn, separate_turn, Outcome::Reply("另一项任务完成".into())).unwrap();
+        }
         let (turn, member, _) = run(&mut conn, current);
-        speakers.push(member.name.clone());
+        assert_eq!(turn.depth, depth);
         let other = if member.name == "张三" { "李四" } else { "张三" };
-        let finished = finish_turn(&mut conn, turn.id, Outcome::Reply(format!("@{other} 你来"))).unwrap().unwrap();
-        match finished.relayed.first() {
-            Some(next) => current = *next,
-            None => break,
+        let mut body = format!("@{other} 处理版本 {depth}");
+        if depth == 10 { body.push_str(" @王五 核对交付"); }
+        let finished = finish_turn(&mut conn, turn.id, Outcome::Reply(body)).unwrap().unwrap();
+        current = finished.relayed[0];
+        if depth == 10 {
+            let sibling = finished.relayed[1];
+            let Start::Review(review) = start_turn(&mut conn, sibling).unwrap() else { panic!("missing sibling review") };
+            assert_eq!(review.target, "王五");
+            finish_relay_review(&mut conn, sibling, Ok(Some("重复请求核对同一版本".into()))).unwrap();
+            assert!(matches!(start_turn(&mut conn, sibling).unwrap(), Start::Skipped));
+            let notice = last_message(&conn, group.id).unwrap().unwrap();
+            assert!(notice.body.contains("王五") && notice.body.contains("重复请求核对同一版本"));
+        }
+        if depth > 0 && depth % 10 == 0 {
+            let Start::Review(review) = start_turn(&mut conn, current).unwrap() else { panic!("missing review after {depth}") };
+            assert_eq!(review.target, other);
+            assert_eq!(review.origin.seq, question.seq);
+            assert_eq!(review.history.len(), 10);
+            assert!(review.history.iter().all(|message| message.body.contains("处理版本")));
+            assert_eq!(review.history.first().unwrap().body, format!("@张三 处理版本 {}", depth - 9));
+            assert_eq!(review.history.last().unwrap().seq, finished.reply.unwrap().seq);
+            if depth == 30 {
+                stop(&mut conn, group.id).unwrap();
+                finish_relay_review(&mut conn, current, Ok(None)).unwrap();
+                assert_eq!(super::turn(&conn, current).unwrap().state, "cancelled");
+            } else {
+                let verdict = if depth == 20 { Err("调度模型请求超时".into()) } else { Ok(None) };
+                finish_relay_review(&mut conn, current, verdict).unwrap();
+                if depth == 20 {
+                    assert!(last_message(&conn, group.id).unwrap().unwrap().body.contains("调度模型请求超时"));
+                }
+                // 重复回执不能推翻已经生效的结果。
+                finish_relay_review(&mut conn, current, Ok(Some("迟到的结论".into()))).unwrap();
+            }
         }
     }
-    assert_eq!(speakers, vec!["张三", "李四", "张三", "李四"]);
-    let limit = last_message(&conn, group.id).unwrap().unwrap();
-    assert_eq!(limit.kind, "notice");
-    assert!(limit.body.contains("没有再请 张三 回复"), "{}", limit.body);
 }
 
 #[test]

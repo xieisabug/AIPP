@@ -16,9 +16,8 @@ pub const MEMBER_KIND: &str = "butler_group_member";
 pub const MAX_MEMBERS: usize = 30;
 pub const MAX_NAME_CHARS: usize = 60;
 pub const MAX_BODY_CHARS: usize = 20_000;
-/// 成员之间 @ 接力的最大层数，以及同一条用户消息最多引出的接力次数，防止互相点名形成循环。
-pub const MAX_RELAY_DEPTH: i64 = 3;
-pub const MAX_RELAYS_PER_ORIGIN: i64 = 12;
+/// 从用户发言后的首次成员间接力开始计数。
+const RELAY_REVIEW_INTERVAL: i64 = 10;
 /// 用户要求成员讨论时最多进行的轮数。
 pub const MAX_DISCUSSION_ROUNDS: i64 = 5;
 /// 单次投递给成员的群消息上限；更早的消息只保留数量说明。
@@ -89,6 +88,8 @@ CREATE TABLE IF NOT EXISTS butler_chat_group_turn (
 );
 CREATE INDEX IF NOT EXISTS idx_butler_chat_group_turn_state
     ON butler_chat_group_turn(state, member_id, id);
+CREATE INDEX IF NOT EXISTS idx_butler_chat_group_turn_reply
+    ON butler_chat_group_turn(group_id, reply_seq) WHERE reply_seq IS NOT NULL;
 ";
 
 /// 第一版协作群的队列表（投递包、席位、依赖、原生插队等）。新实现不再使用，迁移公开消息后按子表到父表的顺序删除。
@@ -131,6 +132,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // 早期版本按顺序串行回复（after_turn），现在同一轮并发回复、多轮讨论按 round/rounds 推进。
     ensure_column(conn, "butler_chat_group_turn", "round", "INTEGER NOT NULL DEFAULT 1")?;
     ensure_column(conn, "butler_chat_group_turn", "rounds", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(conn, "butler_chat_group_turn", "relay_review_pending", "INTEGER NOT NULL DEFAULT 0")?;
     // 成员发言对应它执行会话里的那条最终回复，界面据此复用私聊的消息信息、代码预览与附件。
     ensure_column(conn, "butler_chat_group_message", "source_conversation_id", "INTEGER")?;
     ensure_column(conn, "butler_chat_group_message", "source_message_id", "INTEGER")?;
@@ -667,7 +669,51 @@ pub fn fail_route(conn: &mut Connection, group: i64, seq: i64, reason: &str) -> 
 pub enum Start {
     /// `peers` 是同一轮里同时回复的其他成员。
     Run { turn: Turn, member: Member, group: Group, input: String, peers: Vec<String> },
+    Review(RelayReview),
     Skipped,
+}
+
+pub struct RelayReview {
+    pub origin: Message,
+    pub history: Vec<Message>,
+    pub target: String,
+}
+
+/// 只沿本次邀请的公开消息回溯，群里同时进行的其他接力不会混进审核依据。
+fn relay_review(conn: &Connection, t: &Turn, target: String) -> Result<RelayReview> {
+    let mut seq = t.trigger_seq;
+    let mut history = Vec::new();
+    for _ in 0..RELAY_REVIEW_INTERVAL {
+        history.push(message(conn, t.group_id, seq)?);
+        seq = conn.query_row("SELECT trigger_seq FROM butler_chat_group_turn
+            WHERE group_id=?1 AND reply_seq=?2 AND origin_seq=?3", params![t.group_id, seq, t.origin_seq], |r| r.get(0))?;
+    }
+    history.reverse();
+    Ok(RelayReview { origin: message(conn, t.group_id, t.origin_seq)?, history, target })
+}
+
+/// 审核结果只作用于仍在排队的这一项。停止、移出、重复回执均不会重新发起接力。
+pub fn finish_relay_review(conn: &mut Connection, id: i64, verdict: Result<Option<String>, String>) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let t = turn(&tx, id)?;
+    let paused = matches!(verdict, Ok(Some(_)));
+    let updated = tx.execute("UPDATE butler_chat_group_turn SET relay_review_pending=0, state=?2, updated_at=CURRENT_TIMESTAMP
+        WHERE id=?1 AND state='queued' AND relay_review_pending=1", params![id, if paused { "skipped" } else { "queued" }])?;
+    if updated > 0 {
+        let target = member(&tx, t.member_id)?.name;
+        let round = t.depth - 1;
+        match verdict {
+            Ok(Some(reason)) => {
+                notice(&tx, t.group_id, "notice", &format!("第 {round} 轮接力审核确认出现循环，已暂停这次给 {target} 的接力。{reason}。需要继续时可以直接 @ 对方。"))?;
+            }
+            Err(error) => {
+                notice(&tx, t.group_id, "error", &format!("第 {round} 轮接力审核失败（回复 #{id}）：{error}。这次给 {target} 的接力继续。"))?;
+            }
+            Ok(None) => {}
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// 开始一次回复：固定本次可见的群消息上界，整理成员上次回复后其他人的公开发言。
@@ -707,6 +753,12 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
         skip(&tx, "skipped")?;
         tx.commit()?;
         return Ok(Start::Skipped);
+    }
+    let pending: bool = tx.query_row("SELECT relay_review_pending FROM butler_chat_group_turn WHERE id=?1", [id], |r| r.get(0))?;
+    if pending {
+        let review = relay_review(&tx, &t, m.name)?;
+        tx.commit()?;
+        return Ok(Start::Review(review));
     }
     let room = get(&tx, t.group_id)?;
     let delta = messages_between(&tx, room.id, m.delivered_through.max(m.joined_after), room.seq)?
@@ -838,7 +890,7 @@ pub struct Finished {
     pub relayed: Vec<i64>,
 }
 
-/// 结束一次回复：公开最终回复，并按回复里的 @ 邀请其他成员接着说（受层数与次数上限约束）；
+/// 结束一次回复：公开最终回复，并按回复里的 @ 邀请其他成员接着说；
 /// 讨论中的一轮全部说完后进入下一轮。已被停止或移出的回复不会再公开迟到的结果。
 pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<Option<Finished>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -945,26 +997,20 @@ fn relay(tx: &Connection, t: &Turn, from: &Member, reply: &Message) -> Result<Ve
     // 讨论还有下一轮时，被 @ 的参与者会在下一轮回应，不再单独接力，避免同一人连说两次。
     let discussing = if t.depth == 0 && t.round < t.rounds { discussion_members(tx, t, None)? } else { Vec::new() };
     let mut created = Vec::new();
-    let mut blocked = Vec::new();
+    let review_due = t.depth > 0 && t.depth % RELAY_REVIEW_INTERVAL == 0;
     for target in parse_mentions(&reply.body, &others) {
-        let waiting: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE member_id=?1 AND state='queued')",
+        let waiting: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE member_id=?1 AND state='queued' AND relay_review_pending=0)",
             [target], |r| r.get(0))?;
         if waiting || discussing.contains(&target) {
             continue;
         }
-        let used: i64 = tx.query_row("SELECT count(*) FROM butler_chat_group_turn WHERE group_id=?1 AND origin_seq=?2 AND depth>0",
-            params![t.group_id, t.origin_seq], |r| r.get(0))?;
-        let name = others.iter().find(|m| m.id == target).map(|m| m.name.clone()).unwrap_or_default();
-        if t.depth + 1 > MAX_RELAY_DEPTH || used >= MAX_RELAYS_PER_ORIGIN {
-            blocked.push(name);
-            continue;
-        }
-        created.push(insert_turn(tx, NewTurn {
+        let id = insert_turn(tx, NewTurn {
             group: t.group_id, member: target, trigger: reply.seq, origin: t.origin_seq, depth: t.depth + 1, round: 1, rounds: 1,
-        })?);
-    }
-    if !blocked.is_empty() {
-        notice(tx, t.group_id, "notice", &format!("成员之间连续接力的次数已达上限，没有再请 {} 回复。需要的话可以直接 @ 对方。", join_names(&blocked)))?;
+        })?;
+        if review_due {
+            tx.execute("UPDATE butler_chat_group_turn SET relay_review_pending=1 WHERE id=?1", [id])?;
+        }
+        created.push(id);
     }
     Ok(created)
 }

@@ -249,9 +249,27 @@ async fn start(app: &AppHandle, state: &Shared, turn: group::Turn) -> anyhow::Re
     }
     let id = turn.id;
     let started = database(app, "开始回复", move |conn| group::start_turn(conn, id)).await.map_err(anyhow::Error::msg)?;
-    let group::Start::Run { turn, member, group: room, input, peers } = started else {
-        changed(app, turn.group_id);
-        return Ok(());
+    let (turn, member, room, input, peers) = match started {
+        group::Start::Run { turn, member, group, input, peers } => (turn, member, group, input, peers),
+        group::Start::Review(review) => {
+            let worker = app.clone();
+            let group_id = turn.group_id;
+            lock(state).dispatching.insert(id);
+            let release = Release { state: state.clone(), routing: None, turn: Some(id) };
+            tauri::async_runtime::spawn(async move {
+                let _release = release;
+                let verdict = super::butler_group_router::review_relay(&worker, group_id, &review).await;
+                if let Err(error) = database(&worker, "记录接力审核", move |conn| group::finish_relay_review(conn, id, verdict)).await {
+                    tracing::error!(group_id, turn = id, %error, "failed to save relay review");
+                }
+                changed(&worker, group_id);
+            });
+            return Ok(());
+        }
+        group::Start::Skipped => {
+            changed(app, turn.group_id);
+            return Ok(());
+        }
     };
     lock(state).dispatching.insert(turn.id);
     changed(app, room.id);

@@ -1,5 +1,23 @@
 use super::*;
 
+#[test]
+fn test_group_relay_review_requires_an_explicit_verdict_and_reason_to_pause() {
+    let review = RelayReview {
+        origin: message(1, None, "完成复测"),
+        history: vec![message(4, None, "请复测"), message(9, None, "请复测")],
+        target: "测试".into(),
+    };
+    assert_eq!(parse_loop_review(r#"{"looping":false,"reason":"新版本待复测"}"#, &review), Ok(None));
+    assert_eq!(parse_loop_review(r#"{"looping":true,"reason":"反复要求复测同一版本","repeated_seq":4}"#, &review),
+        Ok(Some("反复要求复测同一版本（参见群消息 #4）".into())));
+    for seq in [7, 9] {
+        let text = serde_json::json!({"looping":true,"reason":"重复交接","repeated_seq":seq}).to_string();
+        assert!(parse_loop_review(&text, &review).is_err());
+    }
+    assert!(parse_loop_review(r#"{"looping":true,"reason":" "}"#, &review).is_err());
+    assert!(parse_loop_review("可能在循环", &review).is_err());
+}
+
 fn member(id: i64, name: &str) -> Member {
     Member { id, group_id: 1, assistant_id: id + 100, name: name.into(), conversation_id: id + 200, joined_after: 0, delivered_through: 0, active: true }
 }
