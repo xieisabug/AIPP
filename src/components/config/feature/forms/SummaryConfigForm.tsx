@@ -405,7 +405,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                                     />
                                                 </FormControl>
                                                 <FormDescription>
-                                                    决策模型返回的 safe（及用户意图一致）概率均须不低于此阈值，且风险分类为安全项时才自动放行；否则转为人工确认（默认 0.90）。
+                                                    决策模型评估时，安全概率须不低于此阈值：局部只读/写入操作无意图冲突即放行；对外发送或持久化变更还须用户授权概率达标；高危分类始终转人工确认（默认 0.90）。
                                                 </FormDescription>
                                                 <FormMessage />
                                             </FormItem>

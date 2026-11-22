@@ -24,7 +24,8 @@ fn test_decision_review_enforces_threshold_and_risk_category_fail_closed() {
         serde_json::json!({
             "answers": {
                 "safe": { "type": "noul", "noul": 0.96 },
-                "intent_aligned": { "type": "noul", "noul": 0.94 },
+                "intent_violation": { "type": "noul", "noul": 0.04 },
+                "user_authorized": { "type": "noul", "noul": 0.60 },
                 "risk_category": {
                     "type": "choice",
                     "choice": "safe_readonly",
@@ -45,7 +46,8 @@ fn test_decision_review_enforces_threshold_and_risk_category_fail_closed() {
         serde_json::json!({
             "answers": {
                 "safe": { "type": "noul", "noul": 0.82 },
-                "intent_aligned": { "type": "noul", "noul": 0.95 },
+                "intent_violation": { "type": "noul", "noul": 0.05 },
+                "user_authorized": { "type": "noul", "noul": 0.95 },
                 "risk_category": { "type": "choice", "choice": "safe_readonly" }
             }
         }),
@@ -55,14 +57,15 @@ fn test_decision_review_enforces_threshold_and_risk_category_fail_closed() {
     assert_eq!(low_draft.verdict, "risky");
     assert!(low_draft.reason.contains("低于阈值"));
 
-    // 即使 safe 概率高，若风险分类为破坏性操作仍必须拦截
+    // 即使 safe 概率与授权概率都高，若风险分类为破坏性操作仍必须拦截（hard deny）
     let risky_cat_resp = crate::decision::decode_response(
         crate::decision::DecisionProtocol::TypesafeSystemOne,
         &req,
         serde_json::json!({
             "answers": {
                 "safe": { "type": "noul", "noul": 0.95 },
-                "intent_aligned": { "type": "noul", "noul": 0.95 },
+                "intent_violation": { "type": "noul", "noul": 0.02 },
+                "user_authorized": { "type": "noul", "noul": 0.99 },
                 "risk_category": { "type": "choice", "choice": "destructive_action" }
             }
         }),
@@ -74,22 +77,90 @@ fn test_decision_review_enforces_threshold_and_risk_category_fail_closed() {
 }
 
 #[test]
-fn test_decision_review_identifies_low_intent_on_safe_scoped_write() {
+fn test_decision_review_allows_local_scoped_write_without_explicit_auth_unless_violating_intent() {
     let request = build_decision_review_request("jev-latest", "修改相关模块", true);
-    let response = crate::decision::decode_response(
+    // 局部可逆写入：安全概率达标且无意图冲突，即使未显式点名目标（user_authorized 仅 47%）也应放行
+    let allowed_resp = crate::decision::decode_response(
         crate::decision::DecisionProtocol::TypesafeSystemOne,
         &request,
         serde_json::json!({ "answers": {
             "safe": { "type": "noul", "noul": 0.95 },
-            "intent_aligned": { "type": "noul", "noul": 0.47 },
+            "intent_violation": { "type": "noul", "noul": 0.08 },
+            "user_authorized": { "type": "noul", "noul": 0.47 },
             "risk_category": { "type": "choice", "choice": "safe_scoped_write" }
         }}),
         10,
     ).unwrap();
-    let review = evaluate_decision_review(&response, true, 0.90, "jev-latest", 7, 10);
-    assert_eq!(review.verdict, "risky");
-    assert!(review.reason.contains("安全概率 95%，意图一致 47% 低于阈值 90%"));
-    assert!(!review.reason.contains("符合授权"));
+    let allowed = evaluate_decision_review(&allowed_resp, true, 0.90, "jev-latest", 7, 10);
+    assert_eq!(allowed.verdict, "safe", "reason={}", allowed.reason);
+    assert!(allowed.reason.contains("安全概率 95%"));
+
+    // 局部写入若违背用户明确限制（如只让检查却修改），必须拦截
+    let conflict_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &request,
+        serde_json::json!({ "answers": {
+            "safe": { "type": "noul", "noul": 0.95 },
+            "intent_violation": { "type": "noul", "noul": 0.72 },
+            "user_authorized": { "type": "noul", "noul": 0.15 },
+            "risk_category": { "type": "choice", "choice": "safe_scoped_write" }
+        }}),
+        10,
+    ).unwrap();
+    let conflict = evaluate_decision_review(&conflict_resp, true, 0.90, "jev-latest", 7, 10);
+    assert_eq!(conflict.verdict, "risky");
+    assert!(conflict.reason.contains("意图冲突 72% 达到拦截阈值 50%"), "reason={}", conflict.reason);
+}
+
+#[test]
+fn test_decision_review_requires_user_authorization_for_external_or_persistent_actions() {
+    let request = build_decision_review_request("jev-latest", "发飞书消息", true);
+    // 对外发送且用户明确授权：放行
+    let auth_ok_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &request,
+        serde_json::json!({ "answers": {
+            "safe": { "type": "noul", "noul": 0.94 },
+            "intent_violation": { "type": "noul", "noul": 0.03 },
+            "user_authorized": { "type": "noul", "noul": 0.95 },
+            "risk_category": { "type": "choice", "choice": "external_or_persistent" }
+        }}),
+        12,
+    ).unwrap();
+    let ok = evaluate_decision_review(&auth_ok_resp, true, 0.90, "jev-latest", 7, 12);
+    assert_eq!(ok.verdict, "safe", "reason={}", ok.reason);
+    assert!(ok.reason.contains("用户授权 95%"));
+
+    // 对外发送但授权不足：拦截
+    let auth_low_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &request,
+        serde_json::json!({ "answers": {
+            "safe": { "type": "noul", "noul": 0.94 },
+            "intent_violation": { "type": "noul", "noul": 0.12 },
+            "user_authorized": { "type": "noul", "noul": 0.47 },
+            "risk_category": { "type": "choice", "choice": "external_or_persistent" }
+        }}),
+        12,
+    ).unwrap();
+    let low = evaluate_decision_review(&auth_low_resp, true, 0.90, "jev-latest", 7, 12);
+    assert_eq!(low.verdict, "risky");
+    assert!(low.reason.contains("用户授权 47% 低于阈值 90%"), "reason={}", low.reason);
+
+    // 缺少用户意图上下文时，对外/持久化变更 fail-closed
+    let no_intent_req = build_decision_review_request("jev-latest", "发飞书消息", false);
+    let no_intent_resp = crate::decision::decode_response(
+        crate::decision::DecisionProtocol::TypesafeSystemOne,
+        &no_intent_req,
+        serde_json::json!({ "answers": {
+            "safe": { "type": "noul", "noul": 0.96 },
+            "risk_category": { "type": "choice", "choice": "external_or_persistent" }
+        }}),
+        12,
+    ).unwrap();
+    let no_intent = evaluate_decision_review(&no_intent_resp, false, 0.90, "jev-latest", 7, 12);
+    assert_eq!(no_intent.verdict, "risky");
+    assert!(no_intent.reason.contains("缺少用户意图上下文"), "reason={}", no_intent.reason);
 }
 
 fn model_response(text: &str) -> ChatResponse {
