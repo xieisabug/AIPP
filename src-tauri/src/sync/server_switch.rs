@@ -148,10 +148,11 @@ pub async fn inspect_sync_server_switch(app_handle: AppHandle, request: InspectS
     let status = fetch_remote_status(&url, &token, &device, &CancellationToken::new()).await?;
     let sample = if request.choice == "auto" { samples(&open_sync_db(&app_handle)?)? } else { Vec::new() };
     let response = sync_http_client()?.post(format!("{url}/v1/sync/inspect")).bearer_auth(&token)
-        .json(&json!({"sequences": sample.iter().map(|s| s.seq).collect::<Vec<_>>()})).send().await.map_err(|e| format!("检查同步历史请求失败: {e}"))?;
+        .json(&json!({"sequences": sample.iter().map(|s| s.seq).collect::<Vec<_>>()})).send().await
+        .map_err(|e| format!("检查同步历史请求失败: {}", sync_http_error(e)))?;
     let remote = if response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::METHOD_NOT_ALLOWED { None }
         else if !response.status().is_success() { return Err(format!("同步历史检查返回 HTTP {}", response.status())); }
-        else { Some(response.json::<Inspection>().await.map_err(|e| format!("解析同步历史检查结果失败: {e}"))?) };
+        else { Some(response.json::<Inspection>().await.map_err(|e| format!("解析同步历史检查结果失败: {}", sync_http_error(e)))?) };
     if remote.as_ref().is_some_and(|r| r.account_id != status.account_id) { return Err("检查期间服务端账号发生变化，请重试".into()); }
     let (mode, message) = match request.choice.as_str() {
         "auto" => match &remote {

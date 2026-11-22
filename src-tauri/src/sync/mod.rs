@@ -1165,15 +1165,54 @@ fn is_sync_stopped_error(err: &str) -> bool {
     err == SYNC_STOPPED_MSG
 }
 
-async fn await_or_cancel<T, E, F>(cancel: &CancellationToken, fut: F) -> Result<T, String>
+fn sync_http_error(error: reqwest::Error) -> String {
+    use std::error::Error;
+
+    // A configured base URL can contain credentials, a private path or a query.
+    let origin = error.url().map(|url| url.origin().ascii_serialization());
+    let error = error.without_url();
+    let summary = match origin {
+        Some(origin) => format!("{error} ({origin})"),
+        None => error.to_string(),
+    };
+    let mut details = vec![summary];
+    let mut source = error.source();
+    if source.is_none() {
+        details.push("网络库未提供更底层的原因".to_string());
+    }
+    while let Some(cause) = source {
+        // Serde's Display can quote the actual value from the sync response.
+        if let Some(json) = cause.downcast_ref::<serde_json::Error>() {
+            details.push(format!(
+                "JSON {:?} 错误（第 {} 行，第 {} 列）",
+                json.classify(), json.line(), json.column()
+            ));
+            break;
+        }
+        let message = cause.to_string();
+        if details.last() != Some(&message) {
+            details.push(message);
+        }
+        source = cause.source();
+    }
+    details.join(" → ")
+}
+
+fn sync_stage_error(stage: &str, error: String) -> String {
+    if is_sync_stopped_error(&error) {
+        return error;
+    }
+    format!("{stage}: {error}")
+}
+
+async fn await_or_cancel<T, F>(cancel: &CancellationToken, fut: F) -> Result<T, String>
 where
-    F: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
+    F: std::future::Future<Output = reqwest::Result<T>>,
 {
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(SYNC_STOPPED_MSG.to_string()),
-        result = fut => result.map_err(|e| e.to_string()),
+        result = fut => result.map_err(sync_http_error),
     }
 }
 
@@ -1392,17 +1431,12 @@ async fn fetch_remote_status(
             .send(),
     )
     .await
-    .map_err(|e| {
-        if is_sync_stopped_error(&e) {
-            e
-        } else {
-            format!("连接同步服务器失败: {e}")
-        }
-    })?;
+    .map_err(|e| sync_stage_error("连接同步服务器失败（GET /v1/sync/status）", e))?;
     if !response.status().is_success() {
         return Err(format!("同步服务器 status 返回 {}", response.status()));
     }
     await_or_cancel(cancel, response.json::<RemoteStatus>()).await
+        .map_err(|e| sync_stage_error("读取同步状态响应失败", e))
 }
 
 async fn push_pending(
@@ -1578,7 +1612,8 @@ async fn push_event_batch_once(
         let reason = if status == StatusCode::PAYLOAD_TOO_LARGE {
             format!("{OVERSIZED_PUSH_REASON}（{}/{}）", event.object_type, event.object_id)
         } else {
-            let detail = await_or_cancel(cancel, response.text()).await?;
+            let detail = await_or_cancel(cancel, response.text()).await
+                .map_err(|e| sync_stage_error("读取推送校验响应失败", e))?;
             format!("同步事件校验失败 HTTP 422（{}/{}）: {detail}", event.object_type, event.object_id)
         };
         warn!(
@@ -1599,6 +1634,7 @@ async fn push_event_batch_once(
         Ok(body) => body,
         Err(err) if is_sync_stopped_error(&err) => return Err(err),
         Err(err) => {
+            let err = sync_stage_error("读取推送响应失败", err);
             mark_events_failed(app_handle, events, &err)?;
             return Err(err);
         }
@@ -1675,20 +1711,15 @@ async fn pull_remote(
                 .send(),
         )
         .await
-        .map_err(|e| {
-            if is_sync_stopped_error(&e) {
-                e
-            } else {
-                format!("拉取同步变更失败: {e}")
-            }
-        })?;
+        .map_err(|e| sync_stage_error("拉取同步变更失败", e))?;
         if response.status() == StatusCode::NO_CONTENT {
             return Ok(());
         }
         if !response.status().is_success() {
             return Err(format!("同步服务器 pull 返回 {}", response.status()));
         }
-        let body = await_or_cancel(cancel, response.json::<PullResponse>()).await?;
+        let body = await_or_cancel(cancel, response.json::<PullResponse>()).await
+            .map_err(|e| sync_stage_error("读取拉取响应失败", e))?;
         // 每页复用同一个 sync.db 连接应用所有变更
         let sync_conn = open_sync_db(app_handle)?;
         let mut applied_types = HashSet::new();
@@ -2009,7 +2040,7 @@ fn sync_http_client() -> Result<reqwest::Client, String> {
             .no_proxy()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
             .build()
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("初始化同步客户端失败: {}", sync_http_error(e)))
     }).clone()
 }
 
@@ -2021,7 +2052,7 @@ fn sync_notify_http_client() -> Result<reqwest::Client, String> {
         .connect_timeout(Duration::from_secs(NOTIFY_CONNECT_TIMEOUT_SECS))
         .pool_idle_timeout(Duration::from_secs(90))
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("初始化同步通知客户端失败: {}", sync_http_error(e)))
 }
 
 /// Subscribe to `GET /v1/sync/notify` and wake the poll worker when the account cursor advances.
@@ -2074,7 +2105,7 @@ async fn listen_notify_once(app_handle: &AppHandle) -> Result<(), String> {
         .header("Accept", "text/event-stream")
         .send()
         .await
-        .map_err(|e| format!("notify connect failed: {e}"))?;
+        .map_err(|e| format!("notify connect failed: {}", sync_http_error(e)))?;
     if !response.status().is_success() {
         return Err(format!("notify HTTP {}", response.status()));
     }
@@ -2083,7 +2114,7 @@ async fn listen_notify_once(app_handle: &AppHandle) -> Result<(), String> {
     let mut buffer = String::new();
     use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("notify read failed: {e}"))?;
+        let chunk = chunk.map_err(|e| format!("notify read failed: {}", sync_http_error(e)))?;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(idx) = buffer.find("
 
@@ -6475,14 +6506,14 @@ mod tests {
     async fn await_or_cancel_returns_stopped_when_cancelled() {
         let token = CancellationToken::new();
         token.cancel();
-        let result: Result<i32, String> = await_or_cancel(&token, async { Ok::<i32, String>(1) }).await;
+        let result = await_or_cancel(&token, async { Ok(1) }).await;
         assert_eq!(result.unwrap_err(), SYNC_STOPPED_MSG);
     }
 
     #[tokio::test]
     async fn await_or_cancel_passes_through_success() {
         let token = CancellationToken::new();
-        let result = await_or_cancel(&token, async { Ok::<i32, String>(7) }).await;
+        let result = await_or_cancel(&token, async { Ok(7) }).await;
         assert_eq!(result.unwrap(), 7);
     }
 

@@ -243,7 +243,7 @@ export function friendlySyncError(raw: string, fallbackPrefix: string): string {
     if (text.includes("强制停止") || text.includes("协作取消超时")) {
         return "已强制停止同步（将在下次同步时自动恢复）";
     }
-    if (text.includes("413") || text.includes("变更过大")) {
+    if (text.includes("变更过大") || /^HTTP\s+413\b/i.test(text)) {
         return text.includes("已跳过")
             ? text
             : "某条变更过大被服务器拒绝，已跳过并记入失败项，其余同步继续";
@@ -284,7 +284,7 @@ export function formatRecentSyncError(input: {
     if (
         !input.syncing &&
         failed > 0 &&
-        (raw.includes("413") || raw.includes("变更过大") || /HTTP\s*\d+/i.test(raw))
+        (raw.startsWith("变更过大被服务器拒绝") || /^HTTP\s+413\b/i.test(raw))
     ) {
         return `有 ${failed} 条待重试`;
     }

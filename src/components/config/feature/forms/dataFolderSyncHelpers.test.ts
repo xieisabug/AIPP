@@ -278,6 +278,12 @@ describe("dataFolderSyncHelpers", () => {
         expect(metrics.find((metric) => metric.label === "游标")?.value).toBe(1);
     });
 
+    it("should preserve connection details when the server port contains 413", () => {
+        const error = "连接同步服务器失败（GET /v1/sync/status）: error sending request (http://192.168.1.2:4130) → Connection refused";
+        expect(friendlySyncError(error, "同步失败")).toContain(error);
+        expect(formatRecentSyncError({ last_error: error, failed_outbox_count: 2 })).toBe(error);
+    });
+
     it("formatRecentSyncError softens stale outbox HTTP errors", () => {
         expect(
             formatRecentSyncError({

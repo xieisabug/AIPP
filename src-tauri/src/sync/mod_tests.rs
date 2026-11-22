@@ -1,5 +1,32 @@
 use super::*;
 
+/// Exercise the status request against an occupied but non-listening local port.
+#[tokio::test]
+async fn test_sync_http_error_status_preserves_os_cause_and_hides_credentials() {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = socket.local_addr().unwrap();
+    let url = format!("http://example-user:example-password@{address}/private-path");
+    let error = fetch_remote_status(&url, "example-token", "device", &CancellationToken::new())
+        .await.err().expect("the port is not listening");
+    assert!(error.contains("GET /v1/sync/status"));
+    assert!(error.contains(&address.to_string()));
+    assert!(error.contains("os error"), "{error}");
+    for secret in ["example-user", "example-password", "private-path", "example-token"] {
+        assert!(!error.contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn test_sync_http_error_invalid_response_hides_sync_values() {
+    let response = tauri::http::Response::new(r#""private-sync-value""#);
+    let error = reqwest::Response::from(response).json::<u64>().await.unwrap_err();
+    let message = sync_http_error(error);
+    assert!(message.contains("JSON Data"));
+    assert!(message.contains("第 1 行"));
+    assert!(!message.contains("private-sync-value"));
+}
+
 #[test]
 fn test_cascade_delete_sync_children_can_revive_and_stale_aliases_are_repaired() {
     for legacy_stale_mapping in [false, true] {
