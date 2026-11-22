@@ -54,8 +54,10 @@ export function buildNativeAgentApprovalFields(
         antigravity: [select("antigravity_mode", "Antigravity 权限模式", [
             { value: "default", label: "默认：逐项审批（默认）" },
             { value: "auto_edit", label: "自动接受编辑，其余审批" },
-            { value: "yolo", label: "全部自动执行（yolo）" },
-        ], "使用 Antigravity 原生权限模式；所选模式未被当前 agy 版本提供时会直接报错并列出可用模式。")],
+            { value: "auto", label: "自动审核（auto），高风险操作仍需确认" },
+            { value: "plan", label: "规划（plan），先分析并制定计划" },
+            { value: "yolo", label: "全部自动执行，跳过工具权限确认" },
+        ], "全部自动执行会在 agy 启动时开启。使用独立 ACP 程序时，该程序须提供 yolo 模式。")],
         opencode: [{
             key: "opencode_approval_notice",
             config: {

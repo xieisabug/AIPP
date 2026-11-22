@@ -261,9 +261,49 @@ test('should apply the chosen Antigravity permission mode through its advertised
   } finally { await runtime.close(); }
 });
 
+test('should enable CLI auto-approval only for a yolo conversation', async () => {
+  const fs = { mkdir: async () => {}, writeFile: async () => {}, mkdtemp: async path => path };
+  const config = { profile: resolve('profile'), antigravity_mode: 'yolo' };
+  for (const [overrides, expected] of [
+    [{}, ['acp', '--dangerously-skip-permissions']],
+    [{ probe: true }, ['acp']], [{ login: true }, ['acp']], [{ logout: true }, ['acp']],
+    [{ antigravity_mode: 'auto' }, ['acp']],
+    [{ runtime: 'standalone', harness: resolve('harness') }, process.platform === 'linux' ? ['--uid='] : []],
+  ]) {
+    const plan = await antigravityLaunch({ ...config, ...overrides }, {}, fs);
+    assert.deepEqual(plan.args, expected);
+  }
+});
+
+test('should apply Antigravity execution modes on new and resumed CLI sessions', async () => {
+  for (const session of [undefined, 's1']) {
+    for (const [setting, mode] of [['auto_edit', 'accept-edits'], ['auto', 'auto'], ['plan', 'plan'], ['yolo', 'default']]) {
+      const f = fixture({ options: [select('mode', ['default', 'accept-edits', 'auto', 'plan'], 'plan')] });
+      const runtime = await f.open('antigravity', { antigravity_mode: setting, session });
+      try {
+        assert.equal(f.commands.find(c => c.method === 'session/set_config_option').params.value, mode);
+      } finally { await runtime.close(); }
+    }
+  }
+});
+
+test('should discover Antigravity account models independently of conversation permissions', async () => {
+  for (const catalog of [
+    { configOptions: [select('model', ['available'])] },
+    { models: { availableModels: [{ modelId: 'available', name: 'available' }] } },
+  ]) {
+    const f = fixture({ respond: c => c.method === 'session/new' ? { result: { sessionId: 'probe', ...catalog } } : undefined });
+    const runtime = await f.open('antigravity', { probe: true, antigravity_mode: 'invalid', model: 'stale' });
+    try {
+      assert.deepEqual(await runtime.models(), [{ id: 'available', name: 'available' }]);
+      assert.deepEqual(f.commands.map(c => c.method), ['initialize', 'authenticate', 'session/new']);
+    } finally { await runtime.close(); }
+  }
+});
+
 test('should name the advertised Antigravity modes when the chosen one is missing', async () => {
-  const f = fixture({ respond: c => c.method === 'session/new' ? { result: { sessionId: 's1', configOptions: [], modes: { availableModes: [{ id: 'default' }, { id: 'plan' }] } } } : undefined });
-  await assert.rejects(f.open('antigravity', { antigravity_mode: 'yolo' }), /did not advertise the yolo permission mode \(advertised: default, plan\)/);
+  const f = fixture({ respond: c => c.method === 'session/new' ? { result: { sessionId: 's1', configOptions: [select('mode', ['default', 'plan'])], modes: { availableModes: [{ id: 'default' }, { id: 'plan' }] } } } : undefined });
+  await assert.rejects(f.open('antigravity', { runtime: 'standalone', antigravity_mode: 'yolo' }), /did not advertise the yolo permission mode \(advertised: default, plan\)/);
   await assert.rejects(fixture().open('antigravity', { antigravity_mode: 'turbo' }), /Unsupported Antigravity permission mode 'turbo'/);
 });
 

@@ -21,6 +21,15 @@ describe("buildNativeAgentApprovalFields", () => {
         expect(set).toHaveBeenCalledWith("tool_review_mode", "auto_model", "string");
     });
 
+    it("should retain saved Antigravity auto-approval and offer the native execution modes", () => {
+        const set = vi.fn();
+        const [field] = buildNativeAgentApprovalFields("antigravity", getter({ antigravity_mode: "yolo" }), set, true);
+        expect(field.config.value).toBe("yolo");
+        expect(field.config.options?.map(option => option.value)).toEqual(["default", "auto_edit", "auto", "plan", "yolo"]);
+        field.config.onChange?.("auto");
+        expect(set).toHaveBeenCalledWith("antigravity_mode", "auto", "string");
+    });
+
     it("should only explain Cursor's built-in review and leave other agents untouched", () => {
         expect(keys(buildNativeAgentApprovalFields("cursor", getter({}), vi.fn(), true))).toEqual(["cursor_approval_notice"]);
         expect(buildNativeAgentApprovalFields("codex_app_server", getter({}), vi.fn(), true)).toEqual([]);

@@ -29,6 +29,13 @@ export function authorizationUrl(value) {
   return value;
 }
 
+// The CLI implements full auto-approval at process startup. Standalone ACP uses
+// the session modes it advertises. Account operations never need this flag.
+function cliAutoApproval(config) {
+  return (config.runtime || 'cli') === 'cli' && config.antigravity_mode === 'yolo'
+    && !config.probe && !config.login && !config.logout;
+}
+
 export async function antigravityLaunch(config, environment = process.env, fs = { mkdir, mkdtemp, writeFile, rm }) {
   if (!config.profile || !isAbsolute(config.profile)) throw new Error('Antigravity requires an absolute per-provider account directory');
   const method = config.auth_method || 'oauth-personal';
@@ -50,8 +57,9 @@ export async function antigravityLaunch(config, environment = process.env, fs = 
     PYTHONUNBUFFERED: '1', BROWSER: `${browser} "%s"`, TEMP: temporary, TMP: temporary, TMPDIR: temporary });
   if (method === 'gemini-api-key') env.GEMINI_API_KEY = config.auth_key;
   if (runtime === 'standalone') env.ANTIGRAVITY_HARNESS_PATH = config.harness;
-  return { command: config.command || (runtime === 'cli' ? 'agy' : 'antigravity-acp'),
-    args: runtime === 'cli' ? ['acp'] : process.platform === 'linux' ? ['--uid='] : [], env,
+  const args = runtime === 'cli' ? ['acp'] : process.platform === 'linux' ? ['--uid='] : [];
+  if (cliAutoApproval(config)) args.push('--dangerously-skip-permissions');
+  return { command: config.command || (runtime === 'cli' ? 'agy' : 'antigravity-acp'), args, env,
     cleanup: () => fs.rm(temporary, { recursive: true, force: true }) };
 }
 
@@ -61,6 +69,8 @@ const choices = option => (option?.options ?? []).flatMap(entry => 'value' in en
 export const ANTIGRAVITY_MODES = {
   default: ['default'],
   auto_edit: ['auto_edit', 'autoEdit', 'accept-edits', 'accept_edits', 'acceptEdits'],
+  auto: ['auto'],
+  plan: ['plan'],
   yolo: ['yolo'],
 };
 function sessionModels(options = [], legacy) {
@@ -266,7 +276,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       if (!init.authMethods?.some(item => item.id === method)) throw new Error(`Antigravity does not advertise authentication method ${method}`);
       await request('authenticate', { methodId: method }, config.login ? 300000 : 30000);
     }
-    if (config.login) {
+    if (config.login || (driver === 'antigravity' && config.probe)) {
       return { close, async models() {
         const result = await request('session/new', { cwd: config.cwd, mcpServers: [] });
         return sessionModels(result.configOptions, result.models);
@@ -303,17 +313,21 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       updateOptions(response.configOptions);
       if (config.kiro_agent) await configure('mode', config.kiro_agent);
     } else {
-      // Never inherit a persisted yolo/auto_edit mode; apply the assistant's choice (default: supervised).
-      const wanted = config.antigravity_mode || 'default';
+      // Reset any persisted execution mode (including plan) when the CLI
+      // received the independent auto-approval flag on launch.
+      const wanted = cliAutoApproval(config) ? 'default' : config.antigravity_mode || 'default';
+      if (!Object.hasOwn(ANTIGRAVITY_MODES, wanted)) throw new Error(`Unsupported Antigravity permission mode '${wanted}'; expected ${Object.keys(ANTIGRAVITY_MODES).join(', ')}`);
       const aliases = ANTIGRAVITY_MODES[wanted];
-      if (!aliases) throw new Error(`Unsupported Antigravity permission mode '${wanted}'; expected ${Object.keys(ANTIGRAVITY_MODES).join(', ')}`);
       const advertised = result.modes?.availableModes?.map(mode => mode.id) ?? [];
       const mode = options.find(option => option.category === 'mode' || option.id === 'mode');
       const modeId = aliases.find(id => advertised.includes(id));
       const optionValue = mode && aliases.find(id => choices(mode).some(choice => choice.value === id));
       if (modeId) await request('session/set_mode', { sessionId: session, modeId });
       else if (optionValue) await configure(mode.id, optionValue);
-      else throw new Error(`Antigravity did not advertise the ${wanted} permission mode (advertised: ${[...advertised, ...(mode ? choices(mode).map(choice => choice.value) : [])].join(', ') || 'none'})`);
+      else {
+        const available = new Set([...advertised, ...(mode ? choices(mode).map(choice => choice.value) : [])]);
+        throw new Error(`Antigravity did not advertise the ${wanted} permission mode (advertised: ${[...available].join(', ') || 'none'})`);
+      }
     }
     if (config.model) await configure('model', config.model);
     if (config.kiro_effort) {

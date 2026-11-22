@@ -41,7 +41,7 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 | --- | --- | --- |
 | Pi | Pi 自身没有权限系统，由 AIPP 扩展在工具调用前请求确认 | 「需要审批的操作」：所有工具调用（默认）/ 只读工具（read、grep、find、ls）直接执行 / 全部直接执行 |
 | Kiro | Autopilot | 关闭：逐项审批（默认）/ 开启：Kiro 自动执行 |
-| Antigravity | 原生权限模式 | 默认逐项审批（默认）/ 自动接受编辑 / 全部自动执行（yolo）；当前 agy 不提供所选模式时直接报错并列出可用模式 |
+| Antigravity | 原生执行模式与工具审批 | 可选默认、自动接受编辑、自动审核（`auto`）、规划（`plan`）或全部自动执行。全部自动执行沿用已保存的 `yolo` 设置，CLI 通过 `agy acp --dangerously-skip-permissions` 启动，独立 ACP 程序须公布 `yolo` 模式。会话缺少所选模式时会列出可用模式并停止。 |
 | OpenCode | 本机配置的 `permissions` 规则 | AIPP 不改写（新旧版本的规则格式不同），默认几乎全部放行 |
 | Claude Code | Provider「权限模式」和会话「工作模式」均可选「Claude Code 原生自动审核（auto）」 | 以 `--permission-mode auto` 启动，由 Claude Code 自行判断。Claude Code 发给 AIPP 的 `can_use_tool` 请求再按 AIPP 的审批设置处理；`AskUserQuestion` 仍交给用户回答 |
 | 通用 ACP | 原生 `session/request_permission` 请求 | 安全时只回传 Agent 提供的一次性允许选项；转人工时仍可通过已有飞书通道处理 |
@@ -62,6 +62,8 @@ Kiro 提供「本次允许」时，AIPP 不显示其持久化允许选项；只�
 **Antigravity**：默认使用官方 `agy acp`，建议使用 1.5.1 或更新版本（低于时表单会提示并可一键更新）。也可显式选择「独立 ACP 程序」，选择其可执行文件和相同版本的 `localharness_external`。独立程序由用户自行安装，本次不包含 Registry 安装管理。
 
 认证支持 Google 个人账号和 Gemini API Key。在提供商设置填写当前配置后点击「登录 Antigravity」；个人账号出现「在浏览器中继续登录」按钮，完成 Google 认证后等待 AIPP 显示原生认证成功。可以取消登录，最多等待 5 分钟。API Key 使用专用密码字段；认证错误保留原生原因。普通聊天与模型发现不会自动开启登录，过期时提示返回设置登录。
+
+助手设置中的模型选择框从当前提供商账号读取模型。读取时只请求模型目录，助手已保存的执行模式不可用时仍可查看和选择模型。
 
 Claude Code 的助手设置、新建对话和会话控制共用模型目录。选择带版本的「Claude Opus 5.5 · claude-opus-5-5」时，AIPP 保存完整 ID，并用它启动或恢复会话。选择「CLI 别名 · opus」会沿用 Claude 设置中的映射。CLI 报告的目标与别名不同时，选择器会显示两者，例如「CLI 路由 sonnet → opus」。以前保存的短别名继续按别名执行。「使用 CLI 默认模型」随本机配置生效。目录同时显示当前提供商登记的模型和 CLI 公布的其他选项。助手设置保存默认值，新建对话可单次覆盖并选择其他 Anthropic 提供商登记的模型；会话内切换只使用当前连接的模型，从下一轮生效。
 
