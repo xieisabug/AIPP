@@ -333,16 +333,26 @@ fn test_decision_endpoint_uses_provider_default_and_explicit_gateway() {
     use super::client::decision_endpoint_url;
     use DecisionProtocol::*;
     for (api_type, endpoint, protocol, expected) in [
-        ("openai_api", None, GeminiDecisions, "https://api.openai.com/v1/decisions"),
-        ("openai", Some("   "), TypesafeSystemOne, "https://api.openai.com/v1/systemone"),
+        ("openai_api", None, OpenAiDecisions, "https://api.openai.com/v1/decisions"),
+        ("openai", Some("   "), OpenAiDecisions, "https://api.openai.com/v1/decisions"),
         ("gemini", None, GeminiDecisions, "https://generativelanguage.googleapis.com/v1beta/decisions"),
         ("typesafe_jev", None, TypesafeSystemOne, "https://api.typesafe.ai/v1/systemone"),
-        ("openai_api", Some("https://gateway.example/proxy/v1"), TypesafeSystemOne,
+        ("typesafe_jev", Some("https://gateway.example/proxy/v1"), TypesafeSystemOne,
             "https://gateway.example/proxy/v1/systemone"),
     ] {
         assert_eq!(decision_endpoint_url(api_type, endpoint, protocol).unwrap(), expected);
     }
-    assert!(decision_endpoint_url("openai_api", Some("bad url"), GeminiDecisions).is_err());
+    assert!(decision_endpoint_url("openai_api", Some("bad url"), OpenAiDecisions).is_err());
+    for (api_type, own_protocol) in [
+        ("openai_api", OpenAiDecisions), ("gemini", GeminiDecisions), ("typesafe_jev", TypesafeSystemOne),
+    ] {
+        for protocol in [OpenAiDecisions, GeminiDecisions, TypesafeSystemOne] {
+            if protocol != own_protocol {
+                let err = decision_endpoint_url(api_type, Some("https://gateway.example/v1"), protocol).unwrap_err();
+                assert!(err.contains(api_type) && err.contains(protocol.as_request_mode()));
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -371,7 +381,7 @@ async fn test_decision_provider_redacts_echo_before_both_error_limits() {
         ];
         let request = DecisionRequest::new("model", "ping", vec![DecisionQuestion::bool("ok", "ok?")]);
         let error = execute_for_provider(
-            "openai_api", &configs, MODE_JEV_SYSTEMONE, &request, None, false, Some(5), &HashMap::new(),
+            "typesafe_jev", &configs, MODE_JEV_SYSTEMONE, &request, None, false, Some(5), &HashMap::new(),
         ).await.unwrap_err();
         assert!(error.contains(diagnostic), "{error}");
         assert!(error.ends_with(&format!("{prefix}[REDACTED]..")), "{error}");

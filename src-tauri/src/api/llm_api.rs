@@ -1,6 +1,6 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
-use crate::db::llm_db::{resolve_request_mode_or_default, LLMDatabase};
+use crate::db::llm_db::{http_provider_modes, resolve_request_mode_or_default, LLMDatabase};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
 use crate::FeatureConfigState;
 use genai::Modality;
@@ -87,24 +87,7 @@ fn protocol_choice(db: &LLMDatabase, api_type: &str, provider_id: i64, code: &st
     }
     let resolved = resolve_request_mode_or_default(api_type, code, saved.map(String::as_str)).to_string();
     let default_mode = crate::db::llm_db::default_request_mode_for_model(api_type, code);
-    let available = match api_type.to_lowercase().as_str() {
-        "openai" | "openai_api" => Some(ordered_modes(
-            default_mode,
-            &[
-                "chat_completions",
-                "responses",
-                crate::decision::MODE_OPENAI_DECISIONS,
-                crate::decision::MODE_JEV_SYSTEMONE,
-                crate::decision::MODE_GEMINI_DECISIONS,
-            ],
-        )),
-        "gemini" => Some(ordered_modes(
-            default_mode,
-            &["google_gemini", crate::decision::MODE_GEMINI_DECISIONS],
-        )),
-        "typesafe_jev" => Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
-        _ => None,
-    };
+    let available = http_provider_modes(api_type).map(|modes| ordered_modes(default_mode, modes));
     Ok((available, resolved))
 }
 
@@ -124,27 +107,11 @@ pub(crate) fn validate_request_mode(db: &LLMDatabase, provider: &crate::db::llm_
             format!("Magpie 模型 {code} 不支持协议 {request_mode}")
         });
     }
-    match provider.api_type.to_lowercase().as_str() {
-        "openai" | "openai_api" => match request_mode {
-            "chat_completions"
-            | "responses"
-            | crate::decision::MODE_OPENAI_DECISIONS
-            | crate::decision::MODE_JEV_SYSTEMONE
-            | crate::decision::MODE_GEMINI_DECISIONS => Ok(()),
-            _ => Err(format!("Unsupported request_mode: {request_mode}")),
-        },
-        "gemini" => match request_mode {
-            "google_gemini" | "chat_completions" | crate::decision::MODE_GEMINI_DECISIONS => Ok(()),
-            _ => Err(format!("Unsupported request_mode for Gemini: {request_mode}")),
-        },
-        "typesafe_jev" => match request_mode {
-            crate::decision::MODE_JEV_SYSTEMONE => Ok(()),
-            _ => Err(format!("TypeSafe Jev 仅支持 jev_systemone 协议，收到: {request_mode}")),
-        },
-        _ => match request_mode {
-            "chat_completions" | "responses" => Ok(()),
-            _ => Err(format!("Unsupported request_mode: {request_mode}")),
-        },
+    let modes = http_provider_modes(&provider.api_type).unwrap_or(&["chat_completions", "responses"]);
+    if modes.contains(&request_mode) {
+        Ok(())
+    } else {
+        Err(format!("提供商 {} 不支持协议 {request_mode}，可选协议为 {}", provider.api_type, modes.join("、")))
     }
 }
 
@@ -445,27 +412,21 @@ pub async fn fetch_model_list(
         Ok(models) => {
             let mut result = Vec::new();
             for model in &models {
+                let code = model.id.to_string();
+                let (available_modes, request_mode) = protocol_choice(
+                    &db, &llm_provider.api_type, llm_provider_id, &code, request_mode_map.get(&code),
+                )?;
                 let model = LlmModel {
-                    available_modes: None,
+                    available_modes,
                     id: 0,
                     name: model.name.to_string(),
                     llm_provider_id,
-                    code: model.id.to_string(),
+                    code,
                     description: format!("Model: {}", model.name),
                     vision_support: model.supports_input_modality(&Modality::Image),
                     audio_support: model.supports_input_modality(&Modality::Audio),
                     video_support: model.supports_input_modality(&Modality::Video),
-                    request_mode: request_mode_map
-                        .get(&model.id.to_string())
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            resolve_request_mode_or_default(
-                                &llm_provider.api_type,
-                                &model.id.to_string(),
-                                None,
-                            )
-                            .to_string()
-                        }),
+                    request_mode,
                 };
 
                 result.push(model);
@@ -762,6 +723,7 @@ pub async fn test_decision_model(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(&detail.model.request_mode);
+    validate_request_mode(&db, &detail.provider, &model_code, effective_mode)?;
     let feature_config_state = app_handle.state::<FeatureConfigState>();
     let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
     let network_proxy = get_network_proxy_from_config(&config_feature_map);

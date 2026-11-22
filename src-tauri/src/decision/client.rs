@@ -166,6 +166,10 @@ async fn send_decision(
 pub(super) fn decision_endpoint_url(
     api_type: &str, endpoint: Option<&str>, protocol: DecisionProtocol,
 ) -> Result<String, String> {
+    let mode = protocol.as_request_mode();
+    if !crate::db::llm_db::http_provider_modes(api_type).is_some_and(|modes| modes.contains(&mode)) {
+        return Err(format!("提供商 {api_type} 不支持决策协议 {mode}，请检查提供商和模型协议"));
+    }
     let base = match resolve_provider_endpoint(endpoint).map_err(|e| e.to_string())? {
         ProviderEndpointResolution::Custom(url) => url,
         ProviderEndpointResolution::Unset => provider_destination(api_type, None)?,

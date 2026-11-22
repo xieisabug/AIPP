@@ -59,6 +59,7 @@ export const requestModeLabels: Record<string, string> = {
     jev_systemone: "Jev System One (/v1/systemone)",
     gemini_decisions: "Gemini Decisions (/v1beta/decisions)",
     unsupported: "协议待支持",
+    provider_mode_mismatch: "需重选协议",
 };
 
 export const toModelTagItem = (

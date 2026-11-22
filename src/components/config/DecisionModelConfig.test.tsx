@@ -53,7 +53,7 @@ describe("Decision model UI configuration (#340)", () => {
         rerender(
             <ModelRequestModeToggle
                 requestMode="openai_decisions"
-                availableModes={["chat_completions", "responses", "openai_decisions", "jev_systemone"]}
+                availableModes={["chat_completions", "responses", "openai_decisions"]}
                 onToggle={() => undefined}
             />,
         );
@@ -67,6 +67,22 @@ describe("Decision model UI configuration (#340)", () => {
             />,
         );
         expect(screen.getByText("Gemini Dec.")).toBeInTheDocument();
+    });
+
+    it("should offer OpenAI protocols when a saved protocol needs to be reselected", async () => {
+        let selected = "";
+        render(<ModelRequestModeToggle
+            requestMode="provider_mode_mismatch"
+            availableModes={["chat_completions", "responses", "openai_decisions"]}
+            onToggle={mode => { selected = mode; }}
+        />);
+        const trigger = screen.getByRole("button", { name: "请求协议：需重选协议" });
+        fireEvent.keyDown(trigger, { key: "ArrowDown" });
+        const items = await screen.findAllByRole("menuitemradio");
+        expect(items).toHaveLength(3);
+        expect(screen.queryByRole("menuitemradio", { name: /Jev|Gemini/ })).toBeNull();
+        fireEvent.click(screen.getByRole("menuitemradio", { name: /OpenAI Decisions/ }));
+        expect(selected).toBe("openai_decisions");
     });
 
     it("shows decision threshold & probe button instead of JSON Schema mode when auto_review_model is a decision model", async () => {

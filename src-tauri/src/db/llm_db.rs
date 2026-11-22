@@ -4,6 +4,17 @@ use tracing::{debug, instrument, warn};
 use super::get_db_path;
 
 pub const DEFAULT_MODEL_REQUEST_MODE: &str = "chat_completions";
+pub const PROVIDER_MODE_MISMATCH: &str = "provider_mode_mismatch";
+
+pub fn http_provider_modes(api_type: &str) -> Option<&'static [&'static str]> {
+    use crate::decision::{MODE_GEMINI_DECISIONS, MODE_JEV_SYSTEMONE, MODE_OPENAI_DECISIONS};
+    match api_type.to_ascii_lowercase().as_str() {
+        "openai" | "openai_api" => Some(&["chat_completions", "responses", MODE_OPENAI_DECISIONS]),
+        "gemini" => Some(&["google_gemini", MODE_GEMINI_DECISIONS]),
+        "typesafe_jev" => Some(&[MODE_JEV_SYSTEMONE]),
+        _ => None,
+    }
+}
 
 fn copilot_prefers_responses_by_default(model_code: &str) -> bool {
     let model_code = model_code.trim().to_ascii_lowercase();
@@ -44,13 +55,18 @@ pub fn resolve_request_mode_or_default(
     if api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
         return crate::decision::MODE_JEV_SYSTEMONE;
     }
+    if let Some(mode) = request_mode.filter(|mode| !mode.is_empty()) {
+        if let Some(modes) = http_provider_modes(api_type) {
+            return modes.iter().copied().find(|&allowed| allowed == mode).unwrap_or(PROVIDER_MODE_MISMATCH);
+        }
+        if crate::decision::is_decision_mode(mode) {
+            return PROVIDER_MODE_MISMATCH;
+        }
+    }
     match request_mode {
         Some("responses") => "responses",
         Some("chat_completions") => "chat_completions",
         Some("google_gemini") => "google_gemini",
-        Some("jev_systemone") => crate::decision::MODE_JEV_SYSTEMONE,
-        Some("openai_decisions") => crate::decision::MODE_OPENAI_DECISIONS,
-        Some("gemini_decisions") => crate::decision::MODE_GEMINI_DECISIONS,
         _ => default_request_mode_for_model(api_type, model_code),
     }
 }
@@ -117,7 +133,14 @@ impl LLMDatabase {
             let modes = crate::api::magpie::available_modes(self, provider_id, code, saved.as_deref())?;
             return Ok(crate::api::magpie::selected_mode(&modes, saved.as_ref()));
         }
-        Ok(resolve_request_mode_or_default(api_type, code, saved.as_deref()).into())
+        let mode = resolve_request_mode_or_default(api_type, code, saved.as_deref());
+        if mode == PROVIDER_MODE_MISMATCH {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "提供商 {api_type} 的模型 {code} 不支持已保存的协议 {}，请在提供商设置中重新选择协议",
+                saved.as_deref().unwrap_or_default()
+            )));
+        }
+        Ok(mode.into())
     }
 
     #[instrument(level = "debug", skip(self), err)]
@@ -714,7 +737,7 @@ impl LLMDatabase {
             let mode =
                 resolve_request_mode_or_default(&api_type, &code, saved_mode.as_deref()).to_string();
             let is_decision = crate::decision::is_decision_mode(&mode);
-            if !include_decision && is_decision {
+            if mode == PROVIDER_MODE_MISMATCH || (!include_decision && is_decision) {
                 continue;
             }
             result.push((name, code, id, provider_id, mode, is_decision));
@@ -816,7 +839,7 @@ impl LLMDatabase {
             match model {
                 Ok((name, code, id, provider_id, api_type, saved_mode)) => {
                     let mode = resolve_request_mode_or_default(&api_type, &code, saved_mode.as_deref());
-                    if crate::decision::is_decision_mode(mode) {
+                    if mode == PROVIDER_MODE_MISMATCH || crate::decision::is_decision_mode(mode) {
                         continue;
                     }
                     result.push((name, code, id, provider_id));

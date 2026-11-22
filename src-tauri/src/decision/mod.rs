@@ -55,18 +55,6 @@ pub fn default_decision_mode_for_model(api_type: &str, model_code: &str) -> Opti
     if api_lower == "gemini" && code_lower.starts_with("gemini-decision") {
         return Some(MODE_GEMINI_DECISIONS);
     }
-    if matches!(api_lower.as_str(), "openai" | "openai_api") {
-        if code_lower == "jev"
-            || code_lower.starts_with("jev-")
-            || code_lower.starts_with("typesafe/jev")
-            || code_lower.contains("/jev-")
-        {
-            return Some(MODE_JEV_SYSTEMONE);
-        }
-        if code_lower.starts_with("gemini-decision") {
-            return Some(MODE_GEMINI_DECISIONS);
-        }
-    }
     None
 }
 
