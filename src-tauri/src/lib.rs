@@ -727,6 +727,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(crate::api::ai::agent_driver::lifecycle::AgentSessionBindings::default())
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
+        .register_uri_scheme_protocol("aipp-choice",mcp::builtin_mcp::choices::document::serve)
         .register_uri_scheme_protocol(OFFICE_PREVIEW_SCHEME, handle_office_preview_protocol_request)
         .plugin(tauri_plugin_notification::init())
         .plugin(mobile_files::init())
@@ -744,6 +745,11 @@ pub fn run() {
             Some(vec!["com.xieisabug.aipp"]),
         ));
     let app = builder
+        .on_window_event(|window,event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                mcp::builtin_mcp::choices::build::close_window(window.label());
+            }
+        })
         .setup(|app| {
             let app_handle = app.handle();
 
@@ -923,6 +929,11 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
+            let choices_app = app_handle.clone();
+            match mcp::builtin_mcp::choices::unfinished_calls(&choices_app) {
+                Ok(calls) => { tauri::async_runtime::spawn(mcp::builtin_mcp::choices::reconcile(choices_app, calls)); }
+                Err(error) => tracing::warn!(%error, "读取待恢复的比选工具调用失败"),
+            }
             crate::mcp::apps::recheck_available_connections(app_handle.clone());
             crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             #[cfg(desktop)]
@@ -1368,6 +1379,20 @@ pub fn run() {
             list_preview_code_requests_for_conversation,
             submit_ask_user_question_response,
             submit_preview_code_response,
+            mcp::builtin_mcp::choices::get_present_choices,
+            mcp::builtin_mcp::choices::list_native_choices,
+            mcp::builtin_mcp::choices::submit_present_choices_response,
+            mcp::builtin_mcp::choices::publish_choice_project,
+            mcp::builtin_mcp::choices::get_choice_project,
+            mcp::builtin_mcp::choices::archive::get_collected_choice,
+            mcp::builtin_mcp::choices::archive::build_collected_choice,
+            mcp::builtin_mcp::choices::archive::open_collected_choice_build,
+            mcp::builtin_mcp::choices::authorize_choice_source,
+            mcp::builtin_mcp::choices::build::build_choice_project,
+            mcp::builtin_mcp::choices::build::open_choice_build,
+            mcp::builtin_mcp::choices::build::close_choice_build,
+            mcp::builtin_mcp::choices::document::create_choice_document,
+            mcp::builtin_mcp::choices::document::close_choice_document,
             confirm_operation_permission,
             confirm_agent_interaction,
             confirm_acp_permission,

@@ -1,6 +1,7 @@
 import { useContext, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
+import InlineChoicesCard from "@/components/choices/InlineChoicesCard";
 import { AskUserQuestionCard, PreviewFileCard, type PreviewFileRequest } from "@/components/InlineInteractionCards";
 import type { MCPToolCall } from "@/data/MCPToolCall";
 import { parsePreviewFileRequest, toAskUserPersistedState } from "@/hooks/useInlineInteraction";
@@ -44,6 +45,7 @@ export default function ButlerInteractionResult(props: McpToolComponentProps) {
     const live = useContext(ButlerLiveCardsContext);
     const state = props.callId ? props.mcpToolCallStates?.get(props.callId) : undefined;
     const status = state?.status ?? props.status;
+    if (props.toolName === "present_choices") return <InlineChoicesCard {...props} />;
     if (props.toolName === "preview_code") {
         if (status === "failed") return null;
         return <InlineCodePreviewCard conversationId={props.conversationId} messageId={props.messageId} callId={props.callId}

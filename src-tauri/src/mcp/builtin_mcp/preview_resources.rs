@@ -576,7 +576,7 @@ async fn fetch_remote_resource_bytes(
     kind: PreviewResourceType,
     max_bytes: u64,
 ) -> Result<RemoteResourceBytes, RemoteResourceError> {
-    let response = client.get(normalized_url).send().await.map_err(|e| RemoteResourceError {
+    let mut response = client.get(normalized_url).send().await.map_err(|e| RemoteResourceError {
         timed_out: e.is_timeout(),
         message: format!("Failed to download preview resource: {e}"),
     })?;
@@ -603,17 +603,30 @@ async fn fetch_remote_resource_bytes(
         timed_out: false,
         message,
     })?;
-    let bytes = response.bytes().await.map_err(|e| RemoteResourceError {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| RemoteResourceError {
         timed_out: e.is_timeout(),
         message: format!("Failed to read preview resource response: {e}"),
-    })?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(RemoteResourceError {
-            timed_out: false,
-            message: format!("Preview resource is too large ({} bytes)", bytes.len()),
-        });
+    })? {
+        if bytes.len().saturating_add(chunk.len()) as u64 > max_bytes {
+            return Err(RemoteResourceError {
+                timed_out: false, message: format!("Preview resource exceeds {max_bytes} bytes"),
+            });
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(RemoteResourceBytes { bytes: bytes.to_vec(), content_type })
+    Ok(RemoteResourceBytes { bytes, content_type })
+}
+
+pub(super) async fn fetch_choice_source(app: &AppHandle, url: &str, kind: PreviewResourceType) -> Result<(Vec<u8>,String),String> {
+    if !is_remote_url(url) {return Err("仅支持 HTTP(S) 候选来源".into())}
+    let policy=load_policy_from_state(app).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(policy.limits.request_timeout_secs.max(1)))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().map_err(|e|format!("创建候选下载客户端失败：{e}"))?;
+    let fetched=fetch_remote_resource_bytes(&client,url,kind,policy.limits.max_resource_bytes.min(20*1024*1024)).await.map_err(|e|e.message)?;
+    Ok((fetched.bytes,fetched.content_type.unwrap_or_default()))
 }
 
 async fn download_or_read_resource(

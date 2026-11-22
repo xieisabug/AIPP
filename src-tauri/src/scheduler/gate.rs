@@ -44,6 +44,7 @@ pub(crate) fn scheduled_tool_restriction(command: Option<&str>, tool: &str, para
 /// 必须由用户本人处理的操作，总管家也不能代批。
 pub(crate) fn human_only_reason(command: Option<&str>, tool: &str, parameters: &str) -> Option<String> {
     match command {
+        Some("aipp:ui_interaction") if matches!(tool, "ask_user_question" | "present_choices") => Some("需要用户在会话中作答".into()),
         Some("aipp:operation") => crate::mcp::builtin_mcp::contains_manual_review_command_keyword(parameters)
             .then(|| "包含 rm/删除类命令".to_string()),
         Some("aipp:superadmin") => {
@@ -142,6 +143,7 @@ mod tests {
 
     #[test]
     fn test_human_only_operations_are_never_delegated() {
+        assert!(human_only_reason(Some("aipp:ui_interaction"), "present_choices", "{}").is_some());
         assert!(human_only_reason(Some("aipp:operation"), "execute_bash", r#"{"command":"rm -rf build"}"#).is_some());
         assert!(human_only_reason(Some("aipp:operation"), "execute_bash", r#"{"command":"Remove-Item x"}"#).is_some());
         assert!(human_only_reason(Some("aipp:operation"), "execute_bash", r#"{"command":"ls -la"}"#).is_none());

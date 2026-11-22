@@ -58,7 +58,7 @@
             ],
             "csp": {
                 "default-src": "'self'",
-                "frame-src": "'self' http://localhost:* https://localhost:* aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost",
+                "frame-src": "'self' http://localhost:* https://localhost:* http://*.aipp-choice.localhost:* https://embed.diagrams.net aipp-choice: http://aipp-choice.localhost https://aipp-choice.localhost aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost",
                 "connect-src": "'self' http://localhost:* https://localhost:* ipc: http://ipc.localhost",
                 "style-src": "'self' 'unsafe-inline'",
                 "font-src": "'self' data:",

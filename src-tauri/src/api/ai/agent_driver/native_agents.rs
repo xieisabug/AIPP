@@ -189,6 +189,9 @@ impl PreparedAgentSession for Prepared {
         let tools_file = scope.attach_selected_tools_file(&payload).map_err(error)?;
         let exe = std::env::current_exe().map_err(error)?;
         let db = crate::db::mcp_db::MCPDatabase::db_path(app).map_err(error)?;
+        if let Some(seconds) = native_answer_window(app, &payload).map_err(error)? {
+            self.config.wire["mcpAnswerTimeoutMs"] = json!(seconds * 1000);
+        }
         self.config.wire["mcp"] = json!({ "type": "stdio", "command": exe, "args": [ACP_MCP_BRIDGE_ARG], "env": {
             (ACP_MCP_DB_PATH_ENV): db, (ACP_MCP_CONVERSATION_ID_ENV): cid.to_string(),
             (ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV): "1", (ACP_MCP_PROXY_ADDR_ENV): proxy.addr,

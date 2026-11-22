@@ -24,7 +24,7 @@ pub(crate) fn should_auto_run_tool(
     // ask_user_question / preview_* are themselves the user-facing interaction.
     // They must never sit in pending waiting for a separate "run" permission click.
     if server_command == Some("aipp:ui_interaction")
-        && matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file")
+        && matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file" | "present_choices")
     {
         return true;
     }

@@ -3599,7 +3599,7 @@ async fn execute_builtin_tool(
     });
     // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
     let skip_outer_timeout = (command == "aipp:ui_interaction"
-        && matches!(tool_name, "ask_user_question" | "preview_code"))
+        && matches!(tool_name, "ask_user_question" | "preview_code" | "present_choices"))
         || (command == "aipp:operation" && tool_name == "execute_bash")
         // Office 修改有自己的认领 / 执行超时（首次使用可能要下载 Office 组件）。
         || (command == crate::mcp::builtin_mcp::office::COMMAND && crate::mcp::builtin_mcp::office::is_tool(tool_name))

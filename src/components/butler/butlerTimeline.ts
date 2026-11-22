@@ -82,7 +82,7 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
     for (const call of uiCalls.sort((a, b) => a.call_id - b.call_id)) {
         if (positionedCalls.has(call.call_id) || !call.message_id || !positions.has(call.message_id)) continue;
         const live = byCall.get(call.call_id);
-        if (!live && call.status !== "success" && !(call.tool_name === "preview_code" && call.status === "executing")) continue;
+        if (!live && call.status !== "success" && !((call.tool_name === "preview_code" || call.tool_name === "present_choices") && (call.status === "executing" || (call.tool_name === "present_choices" && call.status === "failed")))) continue;
         positionedCalls.add(call.call_id);
         addCard(-6_000_000_000_000 - call.call_id, call.message_id, call.started_time ? parseGroupTime(call.started_time).getTime() : NaN,
             live?.content ?? storedCallContent(call), call.call_id, live);

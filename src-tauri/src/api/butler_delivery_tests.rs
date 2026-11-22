@@ -26,6 +26,7 @@ fn server(command: &str, enabled: bool, tools: &[(&str, bool)]) -> MCPServerWith
 fn all_tools() -> DeliveryTools {
     DeliveryTools {
         ask_user_question: true,
+        present_choices: true,
         preview_file: true,
         preview_code: true,
         artifact: true,
@@ -51,6 +52,7 @@ fn detects_only_enabled_builtin_tools() {
         DeliveryTools::from_servers(&servers),
         DeliveryTools {
             ask_user_question: true,
+            present_choices: false,
             preview_file: true,
             preview_code: false,
             artifact: true,

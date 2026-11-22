@@ -9,6 +9,7 @@ use tracing::{debug, error, instrument};
 
 pub mod agent;
 pub mod interaction;
+pub mod choices;
 pub mod office;
 pub mod operation;
 pub mod preview_resources;
@@ -1573,6 +1574,10 @@ pub async fn execute_aipp_builtin_tool(
         }
         "dynamic_mcp" => execute_dynamic_mcp_tool(&app_handle, &tool_name, &args, conversation_id)?,
         "ui_interaction" => match tool_name.as_str() {
+            "present_choices" => {
+                let decision = choices::present(&app_handle, conversation_id, args.clone()).await?;
+                serde_json::json!({"content":[{"type":"json","json":decision}],"isError":false})
+            }
             "ask_user_question" => {
                 use interaction::{request_ask_user_question, AskUserQuestionRequest};
 

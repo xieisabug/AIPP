@@ -85,7 +85,7 @@ fn expandable_arguments<'a>(server: &MCPServer, tool: &str, args: &'a mut Value)
     match (builtin.as_deref(), tool) {
         (Some("agent"), "butler_memory" | "message_bot" | "continue_work" | "spawn_task_conversation"
             | "task_conversation_operation" | "schedule_task" | "report_progress" | "stop_assistant_exchange")
-        | (Some("ui_interaction"), "ask_user_question") => Vec::new(),
+        | (Some("ui_interaction"), "ask_user_question" | "present_choices") => Vec::new(),
         (Some("superadmin"), "superadmin_execute") => action_arguments(args).collect(),
         (Some("superadmin"), "superadmin_batch") => args.get_mut("actions").and_then(Value::as_array_mut)
             .into_iter().flatten().flat_map(action_arguments).collect(),

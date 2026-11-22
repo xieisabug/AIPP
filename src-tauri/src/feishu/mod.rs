@@ -24,7 +24,7 @@ pub(crate) use config::{
     clear_feishu_secret, save_feishu_secret,
 };
 pub(crate) use debug::resend_message_to_feishu_for_debug;
-pub(crate) use interaction::try_deliver_ask_user_question_to_feishu;
+pub(crate) use interaction::{deliver_choice_notice, try_deliver_ask_user_question_to_feishu};
 pub(crate) use relay::{
     conversation_has_feishu_target, inherit_latest_feishu_target,
     maybe_schedule_butler_feishu_relay_for_aipp_turn,

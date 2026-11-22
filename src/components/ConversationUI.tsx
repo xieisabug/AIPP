@@ -66,6 +66,7 @@ import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
+import { useNativeChoices } from "./choices/useNativeChoices";
 import { ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteJumpContext, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
 import { restoreTranscriptPosition } from "./conversation/restoreTranscriptPosition";
 import { reportedProgressByMessage } from "@/components/butler/reportedProgress";
@@ -1051,11 +1052,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)),
                 visible.filter(row => row.message_type === "butler_report" && unpublished.has(row.parent_id!)).map(row => row.content));
         }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId, interactions, inlineInteractionItems, mcpToolCallStates, displayAgentActivities]);
+        const nativeChoices = useNativeChoices(Number(conversationId), !resultOnly);
         const remainingInlineItems = useMemo(() => {
-            if (!resultOnly) return inlineInteractionItems;
+            if (!resultOnly) return nativeChoices?.length ? [...(inlineInteractionItems ?? []), ...nativeChoices] : inlineInteractionItems;
             const positioned = new Set(transcript.map(row => row.butler_live_item_key).filter(Boolean));
             return inlineInteractionItems?.filter(item => !positioned.has(item.key));
-        }, [transcript, inlineInteractionItems, resultOnly]);
+        }, [transcript, inlineInteractionItems, resultOnly, nativeChoices]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -1291,9 +1293,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         const mobilePlatform = useIsMobilePlatform();
         const handleArtifact = useCallback((language: string, code: string, binding?: ArtifactRunBinding) => {
-            if (mobilePlatform) previewMobile({ language, code });
+            if (mobilePlatform) {
+                previewMobile({ language, code, conversationId: binding?.artifactKey ? Number(conversationId) : undefined });
+            }
             else handleDesktopArtifact(language, code, binding);
-        }, [mobilePlatform, handleDesktopArtifact]);
+        }, [mobilePlatform, handleDesktopArtifact, conversationId]);
 
         // ============= 初始化和生命周期逻辑 =============
 

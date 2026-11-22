@@ -1,3 +1,4 @@
+import { SavedChoicePreview, readPreviewReference } from "@/components/choices/ChoicePreview";
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -1147,7 +1148,7 @@ export default function ArtifactPreviewWindow() {
                                 </div>
                             ) : previewType === 'html' || previewType === 'svg' || previewType === 'xml' ? (
                                 /* HTML/SVG/XML 预览 */
-                                <iframe
+                                readPreviewReference(htmlContent) ? <SavedChoicePreview reference={readPreviewReference(htmlContent)!}/> : <iframe
                                     srcDoc={htmlContent}
                                     className="flex-1 w-full border-0 bg-background"
                                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
@@ -1218,6 +1219,7 @@ export default function ArtifactPreviewWindow() {
                     onClose={() => setShowSaveDialog(false)}
                     artifactType={previewTypeRef.current}
                     code={originalCode || htmlContent || mermaidContent || markdownContent}
+                    choiceReference={readPreviewReference(originalCode || htmlContent)}
                     initialDbId={runtimeConfig.db_id}
                     initialAssistantId={runtimeConfig.assistant_id}
                 />

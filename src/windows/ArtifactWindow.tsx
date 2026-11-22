@@ -1,3 +1,4 @@
+import { CollectedChoicePreview, archivePrefix } from "@/components/choices/ChoicePreview";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -731,6 +732,8 @@ export default function ArtifactWindow() {
                                         })()}
                                     </div>
                                 </div>
+                            ) : previewType === "html" && htmlContent.startsWith(archivePrefix) && artifactInfo ? (
+                                <CollectedChoicePreview key={artifactInfo.id} collectionId={artifactInfo.id} />
                             ) : previewType === "html" || previewType === "svg" || previewType === "xml" ? (
                                 /* HTML/SVG/XML 预览 */
                                 <iframe

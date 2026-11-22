@@ -22,7 +22,7 @@ pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
             || crate::api::butler_peer::is_peer_tool(tool)
             || tool == "schedule_task",
         // 受托助手在自己的会话里向用户提问，问题绑定当前回合（即当前这项委托或任务）。
-        Some("aipp:ui_interaction") => tool == "ask_user_question",
+        Some("aipp:ui_interaction") => matches!(tool, "ask_user_question" | "present_choices"),
         _ => false,
     }
 }
@@ -189,7 +189,7 @@ pub fn prepare_scheduled_run_tools(app: &tauri::AppHandle, servers: &mut Vec<MCP
     }
     for server in servers.iter_mut() {
         match server.command.as_deref() {
-            Some("aipp:ui_interaction") => server.tools.retain(|t| t.name != "ask_user_question"),
+            Some("aipp:ui_interaction") => server.tools.retain(|t| !matches!(t.name.as_str(), "ask_user_question" | "present_choices")),
             Some("aipp:agent") => server.tools.retain(|t| {
                 !super::builtin_mcp::templates::is_butler_main_only_agent_tool(&t.name)
                     && !crate::api::butler_peer::is_peer_tool(&t.name)

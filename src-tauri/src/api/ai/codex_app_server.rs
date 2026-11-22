@@ -573,14 +573,18 @@ async fn codex_mcp_bridge_overrides(
     let mut proxy = ensure_proxy_server(app_handle.clone()).await?;
     proxy.token = mcp_scope.token().to_string();
     let selected_tools_file = mcp_scope.attach_selected_tools_file(&config.selected_mcp_tools_payload)?;
-    Ok(Some(build_codex_mcp_config_overrides_with_env(
+    let mut overrides = build_codex_mcp_config_overrides_with_env(
         &bridge_command,
         &mcp_db_path,
         conversation_id,
         &proxy,
         ACP_MCP_SELECTED_TOOLS_FILE_ENV,
         &selected_tools_file.display().to_string(),
-    )))
+    );
+    if let Some(seconds) = crate::acp_mcp_bridge::native_answer_window(app_handle, payload)? {
+        overrides.insert("mcp_servers.aipp.tool_timeout_sec".into(), json!(seconds));
+    }
+    Ok(Some(overrides))
 }
 
 fn rpc_id_key(id: &Value) -> String {

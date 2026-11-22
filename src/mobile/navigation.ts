@@ -1,6 +1,6 @@
 export type MobileRoute = "chat_ui" | "config" | "collections" | "preview";
 /** `collectionId` marks a preview opened from an existing collection item (no re-save offered). */
-export interface MobilePreview { language: string; code: string; title?: string; collectionId?: number }
+export interface MobilePreview { language: string; code: string; title?: string; collectionId?: number; conversationId?: number }
 export function previewMobile(detail: MobilePreview): void {
     window.dispatchEvent(new CustomEvent("aipp:mobile-preview", { detail }));
 }

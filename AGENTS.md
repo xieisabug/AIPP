@@ -16,6 +16,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **桌面管家**：联系人长期私聊、总管家主会话和派发任务会话独立。每个助手只有一条当前私聊（`butler_contact`，按助手查找）；「重开新会话」把旧私聊改为 `butler_contact_archive` 归档（总管家旧主会话仍是 `butler_main`、以 `butler_main_state` 区分当前），SuperAdmin 动作 `assistant.reset_conversation` 按助手 ID 复用联系人或总管家的重开入口，归档会话不参与协作，但管家搜索与助手历史检索可查到并标 `archived`（`reset_butler_contact_conversation`、`db/butler_history.rs`）。谁接手工作谁和用户沟通：受托助手默认在自己的会话里直接交付/提问（`deliver_to=user`），总管家只协调，要求整体汇总时才收回（`deliver_to=sender`）。受托助手可再请协助（有界多层：parent/depth、按工作链 chain 计预算与有效期、按助手身份防循环，见 `db/butler_peer.rs`），独立任务也可发起并接收协作回送；停止会实际打断属于该工作的执行（`api/butler_peer.rs` halt_*）。引用回复/续接/任务提问见 `api/butler_work.rs`；助手引用回复是回复首行 `[[QUOTE:原话片段]]`，私聊在前端 `butlerTranscript` 解析定位、群聊在 `finish_turn` 记为 `reply_to`，两端匹配规则须一致（`utils/reply_quote.rs` ↔ `butlerReplyQuote.ts`）。助手间协作须保留发送方和请求归属；团队历史检索只覆盖管家会话。聊天正文的简洁展示与模型工作上下文分别处理。管家模式下所有助手（总管家、联系人、受托任务、群成员）与总管家权限一致：直接注入 SuperAdmin、assistant 查询/协作工具与 `schedule_task`，全局启用的 MCP 与 Skills 都可用，统一模型审核，不受原助手 MCP 配置影响、不写回助手配置；只有派发/操作独立任务的工具留在主会话（`templates.rs` 的 `is_butler_main_only_agent_tool`）。普通聊天不继承该权限。见 [Butler 任务系统](./docs/product/18-Butler任务系统.md)。
 
+**方案比选**：`present_choices` 在原执行会话等待作答。候选文件与完整 Artifact 工程固定为快照，历史、独立窗口和发布均按请求与候选 ID 读取。桌面每次通过原生确认后才可在临时副本上用 Bun 安装依赖和运行构建。飞书来源收到桌面作答提示。见[内置工具](./docs/product/05-内置工具.md)和[制品预览与执行](./docs/product/06-制品预览与执行.md)。
+
 **管家开工提示**：总管家、联系人、任务助手与群成员使用 `report_progress` 说明准备做什么，工具回执后沿既有执行链路继续。按执行会话广播 `butler_progress_summary`，私聊与群成员行以气泡显示上报原话。辅助模型的最新总结在私聊居中显示，在群聊与发言气泡左对齐并标明成员名。最终交付仍由原会话处理。
 
 **管家主动整理**：`proactive/` 使用分会话的巡检与复盘水位线，后台预研仅允许经过范围校验的只读操作。采纳建议通过普通对话入口把确认指令与消息回执写入同一事务。夜间队列、双设备执行权与飞书摘要有独立投递边界。详见[主动整理与关怀](./docs/product/18-Butler任务系统.md#主动整理与关怀)。

@@ -3,6 +3,21 @@ use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArtifactCollectionItem {
+    pub id: i64,
+    pub name: String,
+    pub icon: String,
+    pub description: String,
+    pub artifact_type: String,
+    pub tags: Option<String>,
+    pub created_time: String,
+    pub last_used_time: Option<String>,
+    pub use_count: i64,
+    pub db_id: Option<String>,
+    pub assistant_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ArtifactCollection {
     pub id: i64,
     pub name: String,
@@ -121,49 +136,23 @@ impl ArtifactsDatabase {
     }
 
     /// Get all artifacts with optional type filter
-    pub fn get_artifacts(&self, artifact_type: Option<&str>) -> Result<Vec<ArtifactCollection>> {
-        let query = if let Some(_) = artifact_type {
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
-             FROM artifacts_collection 
-             WHERE artifact_type = ? 
+    pub fn get_artifacts(&self, artifact_type: Option<&str>) -> Result<Vec<ArtifactCollectionItem>> {
+        self.list_metadata(artifact_type, None)
+    }
+
+    fn list_metadata(&self, kind: Option<&str>, pattern: Option<&str>) -> Result<Vec<ArtifactCollectionItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,name,icon,description,artifact_type,tags,created_time,last_used_time,use_count,db_id,assistant_id
+             FROM artifacts_collection WHERE (?1 IS NULL OR artifact_type=?1)
+             AND (?2 IS NULL OR LOWER(name) LIKE ?2 OR LOWER(description) LIKE ?2 OR LOWER(tags) LIKE ?2)
              ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
-        } else {
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
-             FROM artifacts_collection 
-             ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
-        };
-
-        let mut stmt = self.conn.prepare(query)?;
-
-        let row_mapper = |row: &rusqlite::Row| {
-            Ok(ArtifactCollection {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                description: row.get(3)?,
-                artifact_type: row.get(4)?,
-                code: row.get(5)?,
-                tags: row.get(6)?,
-                created_time: row.get(7)?,
-                last_used_time: row.get(8)?,
-                use_count: row.get(9)?,
-                db_id: row.get(10)?,
-                assistant_id: row.get(11)?,
-            })
-        };
-
-        let rows = if let Some(type_filter) = artifact_type {
-            stmt.query_map([type_filter], row_mapper)?
-        } else {
-            stmt.query_map([], row_mapper)?
-        };
-
-        let mut artifacts = Vec::new();
-        for artifact_result in rows {
-            artifacts.push(artifact_result?);
-        }
-
-        Ok(artifacts)
+        )?;
+        let rows = stmt.query_map(params![kind, pattern], |row| Ok(ArtifactCollectionItem {
+            id: row.get(0)?, name: row.get(1)?, icon: row.get(2)?, description: row.get(3)?,
+            artifact_type: row.get(4)?, tags: row.get(5)?, created_time: row.get(6)?,
+            last_used_time: row.get(7)?, use_count: row.get(8)?, db_id: row.get(9)?, assistant_id: row.get(10)?,
+        }))?;
+        rows.collect()
     }
 
     /// Get artifact by ID
@@ -199,39 +188,8 @@ impl ArtifactsDatabase {
     }
 
     /// Search artifacts by name, description, or tags
-    pub fn search_artifacts(&self, query: &str) -> Result<Vec<ArtifactCollection>> {
-        let search_pattern = format!("%{}%", query.to_lowercase());
-
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
-             FROM artifacts_collection 
-             WHERE LOWER(name) LIKE ? OR LOWER(description) LIKE ? OR LOWER(tags) LIKE ?
-             ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
-        )?;
-
-        let rows = stmt.query_map([&search_pattern, &search_pattern, &search_pattern], |row| {
-            Ok(ArtifactCollection {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                description: row.get(3)?,
-                artifact_type: row.get(4)?,
-                code: row.get(5)?,
-                tags: row.get(6)?,
-                created_time: row.get(7)?,
-                last_used_time: row.get(8)?,
-                use_count: row.get(9)?,
-                db_id: row.get(10)?,
-                assistant_id: row.get(11)?,
-            })
-        })?;
-
-        let mut artifacts = Vec::new();
-        for artifact_result in rows {
-            artifacts.push(artifact_result?);
-        }
-
-        Ok(artifacts)
+    pub fn search_artifacts(&self, query: &str) -> Result<Vec<ArtifactCollectionItem>> {
+        self.list_metadata(None, Some(&format!("%{}%", query.to_lowercase())))
     }
 
     /// Update artifact metadata (name, icon, description, tags, db_id, assistant_id)

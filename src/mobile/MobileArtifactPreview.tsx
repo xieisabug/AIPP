@@ -1,3 +1,4 @@
+import { archivePrefix, CollectedChoicePreview, SavedChoicePreview, readPreviewReference } from "@/components/choices/ChoicePreview";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,6 +11,9 @@ import { usePlatform } from "@/hooks/use-platform";
 import SaveArtifactDialog from "@/components/SaveArtifactDialog";
 
 export default function MobileArtifactPreview({ preview }: { preview: MobilePreview }) {
+    const reference = preview.conversationId != null ? readPreviewReference(preview.code) : null;
+    const collected = preview.collectionId != null && preview.code.startsWith(archivePrefix);
+    const isChoice = reference !== null || collected;
     const platform = usePlatform();
     const [document, setDocument] = useState("");
     const [error, setError] = useState("");
@@ -30,6 +34,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
         let active = true;
         clearTimeout(loadTimer.current);
         setDocument(""); setError(""); setZoom(1);
+        if (isChoice) return;
         const build = async () => {
             const language = preview.language.toLowerCase();
             if (["react", "jsx", "vue"].includes(language)) {
@@ -53,7 +58,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
         };
         void build().catch(e => { if (active) setError(`制品渲染失败（${preview.language}）：${String(e)}`); });
         return () => { active = false; };
-    }, [preview.language, preview.code, preview.title]);
+    }, [preview.language, preview.code, preview.title, isChoice]);
     const fromCollection = preview.collectionId != null;
     return <section className="h-full flex flex-col safe-bottom bg-background">
         <header className={`flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-secondary px-2 py-1 safe-top ${platform === "android" ? "safe-top-android" : ""}`}>
@@ -64,14 +69,18 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
             <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{preview.title || "制品预览"}</h1>
             {fromCollection
                 ? <span className="px-2 text-sm text-muted-foreground">已收藏</span>
-                : <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>}
+                : !isChoice && <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>}
             <Button className="min-h-11 min-w-11" variant="outline" aria-label="缩小" onClick={() => setZoom(value => Math.max(.5, value - .25))}>−</Button>
             <span className="text-sm tabular-nums">{Math.round(zoom * 100)}%</span>
             <Button className="min-h-11 min-w-11" variant="outline" aria-label="放大" onClick={() => setZoom(value => Math.min(3, value + .25))}>+</Button>
         </header>
         {error && <p role="alert" className="p-4">{error}</p>}
         <div className="flex-1 overflow-auto min-h-0">
-            {document && <iframe key={JSON.stringify([preview.language, preview.code, preview.title])} ref={frame} title="隔离制品预览" sandbox={component ? "allow-scripts" : ""} referrerPolicy="no-referrer" srcDoc={document}
+            {collected && <div style={{ zoom }}><CollectedChoicePreview key={preview.collectionId} collectionId={preview.collectionId!} /></div>}
+            {reference && (reference.conversationId === preview.conversationId
+                ? <div style={{ zoom }}><SavedChoicePreview reference={reference} /></div>
+                : <p role="alert">此工程快照属于其他会话。</p>)}
+            {!isChoice && document && <iframe key={JSON.stringify([preview.language, preview.code, preview.title])} ref={frame} title="隔离制品预览" sandbox={component ? "allow-scripts" : ""} referrerPolicy="no-referrer" srcDoc={document}
                 onLoad={event => { if (component) {
                     clearTimeout(loadTimer.current);
                     const loadedFrame = event.currentTarget;
@@ -85,7 +94,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
                 } }}
                 className="border-0 bg-white w-full h-full" style={{ zoom }} />}
         </div>
-        {!fromCollection && <SaveArtifactDialog
+        {!isChoice && !fromCollection && <SaveArtifactDialog
             isOpen={saveOpen}
             onClose={() => setSaveOpen(false)}
             artifactType={preview.language || "text"}

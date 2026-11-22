@@ -3,7 +3,7 @@ import { createContext } from "react";
 // Keep execution widgets out of compact chat even during streaming or renderer fallback.
 export const ButlerResultsOnlyContext = createContext(false);
 
-const interactionTools = new Set(["preview_file", "preview_code", "ask_user_question"]);
+const interactionTools = new Set(["preview_file", "preview_code", "ask_user_question", "present_choices"]);
 
 export function isButlerInteractionTool(name?: string) {
     return interactionTools.has(name ?? "");

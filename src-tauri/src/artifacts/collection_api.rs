@@ -11,25 +11,13 @@ use crate::artifacts::vue_runner::run_vue_artifact;
 use crate::db::llm_db::LLMDatabase;
 use crate::FeatureConfigState;
 
+use crate::mcp::builtin_mcp::choices::archive;
 use super::artifacts_db::{
     ArtifactCollection, ArtifactsDatabase, NewArtifactCollection, UpdateArtifactCollection,
 };
 use crate::utils::bun_utils::BunUtils;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ArtifactCollectionItem {
-    pub id: i64,
-    pub name: String,
-    pub icon: String,
-    pub description: String,
-    pub artifact_type: String,
-    pub tags: Option<String>,
-    pub created_time: String,
-    pub last_used_time: Option<String>,
-    pub use_count: i64,
-    pub db_id: Option<String>,
-    pub assistant_id: Option<i64>,
-}
+pub use super::artifacts_db::ArtifactCollectionItem;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SaveArtifactRequest {
@@ -38,6 +26,8 @@ pub struct SaveArtifactRequest {
     pub description: String,
     pub artifact_type: String,
     pub code: String,
+    #[serde(default)]
+    pub save_choice_snapshot: bool,
     pub tags: Option<String>,
     pub db_id: Option<String>,
     pub assistant_id: Option<i64>,
@@ -81,7 +71,11 @@ pub fn save_artifact_to_collection(
         icon: request.icon,
         description: request.description,
         artifact_type: request.artifact_type,
-        code: request.code,
+        code: if request.save_choice_snapshot {
+            archive::capture(&app_handle, &request.code).map_err(|e| format!("收藏候选快照：{e:#}"))?
+        } else {
+            request.code
+        },
         tags: request.tags,
         db_id: request.db_id,
         assistant_id: request.assistant_id,
@@ -109,28 +103,7 @@ pub fn get_artifacts_collection(
     let db = ArtifactsDatabase::new(&app_handle)
         .map_err(|e| format!("Database connection failed: {}", e))?;
 
-    let artifacts = db
-        .get_artifacts(artifact_type.as_deref())
-        .map_err(|e| format!("Failed to get artifacts: {}", e))?;
-
-    let items: Vec<ArtifactCollectionItem> = artifacts
-        .into_iter()
-        .map(|artifact| ArtifactCollectionItem {
-            id: artifact.id,
-            name: artifact.name,
-            icon: artifact.icon,
-            description: artifact.description,
-            artifact_type: artifact.artifact_type,
-            tags: artifact.tags,
-            created_time: artifact.created_time,
-            last_used_time: artifact.last_used_time,
-            use_count: artifact.use_count,
-            db_id: artifact.db_id,
-            assistant_id: artifact.assistant_id,
-        })
-        .collect();
-
-    Ok(items)
+    db.get_artifacts(artifact_type.as_deref()).map_err(|e| format!("Failed to get artifacts: {e}"))
 }
 
 #[tauri::command]
@@ -141,10 +114,26 @@ pub fn get_artifact_by_id(
     let db = ArtifactsDatabase::new(&app_handle)
         .map_err(|e| format!("Database connection failed: {}", e))?;
 
-    let artifact =
-        db.get_artifact_by_id(id).map_err(|e| format!("Failed to get artifact: {}", e))?;
+    load_collection_item(&app_handle, &db, id)
+}
 
-    Ok(artifact)
+fn load_collection_item(
+    app: &tauri::AppHandle, db: &ArtifactsDatabase, id: i64,
+) -> Result<Option<ArtifactCollection>, String> {
+    let Some(mut item) = db.get_artifact_by_id(id).map_err(|e| e.to_string())? else { return Ok(None) };
+    if item.artifact_type == "html" && item.code.starts_with(archive::REFERENCE) {
+        let code = archive::capture(app, &item.code).map_err(|e| format!("恢复旧收藏 {id}：{e:#}"))?;
+        let changed = db.conn.execute(
+            "UPDATE artifacts_collection SET code=?1 WHERE id=?2 AND code=?3",
+            rusqlite::params![code, id, item.code],
+        ).map_err(|e| e.to_string())?;
+        if changed == 0 {
+            return db.get_artifact_by_id(id).map_err(|e| e.to_string());
+        }
+        item.code = code;
+        crate::sync::schedule_sync_after_local_change(app);
+    }
+    Ok(Some(item))
 }
 
 #[tauri::command]
@@ -155,27 +144,7 @@ pub fn search_artifacts_collection(
     let db = ArtifactsDatabase::new(&app_handle)
         .map_err(|e| format!("Database connection failed: {}", e))?;
 
-    let artifacts =
-        db.search_artifacts(&query).map_err(|e| format!("Failed to search artifacts: {}", e))?;
-
-    let items: Vec<ArtifactCollectionItem> = artifacts
-        .into_iter()
-        .map(|artifact| ArtifactCollectionItem {
-            id: artifact.id,
-            name: artifact.name,
-            icon: artifact.icon,
-            description: artifact.description,
-            artifact_type: artifact.artifact_type,
-            tags: artifact.tags,
-            created_time: artifact.created_time,
-            last_used_time: artifact.last_used_time,
-            use_count: artifact.use_count,
-            db_id: artifact.db_id,
-            assistant_id: artifact.assistant_id,
-        })
-        .collect();
-
-    Ok(items)
+    db.search_artifacts(&query).map_err(|e| format!("Failed to search artifacts: {e}"))
 }
 
 #[tauri::command]
@@ -238,9 +207,7 @@ pub async fn open_artifact_window(
     let db = ArtifactsDatabase::new(&app_handle)
         .map_err(|e| format!("Database connection failed: {}", e))?;
 
-    let artifact = db
-        .get_artifact_by_id(artifact_id)
-        .map_err(|e| format!("Failed to get artifact: {}", e))?
+    let artifact = load_collection_item(&app_handle, &db, artifact_id)?
         .ok_or_else(|| "Artifact not found".to_string())?;
 
     db.increment_use_count(artifact_id)
@@ -352,6 +319,7 @@ pub async fn open_artifact_window(
             }
         }
         "html" => {
+            let is_snapshot = artifact.code.starts_with(archive::PREFIX);
             if let Some(window) = app_handle.get_webview_window("artifact") {
                 let _ = window.emit("artifact-log", format!("准备预览 {} 内容...", "html"));
                 let _ = window.emit(
@@ -362,15 +330,17 @@ pub async fn open_artifact_window(
                         "icon": artifact.icon,
                         "description": artifact.description,
                         "type": "html",
-                        "original_code": artifact.code.as_str(),
+                        "original_code": if is_snapshot { archive::PREFIX } else { artifact.code.as_str() },
                         "tags": artifact.tags,
                         "created_time": artifact.created_time,
                         "last_used_time": artifact.last_used_time,
                         "use_count": artifact.use_count,
                     }),
                 );
-                let _ = window
-                    .emit("artifact-log", format!("html content: {}", artifact.code.as_str()));
+
+                if !is_snapshot {
+                    let _ = window.emit("artifact-log", format!("html content: {}", artifact.code));
+                }
                 let _ = window.emit("artifact-success", format!("{} 预览已准备完成", "HTML"));
             }
         }

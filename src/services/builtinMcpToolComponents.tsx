@@ -1,4 +1,5 @@
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
+import InlineChoicesCard from "@/components/choices/InlineChoicesCard";
 import ArtifactToolCall from "@/components/mcp-tool-components/ArtifactToolCall";
 import FetchUrlToolCall from "@/components/mcp-tool-components/FetchUrlToolCall";
 import LoadMcpCatalogToolCall from "@/components/mcp-tool-components/LoadMcpCatalogToolCall";
@@ -19,6 +20,10 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
         return;
     }
     registered = true;
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.present-choices", label: "候选方案对比", match: [{ toolName: "present_choices" }],
+        priority: 100, render: props => <InlineChoicesCard {...props} />,
+    });
 
     mcpToolComponentRegistry.register("builtin", {
         id: "builtin.preview-code",

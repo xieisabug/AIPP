@@ -61,7 +61,7 @@ function groupResults(conversation: number, calls: MCPToolCall[], rows: Interact
         const owner = call.assistant_message_id ?? call.message_id;
         if (call.conversation_id !== conversation || !owner || represented.has(call.id)) continue;
         const pendingQuestion = call.tool_name === "ask_user_question" && call.status === "executing";
-        if (call.status !== "success" && !(call.tool_name === "preview_code" && call.status === "executing") && !pendingQuestion) continue;
+        if (call.status !== "success" && !((call.tool_name === "preview_code" || call.tool_name === "present_choices") && (call.status === "executing" || (call.tool_name === "present_choices" && call.status === "failed"))) && !pendingQuestion) continue;
         let report: string | undefined;
         if (call.tool_name === "report_progress") {
             try { report = JSON.parse(call.parameters)?.text; } catch { continue; }

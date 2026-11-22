@@ -419,6 +419,32 @@ struct AcpManualMcpBridge {
     selected_tools: Vec<AcpSelectedMcpTool>,
 }
 
+// The external clients expose a server-wide deadline. The bridge still applies the
+// ordinary 600-second read deadline per noninteractive call.
+pub(crate) const NATIVE_ANSWER_WINDOW_SECS: u64 = 24 * 60 * 60;
+
+fn is_question_name(name: &str) -> bool {
+    matches!(name, "ask_user_question" | "present_choices")
+}
+
+fn waits_for_answer(db: &MCPDatabase, tool: &AcpSelectedMcpTool) -> Result<bool, String> {
+    if !is_question_name(&tool.tool_name) { return Ok(false); }
+    let server = db.get_mcp_server(tool.server_id).map_err(|e| e.to_string())?;
+    Ok(server.is_builtin && server.command.as_deref() == Some("aipp:ui_interaction"))
+}
+
+pub(crate) fn native_answer_window(app: &tauri::AppHandle, payload: &str) -> Result<Option<u64>, String> {
+    let tools = parse_selected_mcp_tools(payload)?;
+    let mut questions = tools.iter().filter(|tool| is_question_name(&tool.tool_name)).peekable();
+    if questions.peek().is_some() {
+        let db = MCPDatabase::new(app).map_err(|e| e.to_string())?;
+        for tool in questions {
+            if waits_for_answer(&db, tool)? { return Ok(Some(NATIVE_ANSWER_WINDOW_SECS)); }
+        }
+    }
+    Ok(None)
+}
+
 impl AcpManualMcpBridge {
     fn handle_json_rpc(&mut self, request: serde_json::Value) -> Vec<serde_json::Value> {
         let id = request.get("id").cloned();
@@ -486,11 +512,14 @@ impl AcpManualMcpBridge {
     }
 
     fn list_tools(&mut self) -> Result<serde_json::Value, String> {
-        let tools = self
-            .loaded_mcp_tools()?
-            .iter()
-            .map(selected_tool_to_mcp_tool)
-            .collect::<Vec<_>>();
+        let mut tools = Vec::new();
+        for tool in self.loaded_mcp_tools()? {
+            let mut definition = selected_tool_to_mcp_tool(&tool);
+            if waits_for_answer(&self.db, &tool)? {
+                definition["_meta"] = json!({"aipp/waitsForAnswer": true});
+            }
+            tools.push(definition);
+        }
         Ok(json!({ "tools": tools }))
     }
 
@@ -519,6 +548,7 @@ impl AcpManualMcpBridge {
             self.conversation_id,
             tool.server_id,
             &tool.tool_name,
+            waits_for_answer(&self.db, &tool)?,
             args,
         )
     }
@@ -585,12 +615,13 @@ fn call_proxy_tool(
     conversation_id: i64,
     server_id: i64,
     tool_name: &str,
+    waits_for_answer: bool,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let mut stream = TcpStream::connect(proxy_addr)
         .map_err(|error| format!("Failed to connect AIPP MCP proxy: {error}"))?;
     stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(600)))
+        .set_read_timeout((!waits_for_answer).then(|| std::time::Duration::from_secs(600)))
         .map_err(|error| error.to_string())?;
     stream
         .set_write_timeout(Some(std::time::Duration::from_secs(30)))
@@ -680,6 +711,26 @@ fn sanitize_tool_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_choices_bridge_only_exempts_builtin_answer_tools_from_timeout() {
+        let db = MCPDatabase { conn: Connection::open_in_memory().unwrap() };
+        db.create_tables().unwrap();
+        let ui = db.upsert_mcp_server_with_builtin("ui", None, "stdio", Some("aipp:ui_interaction"), None, None, None, None, false, true, true, false, false).unwrap();
+        let other = db.upsert_mcp_server_with_builtin("other", None, "http", None, None, None, Some("https://example.invalid"), None, false, true, false, false, false).unwrap();
+        let make_tool = |id, server, name| serde_json::from_value(json!({
+            "tool_id": id, "server_id": server, "tool_name": name
+        })).unwrap();
+        let mut bridge = AcpManualMcpBridge { db, conversation_id: 1, filter_acp_native_duplicates: false,
+            proxy_addr: None, proxy_token: None, selected_tools: vec![
+                make_tool(1, ui, "present_choices"), make_tool(2, ui, "ask_user_question"),
+                make_tool(3, other, "present_choices"), make_tool(4, ui, "preview_code"),
+            ] };
+        let catalog = bridge.list_tools().unwrap();
+        let flags: Vec<_> = catalog["tools"].as_array().unwrap().iter()
+            .map(|tool| tool["_meta"]["aipp/waitsForAnswer"] == true).collect();
+        assert_eq!(flags, [true, true, false, false]);
+    }
 
     #[test]
     fn parse_selected_mcp_tools_flattens_enabled_manual_selection() {

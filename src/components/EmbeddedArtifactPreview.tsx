@@ -1,3 +1,4 @@
+import { SavedChoicePreview, readPreviewReference } from "@/components/choices/ChoicePreview";
 /**
  * 嵌入式 Artifact 预览组件
  * 可在任意窗口内嵌入，用于预览代码 artifacts
@@ -532,7 +533,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
                                 </div>
                             </div>
                         ) : previewType === 'html' || previewType === 'svg' || previewType === 'xml' ? (
-                            <iframe
+                            readPreviewReference(htmlContent) ? <SavedChoicePreview reference={readPreviewReference(htmlContent)!}/> : <iframe
                                 srcDoc={htmlContent}
                                 className="w-full h-full border-0 bg-background"
                                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"

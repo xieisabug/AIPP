@@ -620,6 +620,11 @@ pub async fn prepare_claude_mcp_bridge(
     let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id)?;
     proxy.token = mcp_scope.token().to_string();
     let selected_tools_file = mcp_scope.attach_selected_tools_file(&config.selected_mcp_tools_payload)?;
+    if let Some(seconds) = crate::acp_mcp_bridge::native_answer_window(app_handle, payload)? {
+        if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+            config.env_vars.entry("MCP_TOOL_TIMEOUT".into()).or_insert_with(|| (seconds * 1000).to_string());
+        }
+    }
     let mcp_config = build_claude_mcp_config(
         &bridge_command,
         &mcp_db_path,

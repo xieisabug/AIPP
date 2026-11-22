@@ -106,7 +106,7 @@ pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_
         Some("aipp:agent") => is_butler || !is_butler_only_agent_tool(tool_name),
         Some("aipp:superadmin") => is_butler,
         Some("aipp:ui_interaction") => {
-            matches!(tool_name, "ask_user_question" | "preview_file" | "preview_code")
+            matches!(tool_name, "ask_user_question" | "preview_file" | "preview_code" | "present_choices")
         }
         // 注入了就应直接可调用；每次使用值由占位符审批把关。
         Some(crate::vault::tool::COMMAND) => crate::vault::tool::is_tool(tool_name),
@@ -878,6 +878,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
         ].into_iter()).collect(),
         Some("ui_interaction") => vec![
+            BuiltinToolInfo {
+                name: "present_choices".into(),
+                description: "Present 2–6 versions of writing, images, HTML or workspace projects for comparison. The host collects the user’s selection and feedback. Emit titles before inline content.".into(),
+                input_schema: serde_json::from_str(include_str!("present_choices.schema.json")).expect("present_choices schema"),
+            },
             BuiltinToolInfo {
                 name: "ask_user_question".into(),
                 description: "Use this tool when you need to ask the user questions during execution. This allows gathering preferences, clarifying ambiguity, and getting implementation decisions. User answers are returned as tool results.".into(),
@@ -1803,8 +1808,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["ask_user_question", "preview_file", "preview_code"],
-            "UI interaction command should have 3 tools"
+            vec!["present_choices", "ask_user_question", "preview_file", "preview_code"]
         );
     }
 

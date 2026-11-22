@@ -7,6 +7,7 @@ use crate::mcp::builtin_mcp::builtin_command_id;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DeliveryTools {
     pub ask_user_question: bool,
+    pub present_choices: bool,
     pub preview_file: bool,
     pub preview_code: bool,
     /// `get_artifact_workspace` 与 `show_artifact` 都可用才算能发布 Artifact。
@@ -28,6 +29,7 @@ impl DeliveryTools {
             has("artifact", "get_artifact_workspace") && has("artifact", "show_artifact");
         Self {
             ask_user_question: has("ui_interaction", "ask_user_question"),
+            present_choices: has("ui_interaction", "present_choices"),
             preview_file: has("ui_interaction", "preview_file"),
             preview_code: has("ui_interaction", "preview_code"),
             artifact,
@@ -47,6 +49,9 @@ pub(crate) fn delivery_prompt(tools: DeliveryTools, unattended: bool) -> String 
         "用户指定的格式、交付渠道和已有文件优先。简短问答、进度沟通直接在聊天中回答。".into(),
     ];
 
+    if tools.present_choices {
+        lines.push("需要用户在 2–6 份实际文稿、图片或界面版本中拍板时，用 `present_choices` 发送候选并等待选择。已有文件或完整 Artifact 工程可以直接引用。飞书来源会收到提示，用户回到 AIPP 桌面的原会话作答。".into());
+    }
     if tools.preview_code {
         lines.push("讲解时可以边说边演示：交互或图示明显比文字好懂时（算法步骤、参数变化、布局效果、数据对比），用 `preview_code` 在聊天里放一个小演示，结论仍用文字说清；一两句话能说明白的不做演示。".into());
         let beyond_ask = if tools.ask_user_question {

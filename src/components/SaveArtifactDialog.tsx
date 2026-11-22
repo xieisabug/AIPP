@@ -1,3 +1,5 @@
+import type { ChoiceRef } from "./choices/ChoicePreview";
+import type { ChoiceCard } from "@/utils/presentChoices";
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useForm } from "react-hook-form";
@@ -26,6 +28,7 @@ interface SaveArtifactDialogProps {
     onClose: () => void;
     artifactType: string;
     code: string;
+    choiceReference?: ChoiceRef | null;
     initialDbId?: string;
     initialAssistantId?: number;
 }
@@ -35,6 +38,7 @@ export default function SaveArtifactDialog({
     onClose,
     artifactType,
     code,
+    choiceReference,
     initialDbId,
     initialAssistantId,
 }: SaveArtifactDialogProps) {
@@ -71,6 +75,7 @@ export default function SaveArtifactDialog({
                 description: data.description.trim(),
                 artifact_type: artifactType,
                 code,
+                ...(choiceReference ? { save_choice_snapshot: true } : {}),
                 tags: data.tags.trim() || null,
                 db_id: data.db_id.trim() || null,
                 assistant_id: data.assistant_id && data.assistant_id !== "none" ? parseInt(data.assistant_id, 10) : null,
@@ -100,9 +105,20 @@ export default function SaveArtifactDialog({
 
         setIsGeneratingMetadata(true);
         try {
+            let metadataCode = code;
+            let metadataType = artifactType;
+            if (choiceReference) {
+                const record = await invoke<ChoiceCard | null>("get_present_choices", {
+                    conversationId: choiceReference.conversationId, requestId: choiceReference.requestId,
+                });
+                const candidate = record?.request.candidates.find(c => c.id === choiceReference.candidateId);
+                if (candidate?.content == null) throw Error("候选快照内容不可用");
+                metadataCode = candidate.content;
+                metadataType = candidate.language || candidate.type;
+            }
             const metadata = await invoke<ArtifactMetadata>("generate_artifact_metadata", {
-                artifactType,
-                code,
+                artifactType: metadataType,
+                code: metadataCode,
             });
 
             const categoryKey = metadata.emoji_category || "objects";
@@ -152,7 +168,7 @@ export default function SaveArtifactDialog({
                     <DialogTitle>保存 Artifact 到合集</DialogTitle>
                     <DialogDescription asChild>
                         <div>
-                            <span>将当前的 {artifactType} artifact 保存到您的合集中，方便以后快速访问。</span>
+                            <span>{choiceReference ? "收藏当前候选的快照。工程会一并保存源文件、图片和已有的构建产物。" : <>将当前的 {artifactType} artifact 保存到您的合集中，方便以后快速访问。</>}</span>
                             <div className="mt-2">
                                 <Button
                                     type="button"
@@ -327,7 +343,7 @@ export default function SaveArtifactDialog({
                             </FormControl>
                         </FormItem>
 
-                        <FormItem className="space-y-3">
+                        {!choiceReference && <FormItem className="space-y-3">
                             <FormLabel className="flex items-center font-semibold text-sm text-foreground">
                                 代码预览
                             </FormLabel>
@@ -336,7 +352,7 @@ export default function SaveArtifactDialog({
                                     {code}
                                 </pre>
                             </FormControl>
-                        </FormItem>
+                        </FormItem>}
                     </form>
                 </Form>
 

@@ -254,6 +254,7 @@ const InputArea = React.memo(
                                 language: item.artifact_type,
                                 code: item.code,
                                 title: item.name,
+                                collectionId: artifactId,
                             });
                             return;
                         }

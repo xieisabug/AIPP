@@ -47,7 +47,7 @@ export default function MobileShell() {
         const showPreview = (event: Event) => {
             const detail = (event as CustomEvent<MobilePreview>).detail;
             if (!detail || typeof detail.language !== "string" || typeof detail.code !== "string") return;
-            setPreview(previous => previous?.language === detail.language && previous.code === detail.code && previous.title === detail.title && previous.collectionId === detail.collectionId ? previous : detail);
+            setPreview(previous => previous?.language === detail.language && previous.code === detail.code && previous.title === detail.title && previous.collectionId === detail.collectionId && previous.conversationId === detail.conversationId ? previous : detail);
             navigate(new CustomEvent("aipp:mobile-navigate", { detail: "preview" }));
         };
         window.addEventListener("aipp:mobile-preview", showPreview);

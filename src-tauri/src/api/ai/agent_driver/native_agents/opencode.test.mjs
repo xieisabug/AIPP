@@ -31,7 +31,7 @@ test('should authenticate the owned OpenCode server and merge MCP without replac
   const fixture = openCodeFixture();
   const mcp = { command: 'aipp', args: ['--aipp-acp-mcp-bridge'], env: { AIPP_SCOPE: 'synthetic-token' } };
   try {
-    const runtime = await openOpenCode({ cwd: process.cwd(), session: 's1', mcp }, () => {}, fixture);
+    const runtime = await openOpenCode({ cwd: process.cwd(), session: 's1', mcp, mcpAnswerTimeoutMs: 86400000 }, () => {}, fixture);
     try {
       const environment = fixture.launches[0][2].env;
       const config = JSON.parse(environment.OPENCODE_CONFIG_CONTENT);
@@ -39,6 +39,7 @@ test('should authenticate the owned OpenCode server and merge MCP without replac
       assert.equal(config.mcp.existing.url, 'https://example.invalid/mcp');
       assert.deepEqual(config.mcp.aipp.command, ['aipp', '--aipp-acp-mcp-bridge']);
       assert.deepEqual(config.mcp.aipp.environment, mcp.env);
+      assert.equal(config.mcp.aipp.timeout, 86400000);
       assert.ok(environment.OPENCODE_SERVER_PASSWORD.length >= 32);
       assert.equal(fixture.requests[0].headers.Authorization, `Basic ${Buffer.from(`opencode:${environment.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`);
       assert.equal(fixture.launches[0][1].join(' ').includes('synthetic-token'), false);

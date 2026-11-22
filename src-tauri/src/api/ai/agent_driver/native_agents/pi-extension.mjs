@@ -50,10 +50,10 @@ export default async function aippExtension(pi) {
           if (response.error) waiter.reject(new Error(JSON.stringify(response.error)));
           else waiter.resolve(response.result);
       }, fail);
-      const call = (method, params) => new Promise((resolve, reject) => {
+      const call = (method, params, waitsForAnswer = false) => new Promise((resolve, reject) => {
         if (failed) return reject(failed);
         const id = ++sequence;
-        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`AIPP MCP ${method} timed out`)); }, method === 'tools/call' ? 600000 : 30000);
+        const timer = waitsForAnswer ? undefined : setTimeout(() => { pending.delete(id); reject(new Error(`AIPP MCP ${method} timed out`)); }, method === 'tools/call' ? 600000 : 30000);
         pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
         child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
       });
@@ -66,7 +66,7 @@ export default async function aippExtension(pi) {
           pi.registerTool({ name: tool.name, label: tool.name, description: tool.description || tool.name,
             parameters: Type.Unsafe({ ...tool.inputSchema, type: tool.inputSchema?.type || 'object', properties: tool.inputSchema?.properties || {} }),
             async execute(_id, params) {
-              const result = await call('tools/call', { name: tool.name, arguments: params });
+              const result = await call('tools/call', { name: tool.name, arguments: params }, tool._meta?.['aipp/waitsForAnswer'] === true);
               if (result.isError) throw new Error(JSON.stringify(result.content));
               return { content: result.content, details: {} };
             },

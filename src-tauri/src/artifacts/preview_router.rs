@@ -239,6 +239,12 @@ pub async fn run_artifacts(
     artifact_key: Option<String>,
     entry_file: Option<String>,
 ) -> Result<String, AppError> {
+    if let Some(raw) = input_str.strip_prefix("AIPP_CHOICE_PREVIEW_V1\n") {
+        let reference: serde_json::Value = serde_json::from_str(raw).map_err(|e|AppError::ParseError(format!("候选预览引用无效：{e}")))?;
+        if conversation_id.is_none() || reference["conversationId"].as_i64() != conversation_id {
+            return Err(AppError::RunCodeError("候选预览引用不属于当前会话".into()));
+        }
+    }
     let target_window = preview_cache_key(source_window.as_deref());
     let request_id = Uuid::new_v4().to_string();
 

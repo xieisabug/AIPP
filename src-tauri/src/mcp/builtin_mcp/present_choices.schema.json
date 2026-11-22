@@ -1,0 +1,124 @@
+{
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Comparison card title, e.g. '选择第三章开篇风格' or '选择登录页 UI 方案'."
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Optional brief guidance shown above the candidates."
+    },
+    "expected_count": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 6,
+      "description": "Emit BEFORE `candidates`. Total number of candidates you are about to generate (2-6), so the UI can show placeholder loading slots immediately."
+    },
+    "candidate_titles": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 6,
+      "items": {
+        "type": "string"
+      },
+      "description": "Optional. Emit BEFORE `candidates`. Ordered short titles for each planned candidate so loading placeholders display meaningful labels before content arrives."
+    },
+    "selection_mode": {
+      "type": "string",
+      "enum": [
+        "single",
+        "multiple"
+      ],
+      "default": "single"
+    },
+    "layout": {
+      "type": "string",
+      "enum": [
+        "tabs",
+        "split",
+        "grid"
+      ],
+      "default": "tabs",
+      "description": "Initial layout: 'tabs' for long text/full pages, 'split' for side-by-side comparison, 'grid' for compact cards/images."
+    },
+    "allow_feedback": {
+      "type": "boolean",
+      "default": true,
+      "description": "Allow user to attach an optional refinement note when confirming or rejecting."
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique stable identifier, e.g. 'v1', 'minimal_dark'."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short display title of this version."
+          },
+          "summary": {
+            "type": "string",
+            "description": "Optional one-line highlight/style note."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "markdown",
+              "text",
+              "html",
+              "image",
+              "artifact"
+            ],
+            "description": "Renderer format. Use html for a self-contained page; use artifact for a workspace project with its entry and companion files."
+          },
+          "content": {
+            "type": "string",
+            "description": "Inline content (markdown/text/html or base64/data URL image)."
+          },
+          "url": {
+            "type": "string",
+            "description": "Local absolute file path (preferred for large HTML/text/images written via write_file) or URL."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional code language when type='text' or artifact hint."
+          },
+          "artifact_key": {
+            "type": "string",
+            "description": "Required when type='artifact'. Relative artifact key under current conversation artifact workspace."
+          },
+          "entry_file": {
+            "type": "string",
+            "description": "Required for artifact. Entry path relative to the project root identified by artifact_key; keep sibling modules, styles, assets and project configuration in that root."
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "type"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "title",
+    "candidates"
+  ],
+  "additionalProperties": false
+}

@@ -288,8 +288,27 @@ pub(crate) async fn try_deliver_ask_user_question_to_feishu(
         return Ok(false);
     };
     let card = build_ask_user_question_card(event);
+    deliver_interaction_card(app_handle, conversation_id, &config, &target, card).await
+}
+
+pub(crate) async fn deliver_choice_notice(app_handle: &AppHandle, conversation_id: i64, title: &str, summary: &str) -> Result<bool,String> {
+    let config = load_runtime_config(app_handle).await?;
+    if !config.enabled || !config.butler_enabled { return Ok(false); }
+    let Some(scope) = find_active_relay_scope(app_handle, conversation_id, RELAY_ORIGIN_FEISHU)? else {
+        return Ok(false);
+    };
+    let target = ChannelLinkTarget {
+        reply_to_message_id: Some(scope.anchor_external_message_id),
+        external_chat_id: scope.external_chat_id,
+        external_user_id: scope.external_user_id,
+    };
+    let card=json!({"schema":"2.0","body":{"elements":[{"tag":"div","text":{"tag":"plain_text","content":format!("{title}\n\n{summary}\n\n请到 AIPP 桌面端会话 #{conversation_id} 选择。")}}]}});
+    deliver_interaction_card(app_handle,conversation_id,&config,&target,card).await
+}
+
+async fn deliver_interaction_card(app_handle:&AppHandle, conversation_id:i64, config:&FeishuRuntimeConfig, target:&ChannelLinkTarget, card:Value)->Result<bool,String>{
     let external_message_id =
-        send_interactive_card_to_target(app_handle, &config, &target, &card).await?;
+        send_interactive_card_to_target(app_handle, config, target, &card).await?;
 
     insert_external_link(
         app_handle,

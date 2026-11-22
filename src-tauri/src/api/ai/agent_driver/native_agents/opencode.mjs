@@ -5,7 +5,8 @@ export async function openOpenCode(config, emit, dependencies = {}) {
   const fetch = dependencies.fetch || globalThis.fetch;
   const password = randomBytes(24).toString('hex');
   const nativeConfig = process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : {};
-  if (config.mcp) nativeConfig.mcp = { ...nativeConfig.mcp, aipp: { type: 'local', command: [config.mcp.command, ...config.mcp.args], environment: config.mcp.env, enabled: true } };
+  if (config.mcp) nativeConfig.mcp = { ...nativeConfig.mcp, aipp: { type: 'local', command: [config.mcp.command, ...config.mcp.args], environment: config.mcp.env, enabled: true,
+    ...(config.mcpAnswerTimeoutMs ? { timeout: config.mcpAnswerTimeoutMs } : {}) } };
   const child = (dependencies.launch || launch)(config.command || 'opencode', ['serve', '--hostname=127.0.0.1', '--port=0'], {
     cwd: config.cwd,
     env: { ...process.env, OPENCODE_SERVER_PASSWORD: password,
