@@ -568,6 +568,13 @@ fn execute_dynamic_mcp_tool(
         std::collections::HashSet::new()
     };
 
+    let mut tool_catalog = db.list_tool_catalog(None).map_err(|e| format!("Failed to list MCP tool catalog: {e}"))?;
+    let kind = conversation_id.and_then(|id| get_conversation_kind(app_handle, id));
+    if kind.as_deref() != Some(templates::GROUP_MEMBER_KIND) {
+        let agent_servers: std::collections::HashSet<_> = db.get_mcp_servers().map_err(|e| e.to_string())?
+            .into_iter().filter(|s| s.is_builtin && s.command.as_deref() == Some("aipp:agent")).map(|s| s.id).collect();
+        tool_catalog.retain(|t| t.tool_name != "read_group_history" || !agent_servers.contains(&t.server_id));
+    }
     let hidden_search_server_ids: std::collections::HashSet<i64> = if cfg!(mobile) {
         db.get_mcp_servers().map_err(|e| e.to_string())?.into_iter()
             .filter(|server| crate::api::mobile_capability::hidden_mobile_tool(
@@ -586,9 +593,6 @@ fn execute_dynamic_mcp_tool(
             let catalogs = db
                 .list_server_capability_catalog()
                 .map_err(|e| format!("Failed to list MCP toolset catalog: {}", e))?;
-            let tool_catalog = db
-                .list_tool_catalog(None)
-                .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
             let mut matched_servers = Vec::new();
             for server in catalogs {
                 if server.summary_generated_at.is_none() || !access.server(server.server_id) {
@@ -662,9 +666,6 @@ fn execute_dynamic_mcp_tool(
                 .ok_or_else(|| "load_mcp_tool requires conversation context".to_string())?;
             let server_filter =
                 args.get("server_name").and_then(|v| v.as_str()).map(|v| v.to_lowercase());
-            let tool_catalog = db
-                .list_tool_catalog(None)
-                .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
             let mut selected = Vec::new();
             let mut selected_ids = std::collections::HashSet::new();
 
@@ -1689,7 +1690,7 @@ pub async fn execute_aipp_builtin_tool(
                         .map_err(|e|format!("search_own_history conversation={id}: {e:#}"))?;
                     serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
                 }
-                "message_bot" | "search_bot_history" | "read_bot_message_context" | "preview_message" | "report_progress"
+                "message_bot" | "search_bot_history" | "read_bot_message_context" | "read_group_history" | "preview_message" | "report_progress"
                 | "read_work_context" | "continue_work" | "resume_work"
                 | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" | "stop_assistant_exchange" => {
                     let id = conversation_id.ok_or("此工具需要管家联系人会话")?;

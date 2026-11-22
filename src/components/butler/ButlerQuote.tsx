@@ -1,6 +1,7 @@
 import { createContext, useContext } from "react";
 import { Quote, X } from "lucide-react";
 import type { Message } from "@/data/Conversation";
+import { visibleText } from "@/utils/turnContext";
 import IconButton from "@/components/IconButton";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { useMessageActionSurface } from "@/components/message-item/messageActionSurface";
@@ -39,8 +40,15 @@ export function quoteExcerpt(text: string, limit = 60): string {
     return plain.length > limit ? `${plain.slice(0, limit)}…` : plain;
 }
 
-/** 已完成、有正文的助手回复可以被引用。 */
+/** 用户发言和已完成的助手回复可以被引用。 */
 export function isQuotableMessage(message: Message): boolean {
+    if (message.message_type === "user") {
+        try {
+            const origin = JSON.parse(message.metadata_json || "{}")?.origin;
+            if (["internal", "scheduled_task", "butler_peer"].includes(origin)) return false;
+        } catch { /* Older messages can lack valid metadata. */ }
+        return message.id > 0 && visibleText(message.content).trim() !== "";
+    }
     return (message.message_type === "response" || message.message_type === "assistant")
         && message.id > 0 && message.finish_time !== null && message.content.trim() !== "";
 }

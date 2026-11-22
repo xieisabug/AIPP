@@ -25,8 +25,6 @@ pub const MAX_DISCUSSION_ROUNDS: i64 = 5;
 const INPUT_MESSAGE_LIMIT: usize = 80;
 const INPUT_CHAR_LIMIT: usize = 60_000;
 const INPUT_PER_MESSAGE_CHARS: usize = 20_000;
-/// 引用别人消息时，在成员输入里保留的原文片段长度。
-const QUOTE_EXCERPT_CHARS: usize = 60;
 /// 成员引用原话时，向前查找的群消息条数。
 const QUOTE_SEARCH_LIMIT: i64 = 200;
 pub const EVERYONE_MENTIONS: [&str; 2] = ["所有人", "全体成员"];
@@ -293,6 +291,49 @@ pub fn members(conn: &Connection, group: i64) -> Result<Vec<Member>> {
     collect(conn, &format!("SELECT {MEMBER_COLUMNS} FROM butler_chat_group_member WHERE group_id=?1 ORDER BY id"), [group], member_row)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRequest {
+    query: Option<String>,
+    before_seq: Option<i64>,
+    limit: Option<usize>,
+}
+
+pub fn read_history(conn: &Connection, conversation: i64, request: HistoryRequest) -> Result<serde_json::Value> {
+    let (group, joined_after): (i64, i64) = conn.query_row(
+        "SELECT group_id,joined_after FROM butler_chat_group_member WHERE conversation_id=?1 AND active=1",
+        [conversation], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.context("只有当前群的在群成员可以查看发言")?;
+    let limit = request.limit.unwrap_or(15);
+    ensure!((1..=50).contains(&limit), "limit 须为 1 至 50");
+    let before = request.before_seq.unwrap_or(i64::MAX);
+    ensure!(before > 0, "before_seq 须为正整数");
+    let query = request.query.as_deref().map(str::trim);
+    if let Some(query) = query {
+        ensure!((1..=512).contains(&query.chars().count()), "query 须为 1 至 512 个字符");
+    }
+    let needle = query.map(str::to_lowercase);
+    let mut stmt = conn.prepare(&format!("{} WHERE group_id=?1 AND seq>?2 AND seq<?3 AND kind='message' ORDER BY seq DESC", public_messages_sql()))?;
+    let rows = stmt.query_map(params![group, joined_after, before], public_message_row)?;
+    let mut messages = Vec::new();
+    let mut chars = 0;
+    let mut oldest = None;
+    let mut next = None;
+    for row in rows {
+        let row = row?;
+        if needle.as_ref().is_some_and(|needle| !row.body.to_lowercase().contains(needle)) { continue; }
+        chars += row.body.chars().count();
+        if messages.len() == limit || (!messages.is_empty() && chars > INPUT_CHAR_LIMIT) {
+            next = oldest;
+            break;
+        }
+        oldest = Some(row.seq);
+        messages.push(serde_json::json!({"seq":row.seq,"speaker":speaker(&row),"body":row.body,
+            "reply_to":row.reply_to,"created_at":row.created_at}));
+    }
+    messages.reverse();
+    Ok(serde_json::json!({"messages":messages,"next_before_seq":next}))
+}
+
 pub fn active_members(conn: &Connection, group: i64) -> Result<Vec<Member>> {
     Ok(members(conn, group)?.into_iter().filter(|m| m.active).collect())
 }
@@ -303,26 +344,31 @@ pub fn member(conn: &Connection, id: i64) -> Result<Member> {
 }
 
 pub fn message(conn: &Connection, group: i64, seq: i64) -> Result<Message> {
-    conn.query_row(&format!("SELECT {MESSAGE_COLUMNS} FROM butler_chat_group_message WHERE group_id=?1 AND seq=?2"),
-        params![group, seq], message_row).optional()?.with_context(|| format!("群聊 #{group} 的消息 #{seq} 不存在"))
+    message_or_none(conn, group, seq)?.with_context(|| format!("群聊 #{group} 的消息 #{seq} 不存在"))
+}
+
+fn public_messages_sql() -> String {
+    format!("SELECT {MESSAGE_COLUMNS},source.content,source.metadata_json FROM butler_chat_group_message
+        LEFT JOIN message source ON source.id=source_message_id AND source.conversation_id=source_conversation_id")
+}
+
+fn public_message_row(r: &Row<'_>) -> rusqlite::Result<Message> {
+    let mut row = message_row(r)?;
+    if let (Some(body), Some(meta)) = (r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?) {
+        if row.body == body.trim() {
+            if let Some(text) = super::butler_execution::agent_final_text(&body, Some(&meta)) {
+                row.body = text.trim().to_owned();
+            }
+        }
+    }
+    Ok(row)
 }
 
 /// 按时间正序返回最新一页；`before` 用于向上翻页。
 pub fn messages(conn: &Connection, group: i64, before: Option<i64>, limit: usize) -> Result<Vec<Message>> {
     ensure!((1..=200).contains(&limit), "群消息分页参数无效：limit={limit}");
-    let mut rows = collect(conn, &format!("SELECT {MESSAGE_COLUMNS},source.content,source.metadata_json FROM butler_chat_group_message
-        LEFT JOIN message source ON source.id=source_message_id AND source.conversation_id=source_conversation_id
-        WHERE group_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"), params![group, before.unwrap_or(i64::MAX), limit as i64], |r| {
-        let mut row = message_row(r)?;
-        if let (Some(body), Some(meta)) = (r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?) {
-            if row.body == body.trim() {
-                if let Some(text) = super::butler_execution::agent_final_text(&body, Some(&meta)) {
-                    row.body = text.trim().to_owned();
-                }
-            }
-        }
-        Ok(row)
-    })?;
+    let mut rows = collect(conn, &format!("{} WHERE group_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3", public_messages_sql()),
+        params![group, before.unwrap_or(i64::MAX), limit as i64], public_message_row)?;
     rows.reverse();
     Ok(rows)
 }
@@ -344,8 +390,8 @@ pub fn interaction_turns(conn: &Connection, group: i64) -> Result<Vec<Interactio
 }
 
 fn messages_between(conn: &Connection, group: i64, after: i64, through: i64) -> Result<Vec<Message>> {
-    collect(conn, &format!("SELECT {MESSAGE_COLUMNS} FROM butler_chat_group_message
-        WHERE group_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq"), params![group, after, through], message_row)
+    collect(conn, &format!("{} WHERE group_id=?1 AND seq>?2 AND seq<=?3 ORDER BY seq", public_messages_sql()),
+        params![group, after, through], public_message_row)
 }
 
 /// 联系人列表用的最后一条可见消息。
@@ -632,7 +678,20 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
     if t.state != "queued" {
         return Ok(Start::Skipped);
     }
-    let m = member(&tx, t.member_id)?;
+    let mut m = member(&tx, t.member_id)?;
+    // 用户停止时，原生进程可能还在收尾。下一轮开始前再检查上次输入对应的持久化输出。
+    let previous = tx.query_row(&format!("SELECT {TURN_COLUMNS} FROM butler_chat_group_turn
+        WHERE member_id=?1 AND id<?2 AND input_through>?3 AND state IN ('cancelled','failed')
+        ORDER BY id DESC LIMIT 1"), params![m.id, id, m.delivered_through], turn_row).optional()?;
+    let mut background_through = None;
+    if let Some(previous) = previous {
+        if received_input(&tx, &previous, &m)? {
+            confirm_delivery(&tx, &previous)?;
+            m = member(&tx, t.member_id)?;
+        } else {
+            background_through = previous.input_through;
+        }
+    }
     // 跳过的回复也算这一轮说完了，讨论可能因此进入下一轮。
     let skip = |tx: &Connection, state: &str| -> Result<()> {
         tx.execute("UPDATE butler_chat_group_turn SET state=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, state])?;
@@ -657,7 +716,7 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
         tx.commit()?;
         return Ok(Start::Skipped);
     }
-    let input = format_input(&tx, &room, &delta)?;
+    let input = format_input(&tx, &room, &delta, t.trigger_seq, background_through)?;
     tx.execute("UPDATE butler_chat_group_turn SET state='running', input_through=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1",
         params![id, room.seq])?;
     let started = turn(&tx, id)?;
@@ -672,8 +731,7 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
     Ok(Start::Run { turn: started, member: m, group: room, input, peers })
 }
 
-/// 把本次群消息写入成员会话。只有仍在进行的回复可以写入；写入成功后才推进成员的读取位置，
-/// 失败或被停止的回复不会让成员“跳过”这些消息。
+/// 写入本地执行记录。原生会话此时可能还没启动，读取位置须等实际输出确认。
 pub fn write_turn_input(conn: &mut Connection, id: i64, conversation: i64, text: &str, model_id: Option<i64>, model: Option<&str>) -> Result<i64> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let t = turn(&tx, id)?;
@@ -688,7 +746,6 @@ pub fn write_turn_input(conn: &mut Connection, id: i64, conversation: i64, text:
         VALUES(?1,'user',?2,?3,?4,?5,0,0,0,?6)", params![conversation, text, stamp, model_id, model, metadata.to_string()])?;
     let input = tx.last_insert_rowid();
     tx.execute("UPDATE butler_chat_group_turn SET input_message_id=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, input])?;
-    tx.execute("UPDATE butler_chat_group_member SET delivered_through=max(delivered_through,?2) WHERE id=?1", params![m.id, through])?;
     tx.execute("UPDATE conversation SET updated_time=?1 WHERE id=?2", params![stamp, conversation])?;
     tx.commit()?;
     Ok(input)
@@ -755,6 +812,26 @@ pub enum Outcome {
     Failed(String),
 }
 
+fn confirm_delivery(conn: &Connection, t: &Turn) -> Result<()> {
+    if let (Some(_), Some(through)) = (t.input_message_id, t.input_through) {
+        conn.execute("UPDATE butler_chat_group_member SET delivered_through=max(delivered_through,?2) WHERE id=?1",
+            params![t.member_id, through])?;
+    }
+    Ok(())
+}
+
+/// 空回复占位和本地报错都不能证明收到输入。只查看该成员这次输入至下一次输入之间的输出。
+fn received_input(conn: &Connection, t: &Turn, m: &Member) -> Result<bool> {
+    let Some(input) = t.input_message_id else { return Ok(false); };
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM message WHERE conversation_id=?1 AND id>?2
+        AND id<coalesce((SELECT min(input_message_id) FROM butler_chat_group_turn
+            WHERE member_id=?3 AND input_message_id>?2),9223372036854775807)
+        AND (message_type='tool_result' OR (message_type IN ('assistant','response','reasoning') AND
+            (trim(content)!='' OR coalesce(trim(tool_calls_json),'') NOT IN ('','null','[]')))
+            OR CASE WHEN json_valid(metadata_json) THEN json_array_length(metadata_json,'$.agent_activities')>0 END))",
+        params![m.conversation_id, input, m.id], |r| r.get(0))?)
+}
+
 #[derive(Debug, Default)]
 pub struct Finished {
     pub reply: Option<Message>,
@@ -771,6 +848,9 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
     }
     let m = member(&tx, t.member_id)?;
     let mut finished = Finished::default();
+    if !matches!(outcome, Outcome::Failed(_)) || received_input(&tx, &t, &m)? {
+        confirm_delivery(&tx, &t)?;
+    }
     match outcome {
         Outcome::Reply(body) => {
             // 回复开头的 `[[QUOTE:原话]]` 是成员在引用某条群消息：去掉标记，找到那条消息后记为回复对象。
@@ -973,14 +1053,6 @@ pub fn parse_mentions(body: &str, members: &[Member]) -> Vec<i64> {
     result
 }
 
-fn excerpt(text: &str, limit: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= limit {
-        return flat;
-    }
-    format!("{}…", flat.chars().take(limit).collect::<String>())
-}
-
 fn speaker(message: &Message) -> String {
     if message.from_user() { "用户".to_string() } else { message.sender_name.clone() }
 }
@@ -993,14 +1065,14 @@ fn clip_body(body: &str) -> String {
 }
 
 /// 成员看到的是一段普通的聊天记录：谁说了什么、回复了谁。不包含任何调度字段。
-fn format_input(conn: &Connection, group: &Group, delta: &[Message]) -> Result<String> {
+fn format_input(conn: &Connection, group: &Group, delta: &[Message], trigger_seq: i64, background_through: Option<i64>) -> Result<String> {
     let mut blocks = Vec::new();
     let mut size = 0usize;
     for message in delta.iter().rev() {
         let block = if message.kind == "message" {
             let quote = match message.reply_to {
                 Some(seq) => match message_or_none(conn, group.id, seq)? {
-                    Some(quoted) => format!("（回复 {}：「{}」）", speaker(&quoted), excerpt(&quoted.body, QUOTE_EXCERPT_CHARS)),
+                    Some(quoted) => format!("（回复 {}：「{}」）", speaker(&quoted), quoted.body),
                     None => String::new(),
                 },
                 None => String::new(),
@@ -1011,11 +1083,13 @@ fn format_input(conn: &Connection, group: &Group, delta: &[Message]) -> Result<S
             let body = message.body.strip_prefix('你').map(|rest| format!("用户{rest}")).unwrap_or_else(|| message.body.clone());
             format!("〔系统〕{body}")
         };
-        size += block.chars().count();
-        if !blocks.is_empty() && (blocks.len() >= INPUT_MESSAGE_LIMIT || size > INPUT_CHAR_LIMIT) {
-            break;
+        let chars = block.chars().count();
+        if !blocks.is_empty() && message.seq != trigger_seq && (blocks.len() >= INPUT_MESSAGE_LIMIT || size + chars > INPUT_CHAR_LIMIT) {
+            if message.seq < trigger_seq { break; }
+            continue;
         }
-        blocks.push(block);
+        size += chars;
+        blocks.push((message.seq, block));
     }
     let omitted = delta.len() - blocks.len();
     blocks.reverse();
@@ -1023,13 +1097,19 @@ fn format_input(conn: &Connection, group: &Group, delta: &[Message]) -> Result<S
     if omitted > 0 {
         text.push_str(&format!("（更早的 {omitted} 条群消息未展开）\n\n"));
     }
-    text.push_str(&blocks.join("\n\n"));
+    for (i, (seq, block)) in blocks.into_iter().enumerate() {
+        if i > 0 { text.push_str("\n\n"); }
+        if background_through.is_some_and(|through| seq <= through && seq < trigger_seq) {
+            text.push_str("〔此前群聊背景，不重新执行旧请求〕");
+        }
+        text.push_str(&block);
+    }
     Ok(text)
 }
 
 fn message_or_none(conn: &Connection, group: i64, seq: i64) -> Result<Option<Message>> {
-    Ok(conn.query_row(&format!("SELECT {MESSAGE_COLUMNS} FROM butler_chat_group_message WHERE group_id=?1 AND seq=?2"),
-        params![group, seq], message_row).optional()?)
+    Ok(conn.query_row(&format!("{} WHERE group_id=?1 AND seq=?2", public_messages_sql()),
+        params![group, seq], public_message_row).optional()?)
 }
 
 #[cfg(test)]

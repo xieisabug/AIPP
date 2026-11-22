@@ -68,7 +68,7 @@ pub fn is_peer_tool(name: &str) -> bool {
     super::butler_assistant_tools::is_tool(name) || super::butler_work::is_tool(name) || matches!(
         name,
         "message_bot" | "search_own_history" | "search_bot_history" | "read_bot_message_context"
-            | "preview_message" | "report_progress"
+            | "preview_message" | "report_progress" | "read_group_history"
     )
 }
 
@@ -136,6 +136,17 @@ pub async fn tool(
     }
     if super::butler_work::is_tool(name) {
         return super::butler_work::tool(app, current, name, args).await;
+    }
+    if name == "read_group_history" {
+        ensure!(owner.conversation_kind == crate::db::butler_group::MEMBER_KIND, "只有群成员能查本群发言");
+        let request = serde_json::from_value(args.clone())?;
+        return tokio::task::spawn_blocking(move || {
+            let mut conn = db.get_connection()?;
+            let tx = conn.transaction()?;
+            let result = crate::db::butler_group::read_history(&tx, current, request)?;
+            tx.commit()?;
+            Ok(result)
+        }).await?;
     }
     let names = bot_names(app).await?;
     match name {

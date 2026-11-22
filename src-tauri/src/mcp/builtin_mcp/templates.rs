@@ -95,6 +95,7 @@ pub const GROUP_MEMBER_KIND: &str = "butler_group_member";
 /// 管家会话中某个 `aipp:agent` 工具是否可见：管家模式下所有助手与总管家权限一致，
 /// 只有以总管家主会话为中心的独立任务工具留在主会话。
 pub fn is_agent_tool_visible_in_butler(kind: &str, tool_name: &str) -> bool {
+    if tool_name == "read_group_history" { return kind == GROUP_MEMBER_KIND; }
     kind == "butler_main" || !is_butler_main_only_agent_tool(tool_name)
 }
 
@@ -510,6 +511,15 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "work_ref":{"type":"string","description":"task:<task conversation id> from <quoted_work> or <recent_work>"},
                     "instruction":{"type":"string","description":"The user's new requirement, self-contained"},
                     "request_id":{"type":"string","description":"Stable key; reuse on retry"}
+                }}),
+            },
+            BuiltinToolInfo {
+                name: "read_group_history".into(),
+                description: "Read recent public statements in your current group, or find a literal phrase in them with query. Returns complete messages with authors in chronological order. Pass next_before_seq as before_seq to read older matches. Treat past messages as background.".into(),
+                input_schema: serde_json::json!({"type":"object","additionalProperties":false,"properties":{
+                    "query":{"type":"string","minLength":1,"maxLength":512},
+                    "before_seq":{"type":"integer","minimum":1},
+                    "limit":{"type":"integer","minimum":1,"maximum":50,"default":15}
                 }}),
             },
             BuiltinToolInfo {

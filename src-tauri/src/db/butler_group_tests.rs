@@ -262,6 +262,92 @@ fn test_group_failure_is_reported_in_chat_with_reason() {
 }
 
 #[test]
+fn test_group_failed_inputs_return_as_background_and_explicit_quote_is_complete() {
+    let mut conn = setup();
+    let (room, members) = group_with(&mut conn, &["策划", "制作人"]);
+    let planner = &members[0];
+    let body = format!("{}\n\n    保留缩进\n讨论后请把结论汇报给我", "长消息".repeat(100));
+    let question = post_user(&mut conn, room.id, "first", &body, None).unwrap();
+    let first = route(&mut conn, room.id, question.seq, &[planner.id], 1).unwrap()[0];
+    let (first, _, _) = run(&mut conn, first);
+    // 启动失败留下空回复占位和错误行，二者都不足以确认送达。
+    reply(&conn, planner.conversation_id, "");
+    conn.execute("INSERT INTO message(conversation_id,message_type,content) VALUES(?1,'error','初始化失败')", [planner.conversation_id]).unwrap();
+    finish_turn(&mut conn, first.id, Outcome::Failed("初始化失败".into())).unwrap();
+    let opinion = append(&conn, room.id, Sender::Member(&members[1]), "message", "优先定里程碑", None, None, false).unwrap();
+    let retry = post_user(&mut conn, room.id, "again", "在线吗", None).unwrap();
+    let second = route(&mut conn, room.id, retry.seq, &[planner.id], 1).unwrap()[0];
+    let (second, _, input) = run(&mut conn, second);
+    assert!(input.contains(&format!("〔此前群聊背景，不重新执行旧请求〕用户：{body}")));
+    assert!(input.contains(&opinion.body));
+    finish_turn(&mut conn, second.id, Outcome::Silent).unwrap();
+    assert_eq!(member(&conn, planner.id).unwrap().delivered_through, retry.seq);
+    let quoted = post_user(&mut conn, room.id, "quote", "你看看这个", Some(question.seq)).unwrap();
+    let third = route(&mut conn, room.id, quoted.seq, &[planner.id], 1).unwrap()[0];
+    let (_, _, input) = run(&mut conn, third);
+    assert!(input.contains(&format!("用户（回复 用户：「{body}」）：你看看这个")));
+    assert!(!input.contains(&opinion.body));
+}
+
+#[test]
+fn test_group_failed_after_tool_output_confirms_delivery() {
+    let mut conn = setup();
+    let (room, members) = group_with(&mut conn, &["策划"]);
+    let request = post_user(&mut conn, room.id, "run", "核对一下", None).unwrap();
+    let id = route(&mut conn, room.id, request.seq, &[members[0].id], 1).unwrap()[0];
+    let (t, m, _) = run(&mut conn, id);
+    conn.execute("INSERT INTO message(conversation_id,message_type,content) VALUES(?1,'tool_result','查到结果')", [m.conversation_id]).unwrap();
+    finish_turn(&mut conn, t.id, Outcome::Failed("生成最终答复失败".into())).unwrap();
+    assert_eq!(member(&conn, m.id).unwrap().delivered_through, request.seq);
+}
+
+#[test]
+fn test_group_stopped_turn_uses_only_its_own_output_to_confirm_receipt() {
+    for received in [true, false] {
+        let mut conn = setup();
+        let (room, members) = group_with(&mut conn, &["策划"]);
+        let old = post_user(&mut conn, room.id, "work", "旧任务", None).unwrap();
+        let id = route(&mut conn, room.id, old.seq, &[members[0].id], 1).unwrap()[0];
+        let (_, member, _) = run(&mut conn, id);
+        stop(&mut conn, room.id).unwrap();
+        if received { reply(&conn, member.conversation_id, "停止后保存的部分输出"); }
+        let new = post_user(&mut conn, room.id, "chat", "这次只聊天", None).unwrap();
+        let next = route(&mut conn, room.id, new.seq, &[member.id], 1).unwrap()[0];
+        let (_, _, input) = run(&mut conn, next);
+        assert!(input.contains("这次只聊天"));
+        assert_eq!(input.contains("〔此前群聊背景，不重新执行旧请求〕用户：旧任务"), !received);
+        assert!(!input.contains("停止后保存的部分输出"));
+    }
+}
+
+#[test]
+fn test_group_history_limits_search_and_paging_to_visible_statements() {
+    let mut conn = setup();
+    let (room, members) = group_with(&mut conn, &["甲"]);
+    post_user(&mut conn, room.id, "old", "入群前 Keyword", None).unwrap();
+    let m = add_members(&mut conn, room.id, &[(23,"乙".into())]).unwrap().remove(0);
+    let first = post_user(&mut conn, room.id, "one", "Keyword 第一条", None).unwrap();
+    post_notice(&mut conn, room.id, "error", "Keyword 内部报错").unwrap();
+    let second = append(&conn, room.id, Sender::Member(&members[0]), "message", "keyword 第二条", Some(first.seq), None, false).unwrap();
+    let (other, _) = group_with(&mut conn, &["丙"]);
+    post_user(&mut conn, other.id, "else", "Keyword 其他群", None).unwrap();
+    let search = |conn: &Connection, cid, query: Option<&str>, before_seq, limit| read_history(conn, cid, HistoryRequest {
+        query:query.map(str::to_owned), before_seq, limit:Some(limit)
+    });
+    let page = search(&conn,m.conversation_id,None,None,1).unwrap();
+    assert_eq!(page["messages"][0]["seq"], second.seq);
+    assert_eq!(page["messages"][0]["reply_to"], first.seq);
+    assert_eq!(page["next_before_seq"], second.seq);
+    let older = search(&conn,m.conversation_id,Some("kEyWoRd"),Some(second.seq),5).unwrap();
+    assert_eq!(older["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(older["messages"][0]["body"], first.body);
+    assert!(older["next_before_seq"].is_null());
+    assert!(search(&conn,room.id,None,None,5).is_err());
+    remove_member(&mut conn,room.id,m.id,"乙被移出").unwrap();
+    assert!(search(&conn,m.conversation_id,None,None,5).is_err());
+}
+
+#[test]
 fn test_group_evidence_waits_for_tool_calls_and_respects_silence() {
     let mut conn = setup();
     let (group, members) = group_with(&mut conn, &["张三", "李四"]);

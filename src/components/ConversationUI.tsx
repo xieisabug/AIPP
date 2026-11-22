@@ -1990,7 +1990,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
             return rendered;
         }, [pluginList]);
-        // 管家会话：助手回复可“引用回复”。按消息缓存渲染结果，保持历史消息的 messageActions 引用稳定。
+        // 按消息缓存管家引用按钮，保持历史消息的 messageActions 引用稳定。
         const quoteActionCacheRef = useRef(new Map<number, { plugin: React.ReactNode; content: string; rendered: React.ReactNode }>());
         const renderMessageActionsWithQuote = useCallback((message: Message) => {
             const plugin = renderPluginMessageActions(message);
@@ -1999,7 +1999,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             const cached = cache.get(message.id);
             if (cached && cached.plugin === plugin && cached.content === message.content) return cached.rendered;
             const rendered = <>{plugin}<ButlerQuoteButton variant="toolbar" target={{
-                kind: "message", id: message.id, label: "引用回复", excerpt: quoteExcerpt(message.content),
+                kind: "message", id: message.id, label: message.message_type === "user" ? "我" : "引用回复",
+                excerpt: quoteExcerpt(message.message_type === "user" ? visibleText(message.content) : message.content),
             }} /></>;
             if (cache.size > MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES) cache.clear();
             cache.set(message.id, { plugin, content: message.content, rendered });

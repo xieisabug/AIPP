@@ -45,6 +45,24 @@ fn test_unavailable_quote_is_reported_without_inventing_content() {
 }
 
 #[test]
+fn test_private_quote_contains_full_visible_body_and_preserves_line_breaks() {
+    let conn = fixture();
+    let body = format!("{}\n\n    第二段正文\n结尾", "超过旧摘录上限".repeat(350));
+    let ctx = crate::utils::turn_context::wrap(["私有附加内容"]);
+    let user = crate::utils::turn_context::append(&body, ctx.as_deref());
+    conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES(100,20,'user',?1)", [user]).unwrap();
+    conn.execute("INSERT INTO message(id,conversation_id,message_type,content,metadata_json) VALUES(101,20,'response',?1,?2)",
+        rusqlite::params![format!("工作过程[[QUOTE:第一段正文]]\n{body}"), r#"{"agent_final":{"start":4}}"#]).unwrap();
+    for id in [100, 101] {
+        let context = turn_context_with(&conn, 20, Some(&WorkQuote { kind: "message".into(), id })).unwrap();
+        let prompt = context.prefix.unwrap();
+        assert!(prompt.contains(&body));
+        assert!(!prompt.contains("私有附加内容") && !prompt.contains("工作过程") && !prompt.contains("[[QUOTE:"));
+        assert!(!context.metadata.unwrap().to_string().contains("第二段正文"));
+    }
+}
+
+#[test]
 fn test_unquoted_turn_provides_single_result_context_without_assuming_intent_and_only_in_butler_chats() {
     let conn = fixture();
     let prefix = turn_context_with(&conn, 20, None).unwrap().prefix.unwrap();

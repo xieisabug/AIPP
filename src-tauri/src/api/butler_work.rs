@@ -83,8 +83,8 @@ pub(crate) fn quote_prompt(view: &WorkView) -> String {
     }
     text.push_str(&format!("目标：{}\n", clip(&view.title, 600)));
     match (&view.excerpt, &view.result) {
-        (Some(excerpt), _) => text.push_str(&format!("用户引用的内容：\n{}\n", clip(excerpt, 1500))),
-        (None, Some(result)) => text.push_str(&format!("结果：\n{}\n", clip(result, 1500))),
+        (Some(excerpt), _) => text.push_str(&format!("用户引用的内容：\n{excerpt}\n")),
+        (None, Some(result)) => text.push_str(&format!("结果：\n{result}\n")),
         _ => {}
     }
     text.push_str("</quoted_work>\n");
@@ -143,10 +143,21 @@ pub(crate) fn turn_context_with(conn: &Connection, conversation: i64, quote: Opt
     }
     if let Some(quote) = quote {
         return Ok(match work::resolve(conn, conversation, &quote.kind, quote.id) {
-            Ok(view) => TurnContext {
-                prefix: Some(quote_prompt(&view)),
-                metadata: Some(json!({"quote": {"ref": view.work_ref, "kind": quote.kind, "id": quote.id, "label": view.label}})),
-            },
+            Ok(view) => {
+                let label = match &view.excerpt {
+                    Some(body) => {
+                        let line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let mut chars = line.chars();
+                        let excerpt: String = chars.by_ref().take(40).collect();
+                        if chars.next().is_some() { format!("{excerpt}…") } else { excerpt }
+                    }
+                    None => view.label.clone(),
+                };
+                TurnContext {
+                    prefix: Some(quote_prompt(&view)),
+                    metadata: Some(json!({"quote": {"ref": view.work_ref, "kind": quote.kind, "id": quote.id, "label": label}})),
+                }
+            }
             Err(error) => TurnContext {
                 prefix: Some(format!(
                     "<quoted_work unavailable=\"true\">用户引用的记录不可用：{error:#}</quoted_work>\n请如实告诉用户这条引用已无法读取（已删除或无权访问），不要编造其内容；需要时请用户说明或重新引用。"

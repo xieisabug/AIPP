@@ -17,6 +17,7 @@ pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
         Some("aipp:superadmin") => is_superadmin_tool(tool),
         // 管家模式下所有助手（含群成员）与总管家一致：长期记忆、成员协作与定时任务都直接提供。
         // 群里读写的是本群记忆，看不到成员的私有记忆。
+        Some("aipp:agent") if tool == "read_group_history" => kind == super::builtin_mcp::templates::GROUP_MEMBER_KIND,
         Some("aipp:agent") => crate::api::butler_memory::is_tool(tool)
             || crate::api::butler_peer::is_peer_tool(tool)
             || tool == "schedule_task",

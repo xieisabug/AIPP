@@ -67,6 +67,17 @@ fn test_butler_tools_global_baseline_merges_without_duplicates() {
 }
 
 #[test]
+fn test_butler_group_history_tool_only_in_group_member_sessions() {
+    for kind in ["butler_group_member", "butler_main", "butler_contact", "butler_task", "scheduled_run", "normal"] {
+        let mut configured = vec![server(1, "aipp:agent")];
+        merge_tools(&mut configured, vec![server(1, "aipp:agent")], kind);
+        let visible = configured[0].tools.iter().any(|t| t.name == "read_group_history");
+        assert_eq!(visible, kind == "butler_group_member", "{kind}");
+        assert_eq!(is_direct_tool(kind, Some("aipp:agent"), "read_group_history"), visible);
+    }
+}
+
+#[test]
 fn test_butler_tools_overrides_disabled_config_without_duplicates_or_schema_drift() {
     let mut configured=vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")];
     merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")],"butler_contact");

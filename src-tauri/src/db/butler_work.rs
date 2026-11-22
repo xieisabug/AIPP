@@ -92,7 +92,8 @@ fn resolve_task(conn: &Connection, conversation: i64, task: i64) -> anyhow::Resu
                     t.butler_task_finalized_at IS NOT NULL,
                     coalesce(nullif(final.content,''),
                         CASE WHEN json_valid(r.structured_output_json) THEN nullif(json_extract(r.structured_output_json,'$.content'),'') END,
-                        r.summary,t.butler_task_summary)
+                        r.summary,t.butler_task_summary),
+                    CASE WHEN nullif(final.content,'') IS NOT NULL THEN final.metadata_json END
              FROM butler_task_definition d JOIN conversation t ON t.id=d.task_conversation_id
              LEFT JOIN butler_task_result r ON r.task_conversation_id=t.id
              LEFT JOIN message final ON final.id=r.final_message_id
@@ -107,12 +108,13 @@ fn resolve_task(conn: &Connection, conversation: i64, task: i64) -> anyhow::Resu
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, bool>(5)?,
                     r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("引用的任务 #{task} 已删除或不存在"))?;
-    let (title, goal, executor, owner, status, finalized, result) = row;
+    let (title, goal, executor, owner, status, finalized, result, metadata) = row;
     // 访问范围：执行助手自己的联系人会话，或派出该任务的总管家会话。
     let allowed = (kind == "butler_contact" && assistant == Some(executor)) || owner == conversation;
     anyhow::ensure!(allowed, "引用的任务 #{task} 不属于当前会话，无权访问");
@@ -125,7 +127,7 @@ fn resolve_task(conn: &Connection, conversation: i64, task: i64) -> anyhow::Resu
         title: goal,
         status: status.into(),
         requester: Some("总管家".into()),
-        result,
+        result: result.map(|body| quoted_reply_body(body, metadata.as_deref())),
         excerpt: None,
         task_conversation_id: Some(task),
         finished,
@@ -183,15 +185,30 @@ fn resolve_turn(conn: &Connection, conversation: i64, id: i64) -> anyhow::Result
     })
 }
 
-/// 引用某条回复：按它所在的那一轮找到真实所属工作（受托协作或本会话自己的对话），不靠文字或时间猜测。
+fn quoted_reply_body(content: String, metadata: Option<&str>) -> String {
+    let body = super::butler_execution::agent_final_text(&content, metadata).unwrap_or(content);
+    match crate::utils::reply_quote::split(&body) {
+        Some((_, visible)) => visible.to_owned(),
+        None => body,
+    }
+}
+
+/// 引用消息：按它所在的那一轮找到真实所属工作（受托协作或本会话自己的对话）。
 fn resolve_message(conn: &Connection, conversation: i64, id: i64) -> anyhow::Result<WorkView> {
-    let (owner, kind, content): (i64, String, String) = conn
-        .query_row("SELECT conversation_id,message_type,content FROM message WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    let (owner, kind, content, metadata): (i64, String, String, Option<String>) = conn
+        .query_row("SELECT conversation_id,message_type,content,metadata_json FROM message WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("引用的消息 #{id} 已删除"))?;
     anyhow::ensure!(owner == conversation, "引用的消息 #{id} 不在当前会话，无权访问");
+    if kind == "user" {
+        let meta = metadata.as_deref().and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        anyhow::ensure!(!matches!(meta.as_ref().and_then(|m| m["origin"].as_str()), Some("internal" | "scheduled_task" | "butler_peer")), "只能引用公开的聊天发言");
+        let mut view = resolve_turn(conn, conversation, id)?;
+        view.excerpt = Some(view.title.clone());
+        return Ok(view);
+    }
     anyhow::ensure!(matches!(kind.as_str(), "response" | "assistant"), "只能引用助手的回复或结果");
     let (user, meta): (i64, Option<String>) = conn
         .query_row(
@@ -229,7 +246,7 @@ fn resolve_message(conn: &Connection, conversation: i64, id: i64) -> anyhow::Res
     } else {
         resolve_turn(conn, conversation, user)?
     };
-    view.excerpt = Some(content);
+    view.excerpt = Some(quoted_reply_body(content, metadata.as_deref()));
     Ok(view)
 }
 

@@ -446,6 +446,8 @@ pub async fn format_mcp_prompt_with_filters(
         }
         if !has_load_tools {
             for tool in get_builtin_tools_for_command("aipp:agent") {
+                // This fallback has no scoped group member. Group tools come from the actual injected list above.
+                if tool.name == "read_group_history" { continue; }
                 load_tools_info.push_str(&format!("#### {} \n", tool.name));
                 load_tools_info.push_str(&format!(" - description: {}\n", tool.description));
                 load_tools_info.push_str(&format!(" - parameters: {}\n\n", tool.input_schema));

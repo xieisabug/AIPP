@@ -92,7 +92,7 @@ fn test_butler_work_message_quote_follows_real_turn_and_reports_missing_records(
 
     assert!(resolve(&conn, 30, "message", 200).unwrap_err().to_string().contains("不在当前会话"));
     assert!(resolve(&conn, 20, "message", 9999).unwrap_err().to_string().contains("已删除"));
-    assert!(resolve(&conn, 20, "message", 101).unwrap_err().to_string().contains("助手的回复"));
+    assert_eq!(resolve(&conn, 20, "message", 101).unwrap().excerpt.as_deref(), Some("私聊：帮我改标题"));
     assert!(resolve(&conn, 20, "task", 77).unwrap_err().to_string().contains("已删除"));
     assert!(parse_ref("task:abc").is_err());
     assert_eq!(parse_ref("task:41").unwrap(), ("task", 41));

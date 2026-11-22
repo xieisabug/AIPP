@@ -9,10 +9,11 @@ import {
 const message = (extra: Partial<Message>) => ({ id: 5, message_type: "response", content: "结果", finish_time: new Date(), ...extra }) as Message;
 
 describe("Butler quote reply", () => {
-    it("should only offer quoting on finished assistant replies", () => {
+    it("should offer quoting on user statements and finished assistant replies", () => {
         expect(isQuotableMessage(message({}))).toBe(true);
         expect(isQuotableMessage(message({ finish_time: null }))).toBe(false);
-        expect(isQuotableMessage(message({ message_type: "user" }))).toBe(false);
+        expect(isQuotableMessage(message({ message_type: "user", finish_time: null }))).toBe(true);
+        expect(isQuotableMessage(message({ message_type: "user", metadata_json: '{"origin":"internal"}' }))).toBe(false);
         expect(isQuotableMessage(message({ id: -3 }))).toBe(false);
     });
 
