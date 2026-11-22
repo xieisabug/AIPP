@@ -8,7 +8,6 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import { useModels } from "@/hooks/useModels";
-import { DecisionModelProbeButton } from "@/components/config/DecisionModelProbeButton";
 import { isDecisionRequestMode } from "@/components/config/llmModelTypes";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Form, FormControl, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -231,14 +230,8 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                 label: model.is_decision || isDecisionRequestMode(model.request_mode)
                     ? `${model.name} [决策]`
                     : model.name,
-                isDecision: Boolean(model.is_decision || isDecisionRequestMode(model.request_mode)),
             })),
         [dispatchModels]
-    );
-    const selectedGroupDispatchModel = String(form.watch("butler_group_dispatch_model_id") || "");
-    const isDecisionDispatchModel = useMemo(
-        () => dispatchModelOptions.some((o) => o.value === selectedGroupDispatchModel && o.isDecision),
-        [dispatchModelOptions, selectedGroupDispatchModel]
     );
     const loadSummaryTaskStatus = useCallback(async () => {
         const status = await invoke<ExperimentalSummaryTaskStatus>("get_experimental_summary_task_status");
@@ -1136,12 +1129,11 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                                     <CircleHelp aria-label="小型辅助模型说明" className="size-3.5 cursor-help text-muted-foreground" />
                                                                 </TooltipTrigger>
                                                                 <TooltipContent className="max-w-xs text-xs">
-                                                                    用于总结之类的辅助任务，例如助手做事时把进展浓缩成一句话，显示在聊天区和左侧联系人中。建议选择便宜、响应快的小模型；不选择时两边显示同一句短状态，还没收到回复时是「投递中」。
+                                                                    用于总结、唤醒自动化之类的辅助任务，例如总结当前助手实时状态、自动唤醒等。建议选择便宜、响应快的小模型。
                                                                 </TooltipContent>
                                                             </Tooltip>
                                                         </span>
                                                     }
-                                                    description="可不选。选择后，助手执行任务时会显示一句进度总结。"
                                                 />
                                                 <div className="w-64 shrink-0 space-y-1">
                                                     <FormControl>
@@ -1176,18 +1168,17 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                 <SettingRowText
                                                     label={
                                                         <span className="inline-flex items-center gap-1">
-                                                            群聊发言调度模型
+                                                            决策模型
                                                             <Tooltip>
                                                                 <TooltipTrigger asChild>
-                                                                    <CircleHelp aria-label="群聊发言调度模型说明" className="size-3.5 cursor-help text-muted-foreground" />
+                                                                    <CircleHelp aria-label="决策模型说明" className="size-3.5 cursor-help text-muted-foreground" />
                                                                 </TooltipTrigger>
                                                                 <TooltipContent className="max-w-xs text-xs">
-                                                                    专用于群聊未 @ 成员时的发言选人与讨论轮数判断，支持 Jev / OpenAI Decisions / Gemini Decisions 等决策模型或普通模型；不选时沿用小型辅助模型或总管家模型。
+                                                                    用于进行工具执行的判断、群聊回复决策等场景，推荐使用决策模型。
                                                                 </TooltipContent>
                                                             </Tooltip>
                                                         </span>
                                                     }
-                                                    description="可不选。配置决策模型可零输出 Token 快速选人并避免成员名幻觉。"
                                                 />
                                                 <div className="w-64 shrink-0 space-y-2">
                                                     <FormControl>
@@ -1209,9 +1200,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                             </SelectContent>
                                                         </Select>
                                                     </FormControl>
-                                                    {isDecisionDispatchModel ? (
-                                                        <DecisionModelProbeButton modelValue={selectedGroupDispatchModel} />
-                                                    ) : null}
                                                     <FormMessage />
                                                 </div>
                                             </FormItem>

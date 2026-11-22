@@ -152,7 +152,7 @@ describe("Decision model UI configuration (#340)", () => {
         expect(await screen.findByText(/连接成功.*99\.0%/)).toBeInTheDocument();
     });
 
-    it("renders dedicated group dispatch model selector with probe button in ExperimentalConfigForm", async () => {
+    it("should show the selected decision model without a probe button in Butler settings", async () => {
         mockInvokeHandler("get_models_for_select", (args) => {
             if ((args as { includeDecision?: boolean })?.includeDecision) {
                 return [
@@ -190,7 +190,9 @@ describe("Decision model UI configuration (#340)", () => {
         }
 
         render(<Harness />);
-        expect(screen.getByText("群聊发言调度模型")).toBeInTheDocument();
-        expect(await screen.findByRole("button", { name: "测试决策接口" })).toBeInTheDocument();
+        expect(screen.getByText("决策模型")).toBeInTheDocument();
+        expect(screen.getByLabelText("决策模型说明")).toBeInTheDocument();
+        expect(await screen.findByText("OpenAI / GPT-6 Luna [决策]")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "测试决策接口" })).not.toBeInTheDocument();
     });
 });

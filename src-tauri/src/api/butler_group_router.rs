@@ -323,8 +323,8 @@ async fn model(app: &AppHandle) -> Result<(String, i64, &'static str), String> {
         .filter(|value| !value.trim().is_empty());
     if let Some(raw) = dispatch {
         let (code, provider) = parse_model(&raw)
-            .ok_or_else(|| format!("群聊发言调度模型配置无效：{raw}；请在管家设置中重新选择"))?;
-        return Ok((code, provider, "群聊发言调度模型"));
+            .ok_or_else(|| format!("决策模型配置无效：{raw}；请在管家设置中重新选择"))?;
+        return Ok((code, provider, "决策模型"));
     }
     let helper = super::butler_api::get_experimental_config_value(app, super::butler_progress::HELPER_MODEL_KEY).await
         .filter(|value| !value.trim().is_empty());
