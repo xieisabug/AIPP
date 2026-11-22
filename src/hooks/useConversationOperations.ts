@@ -10,6 +10,7 @@ import { useIsMobilePlatform } from "./use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
 import { splitTurnContext, withTurnContext } from "../utils/turnContext";
+import type { ArtifactRunBinding } from "../components/chat-sidebar/types";
 
 export interface UseConversationOperationsProps {
     conversation?: Conversation;
@@ -53,7 +54,7 @@ export interface UseConversationOperationsReturn {
     handleEditSaveAndRegenerate: (content: string) => void;
     handleSend: (emptyPrompt?: string, busyOverride?: "queue" | "interrupt", direct?: { prompt: string }) => void;
     sendAgentCommand: (prompt: string) => Promise<void>;
-    handleArtifact: (lang: string, inputStr: string) => void;
+    handleArtifact: (lang: string, inputStr: string, binding?: ArtifactRunBinding) => void;
 
     // 编辑对话框状态
     editDialogIsOpen: boolean;
@@ -236,9 +237,9 @@ export function useConversationOperations({
     );
 
     // 代码运行处理
-    const handleArtifact = useCallback((lang: string, inputStr: string) => {
+    const handleArtifact = useCallback((lang: string, inputStr: string, binding?: ArtifactRunBinding) => {
         const conversationId = conversation?.id;
-        invoke("run_artifacts", { lang, inputStr, conversationId })
+        invoke("run_artifacts", { lang, inputStr, conversationId, ...binding })
             .then((res) => {
                 console.log(res);
             })

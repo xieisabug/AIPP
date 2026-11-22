@@ -1322,6 +1322,14 @@ async fn execute_run_inner(
     if !skills_info.enabled_skills.is_empty() {
         assistant_prompt = format_skills_prompt(app_handle, assistant_prompt, &skills_info).await;
     }
+    if task.butler_mode {
+        // 管家模式的运行与管家会话共用交付约定；用户不在场、运行会话不可见，只保留文件交付。
+        assistant_prompt.push_str("\n\n");
+        assistant_prompt.push_str(&crate::api::butler_delivery::delivery_prompt(
+            crate::api::butler_delivery::DeliveryTools::from_servers(&mcp_info.enabled_servers),
+            true,
+        ));
+    }
     let deliver_target = {
         let names = service::view_names(app_handle, std::slice::from_ref(task)).unwrap_or_default();
         service::deliver_target_text(task, &names)

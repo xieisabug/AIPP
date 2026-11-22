@@ -15,6 +15,7 @@ pub mod attachment_api;
 pub mod butler_api;
 pub(crate) mod butler_reporting;
 pub(crate) mod butler_capabilities;
+pub(crate) mod butler_delivery;
 pub mod butler_contact_activity;
 pub mod butler_memory;
 pub mod vault_api;

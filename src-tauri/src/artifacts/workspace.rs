@@ -39,10 +39,14 @@ use futures::StreamExt;
 const MANIFEST_VERSION: u32 = 1;
 const MAX_PREVIEW_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const ARTIFACT_EVENT_NAME: &str = "artifact-manifest-updated";
+/// 工作区里存放各 Artifact 的目录名；入口路径是 `<workspace>/artifacts/<artifact_key>/<entry_file>`。
+const ARTIFACTS_DIR_NAME: &str = "artifacts";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactWorkspaceResponse {
     pub workspace_path: String,
+    /// 各 Artifact 的根目录：`<workspace_path>/artifacts`，每个 Artifact 一个 `<artifact_key>/` 子目录。
+    pub artifacts_dir: String,
     pub manifest_path: String,
     pub recommended_flow: Vec<String>,
 }
@@ -203,11 +207,12 @@ pub fn get_artifact_workspace(
     let context = ensure_workspace_context(app_handle, conversation_id)?;
     Ok(ArtifactWorkspaceResponse {
         workspace_path: context.workspace_path.to_string_lossy().to_string(),
+        artifacts_dir: context.workspace_path.join(ARTIFACTS_DIR_NAME).to_string_lossy().to_string(),
         manifest_path: context.manifest_path.to_string_lossy().to_string(),
         recommended_flow: vec![
             "get_artifact_workspace".to_string(),
-            "write_file/edit_file".to_string(),
-            "show_artifact".to_string(),
+            "write_file/edit_file <artifacts_dir>/<artifact_key>/<entry_file>（单个自包含入口文件）".to_string(),
+            "show_artifact artifact_key + entry_file".to_string(),
             "capture_artifact_screenshot".to_string(),
         ],
     })
@@ -223,7 +228,7 @@ pub fn show_artifact(
     let normalized_artifact_key = sanitize_relative_path(&request.artifact_key, "artifact_key")?;
     let normalized_entry_file = sanitize_relative_path(&request.entry_file, "entry_file")?;
 
-    let artifact_dir_relative = PathBuf::from("artifacts").join(&normalized_artifact_key);
+    let artifact_dir_relative = PathBuf::from(ARTIFACTS_DIR_NAME).join(&normalized_artifact_key);
     let artifact_dir_absolute = context.workspace_path.join(&artifact_dir_relative);
     let entry_absolute = artifact_dir_absolute.join(&normalized_entry_file);
     if !entry_absolute.exists() {
@@ -499,7 +504,7 @@ fn prepare_artifact_capture(
     let normalized_artifact_key = sanitize_relative_path(&request.artifact_key, "artifact_key")?;
     let normalized_entry_file = sanitize_relative_path(&request.entry_file, "entry_file")?;
 
-    let artifact_dir_relative = PathBuf::from("artifacts").join(&normalized_artifact_key);
+    let artifact_dir_relative = PathBuf::from(ARTIFACTS_DIR_NAME).join(&normalized_artifact_key);
     let artifact_dir_absolute = context.workspace_path.join(&artifact_dir_relative);
     let entry_absolute = artifact_dir_absolute.join(&normalized_entry_file);
     if !entry_absolute.exists() {

@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { CodeArtifact } from "@/components/chat-sidebar/types";
 
-interface ConversationArtifactItem {
+export interface ConversationArtifactItem {
     artifact_key: string;
     title: string;
     language: string;

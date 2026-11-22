@@ -7,6 +7,7 @@ import { parsePreviewFileRequestId } from "@/hooks/useInlineInteraction";
 import { interactionContent, type InteractionRow } from "./butlerInteractions";
 import { isButlerInteractionTool } from "./ButlerPresentationContext";
 import ButlerInteractionResult from "./ButlerInteractionResult";
+import ArtifactToolCall from "@/components/mcp-tool-components/ArtifactToolCall";
 import { ReportBubble } from "./ButlerProgressRow";
 
 interface GroupResult {
@@ -27,6 +28,19 @@ export interface GroupQuestion {
     content: ReactNode;
     time: number;
     answered: boolean;
+}
+
+/** 成员执行会话对用户不可见，发布的 Artifact 只能靠群里的成果卡打开。 */
+const isGroupResultCard = (tool?: string) => tool === "show_artifact";
+
+function resultCard(conversation: number, owner: number, call: MCPToolCall): ReactNode {
+    if (isGroupResultCard(call.tool_name)) {
+        return <ArtifactToolCall toolName={call.tool_name} status={call.status} conversationId={conversation} messageId={owner}
+            currentToolCall={{ call_id: call.id, conversation_id: call.conversation_id, status: call.status,
+                tool_name: call.tool_name, parameters: call.parameters, result: call.result, error: call.error }} />;
+    }
+    return <ButlerInteractionResult toolName={call.tool_name} callId={call.id} status={call.status} conversationId={conversation}
+        messageId={owner} parameters={call.parameters} isLastMessage={call.status === "executing"} />;
 }
 
 function groupResults(conversation: number, calls: MCPToolCall[], rows: InteractionRow[]): GroupResult[] {
@@ -52,14 +66,12 @@ function groupResults(conversation: number, calls: MCPToolCall[], rows: Interact
         if (call.tool_name === "report_progress") {
             try { report = JSON.parse(call.parameters)?.text; } catch { continue; }
             if (typeof report !== "string" || !report.trim()) continue;
-        } else if (!isButlerInteractionTool(call.tool_name)) continue;
+        } else if (!isButlerInteractionTool(call.tool_name) && !isGroupResultCard(call.tool_name)) continue;
         if (call.tool_name === "preview_file" && requests.has(parsePreviewFileRequestId(call.result) ?? "")) continue;
         const stamp = call.started_time || call.created_time;
         events.push({ key: `call-${call.id}`, conversation, owner, time: stamp ? parseGroupTime(stamp).getTime() : NaN, report,
             questionCall: call.tool_name === "ask_user_question" ? call.id : undefined,
-            content: pendingQuestion ? null : report ? <ReportBubble text={report} /> : <ButlerInteractionResult toolName={call.tool_name}
-                callId={call.id} status={call.status} conversationId={conversation} messageId={owner}
-                parameters={call.parameters} isLastMessage={call.status === "executing"} /> });
+            content: pendingQuestion ? null : report ? <ReportBubble text={report} /> : resultCard(conversation, owner, call) });
     }
     return events;
 }
@@ -92,7 +104,7 @@ export function useGroupResults(conversations: string) {
             }));
             const updates = listen<{ type: string; data?: { tool_name?: string } }>(`conversation_event_${id}`, ({ payload }) => {
                 const tool = payload.data?.tool_name;
-                if (payload.type === "mcp_tool_call_update" && (!tool || tool === "report_progress" || isButlerInteractionTool(tool))) void refresh();
+                if (payload.type === "mcp_tool_call_update" && (!tool || tool === "report_progress" || isButlerInteractionTool(tool) || isGroupResultCard(tool))) void refresh();
             });
             subscriptions.push(changed, ...previews, updates);
             void Promise.all([changed, ...previews, updates]).then(() => { if (active) void refresh(); }).catch(console.error);

@@ -102,6 +102,7 @@ import { cn } from "@/utils/utils";
 
 // 导入 Chat Sidebar 相关
 import { ChatSidebar, ChatSidebarContent, type ContextItem, type TodoItem } from "./chat-sidebar";
+import { artifactRunBinding, type ArtifactRunBinding } from "./chat-sidebar/types";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
@@ -1289,9 +1290,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         });
 
         const mobilePlatform = useIsMobilePlatform();
-        const handleArtifact = useCallback((language: string, code: string) => {
+        const handleArtifact = useCallback((language: string, code: string, binding?: ArtifactRunBinding) => {
             if (mobilePlatform) previewMobile({ language, code });
-            else handleDesktopArtifact(language, code);
+            else handleDesktopArtifact(language, code, binding);
         }, [mobilePlatform, handleDesktopArtifact]);
 
         // ============= 初始化和生命周期逻辑 =============
@@ -2522,7 +2523,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             focusedContextId={focusedContextId}
                             onExpandChange={handleSidebarExpandChange}
                             onOpenWindow={handleOpenSidebarWindow}
-                            onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
+                            onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code, artifactRunBinding(artifact))}
                             onPreviewFileClick={handlePreviewFileContextClick}
                             topPanel={renderAgentWorkspacePanel(false)}
                         />
@@ -2577,7 +2578,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         onArtifactClick={(artifact) => {
                                             if (mobilePlatform) suspendDetails("artifact");
                                             else setMobileDetailsOpen(false);
-                                            handleArtifact(artifact.language, artifact.code);
+                                            handleArtifact(artifact.language, artifact.code, artifactRunBinding(artifact));
                                         }}
                                         onPreviewFileClick={(item) => {
                                             if (mobilePlatform) suspendDetails("context");

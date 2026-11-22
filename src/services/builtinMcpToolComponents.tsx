@@ -1,4 +1,5 @@
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
+import ArtifactToolCall from "@/components/mcp-tool-components/ArtifactToolCall";
 import FetchUrlToolCall from "@/components/mcp-tool-components/FetchUrlToolCall";
 import LoadMcpCatalogToolCall from "@/components/mcp-tool-components/LoadMcpCatalogToolCall";
 import MessagePreviewToolCall from "@/components/mcp-tool-components/MessagePreviewToolCall";
@@ -48,6 +49,15 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
         match: [{ toolName: "preview_message" }],
         priority: 110,
         render: (props: McpToolComponentProps) => <MessagePreviewToolCall {...props} />,
+    });
+
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.show-artifact",
+        label: "show_artifact 成果卡",
+        description: "用于 show_artifact 工具：显示发布的 Artifact，点击打开最新版本的预览",
+        match: [{ toolName: "show_artifact" }],
+        priority: 110,
+        render: (props: McpToolComponentProps) => <ArtifactToolCall {...props} />,
     });
 
     mcpToolComponentRegistry.register("builtin", {

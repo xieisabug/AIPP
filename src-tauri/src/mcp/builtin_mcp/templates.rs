@@ -1051,7 +1051,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             "type": "string",
                             "enum": ["none", "submit_once"],
                             "default": "none",
-                            "description": "Interaction mode for the widget. none is display-only; set submit_once explicitly only when the widget must return a final payload."
+                            "description": "Interaction mode for the widget. none is display-only and the tool returns as soon as the UI is shown. submit_once collects one answer from the user: the tool call waits until the widget calls window.aippPreviewCode.submit(payload) (payload is any JSON value and becomes the tool result) or window.aippPreviewCode.close() (user skipped). The host card has no submit or cancel button of its own, so a submit_once widget must render both buttons and wire them to these two calls."
                         },
                         "metadata": {
                             "type": "object",
@@ -1259,7 +1259,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("artifact") => vec![
             BuiltinToolInfo {
                 name: "get_artifact_workspace".into(),
-                description: "获取当前会话的 Artifact 工作区路径和 manifest 路径。首次调用会自动初始化目录结构。".into(),
+                description: "获取当前会话的 Artifact 工作区路径和 manifest 路径。首次调用会自动初始化目录结构。每个 Artifact 的文件放在 `<workspace_path>/artifacts/<artifact_key>/` 下（返回的 artifacts_dir 即 `<workspace_path>/artifacts`），show_artifact 的 entry_file 相对 `artifacts/<artifact_key>/` 目录。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {}
@@ -1267,7 +1267,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "show_artifact".into(),
-                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。".into(),
+                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。入口文件必须位于 `<workspace_path>/artifacts/<artifact_key>/<entry_file>`。预览只加载入口文件本身，不会加载同目录的其他文件，所以入口要写成自包含的单个文件（HTML 把样式和脚本内联；React/Vue 写成单个组件文件）。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1281,7 +1281,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "entry_file": {
                             "type": "string",
-                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: src/App.tsx）"
+                            "description": "Artifact 入口文件，相对 `<workspace_path>/artifacts/<artifact_key>/` 目录（例如: App.tsx、index.html）。预览只加载这一个文件"
                         },
                         "title": {
                             "type": "string",
@@ -1297,11 +1297,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "db_id": {
                             "type": "string",
-                            "description": "可选。传递给 Artifact 预览运行时的数据库标识"
+                            "description": "可选。绑定一个持久数据库：自定义名称（字母、数字、_、-，最长 64），首次使用自动创建，同名即共享数据。绑定后 Artifact 可通过 AIPP SDK 读写该数据库"
                         },
                         "assistant_id": {
                             "type": "number",
-                            "description": "可选。传递给 Artifact 预览运行时的助手 ID"
+                            "description": "可选。绑定一个助手 ID，Artifact 可通过 AIPP SDK 调用该助手"
                         }
                     },
                     "required": ["artifact_key", "entry_file"]
@@ -1995,6 +1995,27 @@ mod tests {
         assert!(properties.contains_key("selector"));
         assert!(properties.contains_key("width"));
         assert!(properties.contains_key("height"));
+    }
+
+    /// 模型只能从工具描述得知提交接口与目录结构；缺了会让 submit_once 无法提交、Artifact 写错位置。
+    #[test]
+    fn test_tool_descriptions_document_submit_bridge_and_artifact_layout() {
+        let ui = get_builtin_tools_for_command("aipp:ui_interaction");
+        let preview_code = ui.iter().find(|t| t.name == "preview_code").expect("preview_code");
+        let mode = preview_code.input_schema["properties"]["interaction_mode"]["description"]
+            .as_str()
+            .expect("interaction_mode description");
+        assert!(mode.contains("window.aippPreviewCode.submit(payload)"));
+        assert!(mode.contains("window.aippPreviewCode.close()"));
+
+        let artifact = get_builtin_tools_for_command("aipp:artifact");
+        let describe = |name: &str| {
+            artifact.iter().find(|t| t.name == name).map(|t| t.description.clone()).expect(name)
+        };
+        assert!(describe("get_artifact_workspace").contains("<workspace_path>/artifacts/<artifact_key>/"));
+        let show = describe("show_artifact");
+        assert!(show.contains("<workspace_path>/artifacts/<artifact_key>/<entry_file>"));
+        assert!(show.contains("预览只加载入口文件本身"));
     }
 
     #[test]

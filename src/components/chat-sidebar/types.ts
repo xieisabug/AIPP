@@ -33,6 +33,18 @@ export interface CodeArtifact {
     updatedAt?: string;
 }
 
+/** 打开已发布 Artifact 时要带上的发布信息：数据库与助手绑定决定 Artifact 运行时能读写哪个库、调用哪个助手。 */
+export type ArtifactRunBinding = Pick<CodeArtifact, "dbId" | "assistantId" | "artifactKey" | "entryFile">;
+
+export function artifactRunBinding(artifact: CodeArtifact): ArtifactRunBinding {
+    return {
+        dbId: artifact.dbId,
+        assistantId: artifact.assistantId,
+        artifactKey: artifact.artifactKey,
+        entryFile: artifact.entryFile,
+    };
+}
+
 export interface SearchResultItem {
     title: string;
     url: string;

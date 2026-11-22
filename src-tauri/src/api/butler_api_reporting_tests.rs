@@ -82,12 +82,27 @@ fn reporting_member_prompts_share_core_and_keep_user_intervention_exception() {
     assert!(core.contains("无法自行解决的错误与阻塞时应及时说明"));
     assert!(core.contains("不能代替用户授权") && core.contains("未经用户允许的内容"));
     assert!(core.contains("配置修复由总管家或用户决定"), "成员不自行修复配置");
-    assert!(core.contains("生成真实文件"), "成员直接交付，也要遵守交付格式");
+    assert!(core.contains("「交付与展示」"), "成员直接交付，也要遵守交付格式");
     assert!(core.contains("`preview_message`") && core.contains("不要转述"), "原样展示其他成员的答复");
     assert!(super::BUTLER_MEMBER_TASK_PROMPT.contains("等待答复时最终回复只写"));
     assert!(super::BUTLER_MEMBER_TASK_PROMPT.contains("默认是内部协作"));
     for specific in [super::BUTLER_MEMBER_CONTACT_PROMPT, super::BUTLER_MEMBER_TASK_PROMPT] {
         assert!(!specific.contains("不能代替用户授权"), "通用约定只写在共享部分");
+    }
+}
+
+#[test]
+fn delivery_details_come_only_from_the_tool_aware_section() {
+    // 交付载体按本轮实际注入的工具生成（`butler_delivery`），静态模板只引用它，避免提到未注入的工具。
+    for prompt in [
+        super::BUTLER_SYSTEM_PROMPT_BASE,
+        super::BUTLER_MEMBER_CORE_PROMPT,
+        super::BUTLER_GROUP_MEMBER_PROMPT,
+    ] {
+        assert!(prompt.contains("「交付与展示」"));
+        for detail in ["Excel 工作簿", "preview_code", "show_artifact"] {
+            assert!(!prompt.contains(detail), "交付细节不该写死在模板里：{detail}");
+        }
     }
 }
 

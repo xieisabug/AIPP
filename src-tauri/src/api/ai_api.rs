@@ -1465,6 +1465,21 @@ async fn compose_conversation_instructions(
         None => assistant_prompt_result,
     };
 
+    // 管家模式（总管家与成员共用）：「交付与展示」按本轮实际注入的工具生成，未注入的工具不出现。
+    let assistant_prompt_result = if butler_mode_conversation {
+        let delivery = crate::api::butler_delivery::delivery_prompt(
+            crate::api::butler_delivery::DeliveryTools::from_servers(&mcp_info.enabled_servers),
+            false,
+        );
+        if let Some(role) = native_butler_role.as_mut().filter(|_| override_prompt.is_none()) {
+            role.push_str("\n\n");
+            role.push_str(&delivery);
+        }
+        format!("{}\n\n{}", assistant_prompt_result, delivery)
+    } else {
+        assistant_prompt_result
+    };
+
     Ok((assistant_prompt_result, native_butler_role, butler_mode_conversation))
 }
 
