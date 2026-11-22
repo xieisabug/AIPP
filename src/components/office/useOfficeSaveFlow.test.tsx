@@ -16,6 +16,7 @@ vi.mock("@/services/mobileFileService", () => ({
     exportMime: () => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }));
 
+import { toast } from "sonner";
 import { defaultCopyName, useOfficeSaveFlow, type OfficeSaveOutcome } from "./useOfficeSaveFlow";
 import type { OfficeSaveRequest } from "@/services/officeSave";
 
@@ -36,6 +37,7 @@ const copyRequest: OfficeSaveRequest = {
     fileName: "报告.docx",
     format: "docx",
     purpose: "copy",
+    copyOriginToken: "copy-origin",
     bytes: new Uint8Array([80, 75, 3, 4]).buffer,
 };
 
@@ -44,6 +46,7 @@ describe("useOfficeSaveFlow", () => {
         mockInvoke.mockReset();
         mockSaveDialog.mockReset();
         mockMobileAction.mockReset();
+        vi.mocked(toast.success).mockClear();
         android = false;
         outcome = null;
     });
@@ -53,19 +56,56 @@ describe("useOfficeSaveFlow", () => {
         expect(defaultCopyName("报告（AI 修改）.docx", "output")).toBe("报告（AI 修改）.docx");
     });
 
+    function writeCopyHeader(args: unknown) {
+        const body = args as Uint8Array;
+        const headerLen = new DataView(body.buffer, body.byteOffset).getUint32(0, true);
+        return JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + headerLen)));
+    }
+
+    it("should keep the edited bytes and let the user re-pick when the destination is the source", async () => {
+        const sourcePath = "C:/docs/报告.docx";
+        const copyPath = "C:/docs/报告（副本）.docx";
+        mockSaveDialog.mockResolvedValueOnce(sourcePath).mockResolvedValueOnce(copyPath);
+        mockInvoke.mockImplementation(async (cmd: string, args: unknown) => {
+            if (cmd === "suggest_office_copy_path") return copyPath;
+            if (cmd === "office_write_copy") {
+                const header = writeCopyHeader(args);
+                expect(header.source).toEqual(copyRequest.source);
+                expect(header.copyOriginToken).toEqual(copyRequest.copyOriginToken);
+                expect(header.overwrite).toBe(false);
+                if (header.targetPath === sourcePath) {
+                    throw "OFFICE_PREVIEW_ERROR:protected_source:所选位置是原文件，请重新选择位置";
+                }
+                expect(Array.from((args as Uint8Array).slice(-4))).toEqual([80, 75, 3, 4]);
+                return { path: copyPath, fileName: "报告（副本）.docx", sizeBytes: 4, format: "docx" };
+            }
+            return null;
+        });
+
+        render(<Harness request={copyRequest} />);
+        fireEvent.click(screen.getByText("start"));
+        fireEvent.click(await screen.findByTestId("office-save-choose"));
+        expect(await screen.findByText("不能覆盖原文件")).toBeInTheDocument();
+        expect(screen.queryByTestId("office-save-overwrite")).not.toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "重新选择位置" }));
+        await expect(outcome).resolves.toEqual({ status: "saved", fileName: "报告（副本）.docx", location: copyPath });
+        expect(toast.success).toHaveBeenCalledTimes(1);
+    });
+
     it("should show the format notice, then require a second confirmation before overwriting", async () => {
         mockInvoke.mockImplementation(async (cmd: string, args: unknown) => {
             if (cmd === "suggest_office_copy_path") return "C:/docs/报告（副本）.docx";
             if (cmd === "office_write_copy") {
-                const body = args as Uint8Array;
-                const headerLen = new DataView(body.buffer, body.byteOffset).getUint32(0, true);
-                const header = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + headerLen)));
+                const header = writeCopyHeader(args);
+                expect(header.source).toEqual(copyRequest.source);
+                expect(header.copyOriginToken).toEqual(copyRequest.copyOriginToken);
                 if (!header.overwrite) throw "OFFICE_PREVIEW_ERROR:target_exists:「报告.docx」已存在，未覆盖";
                 return { path: header.targetPath, fileName: "报告.docx", sizeBytes: 4, format: "docx" };
             }
             return null;
         });
-        mockSaveDialog.mockResolvedValue("C:/docs/报告.docx");
+        mockSaveDialog.mockResolvedValue("C:/other/报告.docx");
         render(<Harness request={copyRequest} />);
         fireEvent.click(screen.getByText("start"));
         expect(await screen.findByText("另存为新文件")).toBeInTheDocument();
@@ -82,7 +122,7 @@ describe("useOfficeSaveFlow", () => {
         expect(firstWrites).toBe(1);
 
         fireEvent.click(screen.getByTestId("office-save-overwrite"));
-        await expect(outcome).resolves.toEqual({ status: "saved", fileName: "报告.docx", location: "C:/docs/报告.docx" });
+        await expect(outcome).resolves.toEqual({ status: "saved", fileName: "报告.docx", location: "C:/other/报告.docx" });
     });
 
     it("should report a write failure without claiming success", async () => {

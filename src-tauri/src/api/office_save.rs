@@ -11,9 +11,11 @@ use crate::db::conversation_db::ConversationDatabase;
 use crate::db::office_refs::{self, OfficeFileRef};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
 pub const COPY_SUFFIX: &str = "副本";
@@ -91,8 +93,141 @@ fn io_error(stage: &str, target: &Path, e: &std::io::Error) -> OfficePreviewErro
     }
 }
 
+#[derive(Debug)]
+struct ProtectedCopySource {
+    path: PathBuf,
+    opened_path: PathBuf,
+    opened_handle: same_file::Handle,
+}
+
+impl ProtectedCopySource {
+    fn from_open_file(path: PathBuf, opened_file: fs::File) -> Result<Self, OfficePreviewError> {
+        let origin_err = |e| io_error("绑定已打开的原文件", &path, &e);
+        let opened_path = comparable_path(&path).map_err(origin_err)?.unwrap_or_else(|| path.clone());
+        let opened_handle = same_file::Handle::from_file(opened_file).map_err(origin_err)?;
+        Ok(Self { path, opened_path, opened_handle })
+    }
+}
+
+const EDIT_COPY_ORIGIN_LIMIT: usize = 32;
+
+/// Save-only origin bindings for already-opened editor documents. Never used to read file bytes.
+/// Bounded across windows and kept for the process lifetime, independently of read-relay expiry.
+#[derive(Default)]
+pub struct OfficeEditCopyOrigins(Mutex<VecDeque<EditCopyOrigin>>);
+
+struct EditCopyOrigin {
+    token: String,
+    window: String,
+    descriptor: OfficePreviewSource,
+    source: Arc<ProtectedCopySource>,
+}
+
+impl OfficeEditCopyOrigins {
+    pub(crate) fn remember(
+        &self,
+        window: &str,
+        descriptor: &OfficePreviewSource,
+        path: PathBuf,
+        opened_file: fs::File,
+    ) -> Result<String, OfficePreviewError> {
+        let source = Arc::new(ProtectedCopySource::from_open_file(path, opened_file)?);
+        let mut slots = self.0.lock().map_err(|_| err("read_error", "编辑来源记录暂不可用"))?;
+        if slots.len() >= EDIT_COPY_ORIGIN_LIMIT {
+            slots.pop_front();
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        slots.push_back(EditCopyOrigin {
+            token: token.clone(),
+            window: window.to_string(),
+            descriptor: descriptor.clone(),
+            source,
+        });
+        Ok(token)
+    }
+
+    fn get(&self, window: &str, descriptor: &OfficePreviewSource, token: Option<&str>) -> Result<Arc<ProtectedCopySource>, OfficePreviewError> {
+        let slots = self.0.lock().map_err(|_| err("read_error", "编辑来源记录暂不可用"))?;
+        slots.iter().find_map(|origin| {
+            (token == Some(origin.token.as_str()) && origin.window == window && &origin.descriptor == descriptor)
+                .then(|| Arc::clone(&origin.source))
+        }).ok_or_else(|| err("file_not_found", "未找到本窗口已打开的编辑来源，请重新打开原文档"))
+    }
+
+    fn release(&self, window: &str, token: &str) {
+        if let Ok(mut slots) = self.0.lock() {
+            slots.retain(|origin| origin.window != window || origin.token != token);
+        }
+    }
+
+    pub(crate) fn release_window(&self, window: &str) {
+        if let Ok(mut slots) = self.0.lock() {
+            slots.retain(|origin| origin.window != window);
+        }
+    }
+}
+
+/// Resolve existing aliases, or compare the directory and leaf if the file was removed.
+fn comparable_path(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    match dunce::canonicalize(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let Some(name) = path.file_name() else { return Ok(None) };
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            match dunce::canonicalize(parent) {
+                Ok(parent) => Ok(Some(parent.join(name))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn protect_copy_source(source: &ProtectedCopySource, target: &Path) -> Result<(), OfficePreviewError> {
+    let protected = || err("protected_source", "所选位置是原文件，请重新选择位置");
+    if source.path == target {
+        return Err(protected());
+    }
+    let check_err = |e| io_error("核对保存位置", target, &e);
+    let target_path = comparable_path(target).map_err(check_err)?;
+    if target_path.as_ref() == Some(&source.opened_path) {
+        return Err(protected());
+    }
+    match same_file::Handle::from_path(target) {
+        Ok(handle) if handle == source.opened_handle => return Err(protected()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(check_err(e)),
+    }
+    let source_path = comparable_path(&source.path).map_err(check_err)?;
+    if source_path.is_some() && source_path == target_path {
+        return Err(protected());
+    }
+    // Canonicalization detects symlinks; file identity also detects hard links and
+    // case/short-name aliases on filesystems supporting them.
+    match same_file::is_same_file(&source.path, target) {
+        Ok(true) => Err(protected()),
+        Ok(false) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(check_err(e)),
+    }
+}
+
 /// 安全写入 Office 文件；失败时目标与原文件保持原样、不留临时文件。
 pub fn write_office_file_safely(target: &Path, bytes: &[u8], overwrite: bool) -> Result<(), OfficePreviewError> {
+    write_office_file(target, bytes, overwrite, None)
+}
+
+fn write_office_file(
+    target: &Path,
+    bytes: &[u8],
+    overwrite: bool,
+    protected_source: Option<&ProtectedCopySource>,
+) -> Result<(), OfficePreviewError> {
+    if let Some(source) = protected_source {
+        protect_copy_source(source, target)?;
+    }
     let parent = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -142,6 +277,14 @@ pub fn write_office_file_safely(target: &Path, bytes: &[u8], overwrite: bool) ->
             }
         }
     }
+    if overwrite {
+        if let Some(source) = protected_source {
+            if let Err(e) = protect_copy_source(source, target) {
+                let _ = fs::remove_file(&temp);
+                return Err(e);
+            }
+        }
+    }
     if let Err(e) = fs::rename(&temp, target) {
         let _ = fs::remove_file(&temp);
         if placeholder {
@@ -182,9 +325,15 @@ fn check_target_format(target: &Path, content_format: OfficeFormat) -> Result<()
     Ok(())
 }
 
-fn save_bytes(target: &Path, bytes: &[u8], overwrite: bool, content_format: OfficeFormat) -> Result<OfficeSaveResult, OfficePreviewError> {
+fn save_bytes(
+    target: &Path,
+    bytes: &[u8],
+    overwrite: bool,
+    content_format: OfficeFormat,
+    protected_source: Option<&ProtectedCopySource>,
+) -> Result<OfficeSaveResult, OfficePreviewError> {
     check_target_format(target, content_format)?;
-    write_office_file_safely(target, bytes, overwrite)?;
+    write_office_file(target, bytes, overwrite, protected_source)?;
     Ok(OfficeSaveResult {
         path: target.to_string_lossy().to_string(),
         file_name: target.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
@@ -412,7 +561,7 @@ pub async fn office_save_copy(
     let overwrite = overwrite.unwrap_or(false);
     tokio::task::spawn_blocking(move || -> Result<OfficeSaveResult, OfficePreviewError> {
         let (bytes, format) = read_validated(&path, &file_name)?;
-        save_bytes(&target, &bytes, overwrite, format)
+        save_bytes(&target, &bytes, overwrite, format, None)
     })
     .await
     .map_err(|e| err("write_failed", format!("保存线程异常退出：{e}")).to_wire_string())?
@@ -422,6 +571,8 @@ pub async fn office_save_copy(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteCopyHeader {
+    source: OfficePreviewSource,
+    copy_origin_token: Option<String>,
     target_path: String,
     #[serde(default)]
     overwrite: bool,
@@ -441,25 +592,54 @@ pub fn decode_framed_request(body: &[u8]) -> Result<(serde_json::Value, &[u8]), 
     Ok((header, &body[4 + header_len..]))
 }
 
+fn write_edited_copy(
+    source: &ProtectedCopySource,
+    target: &Path,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<OfficeSaveResult, OfficePreviewError> {
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let format = validate_office_bytes(name, bytes, office_preview_max_bytes())?;
+    save_bytes(target, bytes, overwrite, format, Some(source))
+}
+
+fn write_bound_edited_copy(
+    origins: &OfficeEditCopyOrigins,
+    window: &str,
+    body: &[u8],
+) -> Result<OfficeSaveResult, OfficePreviewError> {
+    let (header, bytes) = decode_framed_request(body)?;
+    let header: WriteCopyHeader =
+        serde_json::from_value(header).map_err(|e| err("invalid_request", format!("请求头字段无效：{e}")))?;
+    // A current path lookup cannot identify the opened file once it has moved.
+    let source = origins.get(window, &header.source, header.copy_origin_token.as_deref())?;
+    let target = Path::new(header.target_path.trim());
+    write_edited_copy(&source, target, bytes, header.overwrite)
+}
+
 /// 手动编辑后的文档另存为副本（字节来自查看器）。
 #[tauri::command]
-pub async fn office_write_copy(request: tauri::ipc::Request<'_>) -> Result<OfficeSaveResult, String> {
+pub async fn office_write_copy(
+    app_handle: AppHandle,
+    window: tauri::WebviewWindow,
+    request: tauri::ipc::Request<'_>,
+) -> Result<OfficeSaveResult, String> {
     let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
         return Err(err("invalid_request", "需要二进制请求体").to_wire_string());
     };
     let body = body.clone();
     tokio::task::spawn_blocking(move || -> Result<OfficeSaveResult, OfficePreviewError> {
-        let (header, bytes) = decode_framed_request(&body)?;
-        let header: WriteCopyHeader =
-            serde_json::from_value(header).map_err(|e| err("invalid_request", format!("请求头字段无效：{e}")))?;
-        let target = PathBuf::from(header.target_path.trim());
-        let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        let format = validate_office_bytes(&name, bytes, office_preview_max_bytes())?;
-        save_bytes(&target, bytes, header.overwrite, format)
+        write_bound_edited_copy(&app_handle.state::<OfficeEditCopyOrigins>(), window.label(), &body)
     })
     .await
     .map_err(|e| err("write_failed", format!("保存线程异常退出：{e}")).to_wire_string())?
     .map_err(|e| e.to_wire_string())
+}
+
+/// Invalidate the save-only handle when its editor load is discarded.
+#[tauri::command]
+pub fn release_office_copy_origin(app_handle: AppHandle, window: tauri::WebviewWindow, token: String) {
+    app_handle.state::<OfficeEditCopyOrigins>().release(window.label(), &token);
 }
 
 #[cfg(test)]

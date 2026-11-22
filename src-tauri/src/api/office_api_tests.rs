@@ -114,6 +114,7 @@ fn test_encode_office_file_response_frames_header_and_bytes() {
         mime: OfficeFormat::Docx.mime().to_string(),
         size_bytes: 3,
         sha256: "abc".to_string(),
+        copy_origin_token: None,
     };
     let body = encode_office_file_response(&header, &[1, 2, 3]).unwrap();
 
@@ -127,18 +128,35 @@ fn test_encode_office_file_response_frames_header_and_bytes() {
 #[test]
 fn test_load_office_file_blocking_rejects_missing_and_reads_valid_file() {
     let dir = tempfile::tempdir().unwrap();
-    let missing = load_office_file_blocking(&dir.path().join("none.docx"), "none.docx").unwrap_err();
+    let missing = load_office_file_blocking(&dir.path().join("none.docx"), "none.docx", |_| Ok(None)).unwrap_err();
     assert_eq!(missing.code, "file_not_found");
 
     let docx = build_minimal_ooxml_zip(&[("word/document.xml", b"<w:document/>")]);
     let path = dir.path().join("ok.docx");
     fs::write(&path, &docx).unwrap();
     let before = fs::read(&path).unwrap();
-    let body = load_office_file_blocking(&path, "ok.docx").unwrap();
+    let body = load_office_file_blocking(&path, "ok.docx", |_| Ok(None)).unwrap();
     let header_len = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
     assert_eq!(&body[4 + header_len..], docx.as_slice());
     // 只读：源文件字节不变
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn test_load_office_file_binds_copy_origin_only_after_valid_file_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.docx");
+    fs::write(&path, b"not a zip").unwrap();
+    let failed = load_office_file_blocking(&path, "source.docx", |_| panic!("invalid file must not get a binding"));
+    assert_eq!(failed.unwrap_err().code, "corrupt_file");
+
+    let docx = build_minimal_ooxml_zip(&[("word/document.xml", b"<w:document/>")]);
+    fs::write(&path, &docx).unwrap();
+    let body = load_office_file_blocking(&path, "source.docx", |_| Ok(Some("save-only".into()))).unwrap();
+    let header_len = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
+    let header: serde_json::Value = serde_json::from_slice(&body[4..4 + header_len]).unwrap();
+    assert_eq!(header["copyOriginToken"], "save-only");
+    assert_eq!(&body[4 + header_len..], docx.as_slice());
 }
 
 #[test]

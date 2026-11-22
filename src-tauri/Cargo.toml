@@ -22,6 +22,7 @@ zip = "2.2"
 zip-extract = "0.1.2"
 dirs = "5.0.1"
 dunce = "1.0.5"
+same-file = "1.0.6"
 shellexpand = { version = "3.1.2", default-features = false, features = ["base-0", "path"] }
 tauri = { version = "2", features = [ "test", "protocol-asset", "tray-icon", "devtools"] }
 serde = { version = "1", features = ["derive"] }
