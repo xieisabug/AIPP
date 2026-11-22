@@ -42,11 +42,16 @@ export default function ButlerProgressRow({ conversationId, publishedReports }: 
     </>;
 }
 
-export function HelperSummaryRow({ summary }: { summary: ButlerProgressSummary }) {
+export function HelperSummaryRow({ summary, memberName }: { summary: ButlerProgressSummary; memberName?: string }) {
     const elapsed = useElapsedSeconds();
-    return <div role="status" data-aipp-slot="butler-processing" className="butler-exchange flex items-center justify-center text-xs text-muted-foreground">
-        <div className="flex max-w-full items-center gap-1.5 px-2 py-1">
+    return <div role="status" data-aipp-slot="butler-processing"
+        className={`butler-exchange flex items-center text-xs text-muted-foreground ${memberName ? "justify-start" : "justify-center"}`}>
+        <div className={`flex max-w-full items-center gap-1.5 py-1 ${memberName ? "" : "px-2"}`}>
             <Loader2 aria-hidden="true" className="size-3 shrink-0 animate-spin" />
+            {memberName && <>
+                <span className="max-w-[40%] shrink-0 truncate font-medium" title={memberName}>{memberName}</span>
+                <span aria-hidden="true">·</span>
+            </>}
             <span className="truncate">{summary.text}</span>
             <span className="shrink-0 tabular-nums opacity-70">· {formatElapsed(elapsed)}</span>
         </div>

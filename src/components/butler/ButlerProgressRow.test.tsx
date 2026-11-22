@@ -31,6 +31,7 @@ describe("ButlerProgressRow", () => {
             await waitFor(() => expect(contacts.result.current.visuals.get(7)?.label).toBe(text));
         };
         await checkBoth(progress.text);
+        expect(screen.getByRole("status")).toHaveClass("justify-center");
         await act(async () => {
             await emit(BUTLER_PROGRESS_EVENT, summary(3, 2, "已核对三份报价"));
             await emit(BUTLER_PROGRESS_EVENT, summary(3, 1, "上一轮进展"));

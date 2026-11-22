@@ -44,7 +44,7 @@ function TypingRow({ member, shown }: { member: ButlerGroupMember; shown?: strin
             <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={20} figure animated state="thinking" />
         </ButlerGroupSpeaker>
         <LiveReportBubbles reports={progress?.reports} published={shown} />
-        {progress?.helper ? <HelperSummaryRow summary={progress.helper} /> : <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
+        {progress?.helper ? <HelperSummaryRow summary={progress.helper} memberName={member.name} /> : <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
             <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
         </div>}
     </div>;
