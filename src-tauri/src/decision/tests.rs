@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -175,6 +175,49 @@ fn test_encode_and_decode_openai_decisions() {
 }
 
 #[test]
+fn test_decision_openai_probability_arrays_by_choice_and_level() {
+    let req = DecisionRequest::new("gpt-6-luna", "support ticket", vec![
+        DecisionQuestion::choice("department", "Route", vec![
+            ChoiceOption::new("billing", "Billing"), ChoiceOption::new("support", "Support"),
+        ]),
+        DecisionQuestion::score("severity", "Severity", vec![
+            ScoreLevel::new("Cosmetic", ""), ScoreLevel::new("Workaround available", ""),
+            ScoreLevel::new("Fully blocked", ""),
+        ]),
+    ]);
+    let body = json!({
+        "answers": [
+            {"type": "choice", "name": "department", "choice": "billing", "confidence": 0.81,
+             "probabilities": [{"value": "support", "probability": 0.08}, {"value": "billing", "probability": 0.92}]},
+            {"type": "score", "name": "severity", "score": 1.1, "confidence": 0.55, "probabilities": [
+                {"value": 2, "label": "Fully blocked", "probability": 0.2},
+                {"value": 0, "label": "Cosmetic", "probability": 0.1},
+                {"value": 1, "label": "Workaround available", "probability": 0.7}
+            ]}
+        ]
+    });
+    let decode = |body| decode_response(DecisionProtocol::OpenAiDecisions, &req, body, 0);
+    let response = decode(body.clone()).unwrap();
+    assert_eq!(response.choice("department"), Some(("billing", Some(0.92))));
+    assert_eq!(response.answers["department"], DecisionAnswer::Choice {
+        selected: "billing".into(),
+        probabilities: HashMap::from([("support".into(), 0.08), ("billing".into(), 0.92)]),
+        confidence: Some(0.81),
+    });
+    assert_eq!(response.answers["severity"], DecisionAnswer::Score {
+        score: 1.1, probabilities: vec![0.1, 0.7, 0.2], confidence: Some(0.55),
+    });
+
+    let mut without_distribution = body.clone();
+    without_distribution["answers"][0].as_object_mut().unwrap().remove("probabilities");
+    assert_eq!(decode(without_distribution).unwrap().choice("department"), Some(("billing", None)));
+
+    let mut invalid = body;
+    invalid["answers"][1]["probabilities"][0]["probability"] = json!(1.1);
+    assert!(decode(invalid).unwrap_err().contains("severity"));
+}
+
+#[test]
 fn test_encode_and_decode_gemini_decisions() {
     let req = DecisionRequest::new(
         "gemini-decision-1",
@@ -263,7 +306,7 @@ fn test_decode_rejects_missing_answer_out_of_range_and_unknown_choice() {
 
 async fn spawn_mock_server(
     status_line: &'static str,
-    response_body: Value,
+    response_body: impl ToString,
 ) -> (String, tokio::task::JoinHandle<(String, String)>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -283,6 +326,57 @@ async fn spawn_mock_server(
         (head.to_string(), req_body.to_string())
     });
     (format!("http://{}", addr), handle)
+}
+
+#[test]
+fn test_decision_endpoint_uses_provider_default_and_explicit_gateway() {
+    use super::client::decision_endpoint_url;
+    use DecisionProtocol::*;
+    for (api_type, endpoint, protocol, expected) in [
+        ("openai_api", None, GeminiDecisions, "https://api.openai.com/v1/decisions"),
+        ("openai", Some("   "), TypesafeSystemOne, "https://api.openai.com/v1/systemone"),
+        ("gemini", None, GeminiDecisions, "https://generativelanguage.googleapis.com/v1beta/decisions"),
+        ("typesafe_jev", None, TypesafeSystemOne, "https://api.typesafe.ai/v1/systemone"),
+        ("openai_api", Some("https://gateway.example/proxy/v1"), TypesafeSystemOne,
+            "https://gateway.example/proxy/v1/systemone"),
+    ] {
+        assert_eq!(decision_endpoint_url(api_type, endpoint, protocol).unwrap(), expected);
+    }
+    assert!(decision_endpoint_url("openai_api", Some("bad url"), GeminiDecisions).is_err());
+}
+
+#[tokio::test]
+async fn test_decision_provider_redacts_echo_before_both_error_limits() {
+    use crate::db::llm_db::LLMProviderConfig;
+    use crate::vault::config_ref::PROVIDER_GUARD;
+
+    let secret = "synthetic-test-credential";
+    let row = |name: &str, value: String| LLMProviderConfig {
+        id: 0, llm_provider_id: 1, name: name.into(), value,
+        append_location: String::new(), is_addition: false,
+    };
+    for (status, limit, diagnostic) in [
+        ("401 Unauthorized", 400, "HTTP 401"),
+        ("200 OK", 200, "不是有效 JSON"),
+    ] {
+        let prefix = "测".repeat(limit - 12);
+        let body = format!("{prefix}{secret}{}END", ".".repeat(20));
+        let (base, handle) = spawn_mock_server(status, body).await;
+        let configs = [
+            row("endpoint", base.clone()),
+            row("api_key", format!("test-prefix-{secret}-suffix")),
+            row(PROVIDER_GUARD, json!({
+                "sites": [base], "context": "test", "credentials": ["mock"], "secrets": [secret],
+            }).to_string()),
+        ];
+        let request = DecisionRequest::new("model", "ping", vec![DecisionQuestion::bool("ok", "ok?")]);
+        let error = execute_for_provider(
+            "openai_api", &configs, MODE_JEV_SYSTEMONE, &request, None, false, Some(5), &HashMap::new(),
+        ).await.unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+        assert!(error.ends_with(&format!("{prefix}[REDACTED]..")), "{error}");
+        handle.await.unwrap();
+    }
 }
 
 #[tokio::test]

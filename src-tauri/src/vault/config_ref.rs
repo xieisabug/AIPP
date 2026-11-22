@@ -391,8 +391,15 @@ impl ProviderErrorRedactor {
 /// Build the request-local error redactor before handing resolved authentication to a transport.
 /// Include individual vault values as well as the composed API key (references can be embedded).
 pub(crate) fn provider_redactor(configs: &[LLMProviderConfig]) -> Result<ProviderErrorRedactor, String> {
+    provider_redactor_with_secrets(configs, std::iter::empty())
+}
+
+pub(crate) fn provider_redactor_with_secrets<'a>(
+    configs: &[LLMProviderConfig], extra: impl IntoIterator<Item = &'a str>,
+) -> Result<ProviderErrorRedactor, String> {
     let mut secrets: Vec<String> = configs.iter().filter(|c| c.name == "api_key" && !contains(&c.value))
         .map(|c| c.value.clone()).collect();
+    secrets.extend(extra.into_iter().filter(|s| !s.is_empty()).map(str::to_owned));
     if let Some(row) = configs.iter().find(|c| c.name == PROVIDER_GUARD) {
         let guard: ProviderGuard = serde_json::from_str(&row.value).map_err(|_| "保险箱校验信息损坏，已停止发送")?;
         secrets.extend(guard.secrets);

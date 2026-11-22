@@ -431,6 +431,7 @@ async fn query_model(app: &AppHandle, group_id: i64, chat_prompt: (String, Strin
     if crate::decision::is_decision_mode(&detail.model.request_mode) {
         let decision_req = decision_request(&detail.model.code);
         let (response, _endpoint) = crate::decision::execute_for_provider(
+            &detail.provider.api_type,
             &provider_config,
             &detail.model.request_mode,
             &decision_req,

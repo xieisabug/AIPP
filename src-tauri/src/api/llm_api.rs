@@ -13,6 +13,10 @@ fn emit_llm_provider_changed(app: &tauri::AppHandle) {
     let _ = app.emit("llm_provider_changed", ());
 }
 
+#[cfg(test)]
+#[path = "llm_api_tests.rs"]
+mod llm_api_tests;
+
 #[derive(Serialize, Deserialize)]
 pub struct LlmProvider {
     pub id: i64,
@@ -336,6 +340,37 @@ pub async fn get_llm_models(
     Ok(result)
 }
 
+/// Jev's built-in catalog is additive. Keep the saved row and its metadata for every existing code.
+fn typesafe_catalog(db: &LLMDatabase, provider_id: i64) -> rusqlite::Result<Vec<LlmModel>> {
+    let mut rows = db.get_llm_models(provider_id.to_string())?;
+    for &(code, label) in crate::decision::TYPESAFE_JEV_PRESET_MODELS {
+        if !rows.iter().any(|row| row.3 == code) {
+            rows.push((0, label.into(), provider_id, code.into(),
+                "TypeSafe System One 决策模型".into(), false, false, false));
+        }
+    }
+    let mode = crate::decision::MODE_JEV_SYSTEMONE;
+    Ok(rows.into_iter().map(|(id, name, llm_provider_id, code, description, vision_support, audio_support, video_support)| {
+        LlmModel {
+            id, name, llm_provider_id, code, description, vision_support, audio_support, video_support,
+            request_mode: mode.into(), available_modes: Some(vec![mode.into()]),
+        }
+    }).collect())
+}
+
+fn sync_typesafe_models(db: &LLMDatabase, provider_id: i64) -> rusqlite::Result<Vec<LlmModel>> {
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
+    let mut models = typesafe_catalog(db, provider_id)?;
+    for model in models.iter_mut().filter(|model| model.id == 0) {
+        db.add_llm_model(&model.name, provider_id, &model.code, &model.description,
+            model.vision_support, model.audio_support, model.video_support)?;
+        model.id = tx.last_insert_rowid();
+        db.upsert_model_request_mode(provider_id, &model.code, &model.request_mode)?;
+    }
+    tx.commit()?;
+    Ok(models)
+}
+
 #[tauri::command]
 pub async fn fetch_model_list(
     app_handle: tauri::AppHandle,
@@ -343,6 +378,12 @@ pub async fn fetch_model_list(
 ) -> Result<Vec<LlmModel>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
+    if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
+        let models = sync_typesafe_models(&db, llm_provider_id).map_err(|e| e.to_string())?;
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+        emit_llm_provider_changed(&app_handle);
+        return Ok(models);
+    }
     let llm_provider_config =
         db.get_llm_provider_config(llm_provider_id).map_err(|e| e.to_string())?;
     let request_mode_map = list_request_mode_map(&db, llm_provider_id)?;
@@ -372,30 +413,6 @@ pub async fn fetch_model_list(
         crate::sync::schedule_sync_after_local_change(&app_handle);
         emit_llm_provider_changed(&app_handle);
         return Ok(models);
-    }
-
-    if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
-        drop(config_feature_map);
-        let result: Vec<LlmModel> = crate::decision::TYPESAFE_JEV_PRESET_MODELS
-            .iter()
-            .map(|(code, label)| LlmModel {
-                id: 0,
-                name: (*label).to_string(),
-                llm_provider_id,
-                code: (*code).to_string(),
-                description: "TypeSafe System One 决策模型".to_string(),
-                vision_support: false,
-                audio_support: false,
-                video_support: false,
-                request_mode: crate::decision::MODE_JEV_SYSTEMONE.to_string(),
-                available_modes: Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
-            })
-            .collect();
-        db.replace_llm_models(llm_provider_id, &result.iter().map(persisted_model).collect::<Vec<_>>(), true)
-            .map_err(|e| e.to_string())?;
-        crate::sync::schedule_sync_after_local_change(&app_handle);
-        emit_llm_provider_changed(&app_handle);
-        return Ok(result);
     }
 
     // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
@@ -553,6 +570,15 @@ pub async fn preview_model_list(
 ) -> Result<ModelSelectionResponse, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
+    if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
+        let models = typesafe_catalog(&db, llm_provider_id).map_err(|e| e.to_string())?;
+        let available_models = models.into_iter().map(|m| ModelForSelection {
+            is_selected: m.id != 0, code: m.code, name: m.name, description: m.description,
+            vision_support: m.vision_support, audio_support: m.audio_support, video_support: m.video_support,
+            request_mode: m.request_mode, available_modes: m.available_modes,
+        }).collect();
+        return Ok(ModelSelectionResponse { available_models, missing_models: Vec::new() });
+    }
     let llm_provider_config =
         db.get_llm_provider_config(llm_provider_id).map_err(|e| e.to_string())?;
 
@@ -598,45 +624,6 @@ pub async fn preview_model_list(
                 request_mode: m.request_mode, available_modes: m.available_modes, is_selected }
         }).collect();
         return Ok(ModelSelectionResponse { available_models, missing_models: missing.into_iter().collect() });
-    }
-
-    if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
-        drop(config_feature_map);
-        let mut available_models = Vec::new();
-        let mut seen = HashSet::new();
-        for (code, label) in crate::decision::TYPESAFE_JEV_PRESET_MODELS {
-            seen.insert((*code).to_string());
-            available_models.push(ModelForSelection {
-                name: (*label).to_string(),
-                code: (*code).to_string(),
-                description: "TypeSafe System One 决策模型（/v1/systemone）".to_string(),
-                vision_support: false,
-                audio_support: false,
-                video_support: false,
-                request_mode: crate::decision::MODE_JEV_SYSTEMONE.to_string(),
-                available_modes: Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
-                is_selected: existing_model_codes.contains(*code),
-            });
-        }
-        for (_, name, _, code, desc, _, _, _) in &existing_models {
-            if seen.insert(code.clone()) {
-                available_models.push(ModelForSelection {
-                    name: name.clone(),
-                    code: code.clone(),
-                    description: desc.clone(),
-                    vision_support: false,
-                    audio_support: false,
-                    video_support: false,
-                    request_mode: crate::decision::MODE_JEV_SYSTEMONE.to_string(),
-                    available_modes: Some(vec![crate::decision::MODE_JEV_SYSTEMONE.to_string()]),
-                    is_selected: true,
-                });
-            }
-        }
-        return Ok(ModelSelectionResponse {
-            available_models,
-            missing_models: Vec::new(),
-        });
     }
 
     // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
@@ -787,6 +774,7 @@ pub async fn test_decision_model(
     .await?;
 
     crate::decision::probe_decision_model(
+        &detail.provider.api_type,
         &prepared_configs,
         effective_mode,
         &detail.model.code,

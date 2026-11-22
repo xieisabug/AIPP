@@ -208,9 +208,9 @@ impl DecisionAnswer {
             Self::Choice {
                 selected,
                 probabilities,
-                confidence,
+                ..
             } => {
-                let prob = probabilities.get(selected).copied().or(*confidence);
+                let prob = probabilities.get(selected).copied();
                 Some((selected.as_str(), prob))
             }
             _ => None,
@@ -627,6 +627,33 @@ fn optional_confidence(raw: &Value, key: &str) -> Result<Option<f64>, String> {
     }
 }
 
+fn entry_probability(item: &Value, key: &str) -> Result<f64, String> {
+    let p = item.get("probability").and_then(Value::as_f64)
+        .ok_or_else(|| format!("问题 `{key}` 的概率项缺少有效 probability"))?;
+    validate_probability(p, key)
+}
+
+fn openai_score_probabilities(
+    items: &[Value], levels: &[ScoreLevel], key: &str,
+) -> Result<Vec<f64>, String> {
+    let mut distribution = vec![None; levels.len()];
+    for item in items {
+        let index = item.get("value").and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|&index| index < levels.len())
+            .ok_or_else(|| format!("打分问题 `{key}` 的概率项等级编号无效"))?;
+        if item.get("label").and_then(Value::as_str) != Some(levels[index].label.as_str()) {
+            return Err(format!("打分问题 `{key}` 的等级 {index} 与请求标签不符"));
+        }
+        if distribution[index].replace(entry_probability(item, key)?).is_some() {
+            return Err(format!("打分问题 `{key}` 的等级 {index} 重复"));
+        }
+    }
+    distribution.into_iter().enumerate().map(|(index, p)| {
+        p.ok_or_else(|| format!("打分问题 `{key}` 缺少等级 {index} 的概率"))
+    }).collect()
+}
+
 fn decode_single_answer(
     protocol: DecisionProtocol,
     question: &DecisionQuestion,
@@ -673,11 +700,19 @@ fn decode_single_answer(
             }
 
             let mut probabilities = HashMap::new();
-            if let Some(dist) = raw
-                .get("probabilities")
-                .or_else(|| raw.get("distribution"))
-                .and_then(Value::as_object)
-            {
+            let dist = raw.get("probabilities").or_else(|| raw.get("distribution"));
+            if let Some(items) = dist.and_then(Value::as_array) {
+                for item in items {
+                    let value = item.get("value").and_then(Value::as_str)
+                        .ok_or_else(|| format!("单选问题 `{key}` 的概率项缺少选项值"))?;
+                    if !options.iter().any(|opt| opt.id == value) {
+                        return Err(format!("单选问题 `{key}` 的概率项包含未定义的选项 `{value}`"));
+                    }
+                    if probabilities.insert(value.to_owned(), entry_probability(item, key)?).is_some() {
+                        return Err(format!("单选问题 `{key}` 的选项 `{value}` 概率重复"));
+                    }
+                }
+            } else if let Some(dist) = dist.and_then(Value::as_object) {
                 for (opt_key, opt_val) in dist {
                     if let Some(p) = opt_val.as_f64() {
                         probabilities.insert(
@@ -687,13 +722,11 @@ fn decode_single_answer(
                     }
                 }
             }
-            let confidence = match optional_confidence(raw, key)? {
-                Some(c) => Some(c),
-                None => match raw.get("probability").and_then(Value::as_f64) {
-                    Some(p) => Some(validate_probability(p, &format!("{key}.probability"))?),
-                    None => None,
-                },
-            };
+            // Some gateways return only the probability of the selected choice.
+            if let Some(p) = raw.get("probability").and_then(Value::as_f64) {
+                probabilities.entry(selected.to_owned()).or_insert(validate_probability(p, key)?);
+            }
+            let confidence = optional_confidence(raw, key)?;
 
             Ok(DecisionAnswer::Choice {
                 selected: selected.to_string(),
@@ -719,14 +752,14 @@ fn decode_single_answer(
 
             let mut probabilities = Vec::new();
             if let Some(arr) = raw.get("probabilities").and_then(Value::as_array) {
-                for (i, item) in arr.iter().enumerate() {
-                    let p = item
-                        .as_f64()
-                        .ok_or_else(|| format!("打分问题 `{key}` 概率数组第 {i} 项无效"))?;
-                    probabilities.push(validate_probability(
-                        p,
-                        &format!("{key}.probabilities[{i}]"),
-                    )?);
+                if protocol == DecisionProtocol::OpenAiDecisions && arr.first().is_some_and(Value::is_object) {
+                    probabilities = openai_score_probabilities(arr, levels, key)?;
+                } else {
+                    for (i, item) in arr.iter().enumerate() {
+                        let p = item.as_f64()
+                            .ok_or_else(|| format!("打分问题 `{key}` 概率数组第 {i} 项无效"))?;
+                        probabilities.push(validate_probability(p, &format!("{key}.probabilities[{i}]"))?);
+                    }
                 }
             } else if let Some(map) = raw
                 .get("probabilities")

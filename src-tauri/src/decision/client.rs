@@ -6,9 +6,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::api::ai::config::get_custom_headers_from_config;
-use crate::api::genai_client::{resolve_provider_endpoint, ProviderEndpointResolution};
+use crate::api::genai_client::{provider_destination, resolve_provider_endpoint, ProviderEndpointResolution};
 use crate::db::llm_db::LLMProviderConfig;
 use crate::db::system_db::FeatureConfig;
+use crate::vault::config_ref::{provider_redactor_with_secrets, ProviderErrorRedactor};
 
 use super::protocol::{
     build_endpoint_url, decode_response, encode_request, DecisionProtocol, DecisionQuestion,
@@ -43,6 +44,26 @@ pub struct DecisionProbeResult {
 pub async fn execute_decision(
     cfg: &DecisionClientConfig,
     req: &DecisionRequest,
+) -> Result<DecisionResponse, String> {
+    let redactor = decision_redactor(&[], &cfg.api_key, &cfg.custom_headers)?;
+    send_decision(cfg, req, &redactor).await.map_err(|err| redactor.clean(&err))
+}
+
+fn decision_redactor(
+    configs: &[LLMProviderConfig],
+    api_key: &str,
+    headers: &HashMap<String, String>,
+) -> Result<ProviderErrorRedactor, String> {
+    let auth_values = headers.iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-goog-api-key"))
+        .map(|(_, value)| value.as_str());
+    provider_redactor_with_secrets(configs, auth_values.chain(std::iter::once(api_key.trim())))
+}
+
+async fn send_decision(
+    cfg: &DecisionClientConfig,
+    req: &DecisionRequest,
+    redactor: &ProviderErrorRedactor,
 ) -> Result<DecisionResponse, String> {
     let payload = encode_request(cfg.protocol, req)?;
 
@@ -121,7 +142,7 @@ pub async fn execute_decision(
     let latency_ms = started.elapsed().as_millis() as i64;
 
     if !status.is_success() {
-        let snippet: String = body_text.trim().chars().take(400).collect();
+        let snippet: String = redactor.clean(&body_text).trim().chars().take(400).collect();
         return Err(format!(
             "{} 返回 HTTP {}：{}",
             cfg.protocol.display_name(),
@@ -135,15 +156,26 @@ pub async fn execute_decision(
     }
 
     let body: Value = serde_json::from_str(&body_text).map_err(|e| {
-        let snippet: String = body_text.trim().chars().take(200).collect();
+        let snippet: String = redactor.clean(&body_text).trim().chars().take(200).collect();
         format!("决策接口返回的不是有效 JSON（{e}）：{snippet}")
     })?;
 
     decode_response(cfg.protocol, req, body, latency_ms)
 }
 
+pub(super) fn decision_endpoint_url(
+    api_type: &str, endpoint: Option<&str>, protocol: DecisionProtocol,
+) -> Result<String, String> {
+    let base = match resolve_provider_endpoint(endpoint).map_err(|e| e.to_string())? {
+        ProviderEndpointResolution::Custom(url) => url,
+        ProviderEndpointResolution::Unset => provider_destination(api_type, None)?,
+    };
+    build_endpoint_url(protocol, &base)
+}
+
 /// 通过 AIPP 提供商配置执行决策请求：强制经过保险箱去向校验与错误脱敏。
 pub async fn execute_for_provider(
+    api_type: &str,
     prepared_configs: &[LLMProviderConfig],
     request_mode: &str,
     request: &DecisionRequest,
@@ -156,16 +188,17 @@ pub async fn execute_for_provider(
         format!("模型请求协议 `{request_mode}` 不是决策协议，无法发起决策请求")
     })?;
 
-    let redactor = crate::vault::config_ref::provider_redactor(prepared_configs)?;
+    let api_key = prepared_configs.iter().rev().find(|cfg| cfg.name == "api_key")
+        .map(|cfg| cfg.value.as_str()).unwrap_or_default();
+    let custom_headers = get_custom_headers_from_config(config_feature_map);
+    let redactor = decision_redactor(prepared_configs, api_key, &custom_headers)?;
 
     let result = async {
-        let mut api_key = String::new();
         let mut endpoint_raw: Option<String> = None;
         let mut provider_proxy_enabled = proxy_enabled;
 
         for cfg in prepared_configs {
             match cfg.name.as_str() {
-                "api_key" => api_key = cfg.value.clone(),
                 "endpoint" => endpoint_raw = Some(cfg.value.clone()),
                 "proxy_enabled" => {
                     if let Ok(enabled) = cfg.value.parse::<bool>() {
@@ -176,18 +209,12 @@ pub async fn execute_for_provider(
             }
         }
 
-        let resolved =
-            resolve_provider_endpoint(endpoint_raw.as_deref()).map_err(|e| e.to_string())?;
-        let base_url = match resolved {
-            ProviderEndpointResolution::Custom(url) => url,
-            ProviderEndpointResolution::Unset => protocol.default_base_url().to_string(),
-        };
-        let endpoint_url = build_endpoint_url(protocol, &base_url)?;
+        let endpoint_url = decision_endpoint_url(api_type, endpoint_raw.as_deref(), protocol)?;
 
         // 凭据保险箱红线：检查解析后的 API Key 是否获准发往目标站点
         crate::vault::config_ref::check_provider_destination(
             prepared_configs,
-            &api_key,
+            api_key,
             &endpoint_url,
         )?;
 
@@ -196,18 +223,17 @@ pub async fn execute_for_provider(
         } else {
             None
         };
-        let custom_headers = get_custom_headers_from_config(config_feature_map);
 
         let client_cfg = DecisionClientConfig {
             protocol,
             endpoint_url: endpoint_url.clone(),
-            api_key,
+            api_key: api_key.to_owned(),
             network_proxy: effective_proxy,
             timeout_secs: timeout_secs.unwrap_or(DEFAULT_DECISION_TIMEOUT_SECS),
             custom_headers,
         };
 
-        let response = execute_decision(&client_cfg, request).await?;
+        let response = send_decision(&client_cfg, request, &redactor).await?;
         Ok::<_, String>((response, endpoint_url))
     }
     .await;
@@ -217,6 +243,7 @@ pub async fn execute_for_provider(
 
 /// 轻量连通性探针：发一题最简 Bool 判定，验证端点、鉴权、协议解析与延迟。
 pub async fn probe_decision_model(
+    api_type: &str,
     prepared_configs: &[LLMProviderConfig],
     request_mode: &str,
     model_code: &str,
@@ -237,6 +264,7 @@ pub async fn probe_decision_model(
     );
 
     let (resp, endpoint_url) = execute_for_provider(
+        api_type,
         prepared_configs,
         request_mode,
         &req,

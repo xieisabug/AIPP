@@ -1077,6 +1077,7 @@ async fn review_with_definition(
             build_decision_review_request(&model_detail.model.code, &user_prompt, intent.is_some());
         let threshold = configured_decision_threshold(&config_feature_map);
         return match crate::decision::execute_for_provider(
+            &model_detail.provider.api_type,
             &prepared_configs,
             &model_detail.model.request_mode,
             &decision_req,
