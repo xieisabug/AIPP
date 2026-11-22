@@ -4,7 +4,7 @@ use super::dispatch::{dispatch_prepared, response_message, TurnEffects, TurnInpu
 use super::lifecycle::{bind_session, AgentSessionBinding};
 use super::registry::{registry, AgentDriverMetadata, AgentDriverRegistry, AgentInstanceConfig, PreparedAgentSession};
 use super::session::AgentSessionHandle;
-use crate::api::ai::acp::build_selected_mcp_tools_payload;
+use crate::api::ai::acp::build_selected_mcp_tools_with_catalog;
 use crate::api::ai::events::ConversationEvent;
 use crate::api::ai::types::AiResponse;
 use crate::api::ai_api::parse_agent_model_override;
@@ -94,9 +94,12 @@ pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Windo
         metadata = registry().driver(&instance.driver_id)?.metadata();
         provider_id = Some(instance.provider_id);
         preparation_stage = super::failure::AgentFailureStage::Mcp;
-        let payload = build_selected_mcp_tools_payload(&app_handle, request.assistant.assistant.id, Some(request.conversation_id)).map_err(AppError::UnknownError)?;
+        let (payload, dynamic_catalog) = build_selected_mcp_tools_with_catalog(&app_handle, request.assistant.assistant.id, Some(request.conversation_id)).map_err(AppError::UnknownError)?;
         if let Some(role) = request.native_butler_role.take() {
-            request.native_butler_role = Some(crate::acp_mcp_bridge::native_butler_instructions(&role, &payload).map_err(AppError::UnknownError)?);
+            request.native_butler_role = Some(
+                crate::acp_mcp_bridge::native_butler_instructions_with_catalog(&role, &payload, &dynamic_catalog)
+                    .map_err(AppError::UnknownError)?,
+            );
         }
         preparation_stage = super::failure::AgentFailureStage::Configuration;
         let mut prepared = registry().prepare(&instance, &request, model_override.as_deref())?;

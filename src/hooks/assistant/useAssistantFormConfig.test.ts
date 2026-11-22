@@ -7,6 +7,7 @@ import { emit } from "@tauri-apps/api/event";
 import type { AssistantDetail } from "@/data/Assistant";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import { useAssistantFormConfig } from "./useAssistantFormConfig";
+import { buildAssistantFormValues, buildAssistantSaveDetail } from "@/components/config/assistant/assistantEditorModel";
 
 const baseAssistantDetail: AssistantDetail = {
     assistant: {
@@ -308,7 +309,7 @@ describe("useAssistantFormConfig Codex fields", () => {
 });
 
 describe("native agent model selection", () => {
-    it.each(["pi", "cursor", "opencode", "kiro", "antigravity"])("should expose native models without Codex policies when provider is %s", async (apiType) => {
+    it.each(["pi", "cursor", "opencode", "kiro", "antigravity", "claude_sdk"])("should expose native models without Codex policies when provider is %s", async (apiType) => {
         clearAllMockHandlers();
         mockInvokeHandler("get_all_feature_config", () => []);
         mockInvokeHandler("get_filtered_providers", () => [{ id: 7, name: apiType, api_type: apiType }]);
@@ -318,20 +319,34 @@ describe("native agent model selection", () => {
             assistant: { ...baseAssistantDetail.assistant, assistant_type: 4 },
             model: [{ ...baseAssistantDetail.model[0], provider_id: 7, model_code: "provider/model" }],
         };
+        const onConfigChange = vi.fn();
         const { result } = renderHook(() => useAssistantFormConfig({
             currentAssistant: assistant, assistantTypeNameMap: new Map([[4, "Agent"]]),
             assistantTypeCustomField: [], assistantTypeCustomLabel: new Map(), assistantTypeCustomTips: new Map(),
-            assistantTypeHideField: [], navigateTo: vi.fn(), onConfigChange: vi.fn(), onPromptChange: vi.fn(),
+            assistantTypeHideField: [], navigateTo: vi.fn(), onConfigChange, onPromptChange: vi.fn(),
             pluginAssistantFormFields: [], pluginAssistantConfigValues: {}, onPluginConfigChange: vi.fn(),
-            agentModelOptions: [{ code: "provider/model%%7", name: "Native model", provider_id: 7, efforts: [], is_default: true }],
+            agentModelOptions: [{ code: "provider/model%%7", name: "Native model", provider_id: 7, efforts: apiType === "claude_sdk" ? ["default", "xhigh"] : [], is_default: true }],
             agentModelLoading: false, agentModelError: null, onAgentProviderChange: vi.fn(), onAgentModelChange,
         }));
         await waitFor(() => expect(result.current.formConfig.some(field => field.key === "agent_model")).toBe(true));
         expect(result.current.formConfig.some(field => field.key === "codex_sandbox")).toBe(false);
         expect(result.current.formConfig.some(field => field.key === "reasoning_effort")).toBe(false);
-        expect(result.current.formConfig.find(field => field.key === "acp_additional_args")?.config.disabled).toBe(true);
+        expect(result.current.formConfig.find(field => field.key === "acp_additional_args")?.config.disabled).toBe(apiType !== "claude_sdk");
         result.current.formConfig.find(field => field.key === "agent_model")?.config.onChange?.("provider/model%%7");
-        expect(onAgentModelChange).toHaveBeenCalledWith("provider/model%%7", "");
+        expect(onAgentModelChange).toHaveBeenCalledWith("provider/model%%7", apiType === "claude_sdk" ? undefined : "");
+        const effort = result.current.formConfig.find(field => field.key === "claude_effort");
+        if (apiType === "claude_sdk") {
+            expect(effort?.config.options?.map(option => option.value)).toEqual(["inherit", "default", "xhigh"]);
+            effort?.config.onChange?.("xhigh");
+            expect(onConfigChange).toHaveBeenCalledWith("claude_effort", "xhigh", "string");
+            const values = buildAssistantFormValues(assistant, [], {});
+            const saved = buildAssistantSaveDetail(assistant, { ...values, claude_effort: "xhigh" }, []);
+            expect(buildAssistantFormValues(saved, [], {}).claude_effort).toBe("xhigh");
+            const inherited = buildAssistantSaveDetail(saved, { ...values, claude_effort: "inherit" }, []);
+            expect(inherited.model_configs.find(item => item.name === "claude_effort")?.value).toBe("");
+        } else {
+            expect(effort).toBeUndefined();
+        }
     });
 });
 

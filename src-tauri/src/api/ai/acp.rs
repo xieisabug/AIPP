@@ -4,7 +4,7 @@
 use crate::acp_mcp_bridge::{
     ensure_proxy_server, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV, ACP_MCP_DB_PATH_ENV,
     ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV, ACP_MCP_PROXY_TOKEN_ENV,
-    ACP_MCP_SELECTED_TOOLS_ENV,
+    ACP_MCP_SELECTED_TOOLS_ENV, ACP_MCP_SELECTED_TOOLS_FILE_ENV,
 };
 use crate::api::ai::config::build_proxy_env_vars;
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
@@ -104,16 +104,19 @@ async fn build_acp_manual_mcp_servers(
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
     let mut proxy_config = ensure_proxy_server(app_handle.clone()).await?;
     proxy_config.token = mcp_scope.token().to_string();
-    Ok(build_acp_manual_mcp_servers_from_parts(
+    let selected_tools_file = mcp_scope.attach_selected_tools_file(selected_mcp_tools_payload)?;
+    Ok(build_acp_manual_mcp_servers_with_env(
         bridge_command,
         mcp_db_path,
         conversation_id,
         proxy_config.addr,
         proxy_config.token,
-        selected_mcp_tools_payload.to_string(),
+        ACP_MCP_SELECTED_TOOLS_FILE_ENV,
+        selected_tools_file.display().to_string(),
     ))
 }
 
+#[cfg(test)]
 fn build_acp_manual_mcp_servers_from_parts(
     bridge_command: PathBuf,
     mcp_db_path: PathBuf,
@@ -121,6 +124,26 @@ fn build_acp_manual_mcp_servers_from_parts(
     proxy_addr: String,
     proxy_token: String,
     selected_mcp_tools_payload: String,
+) -> Vec<acp::McpServer> {
+    build_acp_manual_mcp_servers_with_env(
+        bridge_command,
+        mcp_db_path,
+        conversation_id,
+        proxy_addr,
+        proxy_token,
+        ACP_MCP_SELECTED_TOOLS_ENV,
+        selected_mcp_tools_payload,
+    )
+}
+
+fn build_acp_manual_mcp_servers_with_env(
+    bridge_command: PathBuf,
+    mcp_db_path: PathBuf,
+    conversation_id: i64,
+    proxy_addr: String,
+    proxy_token: String,
+    selected_tools_env_key: &str,
+    selected_tools_env_value: String,
 ) -> Vec<acp::McpServer> {
     vec![acp::McpServer::Stdio(
         acp::McpServerStdio::new("AIPP MCP Tools", bridge_command)
@@ -137,7 +160,7 @@ fn build_acp_manual_mcp_servers_from_parts(
                 acp::EnvVariable::new(ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, "1"),
                 acp::EnvVariable::new(ACP_MCP_PROXY_ADDR_ENV, proxy_addr),
                 acp::EnvVariable::new(ACP_MCP_PROXY_TOKEN_ENV, proxy_token),
-                acp::EnvVariable::new(ACP_MCP_SELECTED_TOOLS_ENV, selected_mcp_tools_payload),
+                acp::EnvVariable::new(selected_tools_env_key, selected_tools_env_value),
             ]),
     )]
 }
@@ -149,6 +172,52 @@ pub fn build_selected_mcp_tools_payload(
     assistant_id: i64,
     conversation_id: Option<i64>,
 ) -> Result<String, String> {
+    build_selected_mcp_tools_with_catalog(app_handle, assistant_id, conversation_id)
+        .map(|(payload, _)| payload)
+}
+
+pub(crate) fn collect_native_dynamic_mcp_catalog(
+    servers: &[crate::api::assistant_api::MCPServerWithTools],
+) -> Vec<(String, String)> {
+    let mut catalog: Vec<(String, String)> = servers
+        .iter()
+        .filter(|server| server.is_enabled)
+        .filter(|server| {
+            !matches!(
+                server.command.as_deref(),
+                Some(
+                    "aipp:dynamic_mcp"
+                        | "aipp:agent"
+                        | "aipp:ui_interaction"
+                        | "aipp:superadmin"
+                )
+            ) && server.command.as_deref() != Some(crate::vault::tool::COMMAND)
+                && server.command.as_deref() != Some(crate::mcp::builtin_mcp::office::COMMAND)
+        })
+        .filter(|server| {
+            server.tools.iter().any(|tool| {
+                tool.is_enabled
+                    && !(server.command.as_deref() == Some("aipp:operation")
+                        && matches!(
+                            tool.name.as_str(),
+                            "read_file" | "write_file" | "execute_bash" | "get_bash_output"
+                        ))
+            })
+        })
+        .map(|server| (server.name.clone(), server.summary.clone()))
+        .collect();
+    catalog.sort_by(|left, right| left.0.cmp(&right.0));
+    catalog.dedup_by(|left, right| left.0 == right.0);
+    catalog
+}
+
+/// 返回 `(selected_mcp_tools_payload, dynamic_catalog)`：开启原生动态 MCP 时，
+/// `dynamic_catalog` 包含可供 `load_mcp_server` / `load_mcp_tool` 发现的工具集摘要。
+pub fn build_selected_mcp_tools_with_catalog(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    conversation_id: Option<i64>,
+) -> Result<(String, Vec<(String, String)>), String> {
     use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
     let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let dynamic = crate::api::assistant_api::management::config_value(&db,assistant_id,"mcp_loading_mode_explicit")?.as_deref()==Some("true")
@@ -164,11 +233,13 @@ pub fn build_selected_mcp_tools_payload(
                 }).collect(),
         }).collect();
     let kind = crate::mcp::butler_tools::conversation_kind(app_handle, conversation_id).map_err(|e| e.to_string())?;
+    let mut dynamic_catalog = Vec::new();
     if dynamic {
         servers = crate::mcp::prompt::collect_all_enabled_servers_for_dynamic_mode(app_handle).map_err(|e|e.to_string())?;
         let access = crate::mcp::assistant_access::Restrictions::conversation(app_handle,conversation_id)?;
         servers.retain(|s|access.server(s.id));
         for server in &mut servers { server.tools.retain(|t|access.tool(server.id,t.id)); }
+        dynamic_catalog = collect_native_dynamic_mcp_catalog(&servers);
     }
     crate::mcp::butler_tools::inject(app_handle, &mut servers, &kind).map_err(|e| e.to_string())?;
     // 原生智能体的工具调用显示为活动记录，不会渲染引用卡片；不提供 preview_message，
@@ -180,13 +251,14 @@ pub fn build_selected_mcp_tools_payload(
     if !crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind) {
         servers.retain(|s| s.command.as_deref() != Some("aipp:superadmin"));
     }
-    if dynamic {
+    let payload = if dynamic {
         let butler = crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind);
         for server in &mut servers {
             server.tools.retain(|tool|crate::mcp::builtin_mcp::templates::is_dynamic_loading_fixed_tool(server.command.as_deref(),&tool.name,butler));
         }
-        selected_tools_payload_with_mode(servers,true)
-    } else { selected_tools_payload(servers) }
+        selected_tools_payload_with_mode(servers,true)?
+    } else { selected_tools_payload(servers)? };
+    Ok((payload, dynamic_catalog))
 }
 
 pub(crate) fn selected_tools_payload(servers: Vec<crate::api::assistant_api::MCPServerWithTools>) -> Result<String, String> {
@@ -6553,6 +6625,68 @@ mod tests {
         assert!(server.env.iter().any(|env| {
             env.name == "AIPP_ACP_SELECTED_MCP_TOOLS" && env.value.contains("\"server_id\":7")
         }));
+    }
+
+    #[test]
+    fn collect_native_dynamic_mcp_catalog_lists_only_loadable_non_fixed_servers() {
+        use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
+        let tool = |id: i64, name: &str| MCPToolInfo {
+            id,
+            name: name.into(),
+            description: String::new(),
+            parameters: "{}".into(),
+            is_enabled: true,
+            is_auto_run: false,
+        };
+        let servers = vec![
+            MCPServerWithTools {
+                id: 1,
+                name: "Agent".into(),
+                summary: "内置 Agent".into(),
+                command: Some("aipp:agent".into()),
+                is_enabled: true,
+                tools: vec![tool(1, "load_mcp_server")],
+            },
+            MCPServerWithTools {
+                id: 2,
+                name: "Operation".into(),
+                summary: "本机文件与命令".into(),
+                command: Some("aipp:operation".into()),
+                is_enabled: true,
+                tools: vec![tool(2, "read_file"), tool(3, "execute_bash")],
+            },
+            MCPServerWithTools {
+                id: 3,
+                name: "Search".into(),
+                summary: "联网搜索".into(),
+                command: Some("aipp:search".into()),
+                is_enabled: true,
+                tools: vec![tool(4, "search_web")],
+            },
+            MCPServerWithTools {
+                id: 4,
+                name: "Feishu".into(),
+                summary: "飞书协作".into(),
+                command: None,
+                is_enabled: true,
+                tools: vec![tool(5, "send_message")],
+            },
+            MCPServerWithTools {
+                id: 5,
+                name: "Vault".into(),
+                summary: "保险箱".into(),
+                command: Some(crate::vault::tool::COMMAND.into()),
+                is_enabled: true,
+                tools: vec![tool(6, "vault_list")],
+            },
+        ];
+        assert_eq!(
+            super::collect_native_dynamic_mcp_catalog(&servers),
+            vec![
+                ("Feishu".to_string(), "飞书协作".to_string()),
+                ("Search".to_string(), "联网搜索".to_string()),
+            ]
+        );
     }
 
     #[test]

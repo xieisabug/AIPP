@@ -63,6 +63,12 @@ export const ANTIGRAVITY_MODES = {
   auto_edit: ['auto_edit', 'autoEdit', 'accept-edits', 'accept_edits', 'acceptEdits'],
   yolo: ['yolo'],
 };
+function sessionModels(options = [], legacy) {
+  const model = options.find(option => option.category === 'model' || option.id === 'model');
+  if (model) return choices(model).map(choice => ({ id: choice.value, name: choice.name || choice.value }));
+  return (legacy?.availableModels ?? []).map(choice => ({ id: choice.modelId, name: choice.name || choice.modelId }));
+}
+
 const snapshotOptions = options => options.filter(option => option.type === 'select').map(option => ({
   id: option.id, name: option.name || option.id, category: option.category || option.id,
   current_value: option.currentValue, options: choices(option).map(choice => ({
@@ -78,6 +84,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
   let child;
   try { child = (dependencies.launch || launch)(plan.command, plan.args, { cwd: config.cwd, env: plan.env }); }
   catch (error) { await plan.cleanup(); throw error; }
+  let legacyModels;
   let sequence = 0, session, turn = null, closing = false, ready = false, fatal, options = [], cancelTimer;
   let started = false, cancelling = false, cancelSent = false;
   const pending = new Map(), approvals = new Map(), optionWaiters = new Set();
@@ -97,7 +104,18 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       return await deadline(new Promise((resolve, reject) => { pending.set(id, { resolve, reject, method }); send({ id, method, params }); }), `${driver} ${method}`, milliseconds);
     } finally { pending.delete(id); }
   };
-  const updateOptions = next => { if (Array.isArray(next)) { options = next; for (const notify of optionWaiters) notify(); if (ready) emit({ type: 'config_options', options: snapshotOptions(options) }); } };
+  const updateOptions = next => {
+    if (!Array.isArray(next)) return;
+    options = next;
+    if (next.some(option => option.id === 'model' || option.category === 'model')) legacyModels = undefined;
+    if (legacyModels) {
+      options = [...next, { id: 'model', name: '模型', category: 'model', type: 'select',
+        currentValue: legacyModels.currentModelId,
+        options: sessionModels([], legacyModels).map(({ id, name }) => ({ value: id, name })) }];
+    }
+    for (const notify of optionWaiters) notify();
+    if (ready) emit({ type: 'config_options', options: snapshotOptions(options) });
+  };
   const waitOption = async key => {
     const find = () => options.find(option => option.id === key || option.category === key);
     if (find()) return find();
@@ -225,6 +243,12 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     // Kiro's model option can arrive after session/new. Explicit values are
     // sent to Kiro itself; rejected values fail, never select another model.
     if (!(driver === 'kiro' && key === 'model') && (!option || !choices(option).some(choice => choice.value === value))) throw new Error(`${driver} unavailable configuration ${key}=${value}`);
+    if (key === 'model' && legacyModels) {
+      await request('session/set_model', { sessionId: session, modelId: value });
+      legacyModels.currentModelId = value;
+      updateOptions(options.filter(option => option.id !== 'model'));
+      return;
+    }
     const result = await request('session/set_config_option', { sessionId: session, configId: key, value });
     updateOptions(result.configOptions);
   };
@@ -232,12 +256,22 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     const init = await request('initialize', { protocolVersion: 1, clientInfo: { name: 'aipp', title: 'AIPP', version: '0.4.3' },
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
     if (init.protocolVersion !== 1) throw new Error(`${driver} incompatible ACP protocol version: ${init.protocolVersion}`);
+    if (config.logout && driver === 'antigravity') {
+      if (!init.agentCapabilities?.auth?.logout) throw new Error('当前 Antigravity 版本不支持原生退出登录');
+      await request('logout', {});
+      return { close };
+    }
     if (driver === 'antigravity') {
       const method = config.auth_method || 'oauth-personal';
       if (!init.authMethods?.some(item => item.id === method)) throw new Error(`Antigravity does not advertise authentication method ${method}`);
       await request('authenticate', { methodId: method }, config.login ? 300000 : 30000);
     }
-    if (config.login) { ready = true; return { close }; }
+    if (config.login) {
+      return { close, async models() {
+        const result = await request('session/new', { cwd: config.cwd, mcpServers: [] });
+        return sessionModels(result.configOptions, result.models);
+      } };
+    }
     const sessionAppend = driver === 'antigravity' && Boolean(config.butlerInstructions)
       && (init.agentInfo?.version === '1.4.5' || init.agentCapabilities?._meta?.antigravity?.systemPrompt?.append === true);
     let instructionsPending = !sessionAppend && Boolean(config.butlerInstructions);
@@ -258,7 +292,8 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       session = result.sessionId;
       if (!session) throw new Error(`${driver} session/new omitted sessionId`);
     }
-    updateOptions(result.configOptions);
+    if (driver === 'antigravity' && result.models?.availableModels?.length) legacyModels = result.models;
+    updateOptions(result.configOptions ?? []);
     if (driver === 'kiro') {
       // V3 starts with Autopilot enabled. Write the chosen state (off unless the assistant
       // opted in) even before it advertises options, and fail if Kiro rejects it.
@@ -297,7 +332,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     ready = true;
     return {
       session, canLoad, canResume, get configOptions() { return snapshotOptions(options); },
-      async models() { return choices(options.find(option => option.category === 'model' || option.id === 'model')).map(choice => ({ id: choice.value, name: choice.name || choice.value })); },
+      async models() { return sessionModels(options); },
       configure,
       async prompt(text, id) {
         if (turn !== null) throw new Error(`${driver} already has an active prompt`);

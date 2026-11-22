@@ -163,4 +163,23 @@ fn test_butler_context_tool_guidance_uses_published_catalog() {
     let instructions = crate::acp_mcp_bridge::native_butler_instructions(role, &dynamic.to_string()).unwrap();
     assert!(instructions.contains("aipp_t2_call_mcp_tool"));
     assert!(instructions.contains("server_name 取加载结果的 server，tool_name 取 tool"));
+
+    let with_server_loader = json!([{"server_id":1,"dynamic_loading_enabled":true,"tools":[
+        {"tool_id":1,"tool_name":"load_mcp_tool"},{"tool_id":2,"tool_name":"call_mcp_tool"},
+        {"tool_id":4,"tool_name":"load_mcp_server"}
+    ]}]);
+    let catalog = vec![
+        ("Search".to_string(), "联网搜索与网页抓取".to_string()),
+        ("Notes".to_string(), String::new()),
+    ];
+    let with_catalog = crate::acp_mcp_bridge::native_butler_instructions_with_catalog(
+        role,
+        &with_server_loader.to_string(),
+        &catalog,
+    )
+    .unwrap();
+    assert!(with_catalog.contains("aipp_t4_load_mcp_server"));
+    assert!(with_catalog.contains("## 可动态加载的 MCP 工具集目录"));
+    assert!(with_catalog.contains("- `Search`：联网搜索与网页抓取"));
+    assert!(with_catalog.contains("- `Notes`：暂无摘要"));
 }

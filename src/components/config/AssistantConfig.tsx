@@ -182,11 +182,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     );
 
     const applyAgentModelSelection = useCallback(
-        (modelValue: string, effort: string) => {
+        (modelValue: string, effort?: string) => {
             const [modelCode, providerValue] = modelValue.split("%%");
             const providerId = Number.parseInt(providerValue, 10);
             form.setValue("agent_model", modelValue);
-            form.setValue("reasoning_effort", effort);
+            if (effort !== undefined) form.setValue("reasoning_effort", effort);
             setCurrentAssistant((previous) => {
                 if (!previous || !Number.isFinite(providerId) || providerId <= 0) return previous;
                 const existingModel = previous.model[0];
@@ -197,6 +197,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     provider_id: providerId,
                     alias: existingModel?.alias ?? "",
                 };
+                if (effort === undefined) return { ...previous, model: [nextModel] };
                 const configIndex = previous.model_configs.findIndex(
                     (config) => config.name === "reasoning_effort"
                 );
@@ -217,8 +218,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [form, setCurrentAssistant]
     );
 
+    const modelRequest = useRef(0);
     const loadAgentModelOptions = useCallback(
-        async (assistantDetail: AssistantDetail, providerId: number | null = null, isCurrent: () => boolean = () => true) => {
+        async (assistantDetail: AssistantDetail, agentKind: string, providerId: number | null = null, isCurrent: () => boolean = () => true) => {
+            const request = ++modelRequest.current;
+            const isActive = () => request === modelRequest.current && isCurrent();
             const selectedProviderId = providerId ?? assistantDetail.model[0]?.provider_id ?? 0;
             if (assistantDetail.assistant.assistant_type !== 4 || selectedProviderId <= 0) {
                 setAgentModelOptions([]);
@@ -232,7 +236,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     assistantId: assistantDetail.assistant.id,
                     providerId,
                 });
-                if (!isCurrent()) return;
+                if (!isActive()) return;
                 const useConfiguredValues = providerId == null
                     || providerId === assistantDetail.model[0]?.provider_id;
                 const configuredModel = useConfiguredValues
@@ -241,31 +245,33 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 const configuredEffort = useConfiguredValues
                     ? assistantDetail.model_configs.find((config) => config.name === "reasoning_effort")?.value
                     : null;
+                const ownOptions = options.filter(option => option.provider_id === selectedProviderId);
                 const selection = resolveAgentDefaultSelection(
-                    options,
+                    ownOptions,
                     configuredModel,
                     configuredEffort,
                 );
-                setAgentModelOptions(options);
+                setAgentModelOptions(ownOptions);
                 if (selection.model) {
-                    applyAgentModelSelection(selection.model.code, selection.effort);
+                    const genericEffort = agentKind === "claude_sdk" ? undefined : selection.effort;
+                    applyAgentModelSelection(selection.model.code, genericEffort);
                     // 加载时自动解析的默认模型/推理强度属于已加载状态，不是用户编辑
                     if (providerId == null) {
                         commitFormBaseline({
                             ...loadedFormSnapshotRef.current,
                             agent_model: selection.model.code,
-                            reasoning_effort: selection.effort,
+                            ...(genericEffort !== undefined && { reasoning_effort: genericEffort }),
                         });
                     }
                 }
             } catch (error) {
-                if (!isCurrent()) return;
+                if (!isActive()) return;
                 const message = `无法读取 Agent 默认配置：${getErrorMessage(error)}`;
                 setAgentModelOptions([]);
                 setAgentModelError(message);
                 toast.error(message);
             } finally {
-                if (isCurrent()) setAgentModelLoading(false);
+                if (isActive()) setAgentModelLoading(false);
             }
         },
         [applyAgentModelSelection, commitFormBaseline]
@@ -274,6 +280,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const handleAgentProviderChange = useCallback(
         (providerValue: string, apiType?: string) => {
             const providerId = Number.parseInt(providerValue, 10);
+            ++modelRequest.current;
+            setAgentModelLoading(false);
+            form.setValue("agent_model", "");
             form.setValue("acp_provider", providerValue);
             setAgentModelOptions([]);
             setAgentModelError(null);
@@ -297,12 +306,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 form.setValue("codex_approvals_reviewer", "default");
             }
             if (
-                ["codex_app_server", "pi", "cursor", "opencode", "kiro", "antigravity"].includes(apiType ?? "")
+                AGENT_MODEL_OPTION_KINDS.includes(apiType ?? "")
                 && currentAssistant
                 && Number.isFinite(providerId)
                 && providerId > 0
             ) {
-                void loadAgentModelOptions(currentAssistant, providerId);
+                void loadAgentModelOptions(currentAssistant, apiType ?? "", providerId);
             }
         },
         [currentAssistant, form, loadAgentModelOptions, setCurrentAssistant]
@@ -374,7 +383,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             });
                             if (!isSelectionCurrent()) return;
                             if (AGENT_MODEL_OPTION_KINDS.includes(runtime.agent_kind)) {
-                                await loadAgentModelOptions(assistantDetail, null, isSelectionCurrent);
+                                await loadAgentModelOptions(assistantDetail, runtime.agent_kind, null, isSelectionCurrent);
                             } else {
                                 setAgentModelOptions([]);
                                 setAgentModelError(null);

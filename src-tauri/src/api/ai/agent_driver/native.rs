@@ -333,7 +333,7 @@ impl AgentDriver for BuiltinDriver {
             AgentSessionKind::Claude => fields.extend([
                 string("claude_cli_command"),
                 choice("claude_permission_mode", &["default", "plan", "auto"]),
-                choice("claude_effort", &["default", "low", "medium", "high", "max"]),
+                choice("claude_effort", crate::api::ai::claude_sdk::CLAUDE_EFFORTS),
             ]),
         }
         fields
@@ -406,13 +406,9 @@ impl super::registry::PreparedAgentSession for PreparedAgentSession {
         if let Self::Claude(config) = self {
             let provider_id = config.instance_id.ok_or_else(|| super::registry::routing_error("Claude configuration has no provider instance"))?;
             let database = LLMDatabase::new(app)?;
-            config.model_choices = claude_model_choices(&database.get_llm_models(provider_id.to_string())?);
+            config.model_choices = claude_model_choices(config, provider_id, &database.get_llm_models(provider_id.to_string())?,
+                database.get_llm_provider(provider_id)?.api_type != "anthropic");
             drop(database);
-            if let Some(model) = config.model.as_ref() {
-                if !config.model_choices.iter().any(|choice| &choice.value == model) {
-                    config.model_choices.insert(0, AcpSessionConfigChoicePayload { value: model.clone(), name: format!("{model}（当前模型）"), description: None, group_name: None });
-                }
-            }
             prepare_claude_mcp_bridge(app, conversation_id, config).await.map_err(|error| AppError::UnknownError(format!("Claude Code MCP bridge 初始化失败：{error}")))?;
         }
         Ok(())

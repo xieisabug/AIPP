@@ -4,6 +4,31 @@
 use super::*;
 
 #[test]
+fn test_claude_effort_uses_reported_model_levels_and_passes_assistant_choice_to_cli() {
+    let mut config = extract_claude_sdk_config(&[], &[], Some("opus".into()), vec![]).unwrap();
+    config.instance_id = Some(794);
+    let data = json!({"models":[
+        {"value":"default","supportedEffortLevels":["low","high"]},
+        {"value":"opus","resolvedModel":"claude-opus-5-5","supportedEffortLevels":["low","xhigh","max"]},
+        {"value":"custom","supportsEffort":false}
+    ]});
+    let frame = json!({"type":"control_response","response":{"subtype":"success","request_id":MODEL_CATALOG_REQUEST,"response":data}});
+    REPORTED_MODELS.lock().unwrap().insert(config.catalog_key(794), reported_claude_models(&frame).unwrap());
+    assert_eq!(claude_model_efforts(&config, 794, CLAUDE_CODE_DEFAULT_MODEL), ["default", "low", "high"]);
+    assert_eq!(claude_model_efforts(&config, 794, "custom"), ["default"]);
+    assert_eq!(claude_model_efforts(&config, 794, "claude-opus-5-5"), ["default", "low", "xhigh", "max"]);
+    config.effort = Some("xhigh".into());
+    let selector = claude_config_options(&config).into_iter().find(|o|o.id == "effort").unwrap();
+    assert_eq!(selector.current_value, "xhigh");
+    assert_eq!(selector.options.iter().map(|o|o.value.as_str()).collect::<Vec<_>>(), ["default","low","xhigh","max"]);
+    for session in [None, Some("existing")] {
+        let (command, _) = build_claude_command(&config, session);
+        let args: Vec<_> = command.as_std().get_args().map(|v|v.to_str().unwrap()).collect();
+        assert!(args.windows(2).any(|pair|pair == ["--effort", "xhigh"]));
+    }
+}
+
+#[test]
 fn test_claude_native_auto_for_new_and_resumed_sessions() {
     let provider_mode = crate::db::llm_db::LLMProviderConfig {
         id: 1, llm_provider_id: 1, name: "claude_permission_mode".into(),
@@ -278,10 +303,58 @@ async fn test_agent_permission_review_claude_native_reply_and_late_decision() {
     assert_eq!(response["response"]["request_id"], "req");
     assert_eq!(response["response"]["response"]["behavior"], "allow");
     assert_eq!(response["response"]["response"]["updatedInput"], request["input"]);
+    assert!(response["response"]["response"].get("message").is_none());
 
     let (tx, rx) = oneshot::channel();
     let (_signal, mut cancelled) = watch::channel(1);
     let (decision, _) = wait_claude_permission_decision(&state, "claude:42:run:req", rx, &mut cancelled, 0).await;
     assert!(tx.send(AcpPermissionDecision::Selected("allow".into())).is_err());
-    assert_eq!(claude_permission_response("req", &request, decision)["response"]["response"]["behavior"], "deny");
+    let denied = claude_permission_response("req", &request, decision);
+    assert_eq!(denied["response"]["response"]["behavior"], "deny");
+    assert_eq!(denied["response"]["response"]["message"], "Permission denied by user");
+    assert!(denied["response"]["response"].get("updatedInput").is_none());
+}
+
+#[test]
+fn test_model_catalog_merges_native_configured_and_reported_models_for_one_provider() {
+    let config = extract_claude_sdk_config(&[], &[], Some("previous".into()), vec![]).unwrap();
+    let models = reported_claude_models(&json!({"type":"control_response","response":{
+        "request_id":MODEL_CATALOG_REQUEST,"subtype":"success","response":{"claude_code_version":"2.1.326","models":[
+            {"value":"default","resolvedModel":"opus[1m]"},{"value":"opus","resolvedModel":"opus"},
+            {"value":"sonnet","resolvedModel":"opus"},{"value":"cli-extra","displayName":"CLI extra"}]}}})).unwrap();
+    REPORTED_MODELS.lock().unwrap().insert(config.catalog_key(781), models);
+    let configured = vec![(1, "Registered".into(), 781, "custom".into(), String::new(), false, false, false)];
+    let options = claude_model_choices(&config, 781, &configured, true);
+    let ids: Vec<_> = options.iter().map(|o|o.value.as_str()).collect();
+    assert_eq!(ids, [CLAUDE_CODE_DEFAULT_MODEL, "claude-opus-5-5", "claude-sonnet-5-5", "opus", "sonnet", "cli-extra", "custom", "previous"]);
+    assert_eq!(options[0].name, "使用 CLI 默认模型 → opus[1m]");
+    assert_eq!(options.iter().find(|o| o.value == "sonnet").unwrap().name, "CLI 路由 sonnet → opus");
+    assert_eq!(options.iter().find(|o| o.value == "opus").unwrap().name, "CLI 别名 · opus");
+    for choice in &options[1..] {
+        let mut selected = config.clone();
+        selected.model = Some(choice.value.clone());
+        for session in [None, Some("existing")] {
+            let (command, _) = build_claude_command(&selected, session);
+            let args: Vec<_> = command.as_std().get_args().map(|arg|arg.to_str().unwrap()).collect();
+            assert!(args.windows(2).any(|pair|pair == ["--model", &choice.value]));
+        }
+    }
+    assert!(claude_model_choices(&config, 782, &[], false).iter().all(|o|o.value == "previous"));
+}
+
+#[test]
+fn test_model_catalog_preserves_backend_routes_and_limits_pins_to_supported_cli() {
+    let config = extract_claude_sdk_config(&[], &[], None, vec![]).unwrap();
+    for (provider_id, version) in [(784, "2.1.326"), (785, "2.1.279")] {
+        let data = json!({"claude_code_version":version, "models":[
+            {"value":"opus","resolvedModel":"us.anthropic.claude-opus-5-5-v1:0"},
+            {"value":"sonnet","resolvedModel":"sonnet"},
+            {"value":"haiku","resolvedModel":"claude-haiku-5-5@20261007"}]});
+        let frame = json!({"type":"control_response","response":{"subtype":"success","request_id":MODEL_CATALOG_REQUEST,"response":data}});
+        REPORTED_MODELS.lock().unwrap().insert(config.catalog_key(provider_id), reported_claude_models(&frame).unwrap());
+        let options = claude_model_choices(&config, provider_id, &[], true);
+        assert!(options.iter().any(|o| o.value == "opus" && o.name.contains("us.anthropic.")));
+        assert!(!options.iter().any(|o| o.value == "claude-opus-5-5" || o.value == "claude-haiku-5-5"));
+        assert_eq!(options.iter().any(|o| o.value == "claude-sonnet-5-5"), provider_id == 784);
+    }
 }

@@ -18,11 +18,15 @@ struct ScopeInner {
     token: String,
     conversation_id: i64,
     active: Mutex<Option<Arc<PromptIdentity>>>,
+    selected_tools_file: Mutex<Option<super::SelectedMcpToolsFile>>,
 }
 impl Drop for ScopeInner {
     fn drop(&mut self) {
         if let Ok(active) = self.active.get_mut() {
             if let Some(prompt) = active.take() { prompt.cancel.cancel(); }
+        }
+        if let Ok(file) = self.selected_tools_file.get_mut() {
+            file.take();
         }
         if let Ok(mut registry) = scopes().lock() { registry.remove(&self.token); }
     }
@@ -44,12 +48,25 @@ struct PromptIdentity {
 /// token that lets a bridge choose another conversation/source in JSON.
 impl NativeMcpScope {
     pub fn new(conversation_id: i64) -> Result<Self, String> {
-        let inner = Arc::new(ScopeInner { token: uuid::Uuid::new_v4().to_string(), conversation_id, active: Mutex::new(None) });
+        let inner = Arc::new(ScopeInner {
+            token: uuid::Uuid::new_v4().to_string(),
+            conversation_id,
+            active: Mutex::new(None),
+            selected_tools_file: Mutex::new(None),
+        });
         scopes().lock().map_err(|_| "Native MCP scope registry is poisoned")?
             .insert(inner.token.clone(), Arc::downgrade(&inner));
         Ok(Self(inner))
     }
     pub fn token(&self) -> &str { &self.0.token }
+    /// Write the selected MCP tools JSON to a scope-owned temporary file so large
+    /// tool payloads never exceed Windows' 32 KB environment variable limit.
+    pub fn attach_selected_tools_file(&self, payload: &str) -> Result<std::path::PathBuf, String> {
+        let file = super::SelectedMcpToolsFile::write(payload)?;
+        let path = file.path().to_path_buf();
+        *self.0.selected_tools_file.lock().map_err(|_| "Native MCP tools file state is poisoned")? = Some(file);
+        Ok(path)
+    }
     pub(crate) fn current_prompt(&self) -> Result<Option<CapturedNativeMcpPrompt>, String> {
         let identity = self.0.active.lock().map_err(|_| "Native MCP prompt state is poisoned")?.clone();
         let Some(identity) = identity else { return Ok(None); };

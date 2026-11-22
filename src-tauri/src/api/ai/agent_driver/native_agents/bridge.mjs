@@ -21,8 +21,13 @@ jsonLines(process.stdin, request => {
       if (request.driver === 'cursor') data = await loginCursor(request.config, emit);
       else if (request.driver === 'antigravity') {
         const login = await drivers.antigravity({ ...request.config, login: true }, emit);
-        await login.close();
-        data = { authenticated: true };
+        try {
+          data = { authenticated: true };
+          if (!request.config.logout) {
+            try { data.models = await login.models(); }
+            catch (error) { data.model_error = error.message; }
+          }
+        } finally { await login.close(); }
       } else throw new Error(`Browser login is not supported by ${request.driver}`);
     } else if (request.type === 'detect') {
       data = { node: nodeRuntime(), commands: await detect(request.commands || []) };

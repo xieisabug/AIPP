@@ -98,5 +98,5 @@ export function buildNativeAgentApprovalFields(
 
 /** Agent-assistant (type 4) settings persisted to assistant model_configs. Display-only notices are excluded. */
 export function isAgentAssistantField(key: string): boolean {
-    return ["acp_", "codex_", "pi_", "kiro_", "antigravity_"].some((prefix) => key.startsWith(prefix));
+    return key === "claude_effort" || ["acp_", "codex_", "pi_", "kiro_", "antigravity_"].some((prefix) => key.startsWith(prefix));
 }

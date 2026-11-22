@@ -558,11 +558,16 @@ impl Drop for UpdateGuard { fn drop(&mut self) { if let Ok(mut set) = updating()
 /// Running agents keep the binary/SDK files open. Busy sessions block the update; idle
 /// ones are closed (their native session ids stay persisted and resume on next prompt).
 pub(crate) async fn release_idle_sessions(driver: &str) -> Result<usize, String> {
+    release_instance_sessions(driver, None).await
+}
+
+pub(super) async fn release_instance_sessions(driver: &str, provider_id: Option<i64>) -> Result<usize, String> {
+    let matches = |kind: &str, entry: &Entry| kind == driver && provider_id.is_none_or(|id| id == entry.provider_id);
     let released: Vec<Entry> = {
         let mut entries = sessions().lock().await;
-        let busy = entries.iter().filter(|((kind, _), entry)| *kind == driver && !entry.control.tx.is_closed() && entry.control.busy.load(Ordering::SeqCst)).count();
-        if busy > 0 { return Err(format!("{busy} 个 {driver} 会话正在回复，请等待完成或停止后再更新")); }
-        let keys: Vec<_> = entries.keys().filter(|(kind, _)| *kind == driver).cloned().collect();
+        let busy = entries.iter().filter(|((kind, _), entry)| matches(kind, entry) && !entry.control.tx.is_closed() && entry.control.busy.load(Ordering::SeqCst)).count();
+        if busy > 0 { return Err(format!("{busy} 个 {driver} 会话正在回复，请等待完成或停止后再操作")); }
+        let keys: Vec<_> = entries.iter().filter(|((kind, _), entry)| matches(kind, entry)).map(|(key, _)| *key).collect();
         keys.into_iter().filter_map(|key| entries.remove(&key)).collect()
     };
     for entry in &released { let _ = entry.control.tx.send(Command::Shutdown); }

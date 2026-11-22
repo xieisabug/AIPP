@@ -26,7 +26,7 @@ interface PluginAssistantConfigItem {
 }
 
 /** Agent 提供商里能读取默认模型列表的通道。 */
-export const AGENT_MODEL_OPTION_KINDS = ["codex_app_server", "pi", "cursor", "opencode", "kiro", "antigravity"];
+export const AGENT_MODEL_OPTION_KINDS = ["codex_app_server", "claude_sdk", "pi", "cursor", "opencode", "kiro", "antigravity"];
 
 export const buildPluginAssistantFieldFormKey = (pluginId: number, fieldKey: string) =>
     `plugin::${pluginId}::${fieldKey}`;
@@ -134,6 +134,7 @@ export function buildAssistantFormValues(
             return acc;
         }, {} as Record<string, any>),
         // assistant_model.provider_id 是 Agent 提供商绑定的权威来源。
+        ...(detail.assistant.assistant_type === 4 ? { claude_effort: findConfig("claude_effort")?.value || "inherit" } : {}),
         // 放在旧 model_configs 之后，避免遗留 acp_provider 覆盖当前绑定。
         acp_provider:
             detail.assistant.assistant_type === 4 &&
@@ -210,6 +211,7 @@ export function buildAssistantSaveDetail(
         )
         .filter(([key]) => {
             const config = currentAssistant.model_configs.find((config) => config.name === key);
+            if (key === "claude_effort" && values[key] === "inherit" && !config) return false;
             // ACP/Codex 助手专用字段（assistant_type === 4）
             if (isAgentAssistantField(key) && isAgent) return true;
             // 内置字段允许保存
@@ -244,7 +246,9 @@ export function buildAssistantSaveDetail(
             }
 
             // Codex 字段的 "default" 表示跟随提供商配置，落库时归一化为空字符串
-            const normalizedValue = key.startsWith("codex_") && value === "default" ? "" : value;
+            const inheritsProvider = (key.startsWith("codex_") && value === "default")
+                || (key === "claude_effort" && value === "inherit");
+            const normalizedValue = inheritsProvider ? "" : value;
 
             return {
                 name: key,

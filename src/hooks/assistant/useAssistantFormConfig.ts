@@ -60,7 +60,7 @@ interface UseAssistantFormConfigProps {
     agentModelLoading: boolean;
     agentModelError: string | null;
     onAgentProviderChange: (providerId: string, apiType?: string) => void;
-    onAgentModelChange: (model: string, effort: string) => void;
+    onAgentModelChange: (model: string, effort?: string) => void;
 }
 
 export const useAssistantFormConfig = ({
@@ -183,6 +183,9 @@ export const useAssistantFormConfig = ({
                 agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? ""
             );
             const agentApiType = agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? "";
+            const selectedAgentModel = agentModelOptions.find(option =>
+                option.code === `${currentAssistant.model[0]?.model_code}%%${currentProviderId}`
+            ) ?? agentModelOptions.find(option => option.is_default);
             const nativeAgentApprovalFields = buildNativeAgentApprovalFields(
                 agentApiType,
                 getAcpConfigValue,
@@ -218,7 +221,7 @@ export const useAssistantFormConfig = ({
                         },
                     },
                 },
-                ...(isCodexProvider || isNativeAgentProvider
+                ...(isCodexProvider || isNativeAgentProvider || agentApiType === "claude_sdk"
                     ? [
                           {
                               key: "agent_model",
@@ -237,13 +240,35 @@ export const useAssistantFormConfig = ({
                                   tooltip: agentModelError ?? "读取智能体当前可用模型；默认项复用本机配置",
                                   onChange: (value: string | boolean) => {
                                       const model = agentModelOptions.find((option) => option.code === value);
+                                      const claudeEffort = getAcpConfigValue("claude_effort", "");
+                                      if (agentApiType === "claude_sdk" && model && claudeEffort &&
+                                          !model.efforts.includes(claudeEffort)) {
+                                          handleConfigChange("claude_effort", "inherit", "string");
+                                      }
                                       const effort = model?.default_effort && model.efforts.includes(model.default_effort)
                                           ? model.default_effort
                                           : (model?.efforts[0] ?? "");
-                                      onAgentModelChange(String(value), effort);
+                                      onAgentModelChange(String(value), agentApiType === "claude_sdk" ? undefined : effort);
                                   },
                               },
                           },
+                          ...(agentApiType === "claude_sdk" ? [{
+                              key: "claude_effort",
+                              config: {
+                                  type: "select" as const,
+                                  label: "默认思考强度",
+                                  value: getAcpConfigValue("claude_effort", "") || "inherit",
+                                  options: [
+                                      { value: "inherit", label: "跟随提供商" },
+                                      ...(selectedAgentModel?.efforts ?? []).map(value => ({
+                                          value,
+                                          label: ({ default: "CLI 默认", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" } as Record<string, string>)[value] ?? value,
+                                      })),
+                                  ],
+                                  disabled: agentModelLoading || !selectedAgentModel,
+                                  onChange: (value: string | boolean) => handleConfigChange("claude_effort", value, "string"),
+                              },
+                          }] : []),
                           ...(isCodexProvider ? [{
                               key: "reasoning_effort",
                               config: {

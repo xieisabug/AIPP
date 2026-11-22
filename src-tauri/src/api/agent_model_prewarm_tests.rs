@@ -6,15 +6,13 @@ fn candidate(assistant_id: i64, provider_api_type: &str, provider_enabled: bool)
 
 #[test]
 fn test_agent_model_prewarm_only_probes_agents_without_session_side_effects() {
-    for api_type in ["codex_app_server", "pi", "cursor", "opencode"] {
+    for api_type in ["codex_app_server", "claude_sdk", "pi", "cursor", "opencode"] {
         assert!(is_prewarm_safe_agent(api_type), "{api_type} probes without creating a session");
     }
     // session/new during the probe would show up in the agent's own history
     for api_type in ["acp", "kiro", "antigravity"] {
         assert!(!is_prewarm_safe_agent(api_type), "{api_type} must wait until the user opens it");
     }
-    // Static list: nothing to warm
-    assert!(!is_prewarm_safe_agent("claude_sdk"));
 }
 
 #[test]

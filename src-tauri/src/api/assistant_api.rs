@@ -243,23 +243,30 @@ pub async fn get_agent_model_options(
                 || (api_type == "acp"
                     && is_claude_code_provider(api_type, &provider_configs)) =>
         {
-            let efforts = ["default", "low", "medium", "high", "max"].into_iter().map(str::to_string).collect::<Vec<_>>();
-            for (code, name) in [
-                ("sonnet", "Claude Sonnet"),
-                ("opus", "Claude Opus"),
-                ("haiku", "Claude Haiku"),
-            ] {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · {name}"), provider_id, efforts: efforts.clone(), default_effort: None, is_default: current_model.as_deref() == Some(code) });
+            use crate::api::ai::claude_sdk::{claude_model_efforts, CLAUDE_EFFORTS};
+            let mut config = extract_claude_sdk_config(&detail.model_configs, &provider_configs, current_model.clone(), vec![])
+                .map_err(|e|e.to_string())?;
+            if let Some(proxy) = &proxy { apply_network_proxy_to_env_vars(&mut config.env_vars, proxy); }
+            // The built-in aliases and configured models remain editable while the CLI is unavailable.
+            if let Err(error) = crate::api::ai::claude_sdk::discover_claude_models(config.clone(), provider_id).await {
+                warn!(provider_id, %error, "Claude Code model discovery failed");
             }
-            add_agent_model_option(&mut options, AgentModelOption { code: format!("{CLAUDE_CODE_DEFAULT_MODEL}%%{provider_id}"), name: "Claude Code 默认配置 · 使用 CLI 默认模型".into(), provider_id, efforts: efforts.clone(), default_effort: None, is_default: current_model.is_none() });
+            for choice in claude_model_choices(&config, provider_id, &db_models, true) {
+                let is_default = choice.value == current_model.as_deref().unwrap_or(CLAUDE_CODE_DEFAULT_MODEL);
+                let efforts = claude_model_efforts(&config, provider_id, &choice.value);
+                let default_effort = config.effort.as_ref().filter(|e| efforts.contains(e)).cloned()
+                    .or_else(|| Some("default".into()));
+                add_agent_model_option(&mut options, AgentModelOption {
+                    code: format!("{}%%{provider_id}", choice.value), name: choice.name, provider_id,
+                    efforts, default_effort, is_default,
+                });
+            }
+            let efforts: Vec<String> = CLAUDE_EFFORTS.iter().copied().map(str::to_owned).collect();
             for (other_id, other_name, other_api_type, _, _, _) in llm_db.get_llm_providers().map_err(|e| e.to_string())? {
                 if other_api_type != "anthropic" { continue; }
                 for (_, model_name, _, code, _, _, _, _) in llm_db.get_llm_models(other_id.to_string()).map_err(|e| e.to_string())? {
                     add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{other_id}"), name: format!("{other_name} / {model_name}"), provider_id: other_id, efforts: efforts.clone(), default_effort: None, is_default: false });
                 }
-            }
-            if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · 当前模型 {code}"), provider_id, efforts, default_effort: None, is_default: true });
             }
         }
         "acp" => {
@@ -306,7 +313,11 @@ pub async fn get_agent_model_options(
             config.apply_proxy(api_type, proxy.as_deref());
             let key = config.probe_cache_key(api_type);
             let driver = api_type.to_string();
-            let models = NATIVE_MODEL_PROBES.get_or_probe(key, move || async move { probe_models(&driver, config).await }).await?;
+            let models = if driver == "antigravity" {
+                crate::api::ai::agent_driver::native_agents::catalog::models(&app_handle, provider_id, config, false).await?
+            } else {
+                NATIVE_MODEL_PROBES.get_or_probe(key, move || async move { probe_models(&driver, config).await }).await?
+            };
             add_agent_model_option(&mut options, AgentModelOption { code: format!("{DEFAULT_MODEL}%%{provider_id}"),
                 name: "使用智能体本机默认模型".into(), provider_id, efforts: Vec::new(), default_effort: None,
                 is_default: current_model.is_none() || current_model.as_deref() == Some(DEFAULT_MODEL) });
@@ -978,15 +989,7 @@ pub fn get_acp_working_directory(
             .first()
             .map(|model| model.model_code.clone())
             .filter(|value| !value.trim().is_empty());
-        let model_provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
-            .ok_or_else(|| "Claude Code 助手没有配置模型提供商".to_string())?;
-        let model_choices = claude_model_choices(
-            &LLMDatabase::new(&app_handle)
-                .map_err(|e| e.to_string())?
-                .get_llm_models(model_provider_id.to_string())
-                .map_err(|e| e.to_string())?,
-        );
-        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code, model_choices)
+        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code, vec![])
             .map_err(|e| e.to_string())?;
         return Ok(claude_config.working_directory.display().to_string());
     }

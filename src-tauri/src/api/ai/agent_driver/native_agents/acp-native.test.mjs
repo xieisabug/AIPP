@@ -215,7 +215,10 @@ test('should present an authorization URL only during explicit login and wait fo
       await tick(); assert.equal(f.events[0].url, url);
       assert.equal(f.commands.some(c => c.method === 'session/new'), false);
       f.child.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: authenticate.id, result: {} })}\n`);
-      const runtime = await opening; await runtime.close(); assert.equal(f.cleaned, true);
+      const runtime = await opening;
+      assert.deepEqual(await runtime.models(), [{ id: 'auto', name: 'auto' }, { id: 'model-a', name: 'model-a' }]);
+      assert.equal(f.commands.filter(c => c.method === 'session/new').length, 1);
+      await runtime.close(); assert.equal(f.cleaned, true);
     }
   }
 });
@@ -313,5 +316,25 @@ test('should use the advertised Antigravity system append on resume without repe
     const pending = runtime.prompt('hello', 1); await tick();
     assert.deepEqual(f.commands.at(-1).params.prompt, [{type:'text', text:'hello'}]);
     f.finish(); await pending;
+  } finally { await runtime.close(); }
+});
+
+test('should log out through native ACP without authenticating or opening a session', async () => {
+  const f = fixture({ capabilities: { auth: { logout: true } } });
+  const runtime = await f.open('antigravity', { logout: true });
+  try { assert.deepEqual(f.commands.map(c => c.method), ['initialize', 'logout']); }
+  finally { await runtime.close(); }
+});
+
+test('should discover and switch models advertised through legacy ACP session models', async () => {
+  const f = fixture({ respond: frame => frame.method === 'session/new' ? { result: {
+    sessionId: 's1', modes: { availableModes: [{ id: 'default' }] },
+    models: { currentModelId: 'a', availableModels: [{ modelId: 'a', name: 'A' }, { modelId: 'b', name: 'B' }] },
+  } } : undefined });
+  const runtime = await f.open('antigravity', { model: 'b' });
+  try {
+    assert.deepEqual(await runtime.models(), [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }]);
+    assert.equal(runtime.configOptions.find(option => option.id === 'model').current_value, 'b');
+    assert.deepEqual(f.commands.find(frame => frame.method === 'session/set_model').params, { sessionId: 's1', modelId: 'b' });
   } finally { await runtime.close(); }
 });

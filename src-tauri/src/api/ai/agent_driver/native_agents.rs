@@ -21,6 +21,8 @@ pub const DRIVER_IDS: [&str; 5] = ["pi", "cursor", "opencode", "kiro", "antigrav
 pub const DEFAULT_MODEL: &str = "__agent_default__";
 #[path = "native_agents_auth.rs"]
 pub(crate) mod auth;
+#[path = "antigravity_catalog.rs"]
+pub(crate) mod catalog;
 #[path = "native_agents_env.rs"]
 pub(crate) mod env;
 pub fn is_native_agent(id: &str) -> bool { DRIVER_IDS.contains(&id) }
@@ -66,7 +68,7 @@ impl AgentDriver for NativeDriver {
         let proxy = crate::api::ai::config::agent_network_proxy(&instance.configs, request.feature_configs);
         config.apply_proxy(self.0, proxy.as_deref());
         if let Some(role) = &request.native_butler_role { config.wire["butlerInstructions"] = json!(role); }
-        Ok(Box::new(Prepared { driver: *self, instance: instance.clone(), config, mcp_scope: None }))
+        Ok(Box::new(Prepared { driver: *self, instance: instance.clone(), config, mcp_scope: None, mcp_payload: None }))
     }
     async fn lookup(&self, _: &tauri::AppHandle, conversation_id: i64) -> Result<Option<AgentSessionLookup>, AppError> {
         let mut entries = sessions().lock().await;
@@ -167,6 +169,7 @@ pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMPro
 struct Prepared {
     driver: NativeDriver, instance: AgentInstanceConfig, config: NativeConfig,
     mcp_scope: Option<crate::acp_mcp_bridge::provenance::NativeMcpScope>,
+    mcp_payload: Option<String>,
 }
 #[async_trait::async_trait]
 impl PreparedAgentSession for Prepared {
@@ -177,23 +180,32 @@ impl PreparedAgentSession for Prepared {
         use crate::acp_mcp_bridge::*;
         let proxy = ensure_proxy_server(app.clone()).await.map_err(error)?;
         let scope = provenance::NativeMcpScope::new(cid).map_err(error)?;
+        let tools_file = scope.attach_selected_tools_file(&payload).map_err(error)?;
         let exe = std::env::current_exe().map_err(error)?;
         let db = crate::db::mcp_db::MCPDatabase::db_path(app).map_err(error)?;
         self.config.wire["mcp"] = json!({ "type": "stdio", "command": exe, "args": [ACP_MCP_BRIDGE_ARG], "env": {
             (ACP_MCP_DB_PATH_ENV): db, (ACP_MCP_CONVERSATION_ID_ENV): cid.to_string(),
             (ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV): "1", (ACP_MCP_PROXY_ADDR_ENV): proxy.addr,
-            (ACP_MCP_PROXY_TOKEN_ENV): scope.token(), (ACP_MCP_SELECTED_TOOLS_ENV): payload,
+            (ACP_MCP_PROXY_TOKEN_ENV): scope.token(), (ACP_MCP_SELECTED_TOOLS_FILE_ENV): tools_file,
         }});
         self.mcp_scope = Some(scope);
+        self.mcp_payload = Some(payload);
         Ok(())
     }
     async fn acquire(self: Box<Self>, host: &dyn AgentSessionHost, cid: i64) -> Result<AgentSessionHandle, AppError> {
         let app = host.app_handle()?.clone();
+        let _account = if self.driver.0 == "antigravity" {
+            Some(catalog::gate(self.instance.provider_id).lock_owned().await)
+        } else { None };
         let key = (self.driver.0, cid);
         // Include assistant/model/MCP selections as well as provider configuration.
         let mut signature_wire = self.config.wire.clone();
         if let Some(env) = signature_wire["mcp"]["env"].as_object_mut() {
             env.remove(crate::acp_mcp_bridge::ACP_MCP_PROXY_TOKEN_ENV);
+            env.remove(crate::acp_mcp_bridge::ACP_MCP_SELECTED_TOOLS_FILE_ENV);
+            if let Some(payload) = &self.mcp_payload {
+                env.insert(crate::acp_mcp_bridge::ACP_MCP_SELECTED_TOOLS_ENV.into(), json!(payload));
+            }
         }
         let ordered_env: std::collections::BTreeMap<_, _> = self.config.env.iter().collect();
         let signature = format!("{}:{}:{}:{:?}", self.instance.config_fingerprint, self.config.node, signature_wire, ordered_env);
@@ -215,6 +227,7 @@ impl PreparedAgentSession for Prepared {
         let control = NativeControl { driver: self.driver, tx, busy: busy.clone() };
         let snapshot = Arc::new(Mutex::new(json!({ "conversation_id":cid, "agent_kind":self.driver.0, "session_id": null, "is_busy":false, "config_options":[] })));
         let (ready_tx, ready_rx) = oneshot::channel();
+        let provider_id = self.instance.provider_id;
         let driver = self.driver;
         let actor_snapshot = snapshot.clone();
         let actor_run = run_id.clone();
@@ -222,13 +235,13 @@ impl PreparedAgentSession for Prepared {
         tauri::async_runtime::spawn(async move { run_actor(app, cid, actor_run, *self, session, rx, actor_tx, busy, actor_snapshot, ready_tx).await; });
         timeout(Duration::from_secs(60), ready_rx).await.map_err(|_| error(format!("{} native initialization timed out [conversation_id={cid}, run_id={run_id}]", driver.0)))?
             .map_err(|_| error(format!("{} initialization actor closed [conversation_id={cid}, run_id={run_id}]", driver.0)))?.map_err(error)?;
-        sessions().lock().await.insert(key, Entry { control: control.clone(), run_id: run_id.clone(), signature, snapshot });
+        sessions().lock().await.insert(key, Entry { provider_id, control: control.clone(), run_id: run_id.clone(), signature, snapshot });
         Ok(AgentSessionHandle::new(control, run_id))
     }
 }
 
 #[derive(Clone)]
-struct Entry { control: NativeControl, run_id: String, signature: String, snapshot: Arc<Mutex<Value>> }
+struct Entry { provider_id: i64, control: NativeControl, run_id: String, signature: String, snapshot: Arc<Mutex<Value>> }
 fn sessions() -> &'static tokio::sync::Mutex<HashMap<(&'static str, i64), Entry>> {
     static SESSIONS: OnceLock<tokio::sync::Mutex<HashMap<(&'static str, i64), Entry>>> = OnceLock::new();
     SESSIONS.get_or_init(Default::default)
@@ -318,6 +331,9 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
     // termination; Windows cannot remove a running harness's files.
     let bridge = bridge_files().await;
     let result: Result<(), String> = async {
+        let catalog = if driver.0 == "antigravity" {
+            Some(catalog::Catalog::open(&app, prepared.instance.provider_id, &prepared.config)?)
+        } else { None };
         let files = bridge.as_ref().map_err(Clone::clone)?;
         prepared.config.wire["temp_root"] = json!(files.0);
         let mut command = tokio::process::Command::new(&prepared.config.node);
@@ -350,6 +366,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
             state["session_id"] = json!(native_session);
         }
         if let Some(options) = frame["data"]["config_options"].as_array() {
+            if let Some(catalog) = &catalog { catalog.observe(&app, options); }
             snapshot.lock().unwrap()["config_options"] = json!(options);
         }
         if ready.take().unwrap().send(Ok(())).is_err() { return Err("Session acquisition caller disappeared".into()); }
@@ -414,6 +431,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     if frame["type"] == "fatal" { return Err(frame["error"].as_str().unwrap_or("Native fatal frame omitted error detail").into()); }
                     if frame["type"] == "config_options" {
                         let options = frame["options"].as_array().ok_or("Native configuration update omitted options")?;
+                        if let Some(catalog) = &catalog { catalog.observe(&app, options); }
                         snapshot.lock().unwrap()["config_options"] = json!(options);
                         publish_snapshot(&app, &identity, driver, &snapshot)?;
                         continue;
@@ -574,6 +592,13 @@ async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> R
     stdin.flush().await.map_err(|e| e.to_string())
 }
 
+fn parse_models(data: &Value) -> Result<Vec<(String, String)>, String> {
+    data.as_array().ok_or("Native models response is not an array")?.iter().map(|model| {
+        let id = model["id"].as_str().filter(|s| !s.is_empty()).ok_or("Native model omitted ID")?;
+        Ok((id.into(), model["name"].as_str().unwrap_or(id).into()))
+    }).collect()
+}
+
 pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Result<Vec<(String, String)>, String> {
     if !is_native_agent(driver) { return Err(format!("Unknown native agent driver: {driver}")); }
     let files = bridge_files().await?;
@@ -598,10 +623,7 @@ pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Resu
             if frame["type"] == "fatal" { return Err(frame["error"].to_string()); }
             if frame["id"] != "probe" { continue; }
             if frame["ok"] != true { return Err(frame["error"].to_string()); }
-            return frame["data"].as_array().ok_or_else(||"Native models response is not an array".to_string())?.iter().map(|model| {
-                let id = model["id"].as_str().filter(|s|!s.is_empty()).ok_or("Native model omitted ID")?;
-                Ok((id.to_string(), model["name"].as_str().unwrap_or(id).to_string()))
-            }).collect::<Result<Vec<_>, String>>();
+            return parse_models(&frame["data"]);
         }
     }).await.unwrap_or_else(|_|Err(format!("{driver} model discovery timed out")));
     if result.is_ok() {

@@ -69,11 +69,11 @@ export function useAssistantSetupEditor(
     } = useAssistantTypePlugin(pluginList);
     const pluginFields = useMemo(() => collectPluginAssistantFormFields(pluginList), [pluginList]);
 
-    const applyAgentModelSelection = useCallback((modelValue: string, effort: string) => {
+    const applyAgentModelSelection = useCallback((modelValue: string, effort?: string) => {
         const [modelCode, providerValue] = modelValue.split("%%");
         const providerId = Number.parseInt(providerValue, 10);
         form.setValue("agent_model", modelValue);
-        form.setValue("reasoning_effort", effort);
+        if (effort !== undefined) form.setValue("reasoning_effort", effort);
         setAssistant((previous) => {
             if (!previous || !Number.isFinite(providerId) || providerId <= 0) return previous;
             const existingModel = previous.model[0];
@@ -84,6 +84,7 @@ export function useAssistantSetupEditor(
                 provider_id: providerId,
                 alias: existingModel?.alias ?? "",
             };
+            if (effort === undefined) return { ...previous, model: [nextModel] };
             const others = previous.model_configs.filter((config) => config.name !== "reasoning_effort");
             const existing = previous.model_configs.find((config) => config.name === "reasoning_effort");
             return {
@@ -137,19 +138,21 @@ export function useAssistantSetupEditor(
                 setAgentModelLoading(true);
                 const options = await invoke<AgentModelOption[]>("get_agent_model_options", { assistantId: detail.assistant.id, providerId: null });
                 if (!active) return;
-                setAgentModelOptions(options);
+                const ownOptions = options.filter(option => option.provider_id === detail.model[0].provider_id);
+                setAgentModelOptions(ownOptions);
                 const selection = resolveAgentDefaultSelection(
-                    options,
+                    ownOptions,
                     detail.model[0]?.model_code,
                     detail.model_configs.find((config) => config.name === "reasoning_effort")?.value,
                 );
                 if (selection.model) {
-                    applyAgentModelSelection(selection.model.code, selection.effort);
+                    const genericEffort = runtime.agent_kind === "claude_sdk" ? undefined : selection.effort;
+                    applyAgentModelSelection(selection.model.code, genericEffort);
                     // 自动解析出的默认值属于已加载状态，不算用户修改
                     baselineRef.current = {
                         ...baselineRef.current,
                         agent_model: selection.model.code,
-                        reasoning_effort: selection.effort,
+                        ...(genericEffort !== undefined && { reasoning_effort: genericEffort }),
                     };
                 }
             } catch (error) {
@@ -229,7 +232,7 @@ export function useAssistantSetupEditor(
     });
 
     const { advancedFields, extensionFields } = useMemo(() => ({
-        advancedFields: formConfig.filter((item) => item.section !== "extension" && ASSISTANT_ADVANCED_FIELD_KEYS.includes(item.key)),
+        advancedFields: formConfig.filter((item) => item.section !== "extension" && (item.key === "claude_effort" || ASSISTANT_ADVANCED_FIELD_KEYS.includes(item.key))),
         extensionFields: formConfig.filter((item) => item.section === "extension"),
     }), [formConfig]);
 

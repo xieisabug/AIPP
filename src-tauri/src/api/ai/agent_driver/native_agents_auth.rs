@@ -22,8 +22,10 @@ pub async fn cancel_antigravity_login(provider_id: i64) -> Result<(), String> { 
 pub async fn cancel_native_agent_login(provider_id: i64) -> Result<(), String> { cancel_login(provider_id) }
 
 #[tauri::command]
-pub async fn login_antigravity(app: tauri::AppHandle, provider_id: i64, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>) -> Result<(), String> {
-    browser_login(&app, provider_id, "antigravity", "Antigravity", settings, on_url).await.map(|_| ())
+pub async fn login_antigravity(app: tauri::AppHandle, provider_id: i64, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>, action: Option<String>) -> Result<(), String> {
+    let action = action.as_deref().unwrap_or("login");
+    if !matches!(action, "login" | "refresh" | "logout") { return Err("未知的 Antigravity 账号操作".into()); }
+    browser_login(&app, provider_id, "antigravity", "Antigravity", settings, on_url, action).await.map(|_| ())
 }
 
 /// Per-provider Cursor credential written by the bridge in the SDK's StoredSdkCredentials shape.
@@ -50,7 +52,7 @@ pub(crate) fn read_cursor_account(path: &std::path::Path, now_ms: i64) -> Result
 
 #[tauri::command]
 pub async fn login_cursor(app: tauri::AppHandle, provider_id: i64, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>) -> Result<CursorAccount, String> {
-    let data = browser_login(&app, provider_id, "cursor", "Cursor", settings, on_url).await?;
+    let data = browser_login(&app, provider_id, "cursor", "Cursor", settings, on_url, "login").await?;
     Ok(CursorAccount { signed_in: true, email: data["email"].as_str().map(str::to_string), expires_at_ms: data["expires_at_ms"].as_i64(), expired: false })
 }
 
@@ -69,7 +71,7 @@ pub async fn logout_cursor(app: tauri::AppHandle, provider_id: i64) -> Result<()
     }
 }
 
-async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'static str, display: &str, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>) -> Result<Value, String> {
+async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'static str, display: &str, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>, action: &str) -> Result<Value, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     return Err(format!("MOBILE_UNSUPPORTED: {display} requires a local desktop runtime"));
 
@@ -101,6 +103,18 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
         logins.insert(provider_id, cancel.clone());
     }
     let _guard = LoginGuard(provider_id);
+    if action == "refresh" {
+        catalog::models(app, provider_id, config, true).await?;
+        return Ok(Value::Null);
+    }
+    let account_lock = catalog::gate(provider_id);
+    let _account_guard = if driver == "antigravity" {
+        let guard = account_lock.lock().await;
+        env::release_instance_sessions(driver, Some(provider_id)).await?;
+        if action == "login" { catalog::clear(app, provider_id)?; }
+        Some(guard)
+    } else { None };
+    config.wire["logout"] = json!(action == "logout");
     let files = bridge_files().await?;
     config.wire["temp_root"] = json!(files.0);
     let mut command = tokio::process::Command::new(&config.node);
@@ -133,5 +147,16 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
     };
     terminate_tree(&mut child).await;
     let _ = timeout(Duration::from_secs(2), stderr_task).await;
-    result.map_err(|e|format!("{} [provider_id={provider_id}]; diagnostics: {:?}", diagnostics.sanitize(&e), diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s|s.to_string()), None)))
+    let data = result.map_err(|e|format!("{} [provider_id={provider_id}]; diagnostics: {:?}", diagnostics.sanitize(&e), diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s|s.to_string()), None)))?;
+    if driver == "antigravity" {
+        catalog::clear(app, provider_id)?;
+        if action == "login" {
+            if let Some(error) = data["model_error"].as_str() {
+                return Err(format!("Antigravity 已登录，读取模型失败：{}", diagnostics.sanitize(error)));
+            }
+            let models = parse_models(&data["models"])?;
+            catalog::Catalog::open(app, provider_id, &config)?.save_models(app, &models)?;
+        }
+    }
+    Ok(data)
 }

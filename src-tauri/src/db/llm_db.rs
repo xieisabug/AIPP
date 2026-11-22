@@ -161,6 +161,12 @@ impl LLMDatabase {
                 );",
             [],
         )?;
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS antigravity_model_catalog (
+            provider_id INTEGER PRIMARY KEY, scope TEXT NOT NULL, generation TEXT NOT NULL, models TEXT
+        );
+        CREATE TRIGGER IF NOT EXISTS remove_antigravity_catalog AFTER DELETE ON llm_provider BEGIN
+            DELETE FROM antigravity_model_catalog WHERE provider_id=OLD.id;
+        END;")?;
         self.create_model_request_mode_preference_table()?;
 
         self.conn.execute(

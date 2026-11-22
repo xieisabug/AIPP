@@ -19,6 +19,58 @@ pub const ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV: &str = "AIPP_ACP_NATIVE_DUPLICATE
 pub const ACP_MCP_PROXY_ADDR_ENV: &str = "AIPP_ACP_MCP_PROXY_ADDR";
 pub const ACP_MCP_PROXY_TOKEN_ENV: &str = "AIPP_ACP_MCP_PROXY_TOKEN";
 pub const ACP_MCP_SELECTED_TOOLS_ENV: &str = "AIPP_ACP_SELECTED_MCP_TOOLS";
+pub const ACP_MCP_SELECTED_TOOLS_FILE_ENV: &str = "AIPP_ACP_SELECTED_MCP_TOOLS_FILE";
+
+#[derive(Debug)]
+pub(crate) struct SelectedMcpToolsFile {
+    path: PathBuf,
+}
+
+impl SelectedMcpToolsFile {
+    pub(crate) fn write(content: &str) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!(
+            "aipp-mcp-selected-tools-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| format!("Failed to create AIPP MCP selected tools file: {error}"))?;
+        let guard = Self { path };
+        file.write_all(content.as_bytes())
+            .map_err(|error| format!("Failed to write AIPP MCP selected tools file: {error}"))?;
+        file.flush()
+            .map_err(|error| format!("Failed to flush AIPP MCP selected tools file: {error}"))?;
+        Ok(guard)
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SelectedMcpToolsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn load_selected_mcp_tools_payload(
+    file_path: Option<&str>,
+    inline: Option<&str>,
+) -> Result<String, String> {
+    if let Some(path) = file_path.map(str::trim).filter(|path| !path.is_empty()) {
+        return std::fs::read_to_string(path)
+            .map_err(|error| format!("Failed to read {ACP_MCP_SELECTED_TOOLS_FILE_ENV} ({path}): {error}"));
+    }
+    Ok(inline.unwrap_or("[]").to_string())
+}
 
 #[derive(Clone)]
 pub struct AcpMcpProxyConfig {
@@ -227,8 +279,12 @@ fn run_bridge() -> Result<(), String> {
         .unwrap_or(true);
     let proxy_addr = std::env::var(ACP_MCP_PROXY_ADDR_ENV).ok();
     let proxy_token = std::env::var(ACP_MCP_PROXY_TOKEN_ENV).ok();
-    let selected_tools_payload =
-        std::env::var(ACP_MCP_SELECTED_TOOLS_ENV).unwrap_or_else(|_| "[]".to_string());
+    let selected_tools_file = std::env::var(ACP_MCP_SELECTED_TOOLS_FILE_ENV).ok();
+    let selected_tools_inline = std::env::var(ACP_MCP_SELECTED_TOOLS_ENV).ok();
+    let selected_tools_payload = load_selected_mcp_tools_payload(
+        selected_tools_file.as_deref(),
+        selected_tools_inline.as_deref(),
+    )?;
     let selected_tools = parse_selected_mcp_tools(&selected_tools_payload)?;
 
     let db = open_mcp_db(db_path)?;
@@ -274,6 +330,14 @@ fn open_mcp_db(db_path: PathBuf) -> Result<MCPDatabase, String> {
 }
 
 pub(crate) fn native_butler_instructions(role: &str, payload: &str) -> Result<String, String> {
+    native_butler_instructions_with_catalog(role, payload, &[])
+}
+
+pub(crate) fn native_butler_instructions_with_catalog(
+    role: &str,
+    payload: &str,
+    dynamic_catalog: &[(String, String)],
+) -> Result<String, String> {
     let tools = parse_selected_mcp_tools(payload)?;
     let registered = |name: &str| {
         let mut matches = tools.iter().filter(|tool| tool.tool_name == name);
@@ -292,10 +356,21 @@ pub(crate) fn native_butler_instructions(role: &str, payload: &str) -> Result<St
         instructions.push_str(&format!(r#" 直接调用 {progress}，例如 {{"text":"我会核对任务记录。"}}；text 填本次实际要做的事。"#));
     }
     if let (Some(load), Some(call)) = (registered("load_mcp_tool"), registered("call_mcp_tool")) {
-        instructions.push_str(&format!(" 动态工具先用 {load} 加载定义，再用 {call} 调用：server_name 取加载结果的 server，tool_name 取 tool，parameters 按加载结果的 parameters 定义填写实际参数对象。"));
+        if let Some(load_server) = registered("load_mcp_server") {
+            instructions.push_str(&format!(" 动态工具可先用 {load_server} 查看工具集详情，再用 {load} 加载定义，最后用 {call} 调用：server_name 取加载结果的 server，tool_name 取 tool，parameters 按加载结果的 parameters 定义填写实际参数对象。"));
+        } else {
+            instructions.push_str(&format!(" 动态工具先用 {load} 加载定义，再用 {call} 调用：server_name 取加载结果的 server，tool_name 取 tool，parameters 按加载结果的 parameters 定义填写实际参数对象。"));
+        }
     }
     if let (Some(inspect), Some(execute)) = (registered("superadmin_inspect"), registered("superadmin_execute")) {
         instructions.push_str(&format!(" 先从 {inspect} 读取 args_schema，调用 {execute} 时把对应动作字段放进 args 对象。"));
+    }
+    if !dynamic_catalog.is_empty() && registered("load_mcp_tool").is_some() && registered("call_mcp_tool").is_some() {
+        instructions.push_str("\n\n## 可动态加载的 MCP 工具集目录\n");
+        for (name, summary) in dynamic_catalog {
+            let summary = if summary.trim().is_empty() { "暂无摘要" } else { summary.trim() };
+            instructions.push_str(&format!("- `{name}`：{summary}\n"));
+        }
     }
     Ok(instructions)
 }
@@ -666,5 +741,28 @@ mod tests {
                 "text": "Tool completed successfully with no output."
             }])
         );
+    }
+
+    #[test]
+    fn load_selected_mcp_tools_payload_prefers_file_and_cleans_up_on_scope_drop() {
+        let payload = format!("[{{\"server_id\":1,\"pad\":\"{}\"}}]", "x".repeat(40_000));
+        let path = {
+            let scope = provenance::NativeMcpScope::new(9).unwrap();
+            let path = scope.attach_selected_tools_file(&payload).unwrap();
+            assert!(path.exists());
+            let loaded = load_selected_mcp_tools_payload(
+                Some(path.to_str().unwrap()),
+                Some("[{\"server_id\":999}]"),
+            )
+            .unwrap();
+            assert_eq!(loaded, payload);
+            path
+        };
+        assert!(!path.exists(), "scope drop should clean up temporary selected tools file");
+        assert_eq!(
+            load_selected_mcp_tools_payload(None, Some("[{\"server_id\":2}]")).unwrap(),
+            "[{\"server_id\":2}]"
+        );
+        assert_eq!(load_selected_mcp_tools_payload(None, None).unwrap(), "[]");
     }
 }

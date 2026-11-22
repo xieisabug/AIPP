@@ -14,7 +14,7 @@ use crate::api::operation_api::{
 use crate::acp_mcp_bridge::{
     ensure_proxy_server, AcpMcpProxyConfig, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
     ACP_MCP_DB_PATH_ENV, ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV,
-    ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV,
+    ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV, ACP_MCP_SELECTED_TOOLS_FILE_ENV,
 };
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
@@ -515,6 +515,7 @@ fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
 /// 构造 Codex thread 的 MCP config 覆盖：把 AIPP 桥接进程注册为名为 `aipp` 的 MCP server。
 /// 通过 thread/start 与 thread/resume 的 `config` 字段下发（Codex 0.149 已验证），
 /// 不修改用户 ~/.codex/config.toml；与 ACP 通道共用同一桥接与代理。
+#[cfg(test)]
 fn build_codex_mcp_config_overrides(
     bridge_command: &std::path::Path,
     mcp_db_path: &std::path::Path,
@@ -522,13 +523,31 @@ fn build_codex_mcp_config_overrides(
     proxy: &AcpMcpProxyConfig,
     selected_mcp_tools_payload: &str,
 ) -> serde_json::Map<String, Value> {
+    build_codex_mcp_config_overrides_with_env(
+        bridge_command,
+        mcp_db_path,
+        conversation_id,
+        proxy,
+        ACP_MCP_SELECTED_TOOLS_ENV,
+        selected_mcp_tools_payload,
+    )
+}
+
+fn build_codex_mcp_config_overrides_with_env(
+    bridge_command: &std::path::Path,
+    mcp_db_path: &std::path::Path,
+    conversation_id: i64,
+    proxy: &AcpMcpProxyConfig,
+    selected_tools_env_key: &str,
+    selected_tools_env_value: &str,
+) -> serde_json::Map<String, Value> {
     let mut env = serde_json::Map::new();
     env.insert(ACP_MCP_DB_PATH_ENV.to_string(), json!(mcp_db_path.display().to_string()));
     env.insert(ACP_MCP_CONVERSATION_ID_ENV.to_string(), json!(conversation_id.to_string()));
     env.insert(ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV.to_string(), json!("1"));
     env.insert(ACP_MCP_PROXY_ADDR_ENV.to_string(), json!(proxy.addr));
     env.insert(ACP_MCP_PROXY_TOKEN_ENV.to_string(), json!(proxy.token));
-    env.insert(ACP_MCP_SELECTED_TOOLS_ENV.to_string(), json!(selected_mcp_tools_payload));
+    env.insert(selected_tools_env_key.to_string(), json!(selected_tools_env_value));
     let mut overrides = serde_json::Map::new();
     overrides.insert("mcp_servers.aipp.command".to_string(), json!(bridge_command.display().to_string()));
     overrides.insert("mcp_servers.aipp.args".to_string(), json!([ACP_MCP_BRIDGE_ARG]));
@@ -553,12 +572,14 @@ async fn codex_mcp_bridge_overrides(
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
     let mut proxy = ensure_proxy_server(app_handle.clone()).await?;
     proxy.token = mcp_scope.token().to_string();
-    Ok(Some(build_codex_mcp_config_overrides(
+    let selected_tools_file = mcp_scope.attach_selected_tools_file(&config.selected_mcp_tools_payload)?;
+    Ok(Some(build_codex_mcp_config_overrides_with_env(
         &bridge_command,
         &mcp_db_path,
         conversation_id,
         &proxy,
-        &config.selected_mcp_tools_payload,
+        ACP_MCP_SELECTED_TOOLS_FILE_ENV,
+        &selected_tools_file.display().to_string(),
     )))
 }
 

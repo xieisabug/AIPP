@@ -2,7 +2,7 @@
 //! `agent_model_cache`，不用等本机 CLI 冷启动（Pi ~0.5s、Codex 0.25~5s、Cursor 2~4s）。
 //!
 //! 只预读探测时不会在智能体里留下痕迹的类型：Codex（不建 thread）、Pi（不落盘会话）、
-//! Cursor（只发 HTTP）、OpenCode（拿到目录即返回）。通用 ACP、Kiro、Antigravity 的探测要
+//! Claude（只读 initialize，不保存会话）、Cursor（只发 HTTP）、OpenCode（拿到目录即返回）。通用 ACP、Kiro、Antigravity 的探测要
 //! `session/new`，会出现在智能体自己的会话历史里，留到用户真正打开时再读（之后同样走缓存）。
 //! 预读只占结果本身的内存（几 KB）；拉起的 CLI 拿到列表就退出，逐个执行避免启动时同时拉起多个。
 
@@ -18,7 +18,7 @@ const AGENT_ASSISTANT_TYPE: i64 = 4;
 
 /// 探测没有副作用、适合启动时预读的 Agent 类型
 pub(crate) fn is_prewarm_safe_agent(api_type: &str) -> bool {
-    matches!(api_type, CODEX_APP_SERVER_API_TYPE | "pi" | "cursor" | "opencode")
+    matches!(api_type, CODEX_APP_SERVER_API_TYPE | "claude_sdk" | "pi" | "cursor" | "opencode")
 }
 
 pub(crate) struct PrewarmCandidate {

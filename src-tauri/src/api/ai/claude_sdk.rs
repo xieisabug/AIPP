@@ -14,7 +14,7 @@ use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::acp_mcp_bridge::{
     ensure_proxy_server, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
     ACP_MCP_DB_PATH_ENV, ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV,
-    ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV,
+    ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_FILE_ENV,
 };
 use crate::mcp::builtin_mcp::interaction::{
     request_ask_user_question_scoped, AskUserQuestionItem, AskUserQuestionMetadata,
@@ -73,18 +73,202 @@ pub fn is_claude_code_provider(
             }))
 }
 
-pub fn claude_model_choices(
+use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
+#[derive(Clone)]
+struct ReportedClaudeModel {
+    value: String,
+    name: String,
+    resolved: Option<String>,
+    efforts: Option<Vec<String>>,
+}
+
+#[derive(Clone)]
+struct ClaudeModels {
+    version: Option<semver::Version>,
+    default_target: Option<String>,
+    default_efforts: Option<Vec<String>>,
+    entries: Vec<ReportedClaudeModel>,
+}
+
+// First-party IDs and minimum CLI versions from the T3 Code model manifest (9c25b713).
+// A family alias can be overridden by Claude settings, even to a different family.
+const PINNED_CLAUDE_MODELS: &[(&str, &str, &str, u64)] = &[
+    ("opus", "claude-opus-5-5", "Claude Opus 5.5", 280),
+    ("sonnet", "claude-sonnet-5-5", "Claude Sonnet 5.5", 284),
+    ("haiku", "claude-haiku-5-5", "Claude Haiku 5.5", 293),
+    ("fable", "claude-fable-5-2", "Claude Fable 5.2", 321),
+];
+
+// Reported models belong to the process configuration that produced them.
+static REPORTED_MODELS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, ClaudeModels>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub(crate) const CLAUDE_EFFORTS: &[&str] = &["default", "low", "medium", "high", "xhigh", "max"];
+
+fn reported_efforts(model: &Value) -> Option<Vec<String>> {
+    let mut efforts = vec!["default".into()];
+    if model["supportsEffort"] != false {
+        for level in model["supportedEffortLevels"].as_array()? {
+            if let Some(level) = level.as_str().filter(|v| CLAUDE_EFFORTS.contains(v) && *v != "default") {
+                if !efforts.iter().any(|v| v == level) { efforts.push(level.into()); }
+            }
+        }
+    }
+    Some(efforts)
+}
+
+pub(crate) fn claude_model_efforts(config: &ClaudeSdkConfig, provider_id: i64, code: &str) -> Vec<String> {
+    let catalogs = REPORTED_MODELS.lock().unwrap();
+    let reported = catalogs.get(&config.catalog_key(provider_id)).and_then(|catalog| {
+        if code == CLAUDE_CODE_DEFAULT_MODEL { return catalog.default_efforts.as_ref(); }
+        catalog.entries.iter().find(|entry| entry.value == code)
+            .or_else(|| catalog.entries.iter().find(|entry| entry.resolved.as_deref() == Some(code)))
+            .and_then(|entry| entry.efforts.as_ref())
+    });
+    reported.cloned().unwrap_or_else(|| CLAUDE_EFFORTS.iter().map(|v| (*v).into()).collect())
+}
+
+impl ClaudeSdkConfig {
+    fn catalog_key(&self, provider_id: i64) -> String {
+        let env: std::collections::BTreeMap<_, _> = self.env_vars.iter()
+            .filter(|(key, _)| !matches!(key.to_ascii_lowercase().as_str(), "http_proxy" | "https_proxy" | "all_proxy" | "no_proxy"))
+            .collect();
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(json!([provider_id, self.cli_command, self.working_directory, env]).to_string()))
+    }
+}
+
+fn add_claude_choice(choices: &mut Vec<AcpSessionConfigChoicePayload>, code: &str, name: &str) {
+    if !code.is_empty() && !choices.iter().any(|choice| choice.value == code) {
+        choices.push(AcpSessionConfigChoicePayload {
+            value: code.into(), name: name.into(), description: None, group_name: None,
+        });
+    }
+}
+
+pub(crate) fn claude_model_choices(
+    config: &ClaudeSdkConfig,
+    provider_id: i64,
     models: &[(i64, String, i64, String, String, bool, bool, bool)],
+    native_aliases: bool,
 ) -> Vec<AcpSessionConfigChoicePayload> {
-    models
-        .iter()
-        .map(|(_, name, _, code, description, _, _, _)| AcpSessionConfigChoicePayload {
-            value: code.clone(),
-            name: name.clone(),
-            description: (!description.trim().is_empty()).then(|| description.clone()),
-            group_name: None,
+    let mut choices = Vec::new();
+    let catalogs = REPORTED_MODELS.lock().unwrap();
+    let reported = catalogs.get(&config.catalog_key(provider_id));
+    if native_aliases {
+        let default_name = match reported.and_then(|catalog| catalog.default_target.as_deref()) {
+            Some(target) => format!("使用 CLI 默认模型 → {target}"),
+            None => "使用 CLI 默认模型".into(),
+        };
+        add_claude_choice(&mut choices, CLAUDE_CODE_DEFAULT_MODEL, &default_name);
+        for &(alias, id, name, patch) in PINNED_CLAUDE_MODELS {
+            let Some(catalog) = reported else {
+                add_claude_choice(&mut choices, alias, &format!("CLI 别名 · {alias}"));
+                continue;
+            };
+            // Bedrock / Vertex advertise their accepted argument and backend ID together.
+            // Keep that reported route selectable instead of synthesizing a first-party ID.
+            let available = catalog.entries.iter().any(|entry| {
+                if entry.value == id { return true; }
+                if entry.value != alias { return false; }
+                let target = entry.resolved.as_deref().unwrap_or(alias);
+                target == id || PINNED_CLAUDE_MODELS.iter().any(|(alias, ..)| target == *alias)
+            });
+            if available && catalog.version.as_ref().is_some_and(|v| *v >= semver::Version::new(2, 1, patch)) {
+                add_claude_choice(&mut choices, id, &format!("{name} · {id}"));
+            }
+        }
+    }
+    if let Some(catalog) = reported {
+        for entry in &catalog.entries {
+            let code = &entry.value;
+            let family = PINNED_CLAUDE_MODELS.iter().any(|(alias, ..)| code == alias);
+            if native_aliases && family {
+                if let Some(target) = entry.resolved.as_deref().filter(|id| id.starts_with("claude-") && !id.contains('@')) {
+                    add_claude_choice(&mut choices, target, target);
+                }
+            }
+            let label = match entry.resolved.as_deref() {
+                Some(target) if target != code => format!("CLI 路由 {code} → {target}"),
+                _ if family => format!("CLI 别名 · {code}"),
+                _ => entry.name.clone(),
+            };
+            add_claude_choice(&mut choices, code, &label);
+        }
+    }
+    for (_, name, _, code, _, _, _, _) in models {
+        add_claude_choice(&mut choices, code, name);
+    }
+    if let Some(current) = &config.model {
+        let label = if PINNED_CLAUDE_MODELS.iter().any(|(alias, ..)| current == alias) {
+            format!("CLI 别名 · {current}")
+        } else { current.clone() };
+        add_claude_choice(&mut choices, current, &label);
+    }
+    choices
+}
+
+const MODEL_CATALOG_REQUEST: &str = "aipp-model-catalog";
+fn claude_catalog_request() -> String {
+    let frame = json!({"type":"control_request", "request_id":MODEL_CATALOG_REQUEST, "request":{"subtype":"initialize"}});
+    format!("{frame}\n")
+}
+
+pub(crate) async fn discover_claude_models(mut config: ClaudeSdkConfig, provider_id: i64) -> Result<(), String> {
+    static PROBES: std::sync::LazyLock<crate::api::agent_model_cache::ProbeCache<()>> =
+        std::sync::LazyLock::new(||crate::api::agent_model_cache::ProbeCache::new(Duration::from_secs(300)));
+    let key = config.catalog_key(provider_id);
+    PROBES.get_or_probe(key.clone(), move || async move {
+        // Discovery asks for the entire catalog, including when the stored selection is a CLI-default sentinel.
+        config.model = None;
+        let (mut command, _) = build_claude_command(&config, None);
+        command.args(["--no-session-persistence", "--strict-mcp-config"]);
+        let mut child = command.spawn().map_err(|e|format!("启动 Claude Code 模型探测失败：{e}"))?;
+        let mut stdin = child.stdin.take().ok_or("Claude model probe stdin missing")?;
+        stdin.write_all(claude_catalog_request().as_bytes()).await.map_err(|e|e.to_string())?;
+        drop(stdin);
+        let output = tokio::time::timeout(Duration::from_secs(12), child.wait_with_output()).await
+            .map_err(|_|"Claude Code 模型探测超时")?.map_err(|e|e.to_string())?;
+        if !output.status.success() {
+            let diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
+            return Err(format!("Claude Code initialize ({}): {}", output.status,
+                diagnostics.sanitize(&String::from_utf8_lossy(&output.stderr))));
+        }
+        for line in output.stdout.split(|b| *b == b'\n') {
+            if let Ok(frame) = serde_json::from_slice(line) {
+                if let Some(models) = reported_claude_models(&frame) {
+                    REPORTED_MODELS.lock().unwrap().insert(key, models);
+                    return Ok(());
+                }
+            }
+        }
+        Err("Claude Code initialize 未返回模型列表".into())
+    }).await
+}
+
+fn reported_claude_models(frame: &Value) -> Option<ClaudeModels> {
+    let reply = &frame["response"];
+    if frame["type"] != "control_response" || reply["request_id"] != MODEL_CATALOG_REQUEST
+        || reply["subtype"] != "success" { return None; }
+    let data = &reply["response"];
+    let models = data["models"].as_array()?;
+    let default_target = models.iter().find(|m| m["value"] == "default")
+        .and_then(|m| m["resolvedModel"].as_str()).map(str::trim)
+        .filter(|value| !value.is_empty()).map(str::to_owned);
+    let default_efforts = models.iter().find(|m| m["value"] == "default").and_then(reported_efforts);
+    let entries = models.iter().filter_map(|model| {
+        let code = model["value"].as_str()?.trim();
+        if code.is_empty() || code == "default" { return None; }
+        Some(ReportedClaudeModel {
+            value: code.into(),
+            name: model["displayName"].as_str().unwrap_or(code).into(),
+            efforts: reported_efforts(model),
+            resolved: model["resolvedModel"].as_str().map(str::trim)
+                .filter(|value| !value.is_empty()).map(str::to_owned),
         })
-        .collect()
+    }).collect();
+    let version = data["claude_code_version"].as_str().and_then(|v|semver::Version::parse(v).ok());
+    Some(ClaudeModels { version, default_target, default_efforts, entries })
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +282,7 @@ pub struct ClaudeSdkConfig {
     pub permission_mode: Option<String>,
     pub effort: Option<String>,
     pub model_choices: Vec<AcpSessionConfigChoicePayload>,
+    resolved_model: Option<String>,
     pub butler_instructions: Option<String>,
     instructions_file: Option<Arc<ClaudeInputFile>>,
     pub selected_mcp_tools_payload: String,
@@ -169,7 +354,7 @@ impl ClaudeSessionEntry {
                     },
                     AcpSessionConfigOptionPayload {
                         id: "effort".into(), name: "思考强度".into(), description: Some("下一轮 Claude Code 响应的思考强度".into()), category: Some("thought_level".into()),
-                        current_value: effort.unwrap_or_else(|| "default".into()), options: ["default", "low", "medium", "high", "max"].into_iter().map(|value| AcpSessionConfigChoicePayload { value: value.into(), name: value.into(), description: None, group_name: None }).collect(),
+                        current_value: effort.unwrap_or_else(|| "default".into()), options: CLAUDE_EFFORTS.iter().copied().map(|value| AcpSessionConfigChoicePayload { value: value.into(), name: value.into(), description: None, group_name: None }).collect(),
                     },
                 ],
                 ..Default::default()
@@ -343,6 +528,7 @@ pub fn extract_claude_sdk_config(
         permission_mode,
         effort,
         model_choices,
+        resolved_model: None,
         selected_mcp_tools_payload: String::new(),
         mcp_config_file: None,
         instructions_file: None,
@@ -366,7 +552,7 @@ fn build_claude_mcp_config(
     mcp_db_path: &std::path::Path,
     conversation_id: i64,
     proxy: &crate::acp_mcp_bridge::AcpMcpProxyConfig,
-    selected_mcp_tools_payload: &str,
+    selected_tools_file: &std::path::Path,
 ) -> Result<String, String> {
     let mut env = serde_json::Map::new();
     env.insert(ACP_MCP_DB_PATH_ENV.into(), json!(mcp_db_path.display().to_string()));
@@ -374,7 +560,10 @@ fn build_claude_mcp_config(
     env.insert(ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV.into(), json!("1"));
     env.insert(ACP_MCP_PROXY_ADDR_ENV.into(), json!(proxy.addr));
     env.insert(ACP_MCP_PROXY_TOKEN_ENV.into(), json!(proxy.token));
-    env.insert(ACP_MCP_SELECTED_TOOLS_ENV.into(), json!(selected_mcp_tools_payload));
+    env.insert(
+        ACP_MCP_SELECTED_TOOLS_FILE_ENV.into(),
+        json!(selected_tools_file.display().to_string()),
+    );
     serde_json::to_string(&json!({
         "mcpServers": {
             "aipp": {
@@ -430,12 +619,13 @@ pub async fn prepare_claude_mcp_bridge(
     let mut proxy = ensure_proxy_server(app_handle.clone()).await?;
     let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id)?;
     proxy.token = mcp_scope.token().to_string();
+    let selected_tools_file = mcp_scope.attach_selected_tools_file(&config.selected_mcp_tools_payload)?;
     let mcp_config = build_claude_mcp_config(
         &bridge_command,
         &mcp_db_path,
         conversation_id,
         &proxy,
-        &config.selected_mcp_tools_payload,
+        &selected_tools_file,
     )?;
     config.mcp_config_file = Some(write_claude_input_file("mcp.json", &mcp_config)?);
     config.mcp_scope = Some(mcp_scope);
@@ -573,11 +763,40 @@ fn claude_ask_user_question_payload(input: &Value) -> Result<AskUserQuestionRequ
 
 /// 将用户答案以 问题文本 -> 答案 的形式注入 updatedInput.answers，回给 Claude Code CLI。
 fn inject_answers_into_input(input: &Value, answers: &HashMap<String, String>) -> Value {
-    let mut updated = input.clone();
+    let mut updated = if input.is_object() { input.clone() } else { json!({}) };
     if let Some(obj) = updated.as_object_mut() {
         obj.insert("answers".to_string(), json!(answers));
     }
     updated
+}
+
+fn claude_control_permission_allow(request_id: &str, updated_input: Value) -> Value {
+    let updated_input = if updated_input.is_object() { updated_input } else { json!({}) };
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "allow",
+                "updatedInput": updated_input
+            }
+        }
+    })
+}
+
+fn claude_control_permission_deny(request_id: &str, message: impl Into<String>) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "deny",
+                "message": message.into()
+            }
+        }
+    })
 }
 
 /// Claude Code 的 AskUserQuestion 工具经由 can_use_tool 控制请求到达，
@@ -607,25 +826,17 @@ async fn handle_ask_user_question(
         }
         Err(error) => Err(error),
     };
-    let (behavior, updated_input, message) = match result {
-        Ok(answers) => ("allow", inject_answers_into_input(&input, &answers), Value::Null),
+    let response = match result {
+        Ok(answers) => claude_control_permission_allow(request_id, inject_answers_into_input(&input, &answers)),
         Err(error) => {
             tracing::warn!(
                 conversation_id,
                 error = %error,
                 "Claude Code AskUserQuestion was cancelled"
             );
-            (
-                "deny",
-                input.clone(),
-                json!({"message": format!("用户未回答提问：{error}")}),
-            )
+            claude_control_permission_deny(request_id, format!("用户未回答提问：{error}"))
         }
     };
-    let response = json!({
-        "type": "control_response",
-        "response": {"subtype":"success", "request_id": request_id, "response": {"behavior":behavior, "updatedInput": updated_input, "message":message}}
-    });
     stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|e| e.to_string())?;
     stdin.flush().await.map_err(|e| e.to_string())
 }
@@ -722,14 +933,15 @@ async fn handle_permission(
 }
 
 fn claude_permission_response(request_id: &str, request: &Value, decision: AcpPermissionDecision) -> Value {
-    let (behavior, message) = match decision {
-        AcpPermissionDecision::Selected(value) if value == "allow" => ("allow", Value::Null),
-        _ => ("deny", json!({"message":"Permission denied by user"})),
-    };
-    json!({
-        "type": "control_response",
-        "response": {"subtype":"success", "request_id": request_id, "response": {"behavior":behavior, "updatedInput": request.get("input").cloned().unwrap_or(Value::Null), "message":message}}
-    })
+    match decision {
+        AcpPermissionDecision::Selected(value) if value == "allow" => {
+            claude_control_permission_allow(
+                request_id,
+                request.get("input").cloned().unwrap_or_else(|| json!({})),
+            )
+        }
+        _ => claude_control_permission_deny(request_id, "Permission denied by user"),
+    }
 }
 
 fn emit_update(identity: &AgentEventIdentity, window: &tauri::Window, conversation_id: i64, id: i64, content: &str, done: bool) {
@@ -838,12 +1050,13 @@ fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOption
     vec![
         AcpSessionConfigOptionPayload {
             id: "model".into(), name: "模型".into(), description: Some("下一轮 Claude Code 响应使用的模型".into()), category: Some("model".into()),
-            current_value: config.model.clone().unwrap_or_default(), options: config.model_choices.clone(),
+            current_value: config.model.clone().unwrap_or_else(|| CLAUDE_CODE_DEFAULT_MODEL.into()), options: config.model_choices.clone(),
         },
         AcpSessionConfigOptionPayload {
             id: "effort".into(), name: "思考强度".into(), description: Some("下一轮 Claude Code 响应的思考强度".into()), category: Some("thought_level".into()),
             current_value: config.effort.clone().unwrap_or_else(|| "default".into()),
-            options: ["default", "low", "medium", "high", "max"].into_iter().map(|value| AcpSessionConfigChoicePayload { value: value.into(), name: value.into(), description: None, group_name: None }).collect(),
+            options: claude_model_efforts(config, config.instance_id.unwrap_or_default(), config.model.as_deref().unwrap_or(CLAUDE_CODE_DEFAULT_MODEL))
+                .into_iter().map(|value| AcpSessionConfigChoicePayload { name: value.clone(), value, description: None, group_name: None }).collect(),
         },
         AcpSessionConfigOptionPayload {
             id: "permission_mode".into(),
@@ -935,7 +1148,7 @@ fn claude_session_snapshot(
         agent_kind: CLAUDE_SDK_API_TYPE.into(),
         session_id,
         has_active_prompt,
-        model: config.model.clone(),
+        model: config.resolved_model.clone().or_else(||config.model.clone()),
         permission_mode: config.permission_mode.clone(),
         load_session_supported: false,
         session_resume_supported: true,
@@ -1009,7 +1222,11 @@ async fn spawn_claude_process_with_diagnostics(
         "Starting Claude Code stream-json process"
     );
     let mut child = command.spawn().map_err(|e| e.to_string())?;
-    let stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
+    let mut stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
+    if config.instance_id.is_some() {
+        stdin.write_all(claude_catalog_request().as_bytes()).await.map_err(|e|format!("Claude Code initialize: {e}"))?;
+        stdin.flush().await.map_err(|e|format!("Claude Code initialize flush: {e}"))?;
+    }
     let stdout = child.stdout.take().ok_or("Claude stdout unavailable")?;
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
@@ -1037,7 +1254,17 @@ fn build_claude_command(
     #[cfg(not(target_os = "windows"))]
     let (program, prefix_args): (PathBuf, Vec<String>) = (resolved.clone(), Vec::new());
     let mut command = Command::new(program);
-    command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
+    command.args(prefix_args).args([
+        "--print",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--permission-prompt-tool",
+        "stdio",
+    ]);
     if let Some(file) = &config.instructions_file { command.arg("--append-system-prompt-file").arg(file.path()); }
     if let Some(mcp_config_file) = &config.mcp_config_file {
         command.arg("--mcp-config").arg(mcp_config_file.path());
@@ -1255,7 +1482,8 @@ pub fn spawn_claude_session_task(
                                 let _ = response.send(Err(format!("Claude Code 模型不在当前提供商的模型列表中：{value}")));
                                 continue;
                             }
-                            config.model = Some(value)
+                            config.resolved_model = None;
+                            config.model = (value != CLAUDE_CODE_DEFAULT_MODEL).then_some(value)
                         }
                         "effort" => config.effort = (value != "default").then_some(value),
                         "permission_mode" => {
@@ -1376,6 +1604,18 @@ pub fn spawn_claude_session_task(
                                 break;
                             }
                         };
+                        if let Some(reported) = reported_claude_models(&frame) {
+                            if let Some(provider_id) = config.instance_id {
+                                REPORTED_MODELS.lock().unwrap().insert(config.catalog_key(provider_id), reported);
+                                match crate::db::llm_db::LLMDatabase::new(&app).and_then(|db|
+                                    Ok((db.get_llm_provider(provider_id)?, db.get_llm_models(provider_id.to_string())?))) {
+                                    Ok((provider, models)) => config.model_choices =
+                                        claude_model_choices(&config, provider_id, &models, provider.api_type != "anthropic"),
+                                    Err(error) => tracing::warn!(provider_id, %error, "Failed to update Claude model choices"),
+                                }
+                            }
+                            continue;
+                        }
                         if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
                             match confirm_claude_resume(
                                 pending_resume_session_id.as_deref(),
@@ -1436,7 +1676,7 @@ pub fn spawn_claude_session_task(
                                     compact_boundary = Some(pre_tokens);
                                 }
                                 if let Some(model) = frame.get("model").and_then(Value::as_str) {
-                                    config.model = Some(model.to_string());
+                                    config.resolved_model = Some(model.to_string());
                                 }
                                 if let Some(effort) = frame.get("effort").and_then(Value::as_str) {
                                     config.effort = Some(effort.to_string());
@@ -1780,6 +2020,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["--permission-mode", "plan"]));
+        assert!(args.windows(2).any(|pair| pair == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|pair| pair == ["--resume", "session-1"]));
     }
 
@@ -1800,12 +2041,14 @@ mod tests {
             token: "proxy-token".into(),
         };
         let payload = "[{\"server_id\":1}]";
+        let scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(42).unwrap();
+        let selected_tools_file = scope.attach_selected_tools_file(payload).unwrap();
         let mcp_config = build_claude_mcp_config(
             std::path::Path::new("C:/Aipp/Aipp.exe"),
             std::path::Path::new("C:/Aipp/mcp.db"),
             42,
             &proxy,
-            payload,
+            &selected_tools_file,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&mcp_config).unwrap();
@@ -1816,9 +2059,13 @@ mod tests {
             Some("42")
         );
         assert_eq!(
-            server.pointer(&format!("/env/{ACP_MCP_SELECTED_TOOLS_ENV}")).and_then(Value::as_str),
-            Some(payload)
+            server
+                .pointer(&format!("/env/{ACP_MCP_SELECTED_TOOLS_FILE_ENV}"))
+                .and_then(Value::as_str),
+            Some(selected_tools_file.display().to_string().as_str())
         );
+        assert_eq!(std::fs::read_to_string(&selected_tools_file).unwrap(), payload);
+        assert!(server.pointer("/env/AIPP_ACP_SELECTED_MCP_TOOLS").is_none());
 
         let config_file = write_claude_input_file("mcp.json", &mcp_config).unwrap();
         let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
@@ -1832,6 +2079,7 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "--mcp-config" && pair[1] == config_file.path().display().to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["--permission-prompt-tool", "stdio"]));
     }
 
     #[test]

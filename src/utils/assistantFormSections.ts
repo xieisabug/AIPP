@@ -8,7 +8,7 @@ export const ASSISTANT_ADVANCED_FIELD_KEYS = [
 ];
 
 const BUILTIN_FIELD_KEYS = new Set([
-    "assistantType", "model", "prompt", "acp_provider", "agent_model", "acp_working_directory",
+    "assistantType", "model", "prompt", "acp_provider", "agent_model", "claude_effort", "acp_working_directory",
     ...ASSISTANT_ADVANCED_FIELD_KEYS,
 ]);
 
