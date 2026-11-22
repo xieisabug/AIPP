@@ -280,7 +280,7 @@ export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePrevi
         callbacksRef.current.onFileLoaded?.(null);
         postToViewer({ type: "aipp-office:unload" });
 
-        const request = !isMobilePlatform && mode === "edit" && source.relayToken
+        const request = !isMobilePlatform && mode === "edit"
             ? { source, bindCopySource: true }
             : { source };
         let copyOriginToken: string | undefined;

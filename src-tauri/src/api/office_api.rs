@@ -86,7 +86,7 @@ impl OfficePreviewError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OfficePreviewSource {
     /// `office_file_ref` 引用号：用户交给助手的文件或 AI 生成的副本。
@@ -95,17 +95,6 @@ pub struct OfficePreviewSource {
     pub attachment_id: Option<i64>,
     pub relay_token: Option<String>,
     pub local_path: Option<String>,
-}
-
-impl OfficePreviewSource {
-    /// Match resolve_authorized_office_path's precedence for actual relay-backed sources.
-    pub(crate) fn relay_origin_key(&self) -> Option<&str> {
-        let has_ref = self.ref_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-        if has_ref || self.attachment_id.is_some() {
-            return None;
-        }
-        self.relay_token.as_deref().map(str::trim).filter(|token| !token.is_empty())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -746,12 +735,10 @@ pub async fn read_authorized_office_file(
         resolve_authorized_office_path(&app_handle, &source).map_err(|e| e.to_wire_string())?;
     let body = tokio::task::spawn_blocking(move || {
         load_office_file_blocking(&file_path, &file_name, |file| {
-            if bind_copy_source == Some(true) {
-                if let Some(relay) = source.relay_origin_key() {
-                    let token = app_handle.state::<super::office_save::OfficeEditCopyOrigins>()
-                        .remember(window.label(), relay, file_path.clone(), file)?;
-                    return Ok(Some(token));
-                }
+            if cfg!(desktop) && bind_copy_source == Some(true) {
+                let token = app_handle.state::<super::office_save::OfficeEditCopyOrigins>()
+                    .remember(window.label(), &source, file_path.clone(), file)?;
+                return Ok(Some(token));
             }
             Ok(None)
         })

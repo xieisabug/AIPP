@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 
 const mockInvoke = vi.fn();
+let mockIsMobile = false;
 const eventListeners = new Map<string, Array<(event: { payload: unknown }) => void>>();
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -25,7 +26,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("@/hooks/use-platform", () => ({
-    useIsMobilePlatform: () => false,
+    useIsMobilePlatform: () => mockIsMobile,
 }));
 
 import React from "react";
@@ -67,6 +68,7 @@ function encodeOfficeResponse(fileName: string, bytes: Uint8Array, copyOriginTok
 describe("OfficePreviewPane", () => {
     beforeEach(() => {
         mockInvoke.mockReset();
+        mockIsMobile = false;
         eventListeners.clear();
         __resetOfficePreviewPluginStateForTests();
     });
@@ -239,9 +241,13 @@ describe("OfficePreviewPane", () => {
         return { posted, fromViewer };
     }
 
-    it("should bind an editable relay source without sending its save handle to the iframe", async () => {
+    it.each([
+        { attachmentId: 7 },
+        { refId: "persisted-file-ref" },
+        { localPath: "/known-attachment.docx" },
+        { relayToken: "preview-token" },
+    ])("should bind a desktop edit for %j without sending its save handle to the iframe", async (source) => {
         const loaded = vi.fn();
-        const source = { relayToken: "preview-token" };
         mockInvoke.mockImplementation(async (cmd: string, args: { bindCopySource?: boolean }) => {
             if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, editSupported: true };
             if (cmd === "read_authorized_office_file") {
@@ -260,6 +266,19 @@ describe("OfficePreviewPane", () => {
         expect(load).not.toHaveProperty("copyOriginToken");
         ui.unmount();
         expect(mockInvoke).toHaveBeenCalledWith("release_office_copy_origin", { token: "copy-token" });
+    });
+
+    it("should leave mobile editor reads unbound", async () => {
+        mockIsMobile = true;
+        mockInvoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_office_preview_plugin_status") return { ...READY_STATUS, editSupported: true };
+            if (cmd === "read_authorized_office_file") return encodeOfficeResponse("a.docx", new Uint8Array([80, 75, 3, 4]));
+            return null;
+        });
+        const source = { attachmentId: 7 };
+        render(<OfficePreviewPane title="a.docx" source={source} mode="edit" />);
+        await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("read_authorized_office_file", { source }));
+        expect(mockInvoke).not.toHaveBeenCalledWith("read_authorized_office_file", { source, bindCopySource: true });
     });
 
     it("should release an edit binding from a read that completed after the pane closed", async () => {

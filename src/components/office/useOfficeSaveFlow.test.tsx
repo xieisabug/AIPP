@@ -37,6 +37,7 @@ const copyRequest: OfficeSaveRequest = {
     fileName: "报告.docx",
     format: "docx",
     purpose: "copy",
+    copyOriginToken: "copy-origin",
     bytes: new Uint8Array([80, 75, 3, 4]).buffer,
 };
 
@@ -70,6 +71,7 @@ describe("useOfficeSaveFlow", () => {
             if (cmd === "office_write_copy") {
                 const header = writeCopyHeader(args);
                 expect(header.source).toEqual(copyRequest.source);
+                expect(header.copyOriginToken).toEqual(copyRequest.copyOriginToken);
                 expect(header.overwrite).toBe(false);
                 if (header.targetPath === sourcePath) {
                     throw "OFFICE_PREVIEW_ERROR:protected_source:所选位置是原文件，请重新选择位置";
@@ -97,6 +99,7 @@ describe("useOfficeSaveFlow", () => {
             if (cmd === "office_write_copy") {
                 const header = writeCopyHeader(args);
                 expect(header.source).toEqual(copyRequest.source);
+                expect(header.copyOriginToken).toEqual(copyRequest.copyOriginToken);
                 if (!header.overwrite) throw "OFFICE_PREVIEW_ERROR:target_exists:「报告.docx」已存在，未覆盖";
                 return { path: header.targetPath, fileName: "报告.docx", sizeBytes: 4, format: "docx" };
             }

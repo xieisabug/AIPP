@@ -13,6 +13,10 @@ fn docx_bytes(marker: &str) -> Vec<u8> {
     buf.into_inner()
 }
 
+fn pin_opened_source(source: &Path) -> ProtectedCopySource {
+    ProtectedCopySource::from_open_file(source.to_path_buf(), fs::File::open(source).unwrap()).unwrap()
+}
+
 fn leftover_temp_files(dir: &Path) -> Vec<String> {
     fs::read_dir(dir)
         .unwrap()
@@ -120,14 +124,15 @@ fn test_write_edited_copy_protects_original_and_allows_other_file_after_confirma
     let edited = docx_bytes("edited");
     fs::write(&source, &original).unwrap();
     let original_hash = sha256_hex(&original);
+    let opened = pin_opened_source(&source);
 
     for overwrite in [false, true] {
-        let result = write_edited_copy(&ProtectedCopySource::from(source.clone()), &source, &edited, overwrite).unwrap_err();
+        let result = write_edited_copy(&opened, &source, &edited, overwrite).unwrap_err();
         assert_eq!(result.code, "protected_source");
     }
 
     let copy = dir.path().join("报告（副本）.docx");
-    write_edited_copy(&ProtectedCopySource::from(source.clone()), &copy, &edited, false).unwrap();
+    write_edited_copy(&opened, &copy, &edited, false).unwrap();
     assert_eq!(fs::read(&copy).unwrap(), edited);
 
     // Distinct inode, identical basename and bytes: this is still another file.
@@ -135,10 +140,10 @@ fn test_write_edited_copy_protects_original_and_allows_other_file_after_confirma
     fs::create_dir(&other_dir).unwrap();
     let other = other_dir.join("报告.docx");
     fs::write(&other, &original).unwrap();
-    let result = write_edited_copy(&ProtectedCopySource::from(source.clone()), &other, &edited, false).unwrap_err();
+    let result = write_edited_copy(&opened, &other, &edited, false).unwrap_err();
     assert_eq!(result.code, "target_exists");
     assert_eq!(fs::read(&other).unwrap(), original);
-    write_edited_copy(&ProtectedCopySource::from(source.clone()), &other, &edited, true).unwrap();
+    write_edited_copy(&opened, &other, &edited, true).unwrap();
 
     assert_eq!(fs::read(&other).unwrap(), edited);
     assert_eq!(sha256_hex(&fs::read(&source).unwrap()), original_hash);
@@ -155,11 +160,12 @@ fn test_write_edited_copy_blocks_a_target_that_became_a_source_alias_after_confi
     let edited = docx_bytes("edited");
     fs::write(&source, &original).unwrap();
     fs::write(&target, docx_bytes("unrelated")).unwrap();
+    let opened = pin_opened_source(&source);
 
-    assert_eq!(write_edited_copy(&ProtectedCopySource::from(source.clone()), &target, &edited, false).unwrap_err().code, "target_exists");
+    assert_eq!(write_edited_copy(&opened, &target, &edited, false).unwrap_err().code, "target_exists");
     fs::remove_file(&target).unwrap();
     fs::hard_link(&source, &target).unwrap();
-    assert_eq!(write_edited_copy(&ProtectedCopySource::from(source.clone()), &target, &edited, true).unwrap_err().code, "protected_source");
+    assert_eq!(write_edited_copy(&opened, &target, &edited, true).unwrap_err().code, "protected_source");
     assert_eq!(fs::read(&source).unwrap(), original);
     assert_eq!(fs::read(&target).unwrap(), original);
     assert!(leftover_temp_files(dir.path()).is_empty());
@@ -178,12 +184,13 @@ fn test_write_edited_copy_refuses_symlink_alias_of_source_directory() {
     fs::write(&source, &original).unwrap();
     let edited = docx_bytes("edited");
     let target = alias.join("source.docx");
-    assert_eq!(write_edited_copy(&ProtectedCopySource::from(source.clone()), &target, &edited, true).unwrap_err().code, "protected_source");
+    let opened = pin_opened_source(&source);
+    assert_eq!(write_edited_copy(&opened, &target, &edited, true).unwrap_err().code, "protected_source");
     assert_eq!(fs::read(&source).unwrap(), original);
 
     // A missing leaf is still the original save location.
     fs::remove_file(&source).unwrap();
-    assert_eq!(write_edited_copy(&ProtectedCopySource::from(source.clone()), &target, &edited, false).unwrap_err().code, "protected_source");
+    assert_eq!(write_edited_copy(&opened, &target, &edited, false).unwrap_err().code, "protected_source");
     assert!(!source.exists());
     assert!(leftover_temp_files(&real).is_empty());
 }
@@ -198,14 +205,14 @@ fn test_bound_relay_editor_can_save_without_live_relay_and_protects_initial_iden
     fs::write(&path, &original).unwrap();
     fs::hard_link(&path, &alias).unwrap();
     let origins = OfficeEditCopyOrigins::default();
-    let relay = "already-expired-relay";
+    let relay = &OfficePreviewSource { relay_token: Some("already-expired-relay".into()), ..Default::default() };
     let token = origins.remember("chat", relay, path.clone(), fs::File::open(&path).unwrap()).unwrap();
 
     // Loading an editor earlier is required. The ordinary relay token is not a save handle,
     // and another host window can't reuse the handle.
     assert_eq!(origins.get("chat", relay, None).unwrap_err().code, "file_not_found");
     assert_eq!(origins.get("other", relay, Some(&token)).unwrap_err().code, "file_not_found");
-    assert_eq!(origins.get("chat", "unopened-relay", Some(&token)).unwrap_err().code, "file_not_found");
+    assert_eq!(origins.get("chat", &OfficePreviewSource::default(), Some(&token)).unwrap_err().code, "file_not_found");
 
     // Neither the protection lookup nor the save needs the live read relay.
     let source = origins.get("chat", relay, Some(&token)).unwrap();
@@ -231,16 +238,74 @@ fn test_edit_origin_registry_is_bounded_and_clears_destroyed_windows() {
     let source = dir.path().join("source.docx");
     fs::write(&source, docx_bytes("original")).unwrap();
     let origins = OfficeEditCopyOrigins::default();
-    let evicted = origins.remember("chat", "relay", source.clone(), fs::File::open(&source).unwrap()).unwrap();
+    let relay = &OfficePreviewSource { relay_token: Some("relay".into()), ..Default::default() };
+    let evicted = origins.remember("chat", relay, source.clone(), fs::File::open(&source).unwrap()).unwrap();
     for _ in 0..EDIT_COPY_ORIGIN_LIMIT - 1 {
-        origins.remember("chat", "relay", source.clone(), fs::File::open(&source).unwrap()).unwrap();
+        origins.remember("chat", relay, source.clone(), fs::File::open(&source).unwrap()).unwrap();
     }
-    let active = origins.remember("other", "relay", source.clone(), fs::File::open(&source).unwrap()).unwrap();
-    let same_window = origins.remember("chat", "relay", source.clone(), fs::File::open(&source).unwrap()).unwrap();
-    assert!(origins.get("chat", "relay", Some(&evicted)).is_err());
+    let active = origins.remember("other", relay, source.clone(), fs::File::open(&source).unwrap()).unwrap();
+    let same_window = origins.remember("chat", relay, source.clone(), fs::File::open(&source).unwrap()).unwrap();
+    assert!(origins.get("chat", relay, Some(&evicted)).is_err());
     origins.release_window("chat");
-    assert!(origins.get("chat", "relay", Some(&same_window)).is_err());
-    assert!(origins.get("other", "relay", Some(&active)).is_ok());
+    assert!(origins.get("chat", relay, Some(&same_window)).is_err());
+    assert!(origins.get("other", relay, Some(&active)).is_ok());
+}
+
+fn edited_request(descriptor: &OfficePreviewSource, token: Option<&str>, target: &Path, overwrite: bool, bytes: &[u8]) -> Vec<u8> {
+    let header = serde_json::to_vec(&serde_json::json!({
+        "source": descriptor,
+        "copyOriginToken": token,
+        "targetPath": target.to_str().unwrap(),
+        "overwrite": overwrite,
+    })).unwrap();
+    let mut body = (header.len() as u32).to_le_bytes().to_vec();
+    body.extend_from_slice(&header);
+    body.extend_from_slice(bytes);
+    body
+}
+
+#[test]
+fn test_manual_save_command_refuses_moved_original_for_every_editor_source() {
+    let cases = [
+        OfficePreviewSource { attachment_id: Some(7), ..Default::default() },
+        OfficePreviewSource { ref_id: Some("persisted-file-ref".into()), ..Default::default() },
+        OfficePreviewSource { local_path: Some("known-attachment.docx".into()), ..Default::default() },
+        OfficePreviewSource { relay_token: Some("expired-relay".into()), ..Default::default() },
+    ];
+    for descriptor in &cases {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.docx");
+        let moved = dir.path().join("renamed-original.docx");
+        let copy = dir.path().join("copy.docx");
+        let original = docx_bytes("original");
+        let original_hash = sha256_hex(&original);
+        let edited = docx_bytes("edited");
+        fs::write(&source, &original).unwrap();
+        let origins = OfficeEditCopyOrigins::default();
+        let token = origins.remember("editor", descriptor, source.clone(), fs::File::open(&source).unwrap()).unwrap();
+
+        // Same-volume rename while the editor is open. Its old attachment/ref path no longer
+        // reaches the file the user opened.
+        fs::rename(&source, &moved).unwrap();
+        for overwrite in [false, true] {
+            let body = edited_request(descriptor, Some(&token), &moved, overwrite, &edited);
+            assert_eq!(write_bound_edited_copy(&origins, "editor", &body).unwrap_err().code, "protected_source");
+        }
+        let wrong_source = cases.iter().find(|candidate| *candidate != descriptor).unwrap();
+        let body = edited_request(wrong_source, Some(&token), &copy, true, &edited);
+        assert_eq!(write_bound_edited_copy(&origins, "editor", &body).unwrap_err().code, "file_not_found");
+        let body = edited_request(descriptor, None, &copy, true, &edited);
+        assert_eq!(write_bound_edited_copy(&origins, "editor", &body).unwrap_err().code, "file_not_found");
+        assert!(!copy.exists());
+        assert_eq!(sha256_hex(&fs::read(&moved).unwrap()), original_hash);
+
+        // Re-picking a different location succeeds with the same binding and edited bytes.
+        let body = edited_request(descriptor, Some(&token), &copy, false, &edited);
+        write_bound_edited_copy(&origins, "editor", &body).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), edited);
+        assert_eq!(sha256_hex(&fs::read(&moved).unwrap()), original_hash);
+        assert!(leftover_temp_files(dir.path()).is_empty());
+    }
 }
 
 #[test]

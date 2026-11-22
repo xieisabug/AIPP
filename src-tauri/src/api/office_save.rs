@@ -96,12 +96,16 @@ fn io_error(stage: &str, target: &Path, e: &std::io::Error) -> OfficePreviewErro
 #[derive(Debug)]
 struct ProtectedCopySource {
     path: PathBuf,
-    opened: Option<(PathBuf, same_file::Handle)>,
+    opened_path: PathBuf,
+    opened_handle: same_file::Handle,
 }
 
-impl From<PathBuf> for ProtectedCopySource {
-    fn from(path: PathBuf) -> Self {
-        Self { path, opened: None }
+impl ProtectedCopySource {
+    fn from_open_file(path: PathBuf, opened_file: fs::File) -> Result<Self, OfficePreviewError> {
+        let origin_err = |e| io_error("绑定已打开的原文件", &path, &e);
+        let opened_path = comparable_path(&path).map_err(origin_err)?.unwrap_or_else(|| path.clone());
+        let opened_handle = same_file::Handle::from_file(opened_file).map_err(origin_err)?;
+        Ok(Self { path, opened_path, opened_handle })
     }
 }
 
@@ -115,7 +119,7 @@ pub struct OfficeEditCopyOrigins(Mutex<VecDeque<EditCopyOrigin>>);
 struct EditCopyOrigin {
     token: String,
     window: String,
-    relay_token: String,
+    descriptor: OfficePreviewSource,
     source: Arc<ProtectedCopySource>,
 }
 
@@ -123,14 +127,11 @@ impl OfficeEditCopyOrigins {
     pub(crate) fn remember(
         &self,
         window: &str,
-        relay_token: &str,
+        descriptor: &OfficePreviewSource,
         path: PathBuf,
         opened_file: fs::File,
     ) -> Result<String, OfficePreviewError> {
-        let origin_err = |e| io_error("绑定已打开的原文件", &path, &e);
-        let canonical = comparable_path(&path).map_err(origin_err)?.unwrap_or_else(|| path.clone());
-        let handle = same_file::Handle::from_file(opened_file).map_err(origin_err)?;
-        let source = Arc::new(ProtectedCopySource { path, opened: Some((canonical, handle)) });
+        let source = Arc::new(ProtectedCopySource::from_open_file(path, opened_file)?);
         let mut slots = self.0.lock().map_err(|_| err("read_error", "编辑来源记录暂不可用"))?;
         if slots.len() >= EDIT_COPY_ORIGIN_LIMIT {
             slots.pop_front();
@@ -139,16 +140,16 @@ impl OfficeEditCopyOrigins {
         slots.push_back(EditCopyOrigin {
             token: token.clone(),
             window: window.to_string(),
-            relay_token: relay_token.to_string(),
+            descriptor: descriptor.clone(),
             source,
         });
         Ok(token)
     }
 
-    fn get(&self, window: &str, relay_token: &str, token: Option<&str>) -> Result<Arc<ProtectedCopySource>, OfficePreviewError> {
+    fn get(&self, window: &str, descriptor: &OfficePreviewSource, token: Option<&str>) -> Result<Arc<ProtectedCopySource>, OfficePreviewError> {
         let slots = self.0.lock().map_err(|_| err("read_error", "编辑来源记录暂不可用"))?;
         slots.iter().find_map(|origin| {
-            (token == Some(origin.token.as_str()) && origin.window == window && origin.relay_token == relay_token)
+            (token == Some(origin.token.as_str()) && origin.window == window && &origin.descriptor == descriptor)
                 .then(|| Arc::clone(&origin.source))
         }).ok_or_else(|| err("file_not_found", "未找到本窗口已打开的编辑来源，请重新打开原文档"))
     }
@@ -190,16 +191,14 @@ fn protect_copy_source(source: &ProtectedCopySource, target: &Path) -> Result<()
     }
     let check_err = |e| io_error("核对保存位置", target, &e);
     let target_path = comparable_path(target).map_err(check_err)?;
-    if let Some((opened_path, opened_handle)) = source.opened.as_ref() {
-        if target_path.as_ref() == Some(opened_path) {
-            return Err(protected());
-        }
-        match same_file::Handle::from_path(target) {
-            Ok(handle) if &handle == opened_handle => return Err(protected()),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(check_err(e)),
-        }
+    if target_path.as_ref() == Some(&source.opened_path) {
+        return Err(protected());
+    }
+    match same_file::Handle::from_path(target) {
+        Ok(handle) if handle == source.opened_handle => return Err(protected()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(check_err(e)),
     }
     let source_path = comparable_path(&source.path).map_err(check_err)?;
     if source_path.is_some() && source_path == target_path {
@@ -604,6 +603,20 @@ fn write_edited_copy(
     save_bytes(target, bytes, overwrite, format, Some(source))
 }
 
+fn write_bound_edited_copy(
+    origins: &OfficeEditCopyOrigins,
+    window: &str,
+    body: &[u8],
+) -> Result<OfficeSaveResult, OfficePreviewError> {
+    let (header, bytes) = decode_framed_request(body)?;
+    let header: WriteCopyHeader =
+        serde_json::from_value(header).map_err(|e| err("invalid_request", format!("请求头字段无效：{e}")))?;
+    // A current path lookup cannot identify the opened file once it has moved.
+    let source = origins.get(window, &header.source, header.copy_origin_token.as_deref())?;
+    let target = Path::new(header.target_path.trim());
+    write_edited_copy(&source, target, bytes, header.overwrite)
+}
+
 /// 手动编辑后的文档另存为副本（字节来自查看器）。
 #[tauri::command]
 pub async fn office_write_copy(
@@ -616,17 +629,7 @@ pub async fn office_write_copy(
     };
     let body = body.clone();
     tokio::task::spawn_blocking(move || -> Result<OfficeSaveResult, OfficePreviewError> {
-        let (header, bytes) = decode_framed_request(&body)?;
-        let header: WriteCopyHeader =
-            serde_json::from_value(header).map_err(|e| err("invalid_request", format!("请求头字段无效：{e}")))?;
-        let source = if let Some(relay) = header.source.relay_origin_key() {
-            app_handle.state::<OfficeEditCopyOrigins>().get(window.label(), relay, header.copy_origin_token.as_deref())?
-        } else {
-            let (path, _) = resolve_authorized_office_path(&app_handle, &header.source)?;
-            Arc::new(ProtectedCopySource::from(path))
-        };
-        let target = Path::new(header.target_path.trim());
-        write_edited_copy(&source, target, bytes, header.overwrite)
+        write_bound_edited_copy(&app_handle.state::<OfficeEditCopyOrigins>(), window.label(), &body)
     })
     .await
     .map_err(|e| err("write_failed", format!("保存线程异常退出：{e}")).to_wire_string())?
