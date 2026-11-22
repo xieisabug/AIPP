@@ -237,7 +237,7 @@ impl LLMDatabase {
     pub fn get_filtered_providers(
         &self,
         assistant_type: i64,
-    ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
+    ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool, Option<String>)>> {
         let where_clause = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
             "api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity')"
@@ -247,13 +247,17 @@ impl LLMDatabase {
         };
 
         let sql = format!(
-            "SELECT id, name, api_type, description, is_official, is_enabled FROM llm_provider WHERE {}",
+            "SELECT id, name, api_type, description, is_official, is_enabled,
+                (SELECT CASE WHEN trim(c.value) = '' THEN NULL WHEN trim(c.value) = 'auto_model' THEN 'auto_model' ELSE 'off' END
+                 FROM llm_provider_config c WHERE c.llm_provider_id = p.id AND c.name = 'tool_review_mode'
+                 AND p.api_type IN ('pi','opencode','kiro','antigravity') LIMIT 1)
+             FROM llm_provider p WHERE {}",
             where_clause
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let llm_providers = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
         })?;
 
         let mut result = Vec::new();

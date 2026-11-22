@@ -11,6 +11,7 @@ export interface ProviderForSelect {
     description: string;
     is_official: boolean;
     is_enabled: boolean;
+    tool_review_mode?: "off" | "auto_model" | null;
 }
 
 /**

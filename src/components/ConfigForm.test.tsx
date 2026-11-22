@@ -106,6 +106,25 @@ describe("ConfigForm checkbox interactions", () => {
     });
 });
 
+it("should display the inherited selection when an assistant has no saved approval choice", async () => {
+    function ReviewForm({ inheritedValue }: { inheritedValue: string }) {
+        const form = useForm({ defaultValues: { tool_review_mode: "" } });
+        return <ConfigForm title="审批设置" useFormReturn={form} config={[{
+            key: "tool_review_mode",
+            config: { type: "select", label: "审批请求的处理", inheritedValue,
+                options: [{ value: "off", label: "人工审批" }, { value: "auto_model", label: "AIPP 模型自动审核" }] },
+        }]} />;
+    }
+    const view = render(<ReviewForm inheritedValue="off" />);
+    expect(screen.getByRole("combobox")).toHaveTextContent("人工审批");
+    view.rerender(<ReviewForm inheritedValue="auto_model" />);
+    expect(screen.getByRole("combobox")).toHaveTextContent("AIPP 模型自动审核");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByRole("option", { name: "人工审批" }));
+    expect(screen.getByRole("combobox")).toHaveTextContent("人工审批");
+});
+
 function GroupedFormHarness({ assistantId = 1, hideExtensions = false, onSave = vi.fn() }) {
     const form = useForm({ defaultValues: { basic: "model", temperature: "0.7", plugin: "saved" } });
     return <ConfigForm title="Assistant" layout="prompt" useFormReturn={form}

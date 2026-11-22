@@ -17,6 +17,7 @@ export function buildNativeAgentApprovalFields(
     set: ConfigSetter,
     reviewModelConfigured: boolean,
     missingModelHint?: () => React.ReactNode,
+    providerReviewMode?: "off" | "auto_model" | null,
 ): AssistantFormConfig[] {
     if (apiType === "cursor") {
         return [{
@@ -68,7 +69,8 @@ export function buildNativeAgentApprovalFields(
         }],
     }[apiType] ?? [];
 
-    const reviewMode = get("tool_review_mode", "") === "auto_model" ? "auto_model" : "off";
+    const defaultReviewMode = providerReviewMode ?? (reviewModelConfigured ? "auto_model" : "off");
+    const reviewMode = get("tool_review_mode", "") || defaultReviewMode;
     return [
         ...native,
         {
@@ -77,6 +79,7 @@ export function buildNativeAgentApprovalFields(
                 type: "select" as const,
                 label: "审批请求的处理",
                 value: reviewMode,
+                inheritedValue: defaultReviewMode,
                 options: [
                     { value: "off", label: "人工审批" },
                     { value: "auto_model", label: "AIPP 模型自动审核" },

@@ -173,14 +173,21 @@ pub async fn get_llm_providers(app_handle: tauri::AppHandle) -> Result<Vec<LlmPr
 pub async fn get_filtered_providers(
     app_handle: tauri::AppHandle,
     assistant_type: i64,
-) -> Result<Vec<LlmProvider>, String> {
+) -> Result<Vec<FilteredProvider>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let providers = db.get_filtered_providers(assistant_type).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
-    for (id, name, api_type, description, is_official, is_enabled) in providers {
-        result.push(LlmProvider { id, name, api_type, description, is_official, is_enabled });
+    for (id, name, api_type, description, is_official, is_enabled, tool_review_mode) in providers {
+        result.push(FilteredProvider { provider: LlmProvider { id, name, api_type, description, is_official, is_enabled }, tool_review_mode });
     }
     Ok(result)
+}
+
+#[derive(Serialize)]
+pub struct FilteredProvider {
+    #[serde(flatten)]
+    provider: LlmProvider,
+    tool_review_mode: Option<String>,
 }
 
 #[tauri::command]

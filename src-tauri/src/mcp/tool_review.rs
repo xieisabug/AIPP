@@ -876,6 +876,17 @@ fn configured_review_model(
     Ok((model_code, provider_id))
 }
 
+pub(crate) fn has_configured_review_model(features: &HashMap<String, HashMap<String, FeatureConfig>>) -> bool {
+    configured_review_model(features).is_ok_and(|(_, provider_id)| provider_id > 0)
+}
+
+pub(crate) fn agent_permission_uses_model(mode: Option<&str>, review_model_configured: bool) -> bool {
+    match mode.map(str::trim) {
+        None | Some("") => review_model_configured,
+        Some(choice) => choice == "auto_model",
+    }
+}
+
 async fn execute_review_output(
     client: &crate::api::genai_client::Client,
     model_code: &str,

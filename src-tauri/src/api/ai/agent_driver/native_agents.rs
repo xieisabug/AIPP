@@ -57,7 +57,8 @@ impl AgentDriver for NativeDriver {
     fn capabilities(&self) -> AgentCapabilities { AgentCapabilities::baseline(self.0, self.declaration()) }
     fn prepare(&self, request: &AgentTurnRequest<'_>, instance: &AgentInstanceConfig, model_override: Option<&str>) -> Result<Box<dyn PreparedAgentSession>, AppError> {
         let model = model_override.map(str::to_owned).or_else(|| request.assistant.model.first().map(|model| model.model_code.clone())).filter(|s| !s.is_empty() && s != DEFAULT_MODEL);
-        let mut config = configuration(&request.assistant.model_configs, &instance.configs, model)?;
+        let mut config = configuration_with_review_default(&request.assistant.model_configs, &instance.configs, model,
+            crate::mcp::tool_review::has_configured_review_model(request.feature_configs))?;
         if let Some(overrides) = request.overrides {
             for (key, value) in overrides {
                 if !value.is_null() && value.as_str() != Some("") {
@@ -149,6 +150,10 @@ pub(crate) fn with_node_on_path(node: &str, env: &mut HashMap<String, String>, i
     env.insert(key.unwrap_or_else(|| "PATH".into()), joined.to_string_lossy().into_owned());
 }
 pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>) -> Result<NativeConfig, AppError> {
+    configuration_with_review_default(models, providers, model, false)
+}
+
+fn configuration_with_review_default(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>, review_model_configured: bool) -> Result<NativeConfig, AppError> {
     let get = |key: &str| setting(models, providers, key);
     let cwd = crate::api::ai::working_directory::from_configs(models, providers, true)?;
     if !cwd.is_dir() { return Err(error(format!("Agent working directory does not exist: {}", cwd.display()))); }
@@ -156,7 +161,8 @@ pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMPro
     let mut env = agent_environment(models, providers, &node)?;
     if get("acp_additional_args").is_some() { return Err(error("Dedicated native agent adapters do not accept generic ACP additional arguments; remove acp_additional_args")); }
     if let Some(key) = get("antigravity_api_key") { env.insert("AIPP_ANTIGRAVITY_API_KEY".into(), key); }
-    let review = get("tool_review_mode").as_deref() == Some("auto_model");
+    let mode = setting(models, &[], "tool_review_mode").or_else(|| setting(&[], providers, "tool_review_mode"));
+    let review = crate::mcp::tool_review::agent_permission_uses_model(mode.as_deref(), review_model_configured);
     let wire = json!({ "cwd": cwd, "command": get("agent_cli_command"), "sdk_directory": get("agent_sdk_directory"), "model": model,
         "runtime": get("antigravity_runtime"), "harness": get("antigravity_harness"), "auth_method": get("antigravity_auth_method"),
         "auth_key": get("antigravity_api_key"), "kiro_agent": get("kiro_agent"), "kiro_effort": get("kiro_effort"),
@@ -695,8 +701,17 @@ pub(crate) async fn register_session_permission(
         let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
         let conversation = db.conversation_repo().map_err(|e| e.to_string())?.read(conversation_id)
             .map_err(|e| e.to_string())?.ok_or_else(|| format!("审核会话 {conversation_id} 不存在"))?;
-        (crate::mcp::tool_review::effective_review_mode(app, conversation.assistant_id.unwrap_or_default(), conversation_id)
-            == "auto_model").then_some(id)
+        let uses_model = if crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind) {
+            true
+        } else if let Some(assistant_id) = conversation.assistant_id {
+            let db = crate::db::assistant_db::AssistantDatabase::new(app).map_err(|e| e.to_string())?;
+            let mode = crate::api::assistant_api::management::config_value(&db, assistant_id, "tool_review_mode")?;
+            let state = app.state::<crate::FeatureConfigState>();
+            let features = state.config_feature_map.lock().await;
+            crate::mcp::tool_review::agent_permission_uses_model(mode.as_deref(),
+                crate::mcp::tool_review::has_configured_review_model(&features))
+        } else { false };
+        uses_model.then_some(id)
     } else { None };
     let state = app.state::<crate::api::ai::acp::AcpPermissionState>();
     state.store_request_guarded(event.clone(), sender, scope.clone(), guard).await?;

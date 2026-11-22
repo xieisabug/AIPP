@@ -16,9 +16,17 @@ describe("buildNativeAgentApprovalFields", () => {
         const set = vi.fn();
         const [field] = buildNativeAgentApprovalFields(apiType, getter({}), set, true);
         expect(field.key).toBe("tool_review_mode");
-        expect(field.config.value).toBe("off");
+        expect(field.config.value).toBe("auto_model");
         field.config.onChange?.("auto_model");
         expect(set).toHaveBeenCalledWith("tool_review_mode", "auto_model", "string");
+    });
+
+    it.each([
+        [true, "", "auto_model"], [false, "", "off"],
+        [true, "off", "off"], [false, "auto_model", "auto_model"],
+    ] as const)("should resolve Antigravity review with model configured=%s and saved mode '%s'", (configured, saved, expected) => {
+        const [, field] = buildNativeAgentApprovalFields("antigravity", getter({ tool_review_mode: saved }), vi.fn(), configured);
+        expect(field.config.value).toBe(expected);
     });
 
     it("should retain saved Antigravity auto-approval and offer the native execution modes", () => {
@@ -28,6 +36,12 @@ describe("buildNativeAgentApprovalFields", () => {
         expect(field.config.options?.map(option => option.value)).toEqual(["default", "auto_edit", "auto", "plan", "yolo"]);
         field.config.onChange?.("auto");
         expect(set).toHaveBeenCalledWith("antigravity_mode", "auto", "string");
+    });
+
+    it("should inherit explicit provider approval before the auxiliary model default", () => {
+        const [, field] = buildNativeAgentApprovalFields("kiro", getter({}), vi.fn(), true, undefined, "off");
+        expect(field.config.inheritedValue).toBe("off");
+        expect(field.config.value).toBe("off");
     });
 
     it("should only explain Cursor's built-in review and leave other agents untouched", () => {

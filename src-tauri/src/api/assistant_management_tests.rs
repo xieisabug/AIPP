@@ -457,6 +457,17 @@ fn test_assistant_permissions_channel_expansion_requires_approval_and_rechecks_s
 }
 
 #[test]
+fn test_agent_review_default_requires_approval_to_clear_manual_override() {
+    let (db,llm,_,_) = fixture();
+    let pi = llm.add_llm_provider("Pi","pi","",false,true).unwrap();
+    let id = create(&db,&llm,pi,4);
+    channel::patch(&db,&llm,id,&json!({"tool_review_mode":"off"}),&json!([]),false).unwrap();
+    let result = channel::patch_managed(&db,&llm,id,&json!({}),&json!(["tool_review_mode"]),false,Some(permissions::Policy::Ordinary));
+    assert!(result.unwrap_err().contains("assistant.patch_agent_permissions"));
+    assert_eq!(config_value(&db,id,"tool_review_mode").unwrap().as_deref(), Some("off"));
+}
+
+#[test]
 fn test_assistant_permissions_inherited_expansion_and_provider_drift_are_rejected() {
     use permissions::Policy;
     let (db,llm,_,codex) = fixture();

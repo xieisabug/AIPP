@@ -258,10 +258,15 @@ fn test_filtered_models_for_acp_includes_provider_without_model() {
 fn test_native_agents_provider_and_model_filters() {
     let db = create_llm_db();
     for kind in ["kiro", "antigravity", "pi", "cursor", "opencode", "openai_api"] {
-        db.add_llm_provider(kind, kind, "", false, true).unwrap();
+        let id = db.add_llm_provider(kind, kind, "", false, true).unwrap();
+        if kind == "antigravity" {
+            db.add_llm_provider_config(id, "tool_review_mode", "off", "", false).unwrap();
+        }
     }
     let agents = db.get_filtered_providers(4).unwrap();
     assert_eq!(agents.len(), 5);
+    assert_eq!(agents.iter().find(|p| p.2 == "antigravity").unwrap().6.as_deref(), Some("off"));
+    assert!(agents.iter().filter(|p| p.2 != "antigravity").all(|p| p.6.is_none()));
     assert!(agents.iter().all(|provider| provider.2 != "openai_api"));
     let regular = db.get_filtered_providers(0).unwrap();
     assert_eq!(regular.len(), 1);

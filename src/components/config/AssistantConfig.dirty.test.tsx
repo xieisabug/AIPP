@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AssistantConfig from "./AssistantConfig";
+import { buildAssistantFormValues, buildAssistantSaveDetail } from "./assistant/assistantEditorModel";
 import type { AssistantDetail } from "@/data/Assistant";
 import type { LoadedPlugin } from "@/services/PluginRuntime";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
@@ -37,6 +38,15 @@ const detail = (id: number): AssistantDetail => ({
 });
 describe("AssistantConfig real form initialization", () => {
     afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
+    it("should preserve inherited agent review when saving unrelated edits and persist an explicit manual choice", () => {
+        const agent = detail(2);
+        agent.assistant.assistant_type = 4;
+        const values = buildAssistantFormValues(agent, [], {});
+        const save = (edits: Record<string, string>) => buildAssistantSaveDetail(agent, { ...values, ...edits }, [])
+            .model_configs.find(c => c.name === "tool_review_mode");
+        expect(save({ prompt: "updated" })).toBeUndefined();
+        expect(save({ tool_review_mode: "off" })?.value).toBe("off");
+    });
     it("should remain clean when opening and expanding an untouched assistant", async () => {
         mockInvokeHandler("get_assistants", () => [detail(1).assistant, detail(2).assistant]);
         mockInvokeHandler("get_assistant", args => detail(Number(args?.assistantId)));

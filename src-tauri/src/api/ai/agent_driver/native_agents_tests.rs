@@ -221,6 +221,22 @@ fn test_native_agents_review_and_permission_settings_follow_the_assistant() {
     assert_eq!(config.wire["aipp_review"], true, "the review mode is part of the session signature");
     let manual = configuration(&[assistant("tool_review_mode", "off")], &[], None).unwrap();
     assert!(!manual.review);
+    for (saved, has_model, expected) in [
+        (None, true, true), (None, false, false), (Some("off"), true, false),
+        (Some("auto_model"), false, true), (Some("invalid"), true, false),
+    ] {
+        let configs = saved.map(|value| assistant("tool_review_mode", value));
+        let config = configuration_with_review_default(configs.as_slice(), &[], None, has_model).unwrap();
+        assert_eq!(config.review, expected);
+        assert_eq!(config.wire["aipp_review"], expected);
+    }
+    let provider = LLMProviderConfig { id: 1, llm_provider_id: 2, name: "tool_review_mode".into(),
+        value: "off".into(), append_location: String::new(), is_addition: false };
+    for (value, expected) in [("", false), ("auto_model", true)] {
+        let config = configuration_with_review_default(&[assistant("tool_review_mode", value)],
+            std::slice::from_ref(&provider), None, true).unwrap();
+        assert_eq!(config.review, expected);
+    }
 }
 
 #[test]

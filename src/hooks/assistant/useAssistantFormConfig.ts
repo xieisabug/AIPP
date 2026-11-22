@@ -182,7 +182,8 @@ export const useAssistantFormConfig = ({
             const isNativeAgentProvider = ["pi", "cursor", "opencode", "kiro", "antigravity"].includes(
                 agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? ""
             );
-            const agentApiType = agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? "";
+            const agentProvider = agentProviders.find((provider) => provider.id.toString() === currentProviderId);
+            const agentApiType = agentProvider?.api_type ?? "";
             const selectedAgentModel = agentModelOptions.find(option =>
                 option.code === `${currentAssistant.model[0]?.model_code}%%${currentProviderId}`
             ) ?? agentModelOptions.find(option => option.is_default);
@@ -192,9 +193,10 @@ export const useAssistantFormConfig = ({
                 handleConfigChange,
                 Boolean(
                     getConfigValue("conversation_summary", "auto_review_model").trim()
-                    && getConfigValue("conversation_summary", "auto_review_provider_id").trim()
+                    && /^[1-9]\d*$/.test(getConfigValue("conversation_summary", "auto_review_provider_id").trim())
                 ),
                 () => React.createElement(AutoReviewModelMissingHint),
+                agentProvider?.tool_review_mode,
             );
 
             return [

@@ -9,6 +9,7 @@ export interface FieldConfig {
     label: string;
     value?: any;
     options?: SelectOption[];
+    inheritedValue?: string;
     placeholder?: string;
     description?: string;
     tooltip?: string;

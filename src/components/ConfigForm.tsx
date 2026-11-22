@@ -50,6 +50,7 @@ interface ConfigField {
     label: string;
     className?: string;
     options?: { value: string; label: string; tooltip?: string }[];
+    inheritedValue?: string;
     value?: string | boolean;
     tooltip?: string;
     placeholder?: string;
@@ -164,7 +165,7 @@ export const ConfigFormField = ({ field, name, control, data, assistantConfigApi
                 return (
                     <Select
                         disabled={field.disabled}
-                        value={fieldRenderData.value}
+                        value={field.inheritedValue && !fieldRenderData.value ? field.inheritedValue : fieldRenderData.value}
                         onValueChange={(value) => {
                             fieldRenderData.onChange(value);
                             field.onChange?.(value);

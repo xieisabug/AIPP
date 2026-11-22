@@ -128,7 +128,7 @@ export function buildAssistantFormValues(
                 ? `${detail.model[0].model_code}%%${detail.model[0].provider_id}`
                 : "",
         prompt: detail.prompts[0]?.prompt ?? "",
-        tool_review_mode: "off",
+        tool_review_mode: detail.assistant.assistant_type === 4 ? "" : "off",
         ...detail.model_configs.reduce((acc, config) => {
             acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
             return acc;
@@ -211,6 +211,7 @@ export function buildAssistantSaveDetail(
         )
         .filter(([key]) => {
             const config = currentAssistant.model_configs.find((config) => config.name === key);
+            if (isAgent && key === "tool_review_mode" && !values[key]) return false;
             if (key === "claude_effort" && values[key] === "inherit" && !config) return false;
             // ACP/Codex 助手专用字段（assistant_type === 4）
             if (isAgentAssistantField(key) && isAgent) return true;
