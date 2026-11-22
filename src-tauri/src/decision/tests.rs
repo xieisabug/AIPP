@@ -224,6 +224,12 @@ fn test_encode_and_decode_gemini_decisions() {
         "Read README.md",
         vec![
             DecisionQuestion::bool_with_criteria("safe", "Safe?", "Read only", "Has side effect"),
+            DecisionQuestion::bool("visible", "Visible?"),
+            DecisionQuestion::choice(
+                "route",
+                "Which route?",
+                vec![ChoiceOption::new("local", "On this device"), ChoiceOption::new("remote", "Elsewhere")],
+            ),
             DecisionQuestion::score(
                 "urgency",
                 "Urgency",
@@ -236,20 +242,33 @@ fn test_encode_and_decode_gemini_decisions() {
     );
 
     let encoded = encode_request(DecisionProtocol::GeminiDecisions, &req).unwrap();
-    assert_eq!(encoded["input"], "Read README.md");
-    assert_eq!(encoded["questions"]["safe"]["type"], "noul");
-    assert_eq!(encoded["questions"]["safe"]["criteria"]["true"], "Read only");
-    assert_eq!(encoded["questions"]["urgency"]["criteria"]["0"], "low: Low");
-    assert_eq!(encoded["questions"]["urgency"]["criteria"]["1"], "high: High");
+    assert_eq!(encoded, json!({
+        "model": "gemini-decision-1",
+        "input": "Read README.md",
+        "questions": {
+            "safe": { "type": "noul", "instructions": "Safe?", "criteria": {
+                "true_description": "Read only", "false_description": "Has side effect"
+            }},
+            "visible": { "type": "noul", "instructions": "Visible?" },
+            "route": { "type": "choice", "instructions": "Which route?", "criteria": {
+                "local": "On this device", "remote": "Elsewhere"
+            }},
+            "urgency": { "type": "score", "instructions": "Urgency", "criteria": ["low: Low", "high: High"] }
+        }
+    }));
 
     let raw_resp = json!({
         "answers": {
             "safe": { "type": "noul", "noul": 0.99, "confidence": 0.99 },
+            "visible": { "type": "noul", "noul": 0.98, "confidence": 0.98 },
+            "route": { "type": "choice", "choice": "local",
+                "probabilities": { "local": 0.92, "remote": 0.08 }, "confidence": 0.92 },
             "urgency": {
                 "type": "score",
                 "score": 0.12,
-                "probabilities": { "0": 0.88, "1": 0.12 },
-                "confidence": 0.91
+                "probabilities": { "1": 0.12, "0": 0.88 },
+                "legend": { "0": "low: Low", "1": "high: High" },
+                "confidence": 0.88
             }
         },
         "usage": {
@@ -261,7 +280,16 @@ fn test_encode_and_decode_gemini_decisions() {
 
     let decoded = decode_response(DecisionProtocol::GeminiDecisions, &req, raw_resp, 25).unwrap();
     assert_eq!(decoded.bool_probability("safe"), Some(0.99));
-    assert_eq!(decoded.answers["urgency"].as_score(), Some(0.12));
+    assert_eq!(decoded.bool_probability("visible"), Some(0.98));
+    assert_eq!(decoded.answers["route"].as_choice(), Some(("local", Some(0.92))));
+    match &decoded.answers["urgency"] {
+        DecisionAnswer::Score { score, probabilities, confidence } => {
+            assert_eq!(*score, 0.12);
+            assert_eq!(probabilities, &[0.88, 0.12]);
+            assert_eq!(*confidence, Some(0.88));
+        }
+        answer => panic!("expected score answer, found {answer:?}"),
+    }
     assert_eq!(decoded.usage.input_tokens, Some(44));
     assert_eq!(decoded.usage.output_tokens, 0);
 }

@@ -28,6 +28,61 @@ pub fn event_date(raw: &str, yearly: bool, lunar: bool, today: NaiveDate) -> Res
         .context("纪念日超出有效日期范围")
 }
 
+fn verify_finding_source(conn: &Connection, source: &delta::Source, f: &model::Finding) -> Result<()> {
+    delta::verify(conn, source)?;
+    ensure!(
+        !f.quote.trim().is_empty() && source.text.contains(&f.quote),
+        "整理结果缺少可核对的原话"
+    );
+    Ok(())
+}
+
+fn occurrence(f: &model::Finding, today: NaiveDate) -> std::result::Result<NaiveDate, &'static str> {
+    if f.yearly && f.date.is_none() {
+        return Err("年度事项缺少日期");
+    }
+    match f.date.as_deref() {
+        Some(date) if f.kind != "memory" => event_date(date, f.yearly, f.lunar, today).map_err(|_| "事项日期无效"),
+        _ => Ok(today),
+    }
+}
+
+type Draft = (usize, model::Finding);
+
+pub(super) struct RejectedDate {
+    draft: Draft,
+    reason: &'static str,
+}
+
+/// Keep rejected candidates out of the reconciliation prompt and its draft indices.
+pub(super) fn split_finding_dates(findings: Vec<Draft>, today: NaiveDate) -> (Vec<Draft>, Vec<RejectedDate>) {
+    let mut valid = Vec::new();
+    let mut rejected = Vec::new();
+    for draft in findings {
+        match occurrence(&draft.1, today) {
+            Ok(_) => valid.push(draft),
+            Err(reason) => rejected.push(RejectedDate { draft, reason }),
+        }
+    }
+    (valid, rejected)
+}
+
+pub(super) fn record_rejected_dates(
+    conn: &Connection,
+    rows: &[delta::Source],
+    rejected: &[RejectedDate],
+) -> Result<()> {
+    for entry in rejected {
+        let (index, f) = &entry.draft;
+        let source = rows.get(*index).context("整理来源编号超出本批次")?;
+        // A deterministic date error must not hide source changes or database errors.
+        verify_finding_source(conn, source, f)?;
+        record_failure(conn, "finding", &anyhow::anyhow!("来源 #{} / {} 的{}", source.conversation, source.position, entry.reason))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) fn persist(
     conn: &Connection,
     source: &delta::Source,
@@ -36,11 +91,19 @@ pub(super) fn persist(
     session: i64,
     cfg: &Config,
 ) -> Result<()> {
-    delta::verify(conn, source)?;
-    ensure!(
-        !f.quote.trim().is_empty() && source.text.contains(&f.quote),
-        "整理结果缺少可核对的原话"
-    );
+    persist_at(conn, source, f, chief, session, cfg, Local::now().date_naive())
+}
+
+pub(super) fn persist_at(
+    conn: &Connection,
+    source: &delta::Source,
+    f: &model::Finding,
+    chief: i64,
+    session: i64,
+    cfg: &Config,
+    today: NaiveDate,
+) -> Result<()> {
+    verify_finding_source(conn, source, f)?;
     ensure!(!f.title.trim().is_empty() && f.title.chars().count() <= 300, "事项标题为空或过长");
     ensure!(
         ![&f.title, &f.detail, &f.instruction].iter().any(|s| delta::sensitive(s)),
@@ -98,14 +161,7 @@ pub(super) fn persist(
             && f.lead_days <= 366,
         "事项内容或提前天数超限"
     );
-    let today = Local::now().date_naive();
-    let occurrence = f
-        .date
-        .as_deref()
-        .map(|s| event_date(s, f.yearly, f.lunar, today))
-        .transpose()?
-        .unwrap_or(today);
-    let next = occurrence - Duration::days(f.lead_days.into());
+    let next = occurrence(f, today).map_err(anyhow::Error::msg)? - Duration::days(f.lead_days.into());
     let owner = if source.kind == "butler_contact" { source.assistant } else { None };
     // Earlier schemas also identify an item by its display title within one message.
     // Distinguish two occurrences with the same label while preserving exact replays.
@@ -260,30 +316,28 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
         tx.commit()?;
         session
     };
+    let today = Local::now().date_naive();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         async {
-            let findings=analyze(app, session, &cfg, &rows, deep, chief).await?;
+            let (findings, rejected) = split_finding_dates(analyze(app, session, &cfg, &rows, deep, chief, today).await?, today);
             let tracked=topics::active(&connection(app)?,&cfg)?;
             let changes=if deep {topics::reconcile(app,session,&cfg,&tracked,&rows,&findings).await?}else{vec![]};
-            Ok::<_,anyhow::Error>((findings,tracked,changes))
+            Ok::<_,anyhow::Error>((findings,rejected,tracked,changes))
         },
     )
     .await
     .context("整理超过 300 秒")
     .and_then(|r| r);
     let persisted = (|| -> Result<(String, String)> {
-        let (findings,tracked,changes) = result?;
+        let (findings,rejected,tracked,changes) = result?;
         ensure!(config(app)? == stored, "整理期间设置已改变，本批次保留待重新扫描");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        record_rejected_dates(&tx, &rows, &rejected)?;
         let merged=topics::apply(&tx,&tracked,&rows,&findings,&changes)?;
         for (draft,(index, f)) in findings.iter().enumerate() {
             if merged.contains(&draft) {continue;}
-            if f.yearly && f.date.is_none() {
-                record_failure(&tx,"finding",&anyhow::anyhow!("来源 #{} / {} 的年度事项缺少日期",rows[*index].conversation,rows[*index].position))?;
-                continue;
-            }
-            persist(&tx, &rows[*index], f, chief, session, &cfg)?;
+            persist_at(&tx, &rows[*index], f, chief, session, &cfg, today)?;
         }
         delta::advance(&tx, &rows, deep)?;
         let summary = format!("扫描 {} 条用户消息，归纳 {} 个关联事项，整理出 {} 项。", rows.len(), changes.len(), findings.len()-merged.len());
@@ -358,7 +412,8 @@ async fn analyze(
     rows: &[delta::Source],
     deep: bool,
     chief: i64,
-) -> Result<Vec<(usize, model::Finding)>> {
+    today: NaiveDate,
+) -> Result<Vec<Draft>> {
     let mut output = Vec::new();
     let mut remaining_tools = 12;
     // Isolate each conversation, including research evidence and memory candidates.
@@ -402,7 +457,7 @@ async fn analyze(
                 (tracked, existing)
             };
             let input = serde_json::to_string(&model::Input {
-                today: Local::now().date_naive().to_string(),
+                today: today.to_string(),
                 sources: batch,
                 memories,
                 tracked,

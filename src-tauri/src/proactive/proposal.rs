@@ -2,6 +2,7 @@ use super::{connection, delivery, error};
 use crate::api::{ai::types::AiRequest, ai_api, butler_api};
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::future::Future;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
@@ -125,9 +126,43 @@ async fn dispatch(app: &AppHandle, key: &str) -> Result<()> {
     result
 }
 
+/// Keep order within each conversation, but a busy conversation must not
+/// prevent an accepted suggestion from reaching a different, idle assistant.
+pub(super) fn pending_conversation_heads(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT uuid, conversation_id FROM (
+            SELECT uuid, conversation_id, accepted_at,
+                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY accepted_at, uuid) AS lane_position
+            FROM butler_proactive_acceptance WHERE status='pending'
+        ) WHERE lane_position=1 ORDER BY accepted_at, uuid",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(super) async fn first_idle_head<F, Fut>(
+    heads: Vec<(String, i64)>,
+    mut is_busy: F,
+) -> Option<String>
+where
+    F: FnMut(i64) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    for (key, conversation) in heads {
+        if !is_busy(conversation).await {
+            return Some(key);
+        }
+    }
+    None
+}
+
 pub async fn recover(app: &AppHandle) -> Result<()> {
     let Ok(_guard) = DISPATCH.try_lock() else { return Ok(()) };
-    let key:Option<String>=connection(app)?.query_row("SELECT uuid FROM butler_proactive_acceptance WHERE status='pending' ORDER BY accepted_at LIMIT 1",[],|r|r.get(0)).optional()?;
+    let heads = pending_conversation_heads(&connection(app)?)?;
+    let activity = app.state::<crate::ConversationActivityManager>().inner();
+    let key = first_idle_head(heads, |conversation| {
+        async move { activity.get_runtime_state(conversation).await.is_running }
+    }).await;
     if let Some(key) = key {
         if let Err(error) = dispatch(app, &key).await {
             connection(app)?.execute("UPDATE butler_proactive_acceptance SET status='failed',error=?2 WHERE uuid=?1 AND status='pending' AND message_id IS NULL",

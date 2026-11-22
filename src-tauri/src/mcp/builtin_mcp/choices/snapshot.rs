@@ -91,6 +91,24 @@ pub fn relative(raw: &str) -> Result<PathBuf> {
     );
     Ok(path)
 }
+// Serialize actual filesystem components. A literal backslash is legal in a
+// Unix filename, but cannot be represented as a portable snapshot component.
+fn project_path(path: &Path) -> Result<String> {
+    let components = path.components().map(|part| {
+        let Component::Normal(name) = part else { bail!("无效工程相对路径 {}", path.display()) };
+        let name = name.to_str().context("工程文件名不是 UTF-8")?;
+        ensure!(
+            !name.contains('\\'),
+            "工程文件名包含反斜杠，无法生成完整快照：{}",
+            path.display()
+        );
+        Ok(name)
+    }).collect::<Result<Vec<_>>>()?;
+    let name = components.join("/");
+    relative(&name)?;
+    Ok(name)
+}
+
 pub type Project = BTreeMap<String, String>; // Original bytes, base64 encoded for binary-safe IPC.
 fn read(path: &Path, budget: &mut usize) -> Result<Vec<u8>> {
     let file = fs::File::open(path).with_context(|| format!("读取 {}", path.display()))?;
@@ -135,12 +153,7 @@ pub(super) fn collect_tree(
             collect_tree(root, &path, files, budget, depth + 1)?;
         } else {
             ensure!(files.len() < 2048, "工程超过 2048 个文件");
-            let name = path
-                .strip_prefix(root)?
-                .to_str()
-                .context("工程文件名不是 UTF-8")?
-                .replace('\\', "/");
-            relative(&name)?;
+            let name = project_path(path.strip_prefix(root)?)?;
             files.insert(name, STANDARD.encode(read(&path, budget)?));
         }
     }
@@ -181,8 +194,7 @@ pub fn prepare(
             let base = workspace_root(app, cid, Path::new(&ws.artifacts_dir))?;
             let root = base.join(relative(c.artifact_key.as_deref().unwrap())?).canonicalize()?;
             ensure!(root.starts_with(&base) && root != base, "工程不在本会话工作区");
-            let entry =
-                relative(c.entry_file.as_deref().unwrap())?.to_string_lossy().replace('\\', "/");
+            let entry = project_path(&relative(c.entry_file.as_deref().unwrap())?)?;
             let mut files = Project::new();
             collect_tree(&root, &root, &mut files, &mut budget, 0)?;
             let encoded = files.get(&entry).with_context(|| format!("快照缺少入口 {entry}"))?;

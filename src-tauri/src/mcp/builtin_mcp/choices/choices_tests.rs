@@ -106,6 +106,21 @@ fn test_choices_project_snapshot_survives_source_changes() {
 }
 
 #[test]
+#[cfg(unix)]
+fn test_choices_snapshot_rejects_literal_backslash_instead_of_losing_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("nested/index.html"), "actual nested file").unwrap();
+    fs::write(root.join(r"nested\index.html"), "literal backslash filename").unwrap();
+
+    let mut files = Project::new();
+    let mut budget = snapshot::LIMIT;
+    let err = snapshot::collect_tree(&root, &root, &mut files, &mut budget, 0).unwrap_err();
+    assert!(err.to_string().contains("文件名包含反斜杠"));
+}
+
+#[test]
 fn test_choices_two_active_requests_deliver_to_the_original_waiter() {
     let mut conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(

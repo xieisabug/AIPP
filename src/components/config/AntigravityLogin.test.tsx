@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AntigravityLogin from "./AntigravityLogin";
 
+const loginSuccess = "Antigravity 已登录，模型列表已更新。";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), openUrl: vi.fn(), onmessage: undefined as undefined | ((url: string) => void) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, Channel: class {
     set onmessage(handler: (url: string) => void) { mocks.onmessage = handler; }
@@ -15,14 +16,14 @@ describe("Antigravity sign-in", () => {
         mocks.invoke.mockImplementation(() => new Promise<void>(resolve => { complete = resolve; }));
         render(<AntigravityLogin providerId="7" settings={() => ({ agent_cli_command: "custom-agy" })} />);
         fireEvent.click(screen.getByRole("button", { name: "登录 Antigravity" }));
-        expect(mocks.invoke).toHaveBeenCalledWith("login_antigravity", expect.objectContaining({ providerId: 7, settings: { agent_cli_command: "custom-agy" } }));
+        expect(mocks.invoke).toHaveBeenCalledWith("login_antigravity", expect.objectContaining({ providerId: 7, action: "login", settings: { agent_cli_command: "custom-agy" } }));
         act(() => mocks.onmessage?.("https://accounts.google.com/synthetic"));
-        expect(screen.queryByText(/已确认认证成功/)).not.toBeInTheDocument();
+        expect(screen.queryByText(loginSuccess)).not.toBeInTheDocument();
         expect(mocks.openUrl).not.toHaveBeenCalled();
         fireEvent.click(screen.getByRole("button", { name: "在浏览器中继续登录" }));
         expect(mocks.openUrl).toHaveBeenCalledWith("https://accounts.google.com/synthetic");
         await act(async () => complete());
-        expect(screen.getByText(/已确认认证成功/)).toBeInTheDocument();
+        expect(screen.getByText(loginSuccess)).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "在浏览器中继续登录" })).not.toBeInTheDocument();
     });
     it("should keep the native diagnostic when authentication fails", async () => {
@@ -30,7 +31,7 @@ describe("Antigravity sign-in", () => {
         render(<AntigravityLogin providerId="7" settings={() => ({})} />);
         fireEvent.click(screen.getByRole("button", { name: "登录 Antigravity" }));
         expect(await screen.findByText(/account disabled/)).toBeInTheDocument();
-        expect(screen.queryByText(/已确认认证成功/)).not.toBeInTheDocument();
+        expect(screen.queryByText(loginSuccess)).not.toBeInTheDocument();
         expect(screen.getByRole("button", { name: "登录 Antigravity" })).toBeEnabled();
     });
     it("should cancel the owned login when the user cancels or leaves the provider", async () => {

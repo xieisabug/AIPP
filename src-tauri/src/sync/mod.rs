@@ -3454,7 +3454,6 @@ fn apply_change_to_db_inner(
 
     butler::prepare_group_parent(conn, spec, &field_values)?;
     butler::decode_positions(conn, spec.object_type, &mut field_values, &refs)?;
-    butler::merge_member(sync_conn,conn,change,&mut field_values)?;
 
     if quick_assistant::apply_model(sync_conn, conn, spec, change, &field_values)? {
         return Ok(());
@@ -3495,6 +3494,7 @@ fn apply_change_to_db_inner(
         }
     }
 
+    butler::merge_member(sync_conn, conn, change, &mut field_values)?;
     let goal_changed = butler::prepare_intent(conn, spec.object_type, &mut field_values, merge_target)?;
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
         if change.object_type == "conversation.message" {
@@ -3555,6 +3555,8 @@ fn apply_change_to_db_inner(
             Err(err) => return Err(err),
         }
     }
+
+    butler::cancel_inactive_member_turns(sync_conn, conn, change, &field_values)?;
 
     if goal_changed {
         let conversation = field_as_i64(&field_values,"conversation_id").ok_or("管家目标缺少会话")?;

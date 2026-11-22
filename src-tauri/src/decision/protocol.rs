@@ -496,8 +496,15 @@ fn encode_gemini_request(req: &DecisionRequest) -> Result<Value, String> {
                 let mut obj = Map::new();
                 obj.insert("type".into(), json!("noul"));
                 obj.insert("instructions".into(), json!(instructions));
-                if let (Some(t), Some(f)) = (true_criteria, false_criteria) {
-                    obj.insert("criteria".into(), json!({ "true": t, "false": f }));
+                let mut criteria = Map::new();
+                if let Some(t) = true_criteria {
+                    criteria.insert("true_description".into(), json!(t));
+                }
+                if let Some(f) = false_criteria {
+                    criteria.insert("false_description".into(), json!(f));
+                }
+                if !criteria.is_empty() {
+                    obj.insert("criteria".into(), Value::Object(criteria));
                 }
                 Value::Object(obj)
             }
@@ -521,15 +528,13 @@ fn encode_gemini_request(req: &DecisionRequest) -> Result<Value, String> {
                 levels,
                 ..
             } => {
-                let mut criteria = Map::new();
-                for (idx, level) in levels.iter().enumerate() {
-                    let text = if level.description.trim().is_empty() {
+                let criteria: Vec<_> = levels.iter().map(|level| {
+                    if level.description.trim().is_empty() {
                         level.label.clone()
                     } else {
                         format!("{}: {}", level.label, level.description)
-                    };
-                    criteria.insert(idx.to_string(), json!(text));
-                }
+                    }
+                }).collect();
                 json!({
                     "type": "score",
                     "instructions": instructions,
