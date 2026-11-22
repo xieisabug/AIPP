@@ -235,3 +235,18 @@ fn natural_prompt_uses_latest_user_dialogue_without_granting_authority_to_quotes
     assert!(text.contains("不得因新消息自动恢复执行"));
     assert!(!text.contains("目标冲突时以上述当前要求为准"));
 }
+
+#[test]
+fn test_goal_sync_migration_preserves_existing_goals_and_can_run_twice() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE butler_goal(conversation_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL,
+        goal TEXT NOT NULL, stopped INTEGER NOT NULL);
+        INSERT INTO butler_goal VALUES (42,3,'finish',1);").unwrap();
+    initialize_sync_schema(&conn).unwrap();
+    initialize_sync_schema(&conn).unwrap();
+    let actual: (i64, i64, String, bool) = conn.query_row(
+        "SELECT id, revision, goal, stopped FROM butler_goal WHERE conversation_id=42", [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(actual, (42, 3, "finish".into(), true));
+}

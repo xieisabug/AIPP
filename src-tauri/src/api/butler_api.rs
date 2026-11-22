@@ -4059,6 +4059,7 @@ pub(crate) async fn reopen_butler_main_conversation(
         .map_err(|e| e.to_string())?;
     butler_repo.touch_main_state(BUTLER_MAIN_SLOT).map_err(|e| e.to_string())?;
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit("butler_main_reset", json!({ "conversation_id": new_conversation.id }));
     Ok((new_conversation, previous_main_conversation_id))
 }

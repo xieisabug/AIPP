@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS butler_chat_group_member (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_butler_chat_group_active_member
     ON butler_chat_group_member(group_id, assistant_id) WHERE active=1;
 CREATE TABLE IF NOT EXISTS butler_chat_group_message (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id INTEGER NOT NULL REFERENCES butler_chat_group(id) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     sender_member INTEGER,
@@ -62,7 +63,7 @@ CREATE TABLE IF NOT EXISTS butler_chat_group_message (
     source_conversation_id INTEGER,
     source_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(group_id, seq)
+    UNIQUE(group_id, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_butler_chat_group_message_request
     ON butler_chat_group_message(group_id, request_key) WHERE request_key IS NOT NULL;
@@ -127,6 +128,59 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
     Ok(())
 }
 
+/// Give public messages an integer identity for the generic sync journal. The existing
+/// (group, seq) key still addresses quotes and local execution turns.
+fn install_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
+    if !conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_chat_group_message') WHERE name='id')", [], |r| r.get::<_,bool>(0))? {
+        conn.execute_batch("ALTER TABLE butler_chat_group_message RENAME TO butler_chat_group_message_old")?;
+        // The two named indexes move with the old table. Recreate them after copying.
+        conn.execute_batch(SCHEMA)?;
+        let columns = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,request_key,route_state,source_conversation_id,source_message_id,created_at";
+        conn.execute_batch(&format!("INSERT INTO butler_chat_group_message({columns}) SELECT {columns} FROM butler_chat_group_message_old ORDER BY group_id,seq;
+            DROP TABLE butler_chat_group_message_old;"))?;
+        conn.execute_batch(SCHEMA)?;
+    }
+    if !table_exists(conn, "butler_group_position")? {
+        conn.execute_batch("CREATE TABLE butler_group_position (
+            group_id INTEGER NOT NULL, local_seq INTEGER NOT NULL, wire_seq INTEGER NOT NULL, uid TEXT NOT NULL,
+            PRIMARY KEY(group_id,local_seq), UNIQUE(group_id,uid));
+            INSERT INTO butler_group_position SELECT group_id,seq,seq,lower(hex(randomblob(16))) FROM butler_chat_group_message;")?;
+    }
+    conn.execute_batch("
+        CREATE TRIGGER IF NOT EXISTS group_message_position AFTER INSERT ON butler_chat_group_message BEGIN
+            INSERT INTO butler_group_position(group_id,local_seq,wire_seq,uid) VALUES(NEW.group_id,NEW.seq,NEW.seq,lower(hex(randomblob(16))))
+                ON CONFLICT(group_id,local_seq) DO NOTHING;
+        END;
+        CREATE TRIGGER IF NOT EXISTS group_message_tail AFTER INSERT ON butler_chat_group_message BEGIN
+            UPDATE butler_chat_group SET seq=max(seq,NEW.seq), updated_at=max(updated_at,NEW.created_at) WHERE id=NEW.group_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS group_conversation_name AFTER UPDATE OF name ON conversation
+        WHEN NEW.conversation_kind='butler_group' BEGIN
+            UPDATE butler_chat_group SET name=NEW.name WHERE id=NEW.id;
+        END;
+        CREATE TABLE IF NOT EXISTS butler_read_reply (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL UNIQUE REFERENCES message(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS butler_read_group_reply (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL UNIQUE REFERENCES butler_chat_group_message(id) ON DELETE CASCADE);
+        CREATE TRIGGER IF NOT EXISTS group_read_cleanup AFTER DELETE ON butler_chat_group_message BEGIN
+            DELETE FROM butler_read_group_reply WHERE message_id=OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS group_parent_cleanup AFTER DELETE ON conversation BEGIN
+            DELETE FROM butler_chat_group_turn WHERE member_id IN (SELECT id FROM butler_chat_group_member WHERE conversation_id=OLD.id);
+            DELETE FROM butler_chat_group_member WHERE conversation_id=OLD.id OR group_id=OLD.id;
+            DELETE FROM butler_chat_group_message WHERE group_id=OLD.id;
+            DELETE FROM butler_chat_group_turn WHERE group_id=OLD.id;
+            DELETE FROM butler_group_position WHERE group_id=OLD.id;
+            DELETE FROM butler_chat_group WHERE id=OLD.id;
+        END;
+    ")?;
+    if table_exists(conn, "message")? {
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS contact_read_cleanup AFTER DELETE ON message BEGIN
+            DELETE FROM butler_read_reply WHERE message_id=OLD.id; END;")?;
+    }
+    Ok(())
+}
+
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)?;
     // 早期版本按顺序串行回复（after_turn），现在同一轮并发回复、多轮讨论按 round/rounds 推进。
@@ -136,6 +190,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // 成员发言对应它执行会话里的那条最终回复，界面据此复用私聊的消息信息、代码预览与附件。
     ensure_column(conn, "butler_chat_group_message", "source_conversation_id", "INTEGER")?;
     ensure_column(conn, "butler_chat_group_message", "source_message_id", "INTEGER")?;
+    install_sync_schema(conn)?;
     if !table_exists(conn, "butler_group_event")? {
         return Ok(());
     }
@@ -469,7 +524,14 @@ enum Sender<'a> {
 
 fn append(tx: &Connection, group: i64, sender: Sender<'_>, kind: &str, body: &str, reply_to: Option<i64>,
     request_key: Option<&str>, route: bool) -> Result<Message> {
-    let seq = get(tx, group)?.seq + 1;
+    // The low bits distinguish offline writers at the same logical millisecond.
+    // Stay within the exact integer range supported by the WebView.
+    let previous = get(tx, group)?.seq;
+    let tick = (Utc::now().timestamp_millis() - 1_735_689_600_000).max((previous >> 10) + 1);
+    let salt = i64::from(u16::from_le_bytes(rand::random::<[u8; 2]>()) & 0x03ff);
+    let seq = tick.checked_mul(1 << 10).and_then(|n| n.checked_add(salt))
+        .filter(|n| *n < (1i64 << 53) - 1).context("群聊消息位置超出可表示范围")?;
+    let seq = free_position(tx, group, seq)?;
     let (member, assistant, name) = match sender {
         Sender::User => (None, None, "我".to_string()),
         Sender::Member(m) => (Some(m.id), Some(m.assistant_id), m.name.clone()),
@@ -482,6 +544,18 @@ fn append(tx: &Connection, group: i64, sender: Sender<'_>, kind: &str, body: &st
     tx.execute("UPDATE butler_chat_group SET seq=?1, updated_at=?2 WHERE id=?3", params![seq, stamp, group])?;
     tx.execute("UPDATE conversation SET updated_time=?1 WHERE id=?2", params![Utc::now(), group])?;
     message(tx, group, seq)
+}
+
+/// A wire position can be reserved by a quote or join boundary before its
+/// message arrives. Existing local positions never move under an active turn.
+pub(crate) fn free_position(conn: &Connection, group: i64, preferred: i64) -> rusqlite::Result<i64> {
+    let mut next = preferred;
+    while conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_group_position WHERE group_id=?1 AND local_seq=?2)",
+        params![group,next], |r|r.get::<_,bool>(0))? {
+        next += 1;
+        if next >= (1_i64 << 53) - 1 { return Err(rusqlite::Error::IntegralValueOutOfRange(0, next)); }
+    }
+    Ok(next)
 }
 
 fn notice(tx: &Connection, group: i64, kind: &str, body: &str) -> Result<Message> {

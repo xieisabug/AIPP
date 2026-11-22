@@ -28,6 +28,7 @@ export interface ButlerGroupSummary {
     id: number;
     name: string;
     members: ButlerGroupMember[];
+    unread?: boolean;
     last_reply_seq?: number | null;
     last_message: ButlerGroupMessage | null;
     updated_at: string;

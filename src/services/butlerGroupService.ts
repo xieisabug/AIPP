@@ -6,7 +6,22 @@ import type {
 
 export const BUTLER_GROUP_CHANGED_EVENT = "butler_group_changed";
 
-export const listButlerGroups = () => invoke<ButlerGroupSummary[]>("list_butler_groups");
+export const markRepliesRead = (conversationId: number, through: number, group: boolean, visibleSeqs?: number[]) =>
+    invoke<void>("mark_butler_replies_read", { conversationId, through, group, visibleSeqs });
+
+export async function importLegacyRead(id: number, group: boolean) {
+    const key = group ? `butler-group-read-${id}` : `butler-read-${id}`;
+    const through = Number(localStorage.getItem(key));
+    if (!Number.isSafeInteger(through) || through <= 0) return;
+    await markRepliesRead(id, through, group);
+    localStorage.removeItem(key);
+}
+
+export async function listButlerGroups() {
+    const groups = await invoke<ButlerGroupSummary[]>("list_butler_groups");
+    await Promise.all(groups.map(group => importLegacyRead(group.id, true)));
+    return groups;
+}
 
 export const getButlerGroup = (groupId: number) => invoke<ButlerGroupDetail>("get_butler_group", { groupId });
 

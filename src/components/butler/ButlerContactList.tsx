@@ -11,7 +11,7 @@ import { usePendingApprovalConversations } from "@/hooks/useApprovalAttention";
 import ButlerSortableList from "./ButlerSortableList";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
-import { groupPreview, groupReadKey } from "./butlerGroupModel";
+import { groupPreview } from "./butlerGroupModel";
 
 /** 待审批和头像未读标记分别展示。 */
 function ApprovalDot() {
@@ -22,7 +22,7 @@ function UnreadDot() {
     return <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/>;
 }
 
-export interface ContactPreview { assistantId: number; conversationId: number; messageId: number | null; replyId?: number | null; preview: string | null }
+export interface ContactPreview { assistantId: number; conversationId: number; messageId: number | null; replyId?: number | null; unread?: boolean; preview: string | null }
 interface Props {
     focused?: boolean;
     chief: string;
@@ -50,7 +50,7 @@ interface Props {
 }
 
 function groupUnread(group: ButlerGroupSummary, selected: boolean) {
-    return !selected && !!group.last_reply_seq && group.last_reply_seq > Number(localStorage.getItem(groupReadKey(group.id)) ?? 0);
+    return !selected && !!group.unread;
 }
 
 export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onAssistantAction,
@@ -121,7 +121,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
         </div>
         <nav aria-label="助手联系人" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
             {error && <button onClick={onRefresh} className="px-2 py-1 text-xs text-destructive">刷新联系人</button>}
-            <ButlerSortableList storageKey="butler-contact-order" rows={[...groupRows, ...assistantRows]}/>
+            <ButlerSortableList rows={[...groupRows, ...assistantRows]}/>
         </nav>
     </>;
 }

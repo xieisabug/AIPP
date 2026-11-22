@@ -18,20 +18,28 @@ def pull_changes(
     request: Request,
     cursor: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
+    butler_history: bool = False,
+    butler_history_v2: bool = False,
+    through: int | None = Query(default=None, ge=0),
     auth: AuthContext = Depends(require_auth),
     device_id: str = Depends(require_device_id),
     db: Session = Depends(get_db),
 ) -> PullResponse:
     ensure_device(db, auth, device_id)
 
-    rows = list(
-        db.scalars(
-            select(SyncChange)
-            .where(SyncChange.account_id == auth.account_id, SyncChange.seq > cursor)
-            .order_by(SyncChange.seq.asc())
-            .limit(limit + 1)
+    query = select(SyncChange).where(SyncChange.account_id == auth.account_id, SyncChange.seq > cursor)
+    if butler_history or butler_history_v2:
+        kinds = (
+            "assistant.appearance", "conversation.group_member", "conversation.group_message",
+            "conversation.group_turn", "conversation.read_reply", "conversation.read_group_reply",
         )
-    )
+        if butler_history_v2:
+            kinds += ("assistant.skill", "assistant.prompt_param", "conversation.butler_memory",
+                      "conversation.butler_main", "conversation.butler_goal")
+        query = query.where(SyncChange.object_type.in_(kinds))
+    if through is not None:
+        query = query.where(SyncChange.seq <= through)
+    rows = list(db.scalars(query.order_by(SyncChange.seq.asc()).limit(limit + 1)))
     has_more = len(rows) > limit
     rows = rows[:limit]
     if request.headers.get(CAPABILITY_HEADER) != "1" and any(

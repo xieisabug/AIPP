@@ -8,6 +8,7 @@ pub(super) fn database() -> Connection {
         CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,message_type TEXT,content TEXT,metadata_json TEXT,created_time TEXT DEFAULT CURRENT_TIMESTAMP,
             llm_model_id INTEGER,llm_model_name TEXT,token_count INTEGER,input_token_count INTEGER,output_token_count INTEGER,finish_time TEXT,tool_calls_json TEXT);
         CREATE TABLE conversation_summary(conversation_id INTEGER);
+        CREATE TABLE butler_read_reply(id INTEGER PRIMARY KEY,message_id INTEGER UNIQUE);
         CREATE TABLE butler_main_state(butler_conversation_id INTEGER);
         INSERT INTO butler_main_state VALUES (10);
         INSERT INTO conversation VALUES (10,1,'总管家','butler_main',NULL),(20,2,'写作','butler_contact',NULL),

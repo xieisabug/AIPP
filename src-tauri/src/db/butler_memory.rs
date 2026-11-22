@@ -349,6 +349,8 @@ pub struct Injected {
     pub as_of: i64,
     /// 每条记忆模型看到的最新版本；None 表示已经知道它被删除。
     pub revisions: HashMap<i64, Option<i64>>,
+    /// 历史中的行号属于写入历史的设备，同号同版本也可能对应不同正文。
+    pub last_contents: HashMap<i64, String>,
 }
 
 impl Injected {
@@ -403,6 +405,9 @@ pub fn plan(memories: Vec<Memory>, text: &str, injected: &Injected, budget: usiz
     let (mut updated, mut fresh, mut unseen, mut unchanged) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
     for memory in memories {
         match injected.revisions.get(&memory.id) {
+            Some(None) => updated.push(memory),
+            Some(Some(_)) if injected.last_contents.get(&memory.id)
+                .is_some_and(|text| *text != memory.content.replace('\n', " ")) => updated.push(memory),
             Some(Some(revision)) if memory.revision > *revision => updated.push(memory),
             Some(Some(_)) => unchanged += 1,
             _ if !injected.initial || memory.updated_at > injected.as_of => fresh.push(memory),

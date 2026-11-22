@@ -104,6 +104,12 @@ pub(super) fn scan(
     for batch in ids.chunks(BATCH_SIZE) {
         let mut references = Vec::new();
         let (snapshots, found) = read_snapshot_rows(data,spec,sync,dangling,Some(batch), |id,fields| {
+            if spec.object_type == "conversation.butler_memory" {
+                if let Some(scope_id) = fields.get("scope_id").and_then(JsonValue::as_i64) {
+                    let owner = if fields.get("scope_type").and_then(JsonValue::as_str) == Some("assistant") { "assistant" } else { "conversation" };
+                    references.push((id,owner,scope_id));
+                }
+            }
             for fk in spec.foreign_keys {
                 if let Some(parent) = fields.get(fk.column).and_then(JsonValue::as_i64) {
                     references.push((id,fk.object_type,parent));

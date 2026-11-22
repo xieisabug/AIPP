@@ -70,6 +70,39 @@ def test_push_is_idempotent_by_event_id() -> None:
     assert second.json()["conflicts"] == []
 
 
+def test_butler_history_backfill_filters_before_limit_and_preserves_regular_pull() -> None:
+    client = make_client()
+    events = [sample_event(f"e-{i}", f"obj-{i}") for i in range(4)]
+    events[1]["object_type"] = "conversation.group_member"
+    events[2]["object_type"] = "conversation.read_reply"
+    events[3]["object_type"] = "assistant.appearance"
+    response = client.post("/v1/sync/push", headers=auth_headers(), json={"device_id": "a", "events": events})
+    assert len(response.json()["accepted"]) == 4
+    headers = auth_headers(device_id="b")
+    page = client.get("/v1/sync/pull?butler_history=true&through=3&limit=1", headers=headers).json()
+    assert page["has_more"] and [c["seq"] for c in page["changes"]] == [2]
+    tail = client.get("/v1/sync/pull?butler_history=true&through=3&cursor=2", headers=headers).json()
+    assert not tail["has_more"] and [c["seq"] for c in tail["changes"]] == [3]
+    full = client.get("/v1/sync/pull", headers=headers).json()
+    assert [c["seq"] for c in full["changes"]] == [1, 2, 3, 4]
+
+
+def test_butler_history_v2_includes_settings_memories_and_active_goal() -> None:
+    client = make_client()
+    kinds = ["assistant", "assistant.skill", "assistant.prompt_param", "conversation.butler_memory",
+             "conversation.butler_main", "conversation.butler_goal", "conversation.read_reply"]
+    events = [dict(sample_event(f"e-{i}", f"obj-{i}"), object_type=kind) for i, kind in enumerate(kinds)]
+    pushed = client.post("/v1/sync/push", headers=auth_headers(), json={"device_id": "a", "events": events})
+    assert len(pushed.json()["accepted"]) == len(events)
+    headers = auth_headers(device_id="b")
+    page = client.get("/v1/sync/pull?butler_history_v2=true&limit=2", headers=headers).json()
+    assert page["has_more"] and [c["object_type"] for c in page["changes"]] == kinds[1:3]
+    tail = client.get(f"/v1/sync/pull?butler_history_v2=true&cursor={page['cursor']}&through=6", headers=headers).json()
+    assert not tail["has_more"] and [c["object_type"] for c in tail["changes"]] == kinds[3:6]
+    legacy = client.get("/v1/sync/pull?butler_history=true", headers=headers).json()
+    assert [c["object_type"] for c in legacy["changes"]] == kinds[-1:]
+
+
 def test_pull_returns_monotonic_cursor_and_changes() -> None:
     client = make_client()
     push_body = {

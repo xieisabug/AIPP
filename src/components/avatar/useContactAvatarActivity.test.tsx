@@ -133,15 +133,13 @@ describe("contact activity subscriptions", () => {
         await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("blocked"));
     });
     it("should keep the alert morph for existing unread replies until their conversation is read", async () => {
-        const getItem = vi.fn(() => "9");
-        vi.stubGlobal("localStorage", { getItem });
         mockInvokeHandler("list_butler_contact_activity", () => [row()]);
-        const previews = [{ assistantId: 8, conversationId: 3, messageId: 10, replyId: 10, preview: "消息" }];
+        const previews = [{ assistantId: 8, conversationId: 3, messageId: 10, replyId: 10, unread: true, preview: "消息" }];
         const { result, rerender } = renderHook(({ selected }) => useContactAvatarActivity("1", previews, selected), { initialProps: { selected: -1 } });
         expect(result.current.visuals.get(8)).toEqual({ state: "alerting", label: "有未读消息" });
         rerender({ selected: 8 });
         await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("idle"));
-        getItem.mockReturnValue("10");
+        previews[0].unread = false;
         rerender({ selected: -1 });
         expect(result.current.visuals.get(8)?.state).toBe("idle");
     });

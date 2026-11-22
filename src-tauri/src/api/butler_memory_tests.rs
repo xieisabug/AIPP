@@ -362,3 +362,15 @@ fn test_memory_source_view_shows_label_and_deleted_state() {
     assert_eq!(source_view(&c, private).unwrap().status, "deleted");
     assert!(memory::get_any(&c, private).unwrap().is_some(), "deleting the chat keeps the memory");
 }
+
+#[test]
+fn test_synced_history_with_same_memory_number_and_revision_refreshes_visible_text_once() {
+    let mut conn = fixture();
+    remember_in(&mut conn, 20, 2, "local memory");
+    let first = turn_block(&conn, 20, "hello", &memory::Injected::default(), 1).unwrap().unwrap();
+    let mut history = vec![user(&first.replace("local memory", "other device memory"))];
+    let correction = turn_block(&conn, 20, "hello", &seen(&history), 2).unwrap().unwrap();
+    assert!(correction.contains("local memory"));
+    history.push(user(&correction));
+    assert!(turn_block(&conn, 20, "hello", &seen(&history), 3).unwrap().is_none());
+}

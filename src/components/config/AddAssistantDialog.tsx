@@ -52,12 +52,10 @@ const EMPTY_FIELD_DATA: FieldOptionsData = {
 
 /** 形象存放在 butler_appearance 功能配置里（按助手 id），与编辑助手、管家联系人共用。 */
 async function saveAppearance(id: number, appearance: ButlerAppearance) {
-    const list = await invoke<Array<{ feature_code: string; key: string; value: string }>>("get_all_feature_config");
-    const current = Object.fromEntries(list.filter(item => item.feature_code === "butler_appearance").map(item => [item.key, item.value]));
     await invoke("save_feature_config", {
         featureCode: "butler_appearance",
         feature_code: "butler_appearance",
-        config: { ...current, [appearanceKey(id)]: JSON.stringify(appearance) },
+        config: { [appearanceKey(id)]: JSON.stringify(appearance) },
     });
 }
 

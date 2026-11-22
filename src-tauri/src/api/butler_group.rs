@@ -37,6 +37,7 @@ where
 /// 通知界面刷新，并唤醒调度。
 pub(super) fn changed(app: &AppHandle, group_id: i64) {
     let _ = app.emit("butler_group_changed", serde_json::json!({ "group_id": group_id }));
+    crate::sync::schedule_sync_after_local_change(app);
     super::butler_group_runtime::wake();
 }
 
@@ -119,6 +120,7 @@ pub struct GroupSummary {
     pub name: String,
     pub members: Vec<MemberView>,
     pub last_message: Option<group::Message>,
+    pub unread: bool,
     pub last_reply_seq: Option<i64>,
     pub updated_at: String,
     /// 正在回复的成员。
@@ -146,14 +148,49 @@ fn member_views(members: Vec<group::Member>, roster: &HashMap<i64, RosterEntry>)
 }
 
 async fn summary(app: &AppHandle, group_id: i64, roster: &HashMap<i64, RosterEntry>) -> Result<GroupSummary, String> {
-    let (room, members, last, last_reply_seq, turns) = database(app, "读取", move |conn| {
+    let (room, members, last, last_reply_seq, unread, turns) = database(app, "读取", move |conn| {
         Ok((group::get(conn, group_id)?, group::members(conn, group_id)?, group::last_message(conn, group_id)?,
-            conn.query_row("SELECT max(seq) FROM butler_chat_group_message WHERE group_id=?1 AND kind='message' AND sender_member IS NOT NULL", [group_id], |r| r.get(0))?, group::open_turns(conn, group_id)?))
+            conn.query_row("SELECT max(seq) FROM butler_chat_group_message WHERE group_id=?1 AND kind='message' AND sender_member IS NOT NULL", [group_id], |r| r.get(0))?, conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_message m WHERE m.group_id=?1 AND m.sender_member IS NOT NULL AND m.kind='message'
+                AND NOT EXISTS(SELECT 1 FROM butler_read_group_reply seen WHERE seen.message_id=m.id))", [group_id], |r| r.get(0))?, group::open_turns(conn, group_id)?))
     }).await?;
     Ok(GroupSummary {
-        id: room.id, name: room.name, members: member_views(members, roster), last_message: last, last_reply_seq, updated_at: room.updated_at,
+        id: room.id, name: room.name, members: member_views(members, roster), last_message: last, last_reply_seq, unread, updated_at: room.updated_at,
         typing: turns.into_iter().filter(|t| t.state == "running").map(|t| t.member_id).collect(),
     })
+}
+
+/// Receipts describe individual public replies. Reading an older replica cannot
+/// acknowledge another device's unseen reply or roll back a newer receipt.
+#[tauri::command]
+pub async fn mark_butler_replies_read(app_handle: AppHandle, conversation_id: i64, through: i64,
+    group: bool, visible_seqs: Option<Vec<i64>>) -> Result<(), String> {
+    let changed = database(&app_handle, "记录已读", move |conn| {
+        if group {
+            if let Some(seqs) = visible_seqs {
+                let visible = serde_json::to_string(&seqs)?;
+                return Ok(conn.execute("INSERT OR IGNORE INTO butler_read_group_reply(message_id)
+                    SELECT m.id FROM json_each(?2) page JOIN butler_chat_group_message m ON m.group_id=?1 AND m.seq=page.value
+                    WHERE m.kind='message' AND m.sender_member IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM butler_read_group_reply seen WHERE seen.message_id=m.id)",
+                    rusqlite::params![conversation_id, visible])?);
+            }
+            // One-time import of a previous localStorage watermark.
+            return Ok(conn.execute("INSERT OR IGNORE INTO butler_read_group_reply(message_id)
+                SELECT id FROM butler_chat_group_message WHERE group_id=?1 AND seq<=?2 AND kind='message' AND sender_member IS NOT NULL
+                AND EXISTS(SELECT 1 FROM butler_chat_group_message WHERE group_id=?1 AND seq=?2)", rusqlite::params![conversation_id,through])?);
+        }
+        let public_reply = crate::db::conversation_db::ConversationRepository::PUBLIC_BUTLER_REPLY;
+        Ok(conn.execute(&format!("INSERT OR IGNORE INTO butler_read_reply(message_id)
+            SELECT r.id FROM message r WHERE r.conversation_id=?1 AND r.id<=?2 AND {public_reply}
+            AND EXISTS(SELECT 1 FROM message WHERE id=?2 AND conversation_id=?1)
+            AND NOT EXISTS(SELECT 1 FROM butler_read_reply seen WHERE seen.message_id=r.id)"),
+            rusqlite::params![conversation_id,through])?)
+    }).await?;
+    if changed > 0 {
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+        app_handle.emit("butler_read_changed", ()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

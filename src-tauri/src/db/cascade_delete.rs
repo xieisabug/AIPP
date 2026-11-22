@@ -209,7 +209,7 @@ impl<'a> Tables<'a> {
             let tables: Vec<String> = conn.prepare(&format!("SELECT name FROM {}.sqlite_master WHERE type='table'", quote(&schema)))?
                 .query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
             for table in tables {
-                let columns = conn.prepare(&format!("PRAGMA {}.table_info({})", quote(&schema), quote(&table)))?
+                let columns = conn.prepare(&format!("PRAGMA {}.table_xinfo({})", quote(&schema), quote(&table)))?
                     .query_map([], |r| r.get(1))?.collect::<Result<Vec<String>>>()?;
                 result.columns.entry(table.clone()).or_insert(columns);
                 result.names.entry(table.clone()).or_insert_with(|| format!("{}.{}", quote(&schema), quote(&table)));
@@ -290,7 +290,7 @@ impl<'a> Tables<'a> {
         for table in ["tool_review_log", "conversation_mcp_loaded_tool", "PluginHookAuditLog",
             "external_channel_message_delivery", "external_channel_relay_scope", "external_channel_message_link",
             "acp_session", "queued_conversation_message", "conversation_summary", "conversation_todo",
-            "model_usage_record"] {
+            "model_usage_record", "butler_goal", "butler_goal_turn", "butler_goal_question"] {
             self.remove(table, "conversation_id=?1", id)?;
         }
         self.remove("butler_task_result", "task_conversation_id=?1", id)?;

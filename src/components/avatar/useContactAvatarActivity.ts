@@ -245,8 +245,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
     useEffect(() => { controller?.acknowledge(selected ?? 0); }, [selected, controller]);
     const displayed = new Map(visuals);
     for (const preview of previews) {
-        if (!preview.replyId || preview.assistantId === selected ||
-            preview.replyId <= Number(localStorage.getItem(`butler-read-${preview.conversationId}`))) continue;
+        if (!preview.unread || preview.assistantId === selected) continue;
         if (!approvals.has(preview.assistantId)) {
             displayed.set(preview.assistantId, { state: "alerting", label: "有未读消息" });
         }

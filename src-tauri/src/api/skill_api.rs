@@ -501,6 +501,7 @@ pub async fn update_assistant_skill_config(
         .upsert_assistant_skill_config(assistant_id, &skill_identifier, is_enabled, priority)
         .map_err(|e| e.to_string())?;
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     info!(
         "Updated skill config: assistant={}, skill={}, enabled={}",
         assistant_id, skill_identifier, is_enabled
@@ -518,6 +519,7 @@ pub async fn toggle_assistant_skill(
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_skill_config_enabled(config_id, is_enabled).map_err(|e| e.to_string())?;
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     debug!("Toggled skill config {} to enabled={}", config_id, is_enabled);
     Ok(())
 }
@@ -531,6 +533,7 @@ pub async fn remove_assistant_skill(
     let db = SkillDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_skill_config(config_id).map_err(|e| e.to_string())?;
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     debug!("Removed skill config {}", config_id);
     Ok(())
 }
@@ -556,6 +559,7 @@ pub async fn bulk_update_assistant_skills(
 
     db.bulk_update_assistant_skills(assistant_id, &configs).map_err(|e| e.to_string())?;
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     info!("Bulk updated {} skill configs for assistant {}", configs.len(), assistant_id);
     Ok(())
 }

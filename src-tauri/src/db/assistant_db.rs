@@ -131,6 +131,13 @@ impl AssistantDatabase {
             );",
             [],
         )?;
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS assistant_appearance_foreign_legacy (key TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS assistant_appearance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assistant_id INTEGER NOT NULL UNIQUE REFERENCES assistant(id) ON DELETE CASCADE,
+            value TEXT NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS assistant_appearance_cleanup AFTER DELETE ON assistant BEGIN
+                DELETE FROM assistant_appearance WHERE assistant_id=OLD.id; END;")?;
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS assistant_model (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

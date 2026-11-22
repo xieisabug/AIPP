@@ -24,7 +24,7 @@ class ResizeObserverMock {
 }
 
 const api = vi.hoisted(() => ({
-    getButlerGroup: vi.fn(), listOlderButlerGroupMessages: vi.fn(), postButlerGroupMessage: vi.fn(),
+    markRepliesRead: vi.fn().mockResolvedValue(undefined), getButlerGroup: vi.fn(), listOlderButlerGroupMessages: vi.fn(), postButlerGroupMessage: vi.fn(),
     stopButlerGroupReplies: vi.fn(), addButlerGroupMembers: vi.fn(), removeButlerGroupMember: vi.fn(),
     renameButlerGroup: vi.fn(), deleteButlerGroup: vi.fn(), onButlerGroupChanged: vi.fn(),
 }));
@@ -116,6 +116,7 @@ beforeEach(() => {
 
 describe("ButlerGroupChat", () => {
     it("should show a plain chat stream without routing controls when opened", async () => {
+        const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
         renderChat();
         expect(await screen.findByText("初稿如下")).toBeInTheDocument();
         expect(screen.getByText("帮我写周报").closest("[data-aipp-slot='butler-group-user-message']")).not.toBeNull();
@@ -124,7 +125,8 @@ describe("ButlerGroupChat", () => {
         // 没有选择接收人、顺序讨论之类的控件
         expect(screen.queryByText(/顺序征求意见|各自独立判断|仅引用资料/)).toBeNull();
         expect(screen.getByText("2 位成员")).toBeInTheDocument();
-        expect(localStorage.getItem("butler-group-read-7")).toBe("3");
+        await waitFor(() => expect(api.markRepliesRead).toHaveBeenCalledWith(7, 3, true, [3]));
+        focus.mockRestore();
     });
 
     it("should send the typed text with a stable request key when pressing Enter", async () => {

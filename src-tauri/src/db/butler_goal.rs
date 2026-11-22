@@ -6,15 +6,29 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Goal { pub revision: i64, pub text: String, pub stopped: bool }
 
-pub fn schema(conn: &Connection) -> Result<()> {
+pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS butler_goal (
-      conversation_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, goal TEXT NOT NULL, stopped INTEGER NOT NULL DEFAULT 0);
+      conversation_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, goal TEXT NOT NULL, stopped INTEGER NOT NULL DEFAULT 0,
+      id INTEGER GENERATED ALWAYS AS (conversation_id) VIRTUAL);
       CREATE TABLE IF NOT EXISTS butler_goal_turn (message_id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS butler_goal_question (request_id TEXT PRIMARY KEY, conversation_id INTEGER NOT NULL, revision INTEGER NOT NULL,
         expires_at INTEGER NOT NULL, event_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'waiting');
       CREATE TABLE IF NOT EXISTS butler_goal_stale_message(message_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL);")?;
     Ok(())
 }
+
+pub(crate) fn initialize_sync_schema(conn: &Connection) -> rusqlite::Result<()> {
+    schema(conn)?;
+    let has_id: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('butler_goal') WHERE name='id')",
+        [], |row| row.get(0),
+    )?;
+    if !has_id {
+        conn.execute_batch("ALTER TABLE butler_goal ADD COLUMN id INTEGER GENERATED ALWAYS AS (conversation_id) VIRTUAL")?;
+    }
+    Ok(())
+}
+
 pub fn current(conn: &Connection, conversation: i64) -> Result<Option<Goal>> {
     schema(conn)?;
     Ok(conn.query_row("SELECT revision,goal,stopped FROM butler_goal WHERE conversation_id=?1", [conversation],
@@ -67,6 +81,12 @@ pub fn apply_in_transaction(conn:&Connection,conversation:i64,intent:&str,text:&
     ensure!(goal.chars().count()<=24000,"当前要求过长，请缩短或整理后再发送");
     conn.execute("INSERT INTO butler_goal(conversation_id,revision,goal,stopped) VALUES(?1,1,?2,?3)
       ON CONFLICT(conversation_id) DO UPDATE SET revision=revision+1,goal=excluded.goal,stopped=excluded.stopped",params![conversation,goal,intent=="stop"])?;
+    invalidate_previous_goal(conn, conversation)?;
+    current(conn,conversation)
+}
+
+/// Run under the same transaction that installs the new local or remote goal.
+pub(crate) fn invalidate_previous_goal(conn: &Connection, conversation: i64) -> rusqlite::Result<()> {
     // These are derived checkpoints, never original messages or tool evidence.
     conn.execute("DELETE FROM message WHERE conversation_id=?1 AND message_type='system' AND (content LIKE '<!-- compacted_ids:%' OR content LIKE '<!-- compacted_range:%')",[conversation])?;
     conn.execute("UPDATE butler_goal_question SET state='superseded' WHERE conversation_id=?1 AND state='waiting'",[conversation])?;
@@ -77,7 +97,7 @@ pub fn apply_in_transaction(conn:&Connection,conversation:i64,intent:&str,text:&
       INSERT OR IGNORE INTO butler_goal_stale_message(message_id,revision)
       SELECT m.id,t.revision FROM message m JOIN old_turns t ON m.id=t.id WHERE m.conversation_id=?1
       AND m.message_type IN ('response','assistant') AND m.finish_time IS NULL",[conversation])?;
-    current(conn,conversation)
+    Ok(())
 }
 pub fn bind_turn(conn:&Connection,conversation:i64,message:i64,revision:i64)->Result<()> {
     schema(conn)?; conn.execute("INSERT OR REPLACE INTO butler_goal_turn VALUES(?1,?2,?3)",params![message,conversation,revision])?; Ok(())

@@ -145,7 +145,7 @@ fn test_memory_recall_and_plan_reach_old_memories_behind_many_newer_ones() {
     assert_eq!(ids(&recall(&conn, Viewer::Assistant(1), "部署流程").unwrap()), vec![old.id]);
     let initial = plan_for(&conn, "部署流程怎么走", &Injected::default(), PROMPT_BUDGET_CHARS);
     assert_eq!(initial.listed[0].id, old.id, "首次附带按相关度挑，不受新旧限制");
-    let injected = Injected { initial: true, as_of: now() + 1_000, revisions: HashMap::new() };
+    let injected = Injected { initial: true, as_of: now() + 1_000, ..Default::default() };
     let topped_up = plan_for(&conn, "部署流程怎么走", &injected, PROMPT_BUDGET_CHARS);
     assert_eq!(ids(&topped_up.listed), vec![old.id], "相关的旧记忆照样补带");
     assert_eq!(topped_up.omitted, 600);
@@ -201,6 +201,7 @@ fn test_memory_plan_tops_up_relevant_old_memories_left_out_by_budget() {
         initial: true,
         as_of: now() + 1_000,
         revisions: HashMap::from([(first.listed[0].id, Some(first.listed[0].revision))]),
+        ..Default::default()
     };
     // 没附带过、也不相关：不补带，避免每轮把无关记忆逐条塞进历史。
     let unrelated = plan_for(&conn, "今天天气", &injected, 200);
@@ -220,6 +221,7 @@ fn test_memory_plan_updates_ignore_budget_and_report_removals() {
         initial: true,
         as_of: now() + 1_000,
         revisions: HashMap::from([(long.id, Some(long.revision)), (999, Some(1)), (998, None)]),
+        ..Default::default()
     };
     update(&conn, Some(Viewer::Assistant(1)), long.id, None, &"新".repeat(250), None).unwrap();
     let delta = plan_for(&conn, "任意", &injected, 10);

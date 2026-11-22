@@ -7,7 +7,7 @@ import { appearanceKey, defaultAppearance, parseAppearance } from "@/components/
 
 export default function AssistantAvatarSettings({ id, name }: { id: number; name: string }) {
     const [editing, setEditing] = useState(false);
-    const { featureConfig, loading, loadFeatureConfig, saveFeatureConfig } = useFeatureConfig();
+    const { featureConfig, loading, saveFeatureConfig } = useFeatureConfig();
     const appearance = parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(id))) ?? defaultAppearance;
     return <section className="space-y-3" aria-label="助手头像">
         <h3 className="text-sm font-medium">头像</h3>
@@ -18,9 +18,7 @@ export default function AssistantAvatarSettings({ id, name }: { id: number; name
         {editing && <ButlerProfileDialog appearanceOnly name={name} appearance={appearance}
             onClose={() => setEditing(false)} onSave={async (_, next) => {
                 try {
-                    const latest = await loadFeatureConfig();
                     await saveFeatureConfig("butler_appearance", {
-                        ...Object.fromEntries(latest.get("butler_appearance") ?? []),
                         [appearanceKey(id)]: JSON.stringify(next),
                     });
                 } catch (error) {

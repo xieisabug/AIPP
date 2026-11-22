@@ -40,10 +40,56 @@ pub struct SummaryTriggerResult {
 
 #[tauri::command]
 pub async fn get_all_feature_config(
+    app_handle: tauri::AppHandle,
     state: State<'_, FeatureConfigState>,
 ) -> Result<Vec<FeatureConfig>, String> {
-    let configs = state.configs.lock().await;
-    Ok(configs.clone())
+    let mut configs = state.configs.lock().await.clone();
+    let path = crate::db::get_db_path(&app_handle, "assistant.db")?;
+    let db = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+    let mut foreign_keys = db
+        .prepare("SELECT key FROM assistant_appearance_foreign_legacy")
+        .map_err(|e| e.to_string())?;
+    let foreign = foreign_keys
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()
+        .map_err(|e| e.to_string())?;
+    configs.retain(|c| c.feature_code != "butler_appearance" || !foreign.contains(&c.key));
+    let mut query = db.prepare("SELECT a.id,a.created_time,p.value FROM assistant a LEFT JOIN assistant_appearance p ON p.assistant_id=a.id")
+        .map_err(|e| format!("读取助手形象失败: {e}"))?;
+    let mut rows = query.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+        let created: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+        let value: Option<String> = row.get(2).map_err(|e| e.to_string())?;
+        let key = format!("butler_appearance_{id}");
+        if let Some(value) = value {
+            configs.retain(|c| c.feature_code != "butler_appearance" || c.key != key);
+            configs.push(FeatureConfig {
+                id: None,
+                feature_code: "butler_appearance".into(),
+                key,
+                value,
+                data_type: "string".into(),
+                description: None,
+            });
+        }
+        let seed = created
+            .unwrap_or_default()
+            .bytes()
+            .fold(0u32, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(byte as u32)
+            });
+        configs.push(FeatureConfig {
+            id: None,
+            feature_code: "butler_appearance".into(),
+            key: format!("palette_{id}"),
+            value: seed.to_string(),
+            data_type: "string".into(),
+            description: None,
+        });
+    }
+    Ok(configs)
 }
 
 #[tauri::command]
@@ -53,6 +99,54 @@ pub async fn save_feature_config(
     feature_code: String,
     config: HashMap<String, String>,
 ) -> Result<(), String> {
+    if feature_code == "butler_appearance" {
+        let system = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        {
+            let path = crate::db::get_db_path(&app_handle, "assistant.db")?;
+            let db = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
+            let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+            for (key, value) in &config {
+                if key == "butler_appearance_chief" {
+                    system.conn.execute("INSERT INTO feature_config(feature_code,key,value,data_type,description) VALUES('butler_appearance',?1,?2,'string','')
+                        ON CONFLICT(feature_code,key) DO UPDATE SET value=excluded.value", rusqlite::params![key,value]).map_err(|e|e.to_string())?;
+                } else {
+                    let id = key
+                        .strip_prefix("butler_appearance_")
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .ok_or("助手形象缺少有效的助手编号")?;
+                    let changed = tx.execute("INSERT INTO assistant_appearance(assistant_id,value) SELECT id,?2 FROM assistant WHERE id=?1
+                        ON CONFLICT(assistant_id) DO UPDATE SET value=excluded.value", rusqlite::params![id,value]).map_err(|e|e.to_string())?;
+                    if changed == 0 {
+                        return Err(format!("助手 {id} 已不存在"));
+                    }
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        if config.contains_key("butler_appearance_chief") {
+            let mut configs = state.configs.lock().await;
+            configs.retain(|c| {
+                !(c.feature_code == feature_code && c.key == "butler_appearance_chief")
+            });
+            let chief = system
+                .get_feature_config(&feature_code, "butler_appearance_chief")
+                .map_err(|e| e.to_string())?
+                .ok_or("总管家形象保存后缺失")?;
+            state
+                .config_feature_map
+                .lock()
+                .await
+                .entry(feature_code)
+                .or_default()
+                .insert(chief.key.clone(), chief.clone());
+            configs.push(chief);
+        }
+        app_handle
+            .emit("feature_config_changed", ())
+            .map_err(|e| e.to_string())?;
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+        return Ok(());
+    }
     let config = if feature_code == "experimental" {
         crate::api::butler_api::normalize_butler_experimental_config(&config)?
     } else {

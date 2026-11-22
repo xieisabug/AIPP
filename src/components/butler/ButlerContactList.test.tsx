@@ -1,8 +1,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import ButlerContactList from "./ButlerContactList";
 
+import { mockInvokeHandler } from "@/__tests__/mocks/tauri";
+
 describe("ButlerContactList", () => {
+    beforeEach(() => { mockInvokeHandler("get_butler_contact_order", () => []); });
     it("should open settings from the top-left of the contact list", () => {
         const onOpenSettings = vi.fn();
         render(<ButlerContactList

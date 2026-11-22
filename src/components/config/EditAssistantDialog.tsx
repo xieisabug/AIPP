@@ -49,13 +49,11 @@ const EditAssistantDialog: React.FC<EditAssistantDialogProps> = ({
         onSave={async (name, appearance, description) => {
             let detailsSaved = false;
             try {
-                const latest = await loadFeatureConfig();
                 const updated = { ...currentAssistant, assistant: { ...currentAssistant.assistant, name, description: description ?? "" } };
                 await onSave(updated);
                 detailsSaved = true;
                 onAssistantUpdated(updated);
                 await saveFeatureConfig("butler_appearance", {
-                    ...Object.fromEntries(latest.get("butler_appearance") ?? []),
                     [appearanceKey(id)]: JSON.stringify(appearance),
                 });
                 toast.success("名字、描述与形象已保存");

@@ -28,15 +28,21 @@ fn fresh_install() -> Connection {
     for tool in &tools {
         mcp.upsert_mcp_server_tool(server, &tool.name, Some(&tool.description), Some(&tool.input_schema.to_string())).unwrap();
     }
-    let conn = mcp.conn;
+    let skills = crate::db::skill_db::SkillDatabase { conn: mcp.conn };
+    skills.create_tables().unwrap();
+    let conn = skills.conn;
     // Conversation/artifact tables start empty on a fresh install.
+    crate::db::conversation_db::ensure_conversation_table(&conn).unwrap();
     conn.execute_batch("
-        CREATE TABLE IF NOT EXISTS conversation(id INTEGER PRIMARY KEY, name TEXT, assistant_id INTEGER, parent_butler_conversation_id INTEGER);
+        CREATE TABLE butler_main_state(id INTEGER PRIMARY KEY, slot TEXT UNIQUE, butler_conversation_id INTEGER);
         CREATE TABLE IF NOT EXISTS message(id INTEGER PRIMARY KEY, conversation_id INTEGER, message_type TEXT, content TEXT, finish_time TEXT);
         CREATE TABLE IF NOT EXISTS message_attachment(id INTEGER PRIMARY KEY, message_id INTEGER);
         CREATE TABLE IF NOT EXISTS conversation_summary(id INTEGER PRIMARY KEY, conversation_id INTEGER);
         CREATE TABLE IF NOT EXISTS conversation_todo(id INTEGER PRIMARY KEY, conversation_id INTEGER);
         CREATE TABLE IF NOT EXISTS artifacts_collection(id INTEGER PRIMARY KEY, name TEXT, assistant_id INTEGER);").unwrap();
+    crate::db::butler_group::schema(&conn).unwrap();
+    crate::db::butler_memory::schema(&conn).unwrap();
+    crate::db::butler_goal::initialize_sync_schema(&conn).unwrap();
     conn
 }
 

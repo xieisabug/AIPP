@@ -10,16 +10,17 @@ const colors = ["#246bd5", "#bb3156", "#9353ba", "#147764", "#9a612e", "#5365a9"
  */
 export default function ButlerAvatar({ id, chief = false, size = 32, appearance, figure = false, ...animation }: { id: number; chief?: boolean; size?: number; appearance?: ButlerAppearance; figure?: boolean } & Omit<AnimatedAvatarProps, "appearance" | "size">) {
     const appearances = useContext(ButlerAppearanceContext);
+    const palette = Number(appearances.get(`palette_${id}`) ?? Math.abs(id)) % colors.length;
     const selected = appearance ?? parseAppearance(appearances.get(appearanceKey(chief ? undefined : id))) ?? (chief ? defaultAppearance : figure || animation.animated ? {
         ...defaultAppearance, shape: "pebble" as const,
-        colors: { primary: colors[Math.abs(id) % colors.length], secondary: colors[Math.abs(id) % colors.length] },
+        colors: { primary: colors[palette], secondary: colors[palette] },
     } : undefined);
     if (selected) {
         return <AnimatedAvatar key={selected.shape} appearance={selected} size={size} {...animation} />;
     }
 
     return <span aria-hidden="true" className="butler-avatar relative inline-flex shrink-0 items-center justify-center"
-        style={{ width: size, height: size, backgroundColor: colors[Math.abs(id) % colors.length] }}>
+        style={{ width: size, height: size, backgroundColor: colors[palette] }}>
         <span className="butler-eyes" />
     </span>;
 }

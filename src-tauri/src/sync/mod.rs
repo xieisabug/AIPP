@@ -25,6 +25,8 @@ use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 
 mod divergence;
 mod incremental;
+mod butler;
+pub(crate) mod butler_order;
 #[cfg(test)]
 mod incremental_tests;
 mod persistence;
@@ -344,7 +346,7 @@ struct RemoteStatus {
 }
 
 fn specs() -> Vec<SyncTableSpec> {
-    vec![
+    let mut specs = vec![
         SyncTableSpec {
             db_name: "llm.db",
             table: "llm_provider",
@@ -683,7 +685,9 @@ fn specs() -> Vec<SyncTableSpec> {
             where_clause: None,
             order_by: "id",
         },
-    ]
+    ];
+    specs.extend(butler::specs());
+    specs
 }
 
 pub fn start_worker_from_config(app_handle: AppHandle) {
@@ -1348,6 +1352,8 @@ async fn run_sync_once_inner(
         }
         ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty)?;
     }
+    butler::migrate_appearances(app_handle, &settings, token, &device_id, cancel).await?;
+    butler::backfill(app_handle, &settings, token, &device_id, cancel).await?;
     if get_sync_meta(&open_sync_db(app_handle)?, "new_target_pull_pending")?.as_deref() == Some("1") {
         // Capture local edits first, then learn target identities/keys before pushing.
         // The flag survives interruption; old-target receipts are never reused.
@@ -1780,6 +1786,7 @@ impl SyncUiDomains {
         for object_type in types {
             match object_type.as_str() {
                 "assistant" => domains.assistant = true,
+                "assistant.appearance" => domains.feature = true,
                 "conversation" => domains.conversation = true,
                 "system.feature_config" => domains.feature = true,
                 "artifacts.collection" => domains.artifacts = true,
@@ -1802,6 +1809,11 @@ async fn emit_sync_domain_events(app_handle: &AppHandle, types: &HashSet<String>
     let emit = |event: &str, result: tauri::Result<()>| {
         result.map_err(|error| format!("同步后广播 {event} 失败: {error}"))
     };
+    for (kind, event) in [("conversation.butler_memory", "butler_memory_changed"), ("conversation.butler_main", "butler_main_slot_changed")] {
+        if types.contains(kind) {
+            if let Err(error) = emit(event, app_handle.emit(event, ())) { errors.push(error); }
+        }
+    }
     if domains.feature {
         let result = async {
             let state = app_handle.state::<crate::FeatureConfigState>();
@@ -2492,6 +2504,11 @@ fn read_snapshot_rows(
         }
 
         let local_id = local_id.ok_or_else(|| format!("{} row missing id", spec.table))?;
+        let scoped;
+        let spec = if spec.object_type == "conversation.butler_memory" {
+            scoped = butler::memory_spec(spec, fields.get("scope_type").and_then(JsonValue::as_str))?;
+            &scoped
+        } else { spec };
         record_refs(local_id, &raw_values);
         if spec.object_type == vault::OBJECT_TYPE {
             fields.insert("vault_local_id".into(), raw_values.get("server_id").cloned().unwrap_or(JsonValue::Null));
@@ -2547,6 +2564,10 @@ fn read_snapshot_rows(
         // 无论本行是否因外键未决而跳过，都要计入 present 集合，
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
+        if butler::numeric_appearance(spec.object_type, &fields) {
+            // Retain legacy rows for migration without publishing a device-local assistant ID.
+            continue;
+        }
 
         let Some(mut refs) = build_fk_refs(
             spec,
@@ -2583,6 +2604,7 @@ fn read_snapshot_rows(
             refs.insert("value_provider_id".into(), json!(provider_sync_id));
         }
 
+        butler::encode_positions(conn, spec.object_type, &mut fields, &mut refs)?;
         let payload = json!({ "fields": fields, "refs": refs });
         let payload_json =
             serde_json::to_string(&payload).map_err(|e| format!("serialize payload: {e}"))?;
@@ -2662,6 +2684,11 @@ fn orphan_cleanup_deletes_row(object_type: &str, column: &str) -> bool {
             | ("assistant.model_config", "assistant_id")
             | ("assistant.model_config", "assistant_model_id")
             | ("assistant.prompt", "assistant_id")
+            | ("assistant.skill" | "assistant.prompt_param", "assistant_id")
+            | ("assistant.prompt_param", "assistant_prompt_id")
+            | ("conversation.butler_main", "butler_conversation_id")
+            | ("conversation.butler_goal", "conversation_id")
+            | ("conversation.butler_memory", "scope_id")
             | ("assistant.mcp_config", "assistant_id")
             | ("assistant.mcp_tool_config", "assistant_id")
     )
@@ -2741,7 +2768,18 @@ fn scan_or_null_dangling_local_fks(
     // multiple structural FKs on the same owned row are dangling).
     let mut delete_ids: HashMap<&'static str, std::collections::HashSet<i64>> = HashMap::new();
 
-    for spec in specs() {
+    // Memory ownership depends on each row's scope. The maintenance scan must use
+    // the same parent type as the upload and restore paths.
+    let mut cleanup_specs = specs();
+    if let Some(index) = cleanup_specs.iter().position(|s| s.object_type == "conversation.butler_memory") {
+        let memory = cleanup_specs.remove(index);
+        for (scope, predicate) in [("assistant", "scope_type='assistant'"), ("group", "scope_type='group'"), ("global", "scope_type='global'")] {
+            let mut scoped = butler::memory_spec(&memory, Some(scope))?;
+            scoped.where_clause = Some(predicate);
+            cleanup_specs.push(scoped);
+        }
+    }
+    for spec in cleanup_specs {
         if spec.foreign_keys.is_empty() {
             continue;
         }
@@ -2861,6 +2899,10 @@ fn scan_or_null_dangling_local_fks(
                 if to_delete.contains(&local_id) {
                     continue;
                 }
+                if spec.object_type == "conversation.butler_memory" && column == "source_group_id" {
+                    tx.execute("UPDATE butler_memory SET source_group_id=NULL, source_group_seq=NULL WHERE id=?1", [local_id]).map_err(|e|e.to_string())?;
+                    continue;
+                }
                 tx.execute(
                     &format!("UPDATE {} SET {} = NULL WHERE id = ?1", spec.table, column),
                     params![local_id],
@@ -2960,7 +3002,12 @@ fn required_sync_owner(object_type: &str, column: &str) -> bool {
     (orphan_cleanup_deletes_row(object_type, column)
         && !(object_type == "assistant.model_config" && column == "assistant_model_id"))
         || matches!((object_type, column),
-            ("assistant.model", "provider_id")
+            ("assistant.appearance", "assistant_id")
+            | ("conversation.group_member", "group_id" | "conversation_id")
+            | ("conversation.group_turn", "group_id" | "member_id")
+            | ("conversation.group_message", "group_id")
+            | ("conversation.read_reply" | "conversation.read_group_reply", "message_id")
+            | ("assistant.model", "provider_id")
             | ("mcp.server_tool", "server_id")
             | ("mcp.app_connection", "server_id")
             | ("mcp.vault_secret", "server_id")
@@ -3274,7 +3321,7 @@ fn apply_change_to_db(
     conn: &Connection,
     spec: &SyncTableSpec,
     change: &PullChange,
-    _local_device_id: &str,
+    local_device_id: &str,
     before_message_insert: impl FnMut(&mut Map<String, JsonValue>) -> Result<(), String>,
 ) -> Result<(), String> {
     persistence::recover(sync_conn, conn)?;
@@ -3285,6 +3332,9 @@ fn apply_change_to_db(
             .map_err(|e| format!("sync delete {} object={}: {e}", spec.object_type, change.object_id))?)
     } else { None };
     persistence::coordinated(sync_conn, conn, || {
+        if change.device_id != local_device_id && butler::legacy_appearance(change) {
+            return upsert_shadow_from_remote(sync_conn,change);
+        }
         apply_change_to_db_inner(sync_conn, conn, spec, change, before_message_insert)
     })
 }
@@ -3368,6 +3418,11 @@ fn apply_change_to_db_inner(
         .and_then(JsonValue::as_object)
         .ok_or_else(|| "remote payload missing fields".to_string())?;
     let refs = payload.get("refs").and_then(JsonValue::as_object).cloned().unwrap_or_default();
+    let scoped;
+    let spec = if spec.object_type == "conversation.butler_memory" {
+        scoped = butler::memory_spec(spec, fields.get("scope_type").and_then(JsonValue::as_str))?;
+        &scoped
+    } else { spec };
     let mut field_values = fields.clone();
     resolve_remote_foreign_keys(&spec, &mut field_values, &refs, |object_type, ref_object_id| {
         find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
@@ -3381,6 +3436,10 @@ fn apply_change_to_db_inner(
     if spec.object_type == secrets::OBJECT_TYPE {
         return secrets::apply_upsert(sync_conn, conn, spec, change, &field_values);
     }
+
+    butler::prepare_group_parent(conn, spec, &field_values)?;
+    butler::decode_positions(conn, spec.object_type, &mut field_values, &refs)?;
+    butler::merge_member(sync_conn,conn,change,&mut field_values)?;
 
     if quick_assistant::apply_model(sync_conn, conn, spec, change, &field_values)? {
         return Ok(());
@@ -3421,6 +3480,7 @@ fn apply_change_to_db_inner(
         }
     }
 
+    let goal_changed = butler::prepare_intent(conn, spec.object_type, &mut field_values, merge_target)?;
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
         if change.object_type == "conversation.message" {
             // Streaming updates must stay with the message already placed in a fork.
@@ -3481,11 +3541,20 @@ fn apply_change_to_db_inner(
         }
     }
 
+    if goal_changed {
+        let conversation = field_as_i64(&field_values,"conversation_id").ok_or("管家目标缺少会话")?;
+        crate::db::butler_goal::invalidate_previous_goal(conn,conversation).map_err(|e|e.to_string())?;
+    }
     if spec.object_type == "conversation" && crate::db::conversation_identity::installed(conn).map_err(|err| err.to_string())? {
         if let Some(id) = find_local_id_by_object_id(sync_conn, "conversation", &change.object_id)? {
             let canonical = find_object_id(sync_conn, "conversation", id)?.ok_or("缺少会话同步映射")?;
             conn.execute("UPDATE conversation_identity SET uuid=?1 WHERE conversation_id=?2", params![canonical, id])
                 .map_err(|err| err.to_string())?;
+        }
+    }
+    if spec.object_type == "conversation" && field_values.get("conversation_kind").and_then(JsonValue::as_str) == Some("butler_group") {
+        if let Some(id) = find_local_id_by_object_id(sync_conn, "conversation", &change.object_id)? {
+            butler::ensure_room(conn, id)?;
         }
     }
     if spec.object_type == vault::CONNECTION_TYPE { vault_sync::connection_headers(conn)?; }
@@ -4301,7 +4370,7 @@ fn try_deterministic_child_object_id(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
 ) -> Result<Option<String>, String> {
-    if spec.unique_key_columns.is_empty() {
+    if spec.unique_key_columns.is_empty() || spec.object_type == "conversation.butler_memory" {
         return Ok(None);
     }
     let mut parent_sync_id: Option<String> = None;
@@ -4318,6 +4387,19 @@ fn try_deterministic_child_object_id(
             let Some(sync_id) = find_object_id(sync_conn, fk.object_type, local_fk)? else {
                 return Ok(None);
             };
+            if matches!(spec.object_type, "conversation.read_reply" | "conversation.read_group_reply") {
+                return Ok(Some(format!("read:{}", hash_text(&sync_id))));
+            }
+            if spec.object_type == "conversation.butler_goal" {
+                return Ok(Some(format!("goal:{}", hash_text(&sync_id))));
+            }
+            if spec.object_type == "assistant.skill" {
+                let skill = raw_values.get("skill_identifier").and_then(JsonValue::as_str).ok_or("缺少 Skill 标识")?;
+                return Ok(Some(format!("skill:{}", hash_text(&json!([sync_id,skill]).to_string()))));
+            }
+            if spec.object_type == "assistant.appearance" {
+                return Ok(Some(format!("appearance:{}", hash_text(&sync_id))));
+            }
             if !sync_id.starts_with("official:") {
                 return Ok(None);
             }
@@ -5706,7 +5788,7 @@ fn existing_columns(
     table: &str,
     desired: &[&str],
 ) -> Result<Vec<String>, String> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({table})")).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(1))
         .map_err(|e| e.to_string())?;

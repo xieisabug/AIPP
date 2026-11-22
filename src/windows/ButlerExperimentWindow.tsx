@@ -308,7 +308,6 @@ function ButlerExperimentWindow() {
             }
             nameSaved = true;
             await saveFeatureConfig("butler_appearance", {
-                ...Object.fromEntries(latest.get("butler_appearance") ?? []),
                 [appearanceKey(target.id)]: JSON.stringify(appearance),
             });
             toast.success(target.id === undefined ? "名字与形象已保存" : "助手资料与形象已保存");
@@ -325,6 +324,7 @@ function ButlerExperimentWindow() {
         const request = ++previewRequest.current;
         try {
             const rows = await invoke<ContactPreview[]>("list_butler_contact_previews");
+            await Promise.all(rows.map(row => butlerGroups.importLegacyRead(row.conversationId, false)));
             if (request === previewRequest.current) setPreviews(rows);
         } catch (error) {
             console.warn("读取联系人摘要失败", error);
@@ -351,18 +351,20 @@ function ButlerExperimentWindow() {
         const scheduled = listen("scheduled_task_delivered", schedule);
         const peer = listen("butler_peer_changed", schedule);
         const task = listen("butler_task_updated", schedule);
+        const sync = listen("conversation_data_changed", schedule);
+        const read = listen("butler_read_changed", schedule);
         return () => {
             disposed = true;
             clearTimeout(timer);
-            for (const listener of [activity, reply, scheduled, peer, task]) void listener.then(stop => stop()).catch(console.warn);
+            for (const listener of [activity, reply, scheduled, peer, task, sync, read]) void listener.then(stop => stop()).catch(console.warn);
         };
     }, [loadPreviews]);
     const focused = useFocusedWindow();
     const readingConversation = focused && !historyView && groupId === null ? Number(activeConversationId) : null;
     const activePreview = previews.find(row => row.conversationId === readingConversation);
     useEffect(() => {
-        if (activePreview?.replyId && document.hasFocus() && !document.hidden) {
-            localStorage.setItem(`butler-read-${activePreview.conversationId}`, String(activePreview.replyId));
+        if (activePreview?.unread && activePreview.replyId && document.hasFocus() && !document.hidden) {
+            void butlerGroups.markRepliesRead(activePreview.conversationId, activePreview.replyId, false).catch(console.warn);
         }
     }, [activePreview]);
     const selectContact = useCallback(async (assistant?: AssistantListItem) => {
@@ -399,15 +401,18 @@ function ButlerExperimentWindow() {
         if (!mainConversationId) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
         void loadGroups();
-        const subscription = butlerGroups.onButlerGroupChanged(() => {
+        const refresh = () => {
             clearTimeout(timer);
             timer = setTimeout(() => void loadGroups(), 150);
-        });
+        };
+        const subscription = butlerGroups.onButlerGroupChanged(refresh);
+        const sync = listen("conversation_data_changed", refresh);
+        const read = listen("butler_read_changed", refresh);
         window.addEventListener("focus", loadGroups);
         return () => {
             clearTimeout(timer);
             window.removeEventListener("focus", loadGroups);
-            void subscription.then(stop => stop()).catch(console.warn);
+            for (const listener of [subscription, sync, read]) void listener.then(stop => stop()).catch(console.warn);
         };
     }, [mainConversationId, loadGroups]);
     const [searchOpen, setSearchOpen] = useState(false);
@@ -735,11 +740,16 @@ function ButlerExperimentWindow() {
                 setLoadError(message);
             }
         } finally {
-            if (showLoading && requestId === mainLoadRequestRef.current) {
+            if (requestId === mainLoadRequestRef.current) {
                 setLoadingMain(false);
             }
         }
     }, [applyMainConversationResult]);
+
+    useEffect(() => {
+        const subscription = listen("butler_main_slot_changed", () => void loadMainConversation());
+        return () => { void subscription.then(stop => stop()).catch(console.warn); };
+    }, [loadMainConversation]);
 
     useEffect(() => {
         resettingMainConversationRef.current = resettingMainConversation;

@@ -1,15 +1,37 @@
 import { GripVertical } from "lucide-react";
-import { useState, type PointerEvent, type ReactNode } from "react";
+import { useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 
 interface Row { id: string; label: string; content: ReactNode }
 
-/** The chief stays outside this list. Only an explicit move writes the local preference. */
-export default function ButlerSortableList({ rows, storageKey }: { rows: Row[]; storageKey: string }) {
-    const [saved, setSaved] = useState<string[]>(() => {
-        try {
-            const ids: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
-            return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
-        } catch { return []; }
+const legacyKey = "butler-contact-order";
+function readLegacy(): string[] {
+    try {
+        const ids: unknown = JSON.parse(localStorage.getItem(legacyKey) ?? "[]");
+        return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && /^(assistant|group):[1-9]\d*$/.test(id)) : [];
+    } catch { return []; }
+}
+
+export default function ButlerSortableList({ rows }: { rows: Row[] }) {
+    const [saved, setSaved] = useState<string[]>(readLegacy);
+    const [loaded, setLoaded] = useState(false);
+    const writes = useRef(Promise.resolve());
+    const revision = useRef(0);
+    const refresh = useDataRefresh({
+        events: ["feature_config_changed", "assistant_list_changed", "conversation_data_changed"],
+        initial: true,
+        refresh: async isCurrent => {
+            const version = revision.current;
+            await writes.current;
+            const legacy = readLegacy();
+            const order = await invoke<string[]>("get_butler_contact_order", { legacy });
+            if (!isCurrent() || version !== revision.current) return;
+            setSaved(order);
+            setLoaded(true);
+            if (legacy.length) localStorage.removeItem(legacyKey);
+        },
     });
     const [target, setTarget] = useState<{ id: string; after: boolean } | null>(null);
     const byId = new Map(rows.map(row => [row.id, row]));
@@ -19,8 +41,12 @@ export default function ButlerSortableList({ rows, storageKey }: { rows: Row[]; 
         if (id === to || !byId.has(id) || !byId.has(to)) return;
         const next = ordered.filter(key => key !== id);
         next.splice(next.indexOf(to) + Number(after), 0, id);
+        if (next.every((key, index) => key === ordered[index])) return;
+        const version = ++revision.current;
         setSaved(next);
-        try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* Keep the session order. */ }
+        writes.current = writes.current.then(() => invoke<void>("save_butler_contact_order", { order: next }))
+            .catch(error => toast.error(`保存联系人顺序失败：${String(error)}`))
+            .then(() => { if (version === revision.current) refresh(); });
     }
 
     function destination(event: PointerEvent<HTMLButtonElement>) {
@@ -38,7 +64,7 @@ export default function ButlerSortableList({ rows, storageKey }: { rows: Row[]; 
         return <div key={id} data-butler-sort-id={id} className="group/sort relative flex items-center">
             <div className="min-w-0 flex-1">{row.content}</div>
             {ordered.length > 1 &&
-            <button type="button" aria-label={`调整顺序：${row.label}`}
+            <button type="button" disabled={!loaded} aria-label={`调整顺序：${row.label}`}
                 title="拖动排序，也可用上下方向键移动"
                 className="shrink-0 touch-none cursor-grab rounded px-0.5 py-2 text-muted-foreground opacity-0 hover:bg-muted group-hover/sort:opacity-100 focus-visible:opacity-100 active:cursor-grabbing [@media(hover:none)]:opacity-100"
                 onPointerDown={event => { if (event.button === 0 && event.isPrimary) event.currentTarget.setPointerCapture(event.pointerId); }}

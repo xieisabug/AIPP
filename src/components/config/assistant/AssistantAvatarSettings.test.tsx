@@ -22,7 +22,7 @@ describe("AssistantAvatarSettings", () => {
         fireEvent.click(screen.getByRole("button", { name: /^保存$/ }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_feature_config", expect.objectContaining({
             featureCode: "butler_appearance",
-            config: { butler_appearance_9: "other-avatar", butler_appearance_5: expect.stringContaining('"eyes":"round-glasses"') },
+            config: { butler_appearance_5: expect.stringContaining('"eyes":"round-glasses"') },
         })));
         expect(invoke.mock.calls.some(([command]) => command === "save_assistant")).toBe(false);
         await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());

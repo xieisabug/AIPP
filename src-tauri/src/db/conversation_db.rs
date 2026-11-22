@@ -305,7 +305,7 @@ impl ConversationRepository {
     }
 
     // 与简洁聊天一致，协作输入决定这一轮的最终答复是否面向用户。
-    const PUBLIC_BUTLER_REPLY: &'static str = "r.finish_time IS NOT NULL
+    pub(crate) const PUBLIC_BUTLER_REPLY: &'static str = "r.finish_time IS NOT NULL
         AND r.message_type IN ('assistant','response') AND trim(r.content) NOT IN ('','[[NO_REPLY]]')
         AND r.content NOT LIKE '%<!-- MCP_TOOL_CALL%' AND r.content NOT LIKE '%<mcp_tool_call%'
         AND coalesce(r.tool_calls_json,'') IN ('','[]','null')
@@ -330,7 +330,9 @@ impl ConversationRepository {
                         CASE WHEN c.id=e.owner THEN e.recipient ELSE e.sender END || '：' ||
                         CASE WHEN p.leg='request' THEN e.body ELSE e.reply END,1,140)
                     ELSE substr({visible},1,140) END,
-                    (SELECT max(r.id) FROM message r WHERE r.conversation_id=c.id AND {reply})
+                    (SELECT max(r.id) FROM message r WHERE r.conversation_id=c.id AND {reply}),
+                    EXISTS(SELECT 1 FROM message r WHERE r.conversation_id=c.id AND {reply}
+                        AND NOT EXISTS(SELECT 1 FROM butler_read_reply seen WHERE seen.message_id=r.id))
              FROM conversation c LEFT JOIN message m ON m.id=(
                  SELECT id FROM message WHERE conversation_id=c.id
                    AND message_type IN ('user','assistant','response') AND trim(content) NOT IN ('','[[NO_REPLY]]')
@@ -347,7 +349,7 @@ impl ConversationRepository {
         ))?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({
             "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
-            "messageId":row.get::<_,Option<i64>>(2)?, "replyId":row.get::<_,Option<i64>>(4)?,
+            "messageId":row.get::<_,Option<i64>>(2)?, "replyId":row.get::<_,Option<i64>>(4)?, "unread":row.get::<_,bool>(5)?,
             // 助手引用回复的标记只在聊天里显示成引用，摘要只显示正文。
             "preview":row.get::<_,Option<String>>(3)?.map(|text| crate::utils::reply_quote::strip(&text).to_string()),
         })))?;
@@ -2366,6 +2368,7 @@ impl ConversationDatabase {
         super::token_stats::schema(&conn)?;
         super::butler_work::schema(&conn)?;
         super::butler_memory::schema(&conn)?;
+        super::butler_goal::initialize_sync_schema(&conn)?;
 
         Ok(())
     }

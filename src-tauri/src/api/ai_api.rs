@@ -1514,6 +1514,7 @@ pub async fn ask_ai(
                     None => crate::db::butler_goal::accept_natural_message(&conn, id, &request.prompt),
                 }.map_err(|e| AppError::UnknownError(e.to_string()))?;
                 request.butler_goal_revision = goal.map(|g| g.revision);
+                crate::sync::schedule_sync_after_local_change(&app_handle);
             } else {
                 request.butler_goal_revision=crate::db::butler_goal::current_revision(&conn,id).map_err(|e|AppError::UnknownError(e.to_string()))?;
                 if request.butler_goal_revision.is_none() {

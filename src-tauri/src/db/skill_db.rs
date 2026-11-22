@@ -194,30 +194,20 @@ impl SkillDatabase {
         assistant_id: i64,
         configs: &[(String, bool, i32)], // (skill_identifier, is_enabled, priority)
     ) -> rusqlite::Result<()> {
-        // Start transaction
-        self.conn.execute("BEGIN TRANSACTION", [])?;
-
-        // Delete existing configs for this assistant
-        self.conn.execute(
-            "DELETE FROM assistant_skill_config WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
-
-        // Insert new configs
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO assistant_skill_config 
-             (assistant_id, skill_identifier, is_enabled, priority)
-             VALUES (?, ?, ?, ?)",
-        )?;
-
-        for (skill_identifier, is_enabled, priority) in configs {
-            stmt.execute(params![assistant_id, skill_identifier, is_enabled, priority])?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut retained = std::collections::HashSet::new();
+        for (identifier, enabled, priority) in configs {
+            if !retained.insert(identifier.as_str()) {
+                return Err(rusqlite::Error::InvalidParameterName(format!("重复的 Skill 标识 {identifier}")));
+            }
+            self.upsert_assistant_skill_config(assistant_id, identifier, *enabled, *priority)?;
         }
-
-        // Commit transaction
-        self.conn.execute("COMMIT", [])?;
-
-        Ok(())
+        for existing in self.get_assistant_skill_configs(assistant_id)? {
+            if !retained.contains(existing.skill_identifier.as_str()) {
+                tx.execute("DELETE FROM assistant_skill_config WHERE id=?1", [existing.id])?;
+            }
+        }
+        tx.commit()
     }
 
     /// Get all unique skill identifiers that are configured (for validation)
@@ -325,6 +315,12 @@ mod tests {
             ("aipp:new_skill2".to_string(), false, 1),
         ];
         db.bulk_update_assistant_skills(1, &new_configs).unwrap();
+
+        let first = db.get_assistant_skill_configs(1).unwrap();
+        db.bulk_update_assistant_skills(1, &new_configs).unwrap();
+        assert_eq!(db.get_assistant_skill_configs(1).unwrap()[0].id, first[0].id);
+        let duplicate = vec![("aipp:temporary".to_string(), true, 0); 2];
+        assert!(db.bulk_update_assistant_skills(1, &duplicate).is_err());
 
         // Verify
         let configs = db.get_assistant_skill_configs(1).unwrap();

@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
@@ -53,13 +54,15 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const loadedThrough = useRef(0);
     const revision = useRef(0);
 
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (replaceHistory = false) => {
+        if (replaceHistory) historyLoaded.current = false;
+        const loadFullHistory = !historyLoaded.current;
         const version = ++revision.current;
         try {
             const next = await groups.getButlerGroup(groupId);
             const pages: ButlerGroupMessage[][] = [next.messages];
             let before = next.messages[0]?.seq ?? 0;
-            while (next.has_more && before > 0 && (!historyLoaded.current || before > loadedThrough.current + 1)) {
+            while (next.has_more && before > 0 && (loadFullHistory || before > loadedThrough.current + 1)) {
                 if (version !== revision.current) return;
                 const page = await groups.listOlderButlerGroupMessages(groupId, before, HISTORY_PAGE_SIZE);
                 if (!page.length || page[0].seq >= before) break;
@@ -71,7 +74,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             const incoming = pages.reverse().flat();
             historyLoaded.current = true;
             loadedThrough.current = next.messages.at(-1)?.seq ?? loadedThrough.current;
-            setDetail(previous => ({ ...next, messages: mergeMessages(previous?.messages ?? [], incoming) }));
+            setDetail(previous => ({ ...next, messages: mergeMessages(loadFullHistory ? [] : previous?.messages ?? [], incoming) }));
             setLoadError("");
         } catch (error) {
             if (version === revision.current) setLoadError(String(error));
@@ -86,7 +89,12 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             clearTimeout(timer);
             timer = setTimeout(() => void refresh(), 80);
         });
+        const sync = listen("conversation_data_changed", () => {
+            clearTimeout(timer);
+            void refresh(true);
+        });
         return () => {
+            void sync.then(stop => stop()).catch(console.warn);
             clearTimeout(timer);
             ++revision.current;
             void subscription.then(stop => stop()).catch(() => {});
@@ -96,9 +104,19 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const messages = detail?.messages ?? [];
     const focused = useFocusedWindow();
     const lastSeq = messages.length ? messages[messages.length - 1].seq : 0;
+    const marked = useRef(new Set<number>());
+    useEffect(() => { marked.current = new Set(); }, [groupId]);
     useEffect(() => {
-        if (lastSeq && focused && document.hasFocus()) localStorage.setItem(groupReadKey(groupId), String(lastSeq));
-    }, [groupId, lastSeq, focused]);
+        if (!lastSeq || !focused || !document.hasFocus() || document.hidden) return;
+        const receipts = marked.current;
+        const visible = messages.filter(m => m.sender_member != null && m.kind === "message" && !receipts.has(m.seq)).map(m => m.seq);
+        if (!visible.length) return;
+        for (const seq of visible) receipts.add(seq);
+        void groups.markRepliesRead(groupId, lastSeq, true, visible).catch(error => {
+            for (const seq of visible) receipts.delete(seq);
+            console.warn("记录群聊已读失败", error);
+        });
+    }, [groupId, messages, lastSeq, focused]);
 
     const members = useMemo(() => detail?.members ?? [], [detail?.members]);
     const running = useMemo(() => {

@@ -82,7 +82,7 @@ describe("AddAssistantDialog wizard", () => {
         // 形象与编辑助手共用 butler_appearance 配置，保留其他助手已有的形象。
         await waitFor(() => expect(saveConfig).toHaveBeenCalledOnce());
         const config = (saveConfig.mock.calls[0][0] as { config: Record<string, string> }).config;
-        expect(config.butler_appearance_3).toBe("{}");
+        expect(config.butler_appearance_3).toBeUndefined(); // Saving one assistant leaves other devices’ settings untouched.
         expect(JSON.parse(config.butler_appearance_9)).toMatchObject({ accessories: { head: "beret" }, motion: true });
 
         const advanced = await screen.findByRole("region", { name: "高级配置" });

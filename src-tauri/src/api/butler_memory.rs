@@ -316,6 +316,7 @@ pub async fn tool(app: &AppHandle, conversation: i64, args: &Value) -> Result<Va
     let result = tokio::task::spawn_blocking(move || execute(&mut db.get_connection()?, conversation, anchor, &args))
         .await.context("记忆操作调度失败")??;
     if writing {
+        crate::sync::schedule_sync_after_local_change(app);
         let _ = app.emit(CHANGED_EVENT, ());
     }
     Ok(result)
@@ -418,9 +419,22 @@ fn read_memory_blocks(text: &str, seen: &mut memory::Injected) {
         if let Some(as_of) = crate::utils::turn_context::attribute(element, "as_of").and_then(|v| v.parse::<i64>().ok()) {
             seen.as_of = seen.as_of.max(as_of);
         }
-        for (id, revision) in element.lines().filter_map(parse_line) {
-            seen.saw(id, revision);
+        for line in element.lines() {
+            let Some((id, revision)) = parse_line(line) else { continue };
+            record_seen(seen, id, revision, line.split_once('：').map(|(_, text)| text));
         }
+    }
+}
+
+// Synced transcripts keep the original device's numeric handles. A later explicit
+// display records what the model actually saw for that handle on this device.
+fn record_seen(seen: &mut memory::Injected, id: i64, revision: Option<i64>, content: Option<&str>) {
+    seen.saw(id, revision);
+    if let (Some(version), Some(text)) = (revision, content) {
+        seen.last_contents.insert(id, text.replace('\n', " "));
+        seen.revisions.insert(id, Some(version));
+    } else if revision.is_none() {
+        seen.last_contents.remove(&id);
     }
 }
 
@@ -440,7 +454,7 @@ fn read_tool_result(content: &str, seen: &mut memory::Injected) {
 fn read_tool_value(value: &Value, seen: &mut memory::Injected) {
     fn saw_memory(memory: &Value, seen: &mut memory::Injected) {
         if let (Some(id), Some(revision)) = (memory["id"].as_i64(), memory["revision"].as_i64()) {
-            seen.saw(id, Some(revision));
+            record_seen(seen, id, Some(revision), memory["content"].as_str());
         }
     }
     match value {
@@ -457,7 +471,7 @@ fn read_tool_value(value: &Value, seen: &mut memory::Injected) {
                 Some("saved" | "already_exists" | "updated") => saw_memory(&value["memory"], seen),
                 Some("forgotten") => {
                     if let Some(id) = value["id"].as_i64() {
-                        seen.saw(id, None);
+                        record_seen(seen, id, None, None);
                     }
                 }
                 _ => {}
@@ -571,6 +585,7 @@ pub async fn update_butler_memory(app_handle: AppHandle, id: i64, content: Strin
         tx.commit()?;
         Ok(updated)
     }).await?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit(CHANGED_EVENT, ());
     Ok(updated)
 }
@@ -578,6 +593,7 @@ pub async fn update_butler_memory(app_handle: AppHandle, id: i64, content: Strin
 #[tauri::command]
 pub async fn delete_butler_memory(app_handle: AppHandle, id: i64, revision: Option<i64>) -> Result<bool, String> {
     let deleted = database(&app_handle, "删除", move |conn| memory::forget(conn, None, id, revision)).await?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit(CHANGED_EVENT, ());
     Ok(deleted)
 }
