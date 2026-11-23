@@ -13,7 +13,7 @@ const repository = process.env.GITHUB_REPOSITORY || "xieisabug/AIPP";
 const releaseTag = process.env.GITHUB_REF_NAME || "plugins-dev";
 const releaseBaseUrl = `https://github.com/${repository}/releases/download/${releaseTag}`;
 
-const optionalEntries = ["README.md", "README.MD", "readme.md", "LICENSE", "LICENSE.md", "assets"];
+const optionalEntries = ["README.md", "README.MD", "readme.md", "LICENSE", "LICENSE.md", "assets", "avatars", "accessories"];
 
 function toPosixPath(value) {
     return value.split(path.sep).join("/");
@@ -77,15 +77,17 @@ async function installPluginDependencies(pluginDir) {
 }
 
 async function copyRuntimePackage(pluginDir, packageDir, manifest, entryChecksum) {
+    const runtimeType = String(manifest.runtime?.type || "js").trim().toLowerCase();
+    const isDeclarative = runtimeType === "declarative";
     const runtime = {
         ...(manifest.runtime || {}),
-        type: manifest.runtime?.type || "js",
-        entry: manifest.runtime?.entry || manifest.entry || "dist/main.js",
-        checksum: entryChecksum,
+        type: runtimeType,
+        entry: manifest.runtime?.entry || manifest.entry || (isDeclarative ? "plugin.json" : "dist/main.js"),
+        ...(entryChecksum ? { checksum: entryChecksum } : {}),
     };
     const packagedManifest = {
         ...manifest,
-        entry: manifest.entry || runtime.entry,
+        ...(isDeclarative ? {} : { entry: manifest.entry || runtime.entry }),
         runtime,
     };
 
@@ -95,7 +97,9 @@ async function copyRuntimePackage(pluginDir, packageDir, manifest, entryChecksum
         `${JSON.stringify(packagedManifest, null, 2)}\n`,
         "utf8",
     );
-    await fs.cp(path.join(pluginDir, "dist"), path.join(packageDir, "dist"), { recursive: true });
+    if (!isDeclarative) {
+        await fs.cp(path.join(pluginDir, "dist"), path.join(packageDir, "dist"), { recursive: true });
+    }
 
     for (const entry of optionalEntries) {
         const source = path.join(pluginDir, entry);
@@ -115,16 +119,22 @@ async function packagePlugin(pluginDirName) {
         throw new Error(`Plugin directory and manifest code mismatch: ${pluginDirName} != ${code}`);
     }
 
-    await installPluginDependencies(pluginDir);
-    execFileSync("npm", ["--prefix", pluginDir, "run", "build"], { stdio: "inherit", shell: process.platform === "win32" });
+    const runtimeType = String(manifest.runtime?.type || "js").trim().toLowerCase();
+    const isDeclarative = runtimeType === "declarative";
 
-    const entry = manifest.runtime?.entry || manifest.entry || "dist/main.js";
-    const entryPath = path.join(pluginDir, ...entry.split("/"));
-    if (!(await pathExists(entryPath))) {
-        throw new Error(`Plugin entry does not exist: ${toPosixPath(path.relative(repoRoot, entryPath))}`);
+    let entryChecksum = null;
+    if (!isDeclarative) {
+        await installPluginDependencies(pluginDir);
+        execFileSync("npm", ["--prefix", pluginDir, "run", "build"], { stdio: "inherit", shell: process.platform === "win32" });
+
+        const entry = manifest.runtime?.entry || manifest.entry || "dist/main.js";
+        const entryPath = path.join(pluginDir, ...entry.split("/"));
+        if (!(await pathExists(entryPath))) {
+            throw new Error(`Plugin entry does not exist: ${toPosixPath(path.relative(repoRoot, entryPath))}`);
+        }
+        entryChecksum = await sha256File(entryPath);
     }
 
-    const entryChecksum = await sha256File(entryPath);
     const packageDir = path.join(stagingRoot, code);
     await fs.rm(packageDir, { recursive: true, force: true });
     await copyRuntimePackage(pluginDir, packageDir, manifest, entryChecksum);

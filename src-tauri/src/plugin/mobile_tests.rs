@@ -7,6 +7,10 @@ fn test_mobile_plugin_requires_declaration_and_known_dependencies() {
     assert!(declaration_issue(&manifest).is_none());
     manifest["runtime"]["type"] = "viewer".into();
     assert!(declaration_issue(&manifest).is_none(), "iframe viewer runtime runs no host code");
+    let declarative = serde_json::json!({"runtime":{"type":"declarative"},"contributions":{"avatars":["avatars/cat.json"]}});
+    assert!(declaration_issue(&declarative).is_none(), "declarative avatar plugins require no JS runtime");
+    let declarative_with_perm = serde_json::json!({"runtime":{"type":"declarative"},"permissions":["shell.execute"]});
+    assert!(declaration_issue(&declarative_with_perm).is_some());
     manifest["runtime"]["type"] = "process".into();
     assert!(declaration_issue(&manifest).is_some());
     manifest["runtime"]["type"] = "js".into();

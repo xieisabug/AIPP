@@ -1,0 +1,23 @@
+{
+  "id": "cute-pets-avatar-plugin",
+  "code": "cute-pets-avatar-plugin",
+  "name": "萌宠形象与配饰包",
+  "version": "0.1.0",
+  "description": "纯声明式助手形象与配饰示例插件：包含小猫、云朵熊两个多色矢量形象，以及星星眼镜、魔法帽两个配饰。",
+  "author": "AIPP",
+  "minAippVersion": "0.5.0",
+  "pluginTypes": ["avatarType"],
+  "runtime": {
+    "type": "declarative"
+  },
+  "contributions": {
+    "avatars": [
+      "avatars/orange-cat.json",
+      "avatars/cloud-bear.json"
+    ],
+    "accessories": [
+      "accessories/star-glasses.json",
+      "accessories/wizard-hat.json"
+    ]
+  }
+}

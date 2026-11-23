@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "star-glasses",
+  "label": "星星眼镜",
+  "description": "金色星形框架眼镜，支持悬浮摘戴动画",
+  "slot": "eyes",
+  "anchor": "face",
+  "followGaze": false,
+  "action": "glasses",
+  "previewViewBox": "-146 -70 292 140",
+  "layers": [
+    {
+      "type": "path",
+      "d": "M-128 -10 L-96 -6 M96 -6 L128 -10 M-18 -4 Q0 -14 18 -4",
+      "fill": "none",
+      "stroke": "#B87B14",
+      "strokeWidth": 9,
+      "strokeLinecap": "round"
+    },
+    {
+      "type": "path",
+      "d": "M-56 -48 L-41 -18 L-8 -13 L-32 10 L-26 42 L-56 26 L-86 42 L-80 10 L-104 -13 L-71 -18 Z",
+      "fill": "#FFE066",
+      "fillOpacity": 0.34,
+      "stroke": "#D9911A",
+      "strokeWidth": 8,
+      "strokeLinejoin": "round"
+    },
+    {
+      "type": "path",
+      "d": "M56 -48 L71 -18 L104 -13 L80 10 L86 42 L56 26 L26 42 L32 10 L8 -13 L41 -18 Z",
+      "fill": "#FFE066",
+      "fillOpacity": 0.34,
+      "stroke": "#D9911A",
+      "strokeWidth": 8,
+      "strokeLinejoin": "round"
+    },
+    {
+      "type": "circle",
+      "cx": -68,
+      "cy": -10,
+      "r": 5,
+      "fill": "#FFFFFF",
+      "opacity": 0.85
+    },
+    {
+      "type": "circle",
+      "cx": 44,
+      "cy": -10,
+      "r": 5,
+      "fill": "#FFFFFF",
+      "opacity": 0.85
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 import { useEffect, useId, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import type { ButlerAppearance } from "@/components/butler/butlerAppearance";
-import { actionDurations, avatarDefinitions, type AvatarAction, type AvatarState } from "./avatarDefinition";
+import { actionDurations, avatarDefinitions, type AvatarAction, type AvatarDefinition, type AvatarState } from "./avatarDefinition";
+import { useAvatarRegistrySnapshot } from "./avatarRegistry";
+import { DeclarativeArtwork, formatVectorTransform, type VectorColorPalette, type VectorLayer } from "./DeclarativeArtwork";
 import { BaseballCapArtwork, CrownArtwork, HeadphonesArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "./AvatarAccessories";
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
@@ -13,6 +15,8 @@ import { ConfettiOverlay, MorphParts } from "./AvatarEffects";
 
 export interface AnimatedAvatarProps {
     appearance: ButlerAppearance;
+    /** 仅用于插件中心等预览场景，允许在插件未启用时直接预览未注册的形象定义。 */
+    definitionOverride?: AvatarDefinition;
     size?: number;
     /** 紧凑模式：保留紧凑裁切与小幅度动作，即使尺寸放大到 48px 以上也不切换成全幅预览模式。 */
     compact?: boolean;
@@ -27,8 +31,30 @@ const smoothstep = (a: number, b: number, x: number) => { const t = Math.max(0, 
 /** 圆核与装饰的颜色：黑白（品牌默认）形象跟随前景色，保证深浅主题下都看得见；彩色形象沿用外圈色。 */
 export const coreColorOf = (appearance: ButlerAppearance) => /^#(000000|ffffff)$/i.test(appearance.colors.secondary) ? "currentColor" : appearance.colors.secondary;
 
-export default function AnimatedAvatar({ appearance, size = 32, compact, animated = false, state = "idle", actionRequest }: AnimatedAvatarProps) {
-    const definition = avatarDefinitions[appearance.shape];
+function renderClipShapes(layers: VectorLayer[]) {
+    return layers.map((layer, index) => {
+        const transform = formatVectorTransform(layer.transform);
+        switch (layer.type) {
+            case "path":
+                return layer.d ? <path key={index} d={layer.d} transform={transform} /> : null;
+            case "rect":
+                return <rect key={index} x={layer.x ?? 0} y={layer.y ?? 0} width={layer.width ?? 0} height={layer.height ?? 0} rx={layer.rx} ry={layer.ry} transform={transform} />;
+            case "circle":
+                return <circle key={index} cx={layer.cx ?? 0} cy={layer.cy ?? 0} r={layer.r ?? 0} transform={transform} />;
+            case "ellipse":
+                return <ellipse key={index} cx={layer.cx ?? 0} cy={layer.cy ?? 0} rx={layer.rx ?? 0} ry={layer.ry ?? 0} transform={transform} />;
+            default:
+                return null;
+        }
+    });
+}
+
+export default function AnimatedAvatar({ appearance, definitionOverride, size = 32, compact, animated = false, state = "idle", actionRequest }: AnimatedAvatarProps) {
+    const registry = useAvatarRegistrySnapshot();
+    const matchedDefinition = definitionOverride ?? registry.avatarMap.get(appearance.shape);
+    const definition = matchedDefinition ?? avatarDefinitions.pebble;
+    const isFallbackShape = !matchedDefinition;
+
     const id = useId().replace(/:/g, "");
     const ref = useRef<HTMLSpanElement>(null);
     const { active, action, sequence } = useAvatarMotion(ref, animated && appearance.motion, state, actionRequest, `${appearance.accessories.eyes}-${appearance.accessories.head}`, appearance.shape);
@@ -36,10 +62,17 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
     const performance = useAvatarPerformance(action ? "idle" : state, active, !full, id);
     const v = performance.values;
     const m = performance.morph;
+
     const faceItem = definition.capabilities.includes("eyes") ? appearance.accessories.eyes : null;
     const headItem = definition.capabilities.includes("headwear") ? appearance.accessories.head : null;
-    const glasses = faceItem === "round-glasses";
-    const hat = headItem === "beret" || headItem === "baseball-cap" || headItem === "baseball-cap-left";
+    const faceEntry = faceItem ? registry.accessoryMap.get(faceItem) : undefined;
+    const headEntry = headItem ? registry.accessoryMap.get(headItem) : undefined;
+    const pluginFaceAcc = faceEntry?.slot === "eyes" ? faceEntry.plugin : undefined;
+    const pluginHeadAcc = headEntry?.slot === "head" ? headEntry.plugin : undefined;
+
+    const glasses = faceItem === "round-glasses" || pluginFaceAcc?.action === "glasses";
+    const hat = headItem === "beret" || headItem === "baseball-cap" || headItem === "baseball-cap-left" || pluginHeadAcc?.action === "hat";
+
     // 与当前画幅中心对齐，佩戴头饰不改变身体的位置或大小。
     const morphCenterY = full ? 210 : 255;
     // 身体原地缩成圆核；绕竖轴的转身用 cos(spin) 压缩横向，半程正好侧对观众。
@@ -67,27 +100,38 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
     const performing = (name: AvatarAction, equipped: boolean) => active && full && equipped && action === name;
     const takingGlasses = performing("glasses", glasses);
     const hatTilt = headItem === "baseball-cap-left" ? 15 : -15;
-    const correctingCrown = headItem === "crown" && action === "straighten-crown";
+    const correctingCrown = (headItem === "crown" || pluginHeadAcc?.action === "straighten-crown") && action === "straighten-crown";
     const tippingHat = performing("hat", hat);
-    const peering = performing("peer", faceItem === "sunglasses");
-    const blushing = performing("blush", faceItem === "blush");
-    const jingling = performing("jingle", headItem === "bow-bell");
-    const fluttering = performing("butterfly", headItem === "flower");
-    const twirling = performing("twirl", faceItem === "mustache");
-    const flying = performing("fly", headItem === "rotor");
-    const swayingSprout = performing("sprout-sway", headItem === "sprout");
-    const dozing = performing("doze", headItem === "nightcap");
+    const peering = performing("peer", faceItem === "sunglasses" || pluginFaceAcc?.action === "peer");
+    const blushing = performing("blush", faceItem === "blush" || pluginFaceAcc?.action === "blush");
+    const jingling = performing("jingle", headItem === "bow-bell" || pluginHeadAcc?.action === "jingle");
+    const fluttering = performing("butterfly", headItem === "flower" || pluginHeadAcc?.action === "butterfly");
+    const twirling = performing("twirl", faceItem === "mustache" || pluginFaceAcc?.action === "twirl");
+    const flying = performing("fly", headItem === "rotor" || pluginHeadAcc?.action === "fly");
+    const swayingSprout = performing("sprout-sway", headItem === "sprout" || pluginHeadAcc?.action === "sprout-sway");
+    const dozing = performing("doze", headItem === "nightcap" || pluginHeadAcc?.action === "doze");
     const smiling = twirling || action === "smile" || action === "glasses" || blushing || fluttering;
     const blinking = action === "blink";
     // 装饰动作带动整个身体：摇头晃铃铛、害羞地扭一扭。
-    const listening = performing("listen", headItem === "headphones");
+    const listening = performing("listen", headItem === "headphones" || pluginHeadAcc?.action === "listen");
     const sway = correctingCrown ? { rotate: [0, 0, 0, 0, 0, -8, 3, -1, 0] } : listening ? { rotate: [0, -5, 4, -5, 4, 0] } : jingling ? { rotate: [0, -11, 10, -9, 8, -5, 3, 0] } : blushing ? { rotate: [0, -5, 4, -4, 3, 0] } : { rotate: 0 };
     const swayTransition = correctingCrown ? crownTiming : listening ? { duration: 1.6, ease: "easeInOut" as const } : jingling ? { duration: 1.7, ease: "easeInOut" as const } : blushing ? { duration: 2, ease: "easeInOut" as const } : { duration: 0.25 };
     const face = definition.face;
     const blossom = definition.id === "blossom";
     const codingFace = blossom && active && performance.playingState === "coding";
-    const faceColor = blossom ? "#FFFFFF" : definition.colorLabels.primary ? appearance.colors.primary : appearance.colors.secondary;
+    const faceColor = definition.faceColorSlot === "white"
+        ? "#FFFFFF"
+        : definition.faceColorSlot === "primary"
+            ? appearance.colors.primary
+            : definition.faceColorSlot === "secondary"
+                ? appearance.colors.secondary
+                : definition.colorLabels.primary ? appearance.colors.primary : appearance.colors.secondary;
     const coreColor = coreColorOf(appearance);
+    const palette: VectorColorPalette = {
+        primary: appearance.colors.primary,
+        secondary: appearance.colors.secondary,
+        core: coreColor,
+    };
     const dock = definition.propDock;
     const glassesPose = takingGlasses ? {
         x: [face.x, face.x + 12, dock.x, dock.x, face.x],
@@ -104,7 +148,36 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
         y: [0, 0, 0, -18, -18, -10, 0, 0, 0],
     }} transition={crownTiming}>{eyes}</SvgPose> : blossom ? <g opacity={codingFace ? 0 : 1} className="transition-opacity duration-150 motion-reduce:transition-none">{eyes}</g> : eyes;
 
-    return <span ref={ref} aria-hidden="true" data-avatar-shape={definition.id} data-avatar-state={performance.playingState}
+    const renderPluginHeadAccessory = () => {
+        if (!pluginHeadAcc) return null;
+        const artwork = <DeclarativeArtwork layers={pluginHeadAcc.layers} palette={palette} />;
+        let anchorTransform = `translate(${definition.crown.x} ${definition.crown.y}) scale(${definition.crown.scale})`;
+        if (pluginHeadAcc.anchor === "headphones") {
+            anchorTransform = `translate(${definition.headphones.x} ${definition.headphones.y}) scale(${definition.headphones.scale} ${definition.headphones.scaleY ?? definition.headphones.scale})`;
+        } else if (pluginHeadAcc.anchor === "clip") {
+            anchorTransform = `translate(${definition.clip.x} ${definition.clip.y}) rotate(${definition.clip.rotation ?? 0}) scale(${definition.clip.scale})`;
+        }
+        if (pluginHeadAcc.action === "hat") {
+            return <g transform={anchorTransform}>
+                <motion.g data-avatar-accessory={pluginHeadAcc.id} initial={false}
+                    animate={{ y: tippingHat ? [0, -32, -32, 0] : 0, rotate: tippingHat ? [0, hatTilt, hatTilt, 0] : 0 }}
+                    style={{ transformOrigin: "0px 0px" }} transition={{ duration: tippingHat ? 1.5 : 0, ease: "easeInOut" }}>
+                    {artwork}
+                </motion.g>
+            </g>;
+        }
+        if (pluginHeadAcc.action === "straighten-crown") {
+            return <g data-avatar-accessory={pluginHeadAcc.id} transform={anchorTransform}>
+                <SvgPose pose={{ rotate: correctingCrown ? [0, 30, 30, 30, 30, -5, 3, -1, 0] : 0 }}
+                    transition={correctingCrown ? crownTiming : { duration: 0.12 }}>
+                    {artwork}
+                </SvgPose>
+            </g>;
+        }
+        return <g data-avatar-accessory={pluginHeadAcc.id} transform={anchorTransform}>{artwork}</g>;
+    };
+
+    return <span ref={ref} aria-hidden="true" data-avatar-shape={appearance.shape} data-avatar-fallback={isFallbackShape || undefined} data-avatar-state={performance.playingState}
         data-avatar-action={action ?? "none"} data-avatar-active={active}
         className="relative inline-flex shrink-0 items-center justify-center" style={{ width: size, height: size }}
         onPointerLeave={() => { targetX.set(0); targetY.set(0); }}
@@ -125,17 +198,21 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
                         swayingSprout ? { rotate: [0, -5, 4, 0] } : { y: 0, ...sway }}
                         transition={flying ? { duration: 1.8, times: [0, .32, .53, .85, .97, 1] } : dozing ? { duration: 2, times: [0, .25, .48, .64, .72, 1] } :
                             swayingSprout ? { duration: 0.8 } : swayTransition}><g transform={`translate(0 -140) scale(${definition.artworkScale ?? 1}) translate(-255 -255)`}>
-                        {definition.parts.map(part => {
-                            const fill = part.color === "white" ? "#FFFFFF" : appearance.colors[part.color];
-                            const whiteEdge = definition.id === "aipp" && fill.toUpperCase() === "#FFFFFF";
-                            const stroke = whiteEdge ? "#E4E4E4" : part.outlineWidth ? appearance.colors.secondary : undefined;
-                            return <path key={part.color} d={part.path} fill={fill} stroke={stroke}
-                                strokeWidth={whiteEdge ? 1 : part.outlineWidth} strokeLinejoin="round"
-                                vectorEffect={whiteEdge ? "non-scaling-stroke" : undefined} />;
-                        })}
+                        {definition.vectorParts && definition.vectorParts.length > 0
+                            ? <DeclarativeArtwork layers={definition.vectorParts} palette={palette} />
+                            : definition.parts.map((part, index) => {
+                                const fill = part.color === "white" ? "#FFFFFF" : appearance.colors[part.color];
+                                const whiteEdge = !!part.whiteEdge && fill.toUpperCase() === "#FFFFFF";
+                                const stroke = whiteEdge ? "#E4E4E4" : part.outlineWidth ? appearance.colors.secondary : undefined;
+                                return <path key={`${part.color}-${index}`} d={part.path} fill={fill} stroke={stroke}
+                                    strokeWidth={whiteEdge ? 1 : part.outlineWidth} strokeLinejoin="round"
+                                    vectorEffect={whiteEdge ? "non-scaling-stroke" : undefined} />;
+                            })}
                         {faceItem === "eyepatch" && <g>
                             <defs><clipPath id={`${id}-strap`}>
-                                {definition.parts.map(part => <path key={part.color} d={part.path} />)}
+                                {definition.vectorParts && definition.vectorParts.length > 0
+                                    ? renderClipShapes(definition.vectorParts)
+                                    : definition.parts.map((part, index) => <path key={`${part.color}-${index}`} d={part.path} />)}
                             </clipPath></defs>
                             <g clipPath={`url(#${id}-strap)`}>
                                 <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}><EyepatchStrap reach={600} /></g>
@@ -152,6 +229,11 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
                                 {faceItem === "thick-brows" && <g data-avatar-accessory="thick-brows">
                                     <ThickBrowsArtwork raised={performing("raise-brow", true)} />
                                 </g>}
+                                {pluginFaceAcc && pluginFaceAcc.followGaze && pluginFaceAcc.action !== "glasses" && pluginFaceAcc.action !== "peer" && (
+                                    <g data-avatar-accessory={pluginFaceAcc.id}>
+                                        <DeclarativeArtwork layers={pluginFaceAcc.layers} palette={palette} />
+                                    </g>
+                                )}
                             </motion.g>
                             {faceItem === "mustache" && <g data-avatar-accessory="mustache"><MustacheArtwork playing={twirling} /></g>}
                             {faceItem === "bandage" && <g data-avatar-accessory="bandage"><BandageArtwork /></g>}
@@ -161,14 +243,25 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
                                 transition={peering ? { duration: 3, times: [0, 0.1, 0.3, 0.8, 0.95], ease: "easeInOut" } : { duration: 0.2 }}>
                                 <SunglassesArtwork />
                             </SvgPose>}
+                            {pluginFaceAcc && pluginFaceAcc.action === "peer" && (
+                                <SvgPose data-avatar-accessory={pluginFaceAcc.id} pose={peering ? { y: [0, 0, -130, -130, 0], rotate: [0, 0, -5, -5, 0] } : { y: 0, rotate: 0 }}
+                                    transition={peering ? { duration: 3, times: [0, 0.1, 0.3, 0.8, 0.95], ease: "easeInOut" } : { duration: 0.2 }}>
+                                    <DeclarativeArtwork layers={pluginFaceAcc.layers} palette={palette} />
+                                </SvgPose>
+                            )}
+                            {pluginFaceAcc && !pluginFaceAcc.followGaze && pluginFaceAcc.action !== "glasses" && pluginFaceAcc.action !== "peer" && (
+                                <g data-avatar-accessory={pluginFaceAcc.id}>
+                                    <DeclarativeArtwork layers={pluginFaceAcc.layers} palette={palette} />
+                                </g>
+                            )}
                         </g>
                         <AnimatePresence initial={false}>
-                        {glasses && <motion.g key="glasses" data-avatar-accessory="round-glasses"
+                        {glasses && <motion.g key={pluginFaceAcc ? pluginFaceAcc.id : "glasses"} data-avatar-accessory={pluginFaceAcc ? pluginFaceAcc.id : "round-glasses"}
                             initial={active && full ? { x: dock.x, y: dock.y, scale: dock.scale, opacity: 0 } : false}
                             animate={{ ...glassesPose, opacity: 1 }} style={{ transformOrigin: "0px 0px" }}
                             exit={{ x: dock.x, y: dock.y, rotate: dock.rotation ?? -28, opacity: 0, transition: { duration: active && full ? 0.4 : 0 } }}
                             transition={{ duration: takingGlasses ? 2.4 : active && full ? 0.35 : 0, ...(takingGlasses ? { times: [0, 0.15, 0.42, 0.68, 1] } : {}), ease: "easeInOut" }}>
-                            <GlassesArtwork />
+                            {pluginFaceAcc ? <DeclarativeArtwork layers={pluginFaceAcc.layers} palette={palette} /> : <GlassesArtwork />}
                         </motion.g>}
                         </AnimatePresence>
                         {(headItem === "rotor" || headItem === "sprout" || headItem === "nightcap") &&
@@ -183,7 +276,7 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
                                 <CrownArtwork />
                             </SvgPose>
                         </g>}
-                        {hat && <g transform={`translate(${definition.crown.x} ${definition.crown.y}) scale(${definition.crown.scale})`}>
+                        {(headItem === "beret" || headItem === "baseball-cap" || headItem === "baseball-cap-left") && <g transform={`translate(${definition.crown.x} ${definition.crown.y}) scale(${definition.crown.scale})`}>
                             <motion.g data-avatar-accessory={headItem} initial={false}
                                 animate={{ y: tippingHat ? [0, -32, -32, 0] : 0, rotate: tippingHat ? [0, hatTilt, hatTilt, 0] : 0 }}
                                 style={{ transformOrigin: "0px 0px" }} transition={{ duration: tippingHat ? 1.5 : 0, ease: "easeInOut" }}>
@@ -202,6 +295,7 @@ export default function AnimatedAvatar({ appearance, size = 32, compact, animate
                         {headItem === "flower" && <g data-avatar-accessory="flower" transform={`translate(${definition.clip.x} ${definition.clip.y}) scale(${definition.clip.scale})`}>
                             <FlowerArtwork playing={fluttering} />
                         </g>}
+                        {renderPluginHeadAccessory()}
                     </g></SvgPose>
                     </g></motion.g>
                 </motion.g>

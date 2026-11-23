@@ -1,4 +1,5 @@
-import { accessoryDefinitions, actionDuration, type AvatarShape, type AccessoryId, type AvatarAction, type AvatarState } from "@/components/avatar/avatarDefinition";
+import { actionDuration, type AvatarShape, type AccessoryId, type AvatarAction, type AvatarState } from "@/components/avatar/avatarDefinition";
+import { avatarRegistry } from "@/components/avatar/avatarRegistry";
 
 /** 编辑形象时自动轮播的内容：状态与动作交替出现。 */
 export type ShowcaseStep = { kind: "state"; state: AvatarState } | { kind: "action"; action: AvatarAction };
@@ -9,7 +10,7 @@ export const showcaseStates: readonly AvatarState[] = [
 ];
 
 export const accessoryActionsOf = (items: (AccessoryId | null)[]) =>
-    items.filter((item): item is AccessoryId => item !== null).flatMap(item => accessoryDefinitions[item].action ?? []);
+    items.filter((item): item is AccessoryId => item !== null).flatMap(item => avatarRegistry.getAccessoryEntry(item)?.action ?? []);
 
 /** 偶数步展示状态，奇数步展示动作；戴了装饰时，装饰动作占动作轮次的大半，方便看清效果。 */
 export function showcaseStep(step: number, accessoryActions: AvatarAction[]): ShowcaseStep {

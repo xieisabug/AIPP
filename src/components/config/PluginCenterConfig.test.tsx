@@ -52,4 +52,56 @@ describe("插件中心运行状态", () => {
         expect(screen.getByRole("button", { name: "重新扫描插件" })).toBeVisible();
         expect(screen.queryByText("插件商店")).toBeNull();
     });
+
+    it("should preview declarative avatar and accessory plugins without requiring a JS view", async () => {
+        const avatarPlugin = {
+            pluginId: 2,
+            name: "萌宠包",
+            code: "cute-pets",
+            version: "0.1.0",
+            pluginType: ["avatarType"],
+            runtime: { type: "declarative", entry: "plugin.json" },
+            contributions: { avatars: ["avatars/cat.json"], accessories: ["accessories/hat.json"] },
+            isActive: true,
+            isInstalled: true,
+        };
+        mockInvokeHandler("list_plugins", () => [avatarPlugin]);
+        mockInvokeHandler("get_plugin_avatar_assets", () => ({
+            avatars: [{
+                id: "cute-pets:cat",
+                localId: "cat",
+                pluginCode: "cute-pets",
+                pluginName: "萌宠包",
+                label: "小猫",
+                vectorParts: [{ type: "circle", cx: 255, cy: 255, r: 150, fill: "secondary" }],
+                face: { x: 255, y: 240, scale: 1 },
+                crown: { x: 255, y: 80, scale: 1 },
+                headphones: { x: 255, y: 80, scale: 1 },
+                clip: { x: 140, y: 100, scale: 1 },
+                propDock: { x: 400, y: 350, scale: 0.8 },
+                colorLabels: { secondary: "身体" },
+                capabilities: ["eyes", "headwear"],
+            }],
+            accessories: [{
+                id: "cute-pets:hat",
+                localId: "hat",
+                pluginCode: "cute-pets",
+                pluginName: "萌宠包",
+                label: "魔法帽",
+                slot: "head",
+                anchor: "crown",
+                followGaze: false,
+                action: "hat",
+                previewViewBox: "-100 -100 200 200",
+                layers: [{ type: "circle", cx: 0, cy: 0, r: 40, fill: "#3B3E82" }],
+            }],
+        }));
+        vi.mocked(pluginRuntime.reloadPlugins).mockResolvedValue([]);
+        render(<PluginCenterConfig pluginList={[]} />);
+        expect(await screen.findByText("包含的助手形象（1）")).toBeVisible();
+        expect(screen.getByText("小猫")).toBeVisible();
+        expect(screen.getByText("包含的配饰（1）")).toBeVisible();
+        expect(screen.getByText("魔法帽")).toBeVisible();
+        expect(screen.queryByText(/不是 JS 运行时/)).toBeNull();
+    });
 });

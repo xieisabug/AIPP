@@ -31,6 +31,7 @@ import {
     mcpToolComponentRegistry,
     type McpToolComponentRegistration,
 } from "./mcpToolComponentRegistry";
+import { avatarRegistry } from "@/components/avatar/avatarRegistry";
 
 type PluginConstructor = new () => AippPlugin | AippAssistantTypePlugin;
 
@@ -445,6 +446,7 @@ class PluginRuntime {
         }
 
         this.plugins = loaded;
+        await avatarRegistry.syncFromBackend();
         return loaded;
     }
 

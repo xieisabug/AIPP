@@ -1,21 +1,28 @@
 use crate::api::plugin_api::ResolvedPluginManifest;
 
-/// `viewer` 运行时只在隔离 iframe 里渲染（如 Office 预览），宿主窗口不执行插件代码。
+/// `viewer` 运行时只在隔离 iframe 里渲染（如 Office 预览），`declarative` 只包含纯静态声明式资源（如助手形象与配饰），宿主窗口均不执行插件代码。
 fn is_mobile_runtime(runtime_type: &str) -> bool {
-    matches!(runtime_type, "js" | "viewer")
+    matches!(runtime_type, "js" | "viewer" | "declarative")
 }
 
 pub(crate) fn declaration_issue(value: &serde_json::Value) -> Option<String> {
-    if !is_mobile_runtime(value.pointer("/runtime/type").and_then(|v| v.as_str()).unwrap_or("js")) {
+    let runtime_type = value.pointer("/runtime/type").and_then(|v| v.as_str()).unwrap_or("js");
+    if !is_mobile_runtime(runtime_type) {
         return Some("进程或 WASM 插件尚不支持此移动运行时".to_string());
-    }
-    if value.pointer("/mobile/supported").and_then(|v| v.as_bool()) != Some(true)
-        || value.pointer("/mobile/apiVersion").and_then(|v| v.as_u64()) != Some(1) {
-        return Some("兼容性未验证：插件未声明 mobile.supported=true 和 apiVersion=1".to_string());
     }
     if value.pointer("/contributions/hooks").and_then(|v| v.as_array()).is_some_and(|v| !v.is_empty())
         || value.pointer("/contributions/bangs").and_then(|v| v.as_array()).is_some_and(|v| !v.is_empty()) {
         return Some("移动首批插件仅支持 UI 与显式网络操作，hooks/bangs 依赖尚未核验".to_string());
+    }
+    if runtime_type == "declarative" {
+        if value.get("permissions").and_then(|v| v.as_array()).is_some_and(|v| !v.is_empty()) {
+            return Some("纯声明式插件不应申请额外运行时权限".to_string());
+        }
+        return None;
+    }
+    if value.pointer("/mobile/supported").and_then(|v| v.as_bool()) != Some(true)
+        || value.pointer("/mobile/apiVersion").and_then(|v| v.as_u64()) != Some(1) {
+        return Some("兼容性未验证：插件未声明 mobile.supported=true 和 apiVersion=1".to_string());
     }
     let allowed = ["plugin.storage", "assistant.read", "assistant.config", "assistant.prompt.write", "conversation.read", "conversation.write", "data.read.conversation", "data.read.assistant", "data.read.llm", "network.comfyui", "network.image-generation", "markdown.register"];
     if value.get("permissions").is_some_and(|value| !value.is_array()) {

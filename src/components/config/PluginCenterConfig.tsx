@@ -56,6 +56,10 @@ import { ConfigPageLayout, ConfigPageLoading, ListItemButton, SidebarList } from
 import { pluginRuntime } from "../../services/PluginRuntime";
 import PluginViewHost from "../plugin/PluginViewHost";
 import type { LoadedPlugin } from "../../services/PluginRuntime";
+import AnimatedAvatar, { coreColorOf } from "../avatar/AnimatedAvatar";
+import { DeclarativeArtwork } from "../avatar/DeclarativeArtwork";
+import { toAvatarDefinition, type PluginAvatarAssetBundle } from "../avatar/avatarRegistry";
+import { defaultAppearance } from "../butler/butlerAppearance";
 
 const PLUGIN_CENTER_VIEW_LOCATION = "config.plugin-center";
 const DEFAULT_PLUGIN_DETAIL_TAB = "plugin-ui";
@@ -114,6 +118,8 @@ interface PluginRegistryItem {
             label: string;
             type: string;
         }>;
+        avatars?: unknown[];
+        accessories?: unknown[];
     };
     isActive: boolean;
     isInstalled: boolean;
@@ -244,6 +250,7 @@ const PLUGIN_TYPE_LABELS: Record<string, string> = {
     applicationType: "应用",
     toolType: "工具",
     themeType: "主题",
+    avatarType: "形象",
     markdownType: "Markdown",
     messageType: "消息",
     exportType: "导出",
@@ -321,6 +328,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [hookDebugLoading, setHookDebugLoading] = useState(false);
     const [pluginDetail, setPluginDetail] = useState<PluginDetailItem | null>(null);
     const [pluginDetailLoading, setPluginDetailLoading] = useState(false);
+    const [pluginAvatarAssets, setPluginAvatarAssets] = useState<PluginAvatarAssetBundle | null>(null);
+    const [pluginAvatarAssetsError, setPluginAvatarAssetsError] = useState("");
     const [actionBusy, setActionBusy] = useState(false);
     const [pendingUninstallPlugin, setPendingUninstallPlugin] = useState<PluginRegistryItem | null>(null);
     const [officialPlugins, setOfficialPlugins] = useState<OfficialPlugin[]>([]);
@@ -660,6 +669,25 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         }
     }, []);
 
+    const loadPluginAvatarAssets = useCallback(async (plugin: PluginRegistryItem) => {
+        const hasAssets = (plugin.contributions?.avatars?.length ?? 0) > 0
+            || (plugin.contributions?.accessories?.length ?? 0) > 0;
+        if (!hasAssets || !plugin.isInstalled) {
+            setPluginAvatarAssets(null);
+            setPluginAvatarAssetsError("");
+            return;
+        }
+        try {
+            const bundle = await invoke<PluginAvatarAssetBundle>("get_plugin_avatar_assets", { code: plugin.code });
+            setPluginAvatarAssets(bundle);
+            setPluginAvatarAssetsError("");
+        } catch (error) {
+            console.error("[PluginCenterConfig] Failed to load plugin avatar assets:", error);
+            setPluginAvatarAssets(null);
+            setPluginAvatarAssetsError(String(error));
+        }
+    }, []);
+
     useEffect(() => {
         loadPlugins();
         const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
@@ -677,14 +705,17 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             loadHookDebugInfo(selectedPluginId);
             if (selected) {
                 loadPluginDetail(selected.code);
+                loadPluginAvatarAssets(selected);
             }
         } else {
             setConfigs([]);
             setHookRegistrations([]);
             setHookAuditLogs([]);
             setPluginDetail(null);
+            setPluginAvatarAssets(null);
+            setPluginAvatarAssetsError("");
         }
-    }, [selectedPluginId, plugins, loadConfigs, loadHookDebugInfo, loadPluginDetail]);
+    }, [selectedPluginId, plugins, loadConfigs, loadHookDebugInfo, loadPluginDetail, loadPluginAvatarAssets]);
 
     useEffect(() => {
         if (installDialogOpen && officialFetchStatus === "idle") {
@@ -917,6 +948,12 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     <Badge variant="outline">Actions {pluginDetail.contributions?.actions?.length ?? 0}</Badge>
                     <Badge variant="outline">
                         Fields {pluginDetail.contributions?.assistantFormFields?.length ?? 0}
+                    </Badge>
+                    <Badge variant="outline">
+                        形象 {pluginDetail.contributions?.avatars?.length ?? 0}
+                    </Badge>
+                    <Badge variant="outline">
+                        配饰 {pluginDetail.contributions?.accessories?.length ?? 0}
                     </Badge>
                 </div>
             </div>
@@ -1284,6 +1321,16 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                                     {selectedPlugin.contributions?.assistantFormFields?.length} Assistant Fields
                                 </Badge>
                             )}
+                            {(selectedPlugin.contributions?.avatars?.length ?? 0) > 0 && (
+                                <Badge variant="outline">
+                                    {selectedPlugin.contributions?.avatars?.length} 形象
+                                </Badge>
+                            )}
+                            {(selectedPlugin.contributions?.accessories?.length ?? 0) > 0 && (
+                                <Badge variant="outline">
+                                    {selectedPlugin.contributions?.accessories?.length} 配饰
+                                </Badge>
+                            )}
                             {selectedPlugin.pluginType.map((type) => (
                                 <Badge key={type} variant="outline">
                                     {getPluginTypeLabel(type)}
@@ -1327,13 +1374,79 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                         <TabsTrigger value="hooks">Hook 调试</TabsTrigger>
                     </TabsList>
                     <TabsContent value="plugin-ui" className="mt-4 space-y-3">
+                        {pluginAvatarAssetsError && (
+                            <Alert variant="destructive" className="border-destructive/40">
+                                <XCircle />
+                                <AlertTitle>形象与配饰资产校验失败</AlertTitle>
+                                <AlertDescription className="break-words">{pluginAvatarAssetsError}</AlertDescription>
+                            </Alert>
+                        )}
+                        {pluginAvatarAssets && (pluginAvatarAssets.avatars.length > 0 || pluginAvatarAssets.accessories.length > 0) && (
+                            <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4" data-aipp-slot="plugin-avatar-preview">
+                                {pluginAvatarAssets.avatars.length > 0 && (
+                                    <div className="space-y-2.5">
+                                        <div className="text-sm font-medium">包含的助手形象（{pluginAvatarAssets.avatars.length}）</div>
+                                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+                                            {pluginAvatarAssets.avatars.map((asset) => {
+                                                const def = toAvatarDefinition(asset);
+                                                if (!def) return null;
+                                                const previewAppearance = {
+                                                    ...defaultAppearance,
+                                                    shape: def.id,
+                                                    colors: {
+                                                        primary: def.defaultColors?.primary ?? defaultAppearance.colors.primary,
+                                                        secondary: def.defaultColors?.secondary ?? defaultAppearance.colors.secondary,
+                                                    },
+                                                };
+                                                return (
+                                                    <div key={asset.id} className="flex flex-col items-center gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-center">
+                                                        <AnimatedAvatar appearance={previewAppearance} definitionOverride={def} size={76} animated state="idle" />
+                                                        <div className="text-xs font-medium">{asset.label}</div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+                                {pluginAvatarAssets.accessories.length > 0 && (
+                                    <div className="space-y-2.5">
+                                        <div className="text-sm font-medium">包含的配饰（{pluginAvatarAssets.accessories.length}）</div>
+                                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+                                            {pluginAvatarAssets.accessories.map((asset) => {
+                                                const previewPalette = {
+                                                    primary: defaultAppearance.colors.primary,
+                                                    secondary: defaultAppearance.colors.secondary,
+                                                    core: coreColorOf(defaultAppearance),
+                                                };
+                                                return (
+                                                    <div key={asset.id} className="flex flex-col items-center gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-center">
+                                                        <svg aria-hidden="true" viewBox={asset.previewViewBox} className="size-12">
+                                                            <DeclarativeArtwork layers={asset.layers} palette={previewPalette} />
+                                                        </svg>
+                                                        <div className="text-xs font-medium">{asset.label}</div>
+                                                        <Badge variant="outline" className="text-[10px]">
+                                                            {asset.slot === "eyes" ? "脸部" : "头部"}
+                                                        </Badge>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+                                <p className="text-xs text-muted-foreground">
+                                    {selectedPlugin.isActive
+                                        ? "已启用，可在助手资料的「形象」面板中选择使用。"
+                                        : "启用此插件后，即可在助手资料的「形象」面板中选择使用。"}
+                                </p>
+                            </div>
+                        )}
                         {loadError ? null : canRenderPluginViews ? (
                             <PluginViewHost
                                 pluginList={selectedPluginViewHostItems}
                                 location={PLUGIN_CENTER_VIEW_LOCATION}
                                 emptyDescription="当前插件没有声明插件界面。"
                             />
-                        ) : (
+                        ) : selectedRuntimeType === "declarative" && pluginAvatarAssets ? null : (
                             <div className="rounded-lg border border-border/60 bg-background p-3 md:p-4">
                                 <div className="text-sm text-muted-foreground">
                                     {pluginViewBlockedReason}

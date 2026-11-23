@@ -26,6 +26,9 @@ use crate::db::plugin_db::{
     NewPluginHookRegistration, Plugin, PluginAssistantConfiguration, PluginData, PluginDatabase,
     PluginHookAuditLog, PluginHookRegistration,
 };
+use crate::plugin::avatar_assets::{
+    load_plugin_avatar_assets_from_dir, PluginAvatarAssetBundle,
+};
 use crate::plugin::runtime::verify_entry_checksum as verify_runtime_entry_checksum;
 
 const PLUGIN_TYPE_CONFIG_KEY: &str = "plugin_type";
@@ -399,6 +402,10 @@ pub struct PluginContributions {
     #[serde(default)]
     pub assistant_form_fields: Vec<PluginAssistantFormFieldContribution>,
     #[serde(default)]
+    pub avatars: Vec<JsonValue>,
+    #[serde(default)]
+    pub accessories: Vec<JsonValue>,
+    #[serde(default)]
     pub legacy_assistant_type: bool,
 }
 
@@ -470,6 +477,7 @@ pub struct PluginSelectOption {
 pub struct PluginRuntimeManifest {
     #[serde(rename = "type")]
     pub runtime_type: String,
+    #[serde(default)]
     pub entry: String,
     #[serde(default)]
     pub protocol: Option<String>,
@@ -856,6 +864,7 @@ fn normalize_plugin_type_name(raw: &str) -> Option<String> {
         "ui" | "interface" | "interfacetype" => "interfaceType".to_string(),
         "worker" | "application" | "applicationtype" => "applicationType".to_string(),
         "theme" | "themetype" => "themeType".to_string(),
+        "avatar" | "avatartype" => "avatarType".to_string(),
         "markdown" | "markdowntype" => "markdownType".to_string(),
         "message" | "messagetype" => "messageType".to_string(),
         "tool" | "tooltype" => "toolType".to_string(),
@@ -1221,6 +1230,7 @@ fn normalize_runtime_type(raw: &str) -> String {
         "process" | "stdio" => "process".to_string(),
         "native" => "native".to_string(),
         "mock" => "mock".to_string(),
+        "declarative" | "asset" | "assets" => "declarative".to_string(),
         "js" | "javascript" => "js".to_string(),
         _ => normalized,
     }
@@ -1235,7 +1245,11 @@ fn resolve_runtime_manifest(manifest: &PluginManifest) -> PluginRuntimeManifest 
     });
     runtime.runtime_type = normalize_runtime_type(&runtime.runtime_type);
     if runtime.entry.trim().is_empty() {
-        runtime.entry = "dist/main.js".to_string();
+        runtime.entry = if runtime.runtime_type == "declarative" {
+            "plugin.json".to_string()
+        } else {
+            "dist/main.js".to_string()
+        };
     }
     runtime
 }
@@ -1962,8 +1976,25 @@ fn build_plan_plugin(
     if !entry_path.is_file() {
         errors.push(format!("插件入口文件不存在：{}/{}", to, runtime.entry));
     }
-    if runtime.runtime_type != "js" {
+    if runtime.runtime_type != "js" && runtime.runtime_type != "declarative" {
         warnings.push(format!("当前插件商店第一版主要面向 JS runtime，检测到 {}", runtime.runtime_type));
+    }
+    let has_avatar_assets = !manifest.contributions.avatars.is_empty()
+        || !manifest.contributions.accessories.is_empty();
+    if runtime.runtime_type == "declarative" && !has_avatar_assets {
+        errors.push("声明式插件至少需要声明一个形象（contributions.avatars）或配饰（contributions.accessories）".to_string());
+    }
+    if has_avatar_assets {
+        let display_name = manifest.name.as_deref().unwrap_or(to);
+        if let Err(asset_errors) = load_plugin_avatar_assets_from_dir(
+            source_dir,
+            to,
+            display_name,
+            &manifest.contributions.avatars,
+            &manifest.contributions.accessories,
+        ) {
+            errors.extend(asset_errors);
+        }
     }
 
     let installed_version =
@@ -2413,7 +2444,8 @@ fn sync_discovered_plugins(
         };
 
         if db.get_plugin_status(plugin_id).map_err(|e| e.to_string())?.is_none() {
-            db.upsert_plugin_status(plugin_id, !cfg!(mobile), None).map_err(|e| e.to_string())?;
+            let default_active = !cfg!(mobile) || discovered_plugin.runtime.runtime_type == "declarative";
+            db.upsert_plugin_status(plugin_id, default_active, None).map_err(|e| e.to_string())?;
         }
 
         let plugin_type_value = plugin_types_to_json(&discovered_plugin.plugin_type)?;
@@ -2806,6 +2838,60 @@ pub async fn get_enabled_plugins(
 }
 
 #[tauri::command]
+pub async fn list_plugin_avatar_assets(
+    app_handle: tauri::AppHandle,
+) -> Result<PluginAvatarAssetBundle, String> {
+    let manifests = get_enabled_plugin_manifests(&app_handle)?;
+    let mut bundle = PluginAvatarAssetBundle::default();
+    for manifest in manifests {
+        if manifest.contributions.avatars.is_empty() && manifest.contributions.accessories.is_empty() {
+            continue;
+        }
+        match load_plugin_avatar_assets_from_dir(
+            &manifest.plugin_dir,
+            &manifest.code,
+            &manifest.name,
+            &manifest.contributions.avatars,
+            &manifest.contributions.accessories,
+        ) {
+            Ok(plugin_bundle) => {
+                bundle.avatars.extend(plugin_bundle.avatars);
+                bundle.accessories.extend(plugin_bundle.accessories);
+            }
+            Err(errors) => {
+                warn!(
+                    plugin = %manifest.code,
+                    errors = %errors.join("; "),
+                    "Failed to load avatar assets from plugin"
+                );
+            }
+        }
+    }
+    Ok(bundle)
+}
+
+#[tauri::command]
+pub async fn get_plugin_avatar_assets(
+    app_handle: tauri::AppHandle,
+    code: String,
+) -> Result<PluginAvatarAssetBundle, String> {
+    validate_target_dir_name(&code)?;
+    let manifest = resolve_plugin_manifest_for_code(&app_handle, &code)
+        .ok_or_else(|| format!("Plugin manifest not found or invalid: {}", code))?;
+    if manifest.contributions.avatars.is_empty() && manifest.contributions.accessories.is_empty() {
+        return Ok(PluginAvatarAssetBundle::default());
+    }
+    load_plugin_avatar_assets_from_dir(
+        &manifest.plugin_dir,
+        &manifest.code,
+        &manifest.name,
+        &manifest.contributions.avatars,
+        &manifest.contributions.accessories,
+    )
+    .map_err(|errors| errors.join("；"))
+}
+
+#[tauri::command]
 pub async fn install_plugin(
     app_handle: tauri::AppHandle,
     name: String,
@@ -2836,7 +2922,12 @@ pub async fn install_plugin(
                 .map_err(|e| e.to_string())?
         };
 
-    db.upsert_plugin_status(plugin_id, !cfg!(mobile), None).map_err(|e| e.to_string())?;
+    let manifest_for_install = resolve_plugin_manifest_for_code(&app_handle, &code);
+    let default_active = !cfg!(mobile)
+        || manifest_for_install
+            .as_ref()
+            .is_some_and(|m| m.runtime.runtime_type == "declarative");
+    db.upsert_plugin_status(plugin_id, default_active, None).map_err(|e| e.to_string())?;
     let plugin_types =
         normalize_plugin_types(&plugin_type.unwrap_or_else(|| vec!["assistantType".to_string()]));
     let plugin_types_json = plugin_types_to_json(&plugin_types)?;
@@ -3847,5 +3938,72 @@ mod tests {
         assert_eq!(schema.tables.len(), 1);
         assert_eq!(schema.tables[0].name, "cache");
         assert_eq!(schema.tables[0].columns[0].name, "key");
+    }
+
+    #[test]
+    fn declarative_avatar_plugin_resolves_and_validates_without_js_entry() {
+        let base = std::env::temp_dir().join(format!(
+            "aipp_decl_avatar_plugin_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let plugin_dir = base.join("cute-pets");
+        fs::create_dir_all(plugin_dir.join("avatars")).unwrap();
+        fs::create_dir_all(plugin_dir.join("accessories")).unwrap();
+        fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_string(&serde_json::json!({
+                "id": "cute-pets",
+                "code": "cute-pets",
+                "name": "萌宠包",
+                "version": "1.0.0",
+                "pluginTypes": ["avatarType"],
+                "runtime": { "type": "declarative" },
+                "contributions": {
+                    "avatars": ["avatars/cat.json"],
+                    "accessories": ["accessories/star.json"]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            plugin_dir.join("avatars/cat.json"),
+            serde_json::to_string(&serde_json::json!({
+                "schemaVersion": 1,
+                "id": "cat",
+                "label": "小猫",
+                "parts": [{ "color": "secondary", "path": "M100 100 H400 V400 H100 Z" }],
+                "face": { "x": 255, "y": 230, "scale": 1.0 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            plugin_dir.join("accessories/star.json"),
+            serde_json::to_string(&serde_json::json!({
+                "schemaVersion": 1,
+                "id": "star",
+                "label": "星星发卡",
+                "slot": "head",
+                "anchor": "clip",
+                "previewViewBox": "-40 -40 80 80",
+                "layers": [{ "type": "circle", "cx": 0, "cy": 0, "r": 24, "fill": "#FFD666" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(probe_plugin_entry(&plugin_dir).unwrap());
+        let manifest = resolve_plugin_manifest_from_dir(&plugin_dir, "cute-pets")
+            .expect("declarative manifest should resolve without dist/main.js");
+        assert_eq!(manifest.runtime.runtime_type, "declarative");
+        assert_eq!(manifest.runtime.entry, "plugin.json");
+        assert_eq!(manifest.plugin_type, vec!["avatarType"]);
+
+        let plan = build_plan_plugin(".", "cute-pets", &plugin_dir, &base).unwrap();
+        assert!(plan.validation.is_installable, "errors: {:?}", plan.validation.errors);
+        assert!(plan.validation.warnings.is_empty());
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

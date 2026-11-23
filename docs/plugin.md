@@ -4,6 +4,7 @@
 目标是让你可以自己写一个插件并在 AIPP 中跑起来。
 
 > Theme Plugin 详细开发文档：`docs/theme-plugin-development.md`
+> 助手形象与配饰插件（`avatarType` + `declarative`）开发文档：`docs/avatar-plugin-development.md`
 
 ---
 
