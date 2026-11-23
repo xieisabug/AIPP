@@ -743,6 +743,40 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["com.xieisabug.aipp"]),
         ));
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(|app| {
+        use tauri::menu::{SubmenuBuilder, WINDOW_SUBMENU_ID};
+
+        // Keep the native editing actions and their key equivalents in the menu tree.
+        let edit = SubmenuBuilder::new(app, "编辑")
+            .undo()
+            .redo()
+            .separator()
+            .cut()
+            .copy()
+            .paste()
+            .select_all()
+            .build()?;
+        let application = SubmenuBuilder::new(app, &app.package_info().name)
+            .about(None)
+            .separator()
+            .item(&edit)
+            .services()
+            .separator()
+            .hide()
+            .hide_others()
+            .separator()
+            .quit()
+            .build()?;
+        let window = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "窗口")
+            .minimize()
+            .maximize()
+            .fullscreen()
+            .separator()
+            .close_window()
+            .build()?;
+        MenuBuilder::new(app).items(&[&application, &window]).build()
+    });
     let app = builder
         .on_window_event(|window,event| {
             if let tauri::WindowEvent::Destroyed = event {
