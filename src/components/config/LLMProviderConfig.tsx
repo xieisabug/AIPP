@@ -10,7 +10,7 @@ import ImportDialog from "../ImportDialog";
 import PasswordDialog from "../PasswordDialog";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
-import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
+import { Zap, Settings, Server, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
@@ -288,7 +288,7 @@ const LLMProviderConfig: React.FC = () => {
         <SidebarList
             title="提供商"
             description="选择提供商进行配置"
-            icon={<ServerCrash className="h-5 w-5" />}
+            icon={<Server className="h-5 w-5" />}
             searchValue={searchQuery}
             onSearchChange={setSearchQuery}
             searchPlaceholder="搜索提供商..."
@@ -352,7 +352,7 @@ const LLMProviderConfig: React.FC = () => {
                     sidebar={null}
                     content={
                         <EmptyState
-                            icon={<ServerCrash className="h-8 w-8 text-muted-foreground" />}
+                            icon={<Server className="h-8 w-8 text-muted-foreground" />}
                             title="还没有配置提供商"
                             description="开始添加你的第一个 AI 模型提供商，享受智能助手的强大功能"
                             action={

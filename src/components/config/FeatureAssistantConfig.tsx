@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power, Info, FlaskConical } from "lucide-react";
+import { WandSparkles, Eye, Database, Settings, Globe, Monitor, Keyboard, CircleEllipsis, Info, FlaskConical } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -51,7 +51,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             id: "conversation_summary",
             name: "辅助AI",
             description: "配置AI辅助功能：对话标题生成、表单自动填写、上下文压缩和工具调用自动审核",
-            icon: <MessageSquare className="h-5 w-5" />,
+            icon: <WandSparkles className="h-5 w-5" />,
             code: "conversation_summary",
         },
         {
@@ -65,14 +65,14 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             id: "data_folder",
             name: "数据",
             description: "管理和同步数据文件夹",
-            icon: <FolderOpen className="h-5 w-5" />,
+            icon: <Database className="h-5 w-5" />,
             code: "data_folder",
         },
         {
             id: "network_config",
             name: "网络配置",
             description: "配置请求超时、重试次数和网络代理",
-            icon: <Wifi className="h-5 w-5" />,
+            icon: <Globe className="h-5 w-5" />,
             code: "network_config",
         },
         {
@@ -93,7 +93,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             id: "other",
             name: "其他",
             description: "系统的其他功能",
-            icon: <Power className="h-5 w-5" />,
+            icon: <CircleEllipsis className="h-5 w-5" />,
             code: "other",
         },
         {

@@ -11,7 +11,7 @@ const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTa
 const VaultConfig = React.lazy(() => import("../components/config/VaultConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, KeyRound, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
+import { Bot, KeyRound, ListChecks, Puzzle, Server, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
@@ -65,8 +65,8 @@ function ConfigWindow() {
             {
                 id: "llm-provider-config",
                 name: "提供商",
-                icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
-                iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
+                icon: <Server className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Server className="w-full h-full text-foreground" />,
             },
             {
                 id: "assistant-config",
@@ -87,7 +87,7 @@ function ConfigWindow() {
                 iconSelected: <KeyRound className="w-full h-full text-foreground" />,
             },
         ];
-        if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: <Bot className="h-full w-full text-muted-foreground" />, iconSelected: <Bot className="h-full w-full text-foreground" /> });
+        if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: <ListChecks className="h-full w-full text-muted-foreground" />, iconSelected: <ListChecks className="h-full w-full text-foreground" /> });
         if (skillsAvailable) {
             items.push({
                 id: "skills-config",
