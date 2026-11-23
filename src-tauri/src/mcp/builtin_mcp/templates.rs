@@ -77,11 +77,17 @@ pub fn is_butler_only_builtin_command(command: &str) -> bool {
 /// 定时任务不在其中：普通聊天的助手启用 Agent 工具后也能用，管家会话则总是直接提供。
 const BUTLER_ONLY_AGENT_TOOLS: &[&str] = &["spawn_task_conversation", "task_conversation_operation"];
 
+/// Returns true if the given tool from `aipp:agent` is proactive-run-only.
+pub fn is_proactive_only_agent_tool(tool_name: &str) -> bool {
+    crate::proactive::tools::is_proactive_tool(tool_name)
+}
+
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
     BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
         || crate::api::butler_peer::is_peer_tool(tool_name)
         || crate::api::butler_memory::is_tool(tool_name)
+        || is_proactive_only_agent_tool(tool_name)
 }
 
 /// 只在总管家主会话可用的工具：派发/操作独立任务。独立任务的结果回流、卡住提醒与代批都以总管家主会话为中心，
@@ -93,8 +99,11 @@ pub fn is_butler_main_only_agent_tool(tool_name: &str) -> bool {
 pub const GROUP_MEMBER_KIND: &str = "butler_group_member";
 
 /// 管家会话中某个 `aipp:agent` 工具是否可见：管家模式下所有助手与总管家权限一致，
-/// 只有以总管家主会话为中心的独立任务工具留在主会话。
+/// 只有以总管家主会话为中心的独立任务工具留在主会话。主动整理专用工具仅在主动整理会话可见。
 pub fn is_agent_tool_visible_in_butler(kind: &str, tool_name: &str) -> bool {
+    if is_proactive_only_agent_tool(tool_name) {
+        return kind == crate::proactive::tools::PROACTIVE_RUN_KIND;
+    }
     if tool_name == "read_group_history" { return kind == GROUP_MEMBER_KIND; }
     kind == "butler_main" || !is_butler_main_only_agent_tool(tool_name)
 }
@@ -476,7 +485,10 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
         Some("vault") => crate::vault::tool::definitions(),
         Some("office") => super::office::definitions(),
-        Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
+        Some("agent") => crate::api::butler_assistant_tools::definitions()
+            .into_iter()
+            .chain(crate::proactive::tools::definitions())
+            .chain(vec![
             crate::api::butler_memory::definition(),
             BuiltinToolInfo {
                 name: "message_bot".into(),

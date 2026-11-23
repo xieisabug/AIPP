@@ -819,18 +819,54 @@ pub(super) async fn reply_text_message(
     .await
 }
 
-pub(crate) async fn send_proactive_summary(app:&AppHandle,open_id:&str,text:&str,key:&str)->Result<String,String>{
-    let cfg=load_runtime_config(app).await?;
-    if !cfg.enabled || !cfg.butler_enabled || !cfg.allow_p2p || cfg.only_reply_feishu_originated {
-        return Err("飞书当前配置不允许管家主动私聊投递".into());
+/// 沿用总管家飞书配置发送主动整理高优提醒（统一由总管家飞书机器人发出）：
+/// - 未启用管家飞书或开启了「仅回复飞书发起的对话」时返回 `Ok(None)` 静默跳过；
+/// - 优先沿用总管家主会话的最近飞书对话目标（`chat_id` / `open_id`），
+///   若主会话尚未有过飞书互动但配置了私聊白名单 `allowed_open_ids`，则发给首个允许用户；
+/// - 两者都无目标时返回 `Ok(None)` 静默跳过（仅在 AIPP 桌面投递）。
+pub(crate) async fn send_butler_proactive_summary(
+    app: &AppHandle,
+    text: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let cfg = load_runtime_config(app).await?;
+    if !cfg.enabled || !cfg.butler_enabled || cfg.only_reply_feishu_originated {
+        return Ok(None);
     }
-    if !cfg.allowed_open_ids.is_empty() && !cfg.allowed_open_ids.contains(open_id) {
-        return Err("主动提醒接收人不在飞书允许名单内".into());
-    }
-    let token=fetch_tenant_access_token(app,&cfg).await?;
-    let mut body=build_feishu_text_payload(text);
-    body["uuid"]=json!(key);
-    send_message_request(&feishu_http_client(app),&cfg,&token,"open_id",open_id,body).await
+    let main_target = crate::api::butler_api::active_butler_main_conversation_id(app)
+        .ok()
+        .flatten()
+        .and_then(|main_id| find_latest_feishu_target(app, main_id).ok().flatten());
+    let (receive_id_type, receive_id) = if let Some(target) = main_target {
+        if let Some(chat_id) = target.external_chat_id.filter(|id| !id.trim().is_empty()) {
+            ("chat_id", chat_id)
+        } else if let Some(user_id) = target.external_user_id.filter(|id| !id.trim().is_empty()) {
+            ("open_id", user_id)
+        } else if cfg.allow_p2p {
+            let mut ids: Vec<String> = cfg.allowed_open_ids.iter().cloned().collect();
+            ids.sort();
+            match ids.into_iter().next() {
+                Some(open_id) => ("open_id", open_id),
+                None => return Ok(None),
+            }
+        } else {
+            return Ok(None);
+        }
+    } else if cfg.allow_p2p && !cfg.allowed_open_ids.is_empty() {
+        let mut ids: Vec<String> = cfg.allowed_open_ids.iter().cloned().collect();
+        ids.sort();
+        match ids.into_iter().next() {
+            Some(open_id) => ("open_id", open_id),
+            None => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    let token = fetch_tenant_access_token(app, &cfg).await?;
+    let mut body = build_feishu_text_payload(text);
+    body["uuid"] = json!(key);
+    let msg_id = send_message_request(&feishu_http_client(app), &cfg, &token, receive_id_type, &receive_id, body).await?;
+    Ok(Some(msg_id))
 }
 
 pub(super) async fn send_text_message_to_open_id(

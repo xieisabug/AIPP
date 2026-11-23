@@ -7,29 +7,33 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::warn;
 
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_request_timeout_from_config, ConfigBuilder,
 };
-use crate::api::ai::conversation::{build_chat_request_from_messages, ToolCallStrategy, ToolConfig};
-use crate::api::ai_api::{build_tools_with_mapping, resolve_tool_name, ToolNameMapping};
+use crate::api::ai::conversation::ToolCallStrategy;
+#[allow(unused_imports)]
+pub(crate) use crate::api::ai::unattended_loop::{
+    await_llm_or_stop, build_mcp_tool_call_ui_hint, build_tool_config_for_mcp,
+    extract_prompt_tool_calls, normalize_tool_arguments, run_unattended_loop, save_round_response,
+    AgenticLoopResult, AgenticLoopStatus, LlmWait, LoopLimits, UnattendedLoopContext,
+    UnattendedLoopObserver, UnattendedToolGate,
+};
 use crate::api::assistant_api::get_assistant;
 use crate::api::genai_client::create_client_with_config;
-use crate::db::conversation_db::{ConversationDatabase, MessageAttachment, Repository as ConversationRepository};
+use crate::db::conversation_db::{ConversationDatabase, Repository as ConversationRepository};
 use crate::db::llm_db::LLMDatabase;
-use crate::db::mcp_db::MCPDatabase;
 use crate::db::scheduled_task_db::{
     RunFinish, ScheduledTask, ScheduledTaskDatabase, ScheduledTaskLog, DELIVER_RUN_CONVERSATION,
     RUN_CANCELLED, RUN_DELIVERED, RUN_FAILED, RUN_QUIET, RUN_SKIPPED,
 };
 use crate::db::system_db::FeatureConfig;
-use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
+use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt};
 use crate::scheduler::delivery::{self, DeliveryContent};
 use crate::scheduler::gate::{self, Admission, GateContext};
 use crate::scheduler::service::{self, RunView, SchedulePreview, TaskDefaults, TaskInput, TaskPatch, TaskView};
@@ -41,7 +45,6 @@ use crate::skills::{
 use crate::slash::parse_slash_prompt;
 use crate::template_engine::build_template_engine;
 use crate::{AppState, FeatureConfigState};
-use genai::chat::{ChatOptions, ToolCall};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -124,278 +127,28 @@ fn cancel_scheduled_run(run_id: &str) -> bool {
     }
 }
 
-// ── Agentic Loop Types ──────────────────────────────────────────────────
+// ── Agentic Loop Adapter ────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub(crate) enum AgenticLoopStatus {
-    Completed { message_id: i64 },
-    Cancelled,
-    MaxRoundsReached,
-    Timeout,
-    Error(String),
+struct ScheduledToolGate<'a> {
+    ctx: GateContext<'a>,
 }
 
-impl fmt::Display for AgenticLoopStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AgenticLoopStatus::Completed { .. } => write!(f, "completed"),
-            AgenticLoopStatus::Cancelled => write!(f, "cancelled"),
-            AgenticLoopStatus::MaxRoundsReached => write!(f, "max_rounds_reached"),
-            AgenticLoopStatus::Timeout => write!(f, "timeout"),
-            AgenticLoopStatus::Error(e) => write!(f, "error: {}", e),
-        }
+#[async_trait::async_trait]
+impl UnattendedToolGate for ScheduledToolGate<'_> {
+    async fn admit(&self, call_db_id: i64, progress: &str) -> Admission {
+        gate::admit(&self.ctx, call_db_id, progress).await
     }
 }
 
-#[derive(Debug, Clone)]
-struct AgenticLoopResult {
-    final_text: String,
-    rounds: usize,
-    tool_calls_total: usize,
-    tool_calls_success: usize,
-    tool_calls_failed: usize,
-    status: AgenticLoopStatus,
-}
-
-struct AgenticLoopContext<'a> {
+struct ScheduledLoopObserver<'a> {
     app_handle: &'a tauri::AppHandle,
-    client: &'a crate::api::genai_client::Client,
-    model_name: &'a str,
-    chat_options: &'a ChatOptions,
-    conversation_id: i64,
-    conversation_db: &'a ConversationDatabase,
-    tool_name_mapping: &'a ToolNameMapping,
-    tool_config: Option<ToolConfig>,
-    tool_call_strategy: ToolCallStrategy,
-    llm_model_id: i64,
-    llm_model_code: String,
-    task: &'a ScheduledTask,
-    assistant_name: &'a str,
+    task_id: i64,
     run_id: &'a str,
-    cancel_token: CancellationToken,
 }
 
-// ── Agentic Loop Implementation ─────────────────────────────────────────
-
-/// 将 LLM ToolCall 的 arguments 归一化为 JSON 对象字符串
-pub(crate) fn normalize_tool_arguments(arguments: &serde_json::Value) -> String {
-    if arguments.is_object() {
-        arguments.to_string()
-    } else {
-        "{}".to_string()
-    }
-}
-
-/// 从 prompt 模式的 `<mcp_tool_call>` 标签中提取工具调用。
-///
-/// 返回值：
-/// - `Vec<ToolCall>`: 解析出的工具调用（用于后续统一执行）
-/// - `String`: 去除 `<mcp_tool_call>` 标签后的文本
-pub(crate) fn extract_prompt_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
-    let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>")
-        .expect("valid mcp tool call regex");
-
-    let mut tool_calls = Vec::new();
-    for cap in mcp_regex.captures_iter(content) {
-        let Some(server_name) = cap.get(1).map(|m| m.as_str().trim()).filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        let Some(tool_name) = cap.get(2).map(|m| m.as_str().trim()).filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        let parameters_raw = cap.get(3).map(|m| m.as_str().trim()).unwrap_or("{}");
-        let fn_arguments = serde_json::from_str::<serde_json::Value>(parameters_raw)
-            .ok()
-            .filter(|value| value.is_object())
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        tool_calls.push(ToolCall {
-            call_id: Uuid::new_v4().to_string(),
-            fn_name: crate::api::ai_api::build_tool_name(server_name, tool_name),
-            fn_arguments,
-            thought_signatures: None,
-        });
-    }
-
-    if tool_calls.is_empty() {
-        (tool_calls, content.to_string())
-    } else {
-        let sanitized_content = mcp_regex.replace_all(content, "").to_string();
-        (tool_calls, sanitized_content)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PreparedAgenticToolCall {
-    llm_call_id: String,
-    call_db_id: Option<i64>,
-    call_record_error: Option<String>,
-    server_name: String,
-    tool_name: String,
-    params_str: String,
-    params_json: serde_json::Value,
-}
-
-pub(crate) fn build_mcp_tool_call_ui_hint(
-    server_name: &str,
-    tool_name: &str,
-    parameters: &str,
-    call_db_id: Option<i64>,
-    llm_call_id: &str,
-) -> String {
-    let payload = match call_db_id {
-        Some(call_id) => serde_json::json!({
-            "server_name": server_name,
-            "tool_name": tool_name,
-            "parameters": parameters,
-            "call_id": call_id,
-            "llm_call_id": llm_call_id,
-        }),
-        None => serde_json::json!({
-            "server_name": server_name,
-            "tool_name": tool_name,
-            "parameters": parameters,
-            "llm_call_id": llm_call_id,
-        }),
-    };
-    format!("\n\n<!-- MCP_TOOL_CALL:{} -->\n", payload)
-}
-
-async fn create_scheduled_tool_call_record(
-    app_handle: &tauri::AppHandle,
-    conversation_id: i64,
-    response_message_id: Option<i64>,
-    server_name: &str,
-    tool_name: &str,
-    parameters: &str,
-    llm_call_id: &str,
-) -> Result<i64, String> {
-    crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
-        app_handle.clone(),
-        conversation_id,
-        response_message_id,
-        server_name.to_string(),
-        tool_name.to_string(),
-        parameters.to_string(),
-        Some(llm_call_id),
-        response_message_id,
-    )
-    .await
-    .map(|record| record.id)
-}
-
-fn fail_call(mcp_db: &MCPDatabase, call_db_id: i64, error: &str) {
-    let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(error));
-}
-
-/// 执行单个工具调用；调度器在 2MB 栈的 tokio 工作线程上，工具本身换到大栈线程执行
-///
-/// 返回 (is_success, result_or_error_text)
-async fn execute_single_tool(
-    app_handle: &tauri::AppHandle,
-    call_db_id: i64,
-    timeout: Duration,
-    cancel_token: CancellationToken,
-) -> (bool, String) {
-    let mcp_db = match MCPDatabase::new(app_handle) {
-        Ok(db) => db,
-        Err(e) => return (false, format!("Error: 初始化 MCP 数据库失败: {}", e)),
-    };
-    let mut record = match mcp_db.get_mcp_tool_call(call_db_id) {
-        Ok(record) => record,
-        Err(e) => return (false, format!("Error: 获取工具调用记录失败: {}", e)),
-    };
-    match mcp_db.mark_mcp_tool_call_executing_if_pending(call_db_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            if record.status == "success" {
-                return (true, record.result.unwrap_or_default());
-            }
-            if record.status == "failed" {
-                let err = record.error.unwrap_or_else(|| "工具执行失败".to_string());
-                return (false, format!("Error: {}", err));
-            }
-            let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "executing", None, None);
-        }
-        Err(e) => {
-            let err = format!("Error: 更新工具状态失败: {}", e);
-            fail_call(&mcp_db, call_db_id, &err);
-            return (false, err);
-        }
-    }
-    if let Ok(latest_record) = mcp_db.get_mcp_tool_call(call_db_id) {
-        record = latest_record;
-    }
-    let server = match mcp_db.get_mcp_server(record.server_id) {
-        Ok(s) => s,
-        Err(e) => {
-            let err = format!("Error: 获取 MCP 服务器失败: {}", e);
-            fail_call(&mcp_db, call_db_id, &err);
-            return (false, err);
-        }
-    };
-    if cancel_token.is_cancelled() {
-        let err = "Error: 工具执行已取消".to_string();
-        fail_call(&mcp_db, call_db_id, &err);
-        return (false, err);
-    }
-    let execution = tokio::time::timeout(
-        timeout,
-        crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
-            app_handle,
-            &server,
-            &record.tool_name,
-            &record.parameters,
-            Some(record.conversation_id),
-            Some(cancel_token.clone()),
-        ),
-    );
-    let exec_result = tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => {
-            let error = "工具执行已停止".to_string();
-            fail_call(&mcp_db, call_db_id, &error);
-            return (false, error);
-        }
-        result = execution => result,
-    };
-    match exec_result {
-        Ok(Ok(result)) => {
-            let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "success", Some(&result), None);
-            (true, result)
-        }
-        Ok(Err(e)) => {
-            let err_str = format!("Error: {}", e);
-            fail_call(&mcp_db, call_db_id, &err_str);
-            (false, err_str)
-        }
-        Err(_) => {
-            let err_str = format!("Error: 工具执行超时 ({}s)", timeout.as_secs());
-            fail_call(&mcp_db, call_db_id, &err_str);
-            (false, err_str)
-        }
-    }
-}
-
-pub(crate) enum LlmWait<T> {
-    Done(T),
-    Cancelled,
-    Timeout,
-}
-
-/// 等待模型回复时同时监听停止信号与总时限；停止优先，保证停止后不会再按完成处理。
-pub(crate) async fn await_llm_or_stop<F: std::future::Future>(
-    fut: F,
-    cancel_token: &CancellationToken,
-    deadline: Instant,
-) -> LlmWait<F::Output> {
-    tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => LlmWait::Cancelled,
-        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => LlmWait::Timeout,
-        out = fut => LlmWait::Done(out),
+impl UnattendedLoopObserver for ScheduledLoopObserver<'_> {
+    fn on_log(&self, kind: &str, content: String) {
+        log_task_message(self.app_handle, self.task_id, self.run_id, kind, content);
     }
 }
 
@@ -406,357 +159,14 @@ pub(crate) fn loop_status_failure(
     tool_calls_success: usize,
     tool_calls_failed: usize,
 ) -> Option<(&'static str, String)> {
-    let executed = if tool_calls_success + tool_calls_failed > 0 {
-        format!(
-            "；停止前已执行工具 {} 次（成功 {}，失败 {}），已产生的外部操作无法撤回",
-            tool_calls_success + tool_calls_failed,
-            tool_calls_success,
-            tool_calls_failed
-        )
-    } else {
-        String::new()
-    };
-    match status {
-        AgenticLoopStatus::Completed { .. } => None,
-        AgenticLoopStatus::Cancelled => Some(("cancelled", format!("任务已手动停止（已进行 {rounds} 轮）{executed}"))),
-        AgenticLoopStatus::Timeout => Some((
-            "timeout",
-            format!("执行超时：超过总时限 {AGENTIC_LOOP_TOTAL_TIMEOUT_SECS}s，任务未完成（已进行 {rounds} 轮）{executed}"),
-        )),
-        AgenticLoopStatus::MaxRoundsReached => Some((
-            "max_rounds_reached",
-            format!("达到最大执行轮次 {AGENTIC_LOOP_MAX_ROUNDS}，任务未完成{executed}"),
-        )),
-        AgenticLoopStatus::Error(e) => Some(("error", format!("{e}（已进行 {rounds} 轮）{executed}"))),
-    }
-}
-
-/// 调用模型；接口临时出错时按 30 秒、2 分钟、5 分钟重试，停止与总时限优先。
-async fn exec_chat_with_retry(
-    ctx: &AgenticLoopContext<'_>,
-    messages: &[(String, String, Vec<MessageAttachment>)],
-    round: usize,
-    deadline: Instant,
-) -> Result<genai::chat::ChatResponse, AgenticLoopStatus> {
-    let mut attempt = 0usize;
-    loop {
-        let request = build_chat_request_from_messages(messages, ctx.tool_call_strategy, ctx.tool_config.clone()).chat_request;
-        let result = match await_llm_or_stop(
-            ctx.client.exec_chat(ctx.model_name, request, Some(ctx.chat_options)),
-            &ctx.cancel_token,
-            deadline,
-        )
-        .await
-        {
-            LlmWait::Done(result) => result,
-            LlmWait::Cancelled => {
-                log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "cancel", "等待模型回复时任务已停止");
-                return Err(AgenticLoopStatus::Cancelled);
-            }
-            LlmWait::Timeout => {
-                log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "timeout",
-                    format!("等待模型回复时达到总超时 ({}s)，已进入第 {} 轮", AGENTIC_LOOP_TOTAL_TIMEOUT_SECS, round));
-                return Err(AgenticLoopStatus::Timeout);
-            }
-        };
-        let error = match result {
-            Ok(response) => return Ok(response),
-            Err(error) => error,
-        };
-        error!(task_id = ctx.task.id, round, attempt, error = %error, "LLM call failed in scheduled run");
-        let Some(delay) = LLM_RETRY_DELAYS_SECS.get(attempt).copied() else {
-            return Err(AgenticLoopStatus::Error(format!(
-                "模型调用失败（已重试 {} 次）：{error}",
-                LLM_RETRY_DELAYS_SECS.len()
-            )));
-        };
-        attempt += 1;
-        log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "llm_retry",
-            format!("第 {round} 轮模型调用失败，{delay} 秒后第 {attempt} 次重试：{error}"));
-        tokio::select! {
-            biased;
-            _ = ctx.cancel_token.cancelled() => return Err(AgenticLoopStatus::Cancelled),
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => return Err(AgenticLoopStatus::Timeout),
-            _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
-        }
-    }
-}
-
-struct SavedRoundResponse {
-    message: crate::db::conversation_db::Message,
-    tool_calls: Vec<ToolCall>,
-}
-
-impl SavedRoundResponse {
-    fn next_step(
-        self, cancel: &CancellationToken, rounds: usize, total: usize, success: usize, failed: usize,
-    ) -> std::ops::ControlFlow<AgenticLoopResult, Self> {
-        if !self.tool_calls.is_empty() {
-            return std::ops::ControlFlow::Continue(self);
-        }
-        let status = if cancel.is_cancelled() {
-            AgenticLoopStatus::Cancelled
-        } else {
-            AgenticLoopStatus::Completed { message_id: self.message.id }
-        };
-        std::ops::ControlFlow::Break(AgenticLoopResult {
-            final_text: self.message.content, rounds, tool_calls_total: total,
-            tool_calls_success: success, tool_calls_failed: failed, status,
-        })
-    }
-}
-
-fn save_round_response(
-    db: &ConversationDatabase, conversation_id: i64, chat_response: &genai::chat::ChatResponse,
-    model_id: i64, model_name: &str, generation_group: &str,
-) -> Result<SavedRoundResponse, String> {
-    let mut response_text = chat_response.first_text().unwrap_or("").to_string();
-    let mut captured_tool_calls: Vec<ToolCall> = chat_response.tool_calls().into_iter().cloned().collect();
-    if captured_tool_calls.is_empty() {
-        let (prompt_tool_calls, sanitized_text) = extract_prompt_tool_calls(&response_text);
-        if !prompt_tool_calls.is_empty() {
-            captured_tool_calls = prompt_tool_calls;
-            response_text = sanitized_text;
-        }
-    }
-    let now = Utc::now();
-    let message = crate::api::ai_api::save_message_with_metadata(
-        db, None, conversation_id, "response".into(), response_text, Some(model_id), Some(model_name.into()),
-        Some(now), captured_tool_calls.is_empty().then_some(now), 0, Some(generation_group.into()), None, None,
-    ).map_err(|e| e.to_string())?;
-    Ok(SavedRoundResponse { message, tool_calls: captured_tool_calls })
-}
-
-async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResult {
-    let mut messages: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
-    let mut round: usize = 0;
-    let mut tool_calls_total: usize = 0;
-    let mut tool_calls_success: usize = 0;
-    let mut tool_calls_failed: usize = 0;
-    let mut final_text = String::new();
-    let mut progress = String::new();
-    let deadline = Instant::now() + Duration::from_secs(AGENTIC_LOOP_TOTAL_TIMEOUT_SECS);
-    let gate_ctx = GateContext {
-        app: ctx.app_handle,
-        task: ctx.task,
-        assistant_name: ctx.assistant_name,
-        run_id: ctx.run_id,
-        conversation_id: ctx.conversation_id,
-        cancel: &ctx.cancel_token,
-    };
-
-    let result = |final_text: String, rounds, total, success, failed, status| AgenticLoopResult {
-        final_text,
-        rounds,
-        tool_calls_total: total,
-        tool_calls_success: success,
-        tool_calls_failed: failed,
+    crate::api::ai::unattended_loop::loop_status_failure_with_limits(
         status,
-    };
-
-    // 从 DB 中读取初始消息（system + user）构建内存消息列表
-    match ctx.conversation_db.message_repo().map_err(|e| e.to_string()).and_then(|repo| {
-        repo.list_by_conversation_id(ctx.conversation_id).map_err(|e| e.to_string())
-    }) {
-        Ok(rows) => {
-            for (msg, attachment_opt) in &rows {
-                messages.push((msg.message_type.clone(), msg.content.clone(), attachment_opt.iter().cloned().collect()));
-            }
-        }
-        Err(e) => return result(String::new(), 0, 0, 0, 0, AgenticLoopStatus::Error(format!("读取初始消息失败: {}", e))),
-    }
-
-    let generation_group_id = Uuid::new_v4().to_string();
-
-    loop {
-        if ctx.cancel_token.is_cancelled() {
-            log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "cancel", "任务已停止");
-            return result(final_text, round, tool_calls_total, tool_calls_success, tool_calls_failed, AgenticLoopStatus::Cancelled);
-        }
-        if Instant::now() >= deadline {
-            log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "timeout",
-                format!("总超时 ({}s)，已完成 {} 轮", AGENTIC_LOOP_TOTAL_TIMEOUT_SECS, round));
-            return result(final_text, round, tool_calls_total, tool_calls_success, tool_calls_failed, AgenticLoopStatus::Timeout);
-        }
-        if round >= AGENTIC_LOOP_MAX_ROUNDS {
-            log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "max_rounds", format!("达到最大轮次 ({})", AGENTIC_LOOP_MAX_ROUNDS));
-            return result(final_text, round, tool_calls_total, tool_calls_success, tool_calls_failed, AgenticLoopStatus::MaxRoundsReached);
-        }
-
-        round += 1;
-        info!(task_id = ctx.task.id, round, "scheduled run round start");
-
-        let chat_response = match exec_chat_with_retry(ctx, &messages, round, deadline).await {
-            Ok(response) => response,
-            Err(status) => return result(String::new(), round, tool_calls_total, tool_calls_success, tool_calls_failed, status),
-        };
-
-        let saved = match save_round_response(ctx.conversation_db, ctx.conversation_id, &chat_response,
-            ctx.llm_model_id, &ctx.llm_model_code, &generation_group_id) {
-            Ok(saved) => saved,
-            Err(e) => return result(String::new(), round, tool_calls_total, tool_calls_success, tool_calls_failed,
-                AgenticLoopStatus::Error(format!("运行 {} 会话 {} 第 {round} 轮回复写入失败：{e}", ctx.run_id, ctx.conversation_id))),
-        };
-        debug!(task_id = ctx.task.id, round, text_len = saved.message.content.len(), tool_calls = saved.tool_calls.len(), "scheduled run response");
-        let saved = match saved.next_step(&ctx.cancel_token, round, tool_calls_total, tool_calls_success, tool_calls_failed) {
-            std::ops::ControlFlow::Break(completed) => {
-                if matches!(completed.status, AgenticLoopStatus::Cancelled) {
-                    log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "cancel", "模型已回复但任务已停止，不按完成处理");
-                }
-                return completed;
-            }
-            std::ops::ControlFlow::Continue(saved) => saved,
-        };
-        let response_message_id = saved.message.id;
-        let mut response_content = saved.message.content;
-        let captured_tool_calls = saved.tool_calls;
-        if !response_content.trim().is_empty() {
-            progress = response_content.clone();
-        }
-
-        log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "tool_round", format!("第 {} 轮：{} 个工具调用", round, captured_tool_calls.len()));
-
-        // 先创建 tool_call 记录并写入带 call_id 的 MCP_TOOL_CALL 注释，保证后续可追踪完整状态
-        let mut prepared_tool_calls: Vec<PreparedAgenticToolCall> = Vec::new();
-        for tc in &captured_tool_calls {
-            let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, ctx.tool_name_mapping);
-            let params_str = normalize_tool_arguments(&tc.fn_arguments);
-            let params_json = serde_json::from_str::<serde_json::Value>(&params_str)
-                .unwrap_or_else(|_| serde_json::Value::String(params_str.clone()));
-            let (call_db_id, call_record_error) = match create_scheduled_tool_call_record(
-                ctx.app_handle, ctx.conversation_id, Some(response_message_id), &server_name, &tool_name, &params_str, &tc.call_id,
-            )
-            .await
-            {
-                Ok(call_id) => (Some(call_id), None),
-                Err(e) => (None, Some(format!("Error: failed to create tool call record: {}", e))),
-            };
-            response_content.push_str(&build_mcp_tool_call_ui_hint(&server_name, &tool_name, &params_str, call_db_id, &tc.call_id));
-            prepared_tool_calls.push(PreparedAgenticToolCall {
-                llm_call_id: tc.call_id.clone(),
-                call_db_id,
-                call_record_error,
-                server_name,
-                tool_name,
-                params_str,
-                params_json,
-            });
-        }
-
-        if let Ok(repo) = ctx.conversation_db.message_repo() {
-            if let Ok(Some(mut msg)) = repo.read(response_message_id) {
-                msg.content = response_content.clone();
-                msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-                let _ = repo.update(&msg);
-            }
-        }
-        messages.push(("response".to_string(), response_content.clone(), Vec::new()));
-
-        for tool_call in &prepared_tool_calls {
-            if ctx.cancel_token.is_cancelled() {
-                log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "cancel", "任务已停止");
-                return result(final_text, round, tool_calls_total, tool_calls_success, tool_calls_failed, AgenticLoopStatus::Cancelled);
-            }
-            tool_calls_total += 1;
-            log_task_message(
-                ctx.app_handle,
-                ctx.task.id,
-                ctx.run_id,
-                "tool_call",
-                serde_json::json!({
-                    "callId": tool_call.llm_call_id.clone(),
-                    "callDbId": tool_call.call_db_id,
-                    "serverName": tool_call.server_name.clone(),
-                    "toolName": tool_call.tool_name.clone(),
-                    "parameters": tool_call.params_json.clone(),
-                })
-                .to_string(),
-            );
-
-            let (success, result_text) = match tool_call.call_db_id {
-                Some(call_db_id) => match gate::admit(&gate_ctx, call_db_id, &progress).await {
-                    Admission::Run(basis) => {
-                        log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "admitted", basis);
-                        execute_single_tool(
-                            ctx.app_handle,
-                            call_db_id,
-                            Duration::from_secs(AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS),
-                            ctx.cancel_token.clone(),
-                        )
-                        .await
-                    }
-                    Admission::Refuse(reason) => {
-                        if let Ok(db) = MCPDatabase::new(ctx.app_handle) {
-                            fail_call(&db, call_db_id, &reason);
-                        }
-                        (false, reason)
-                    }
-                },
-                None => (
-                    false,
-                    tool_call.call_record_error.clone().unwrap_or_else(|| "Error: failed to create tool call record before execution".to_string()),
-                ),
-            };
-            if success {
-                tool_calls_success += 1;
-            } else {
-                tool_calls_failed += 1;
-            }
-
-            let tool_result_call_id = if tool_call.llm_call_id.trim().is_empty() {
-                tool_call.call_db_id.map(|id| format!("mcp_tool_call_{}", id)).unwrap_or_else(|| Uuid::new_v4().to_string())
-            } else {
-                tool_call.llm_call_id.clone()
-            };
-            let tool_result_content = format!(
-                "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\n{}",
-                tool_result_call_id.as_str(),
-                tool_call.tool_name.as_str(),
-                tool_call.server_name.as_str(),
-                tool_call.params_str.as_str(),
-                result_text
-            );
-            let _ = crate::api::ai_api::add_message(
-                ctx.app_handle,
-                None,
-                ctx.conversation_id,
-                "tool_result".to_string(),
-                tool_result_content.clone(),
-                Some(ctx.llm_model_id),
-                Some(ctx.llm_model_code.clone()),
-                Some(Utc::now()),
-                Some(Utc::now()),
-                0,
-                Some(generation_group_id.clone()),
-                None,
-            );
-            messages.push(("tool_result".to_string(), tool_result_content, Vec::new()));
-            log_task_message(
-                ctx.app_handle,
-                ctx.task.id,
-                ctx.run_id,
-                "tool_result",
-                serde_json::json!({
-                    "callId": tool_result_call_id,
-                    "callDbId": tool_call.call_db_id,
-                    "serverName": tool_call.server_name.clone(),
-                    "toolName": tool_call.tool_name.clone(),
-                    "success": success,
-                    "parameters": tool_call.params_json.clone(),
-                    "result": result_text,
-                })
-                .to_string(),
-            );
-        }
-
-        if let Ok(repo) = ctx.conversation_db.message_repo() {
-            if let Ok(Some(mut msg)) = repo.read(response_message_id) {
-                msg.finish_time = Some(Utc::now());
-                let _ = repo.update(&msg);
-            }
-        }
-        final_text.clear();
-    }
+        rounds,
+        tool_calls_success,
+        tool_calls_failed,
+        AGENTIC_LOOP_TOTAL_TIMEOUT_SECS,
+        AGENTIC_LOOP_MAX_ROUNDS,
+    )
 }
 
 // ── 运行结果与结果日志 ──────────────────────────────────────────────────
@@ -1085,36 +495,6 @@ fn prune_hidden_run_conversations(app_handle: &tauri::AppHandle, task_id: i64, r
     }
 }
 
-fn build_tool_config_for_mcp(mcp_info: &MCPInfoForAssistant, enable_tools: bool) -> Option<ToolConfig> {
-    use crate::mcp::builtin_mcp::templates::is_dynamic_loading_fixed_tool;
-    if !enable_tools {
-        return None;
-    }
-    let servers_for_injection = if mcp_info.dynamic_loading_enabled {
-        mcp_info
-            .enabled_servers
-            .iter()
-            .filter_map(|server| {
-                let tools: Vec<_> = server
-                    .tools
-                    .iter()
-                    .filter(|tool| is_dynamic_loading_fixed_tool(server.command.as_deref(), &tool.name, true))
-                    .cloned()
-                    .collect();
-                (!tools.is_empty()).then(|| {
-                    let mut server = server.clone();
-                    server.tools = tools;
-                    server
-                })
-            })
-            .collect()
-    } else {
-        mcp_info.enabled_servers.clone()
-    };
-    let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
-    Some(ToolConfig { tools, tool_name_mapping })
-}
-
 fn suppress_completion_notification(config_feature_map: &mut HashMap<String, HashMap<String, FeatureConfig>>) {
     let display_config = config_feature_map.entry("display".to_string()).or_default();
     display_config.insert(
@@ -1428,7 +808,18 @@ async fn execute_run_inner(
         .map_err(|e| RunError::Failed(format!("关联运行 {run_id} 与会话 {conversation_id} 失败：{e}")))?;
 
     // ── 6. 执行 ───────────────────────────────────────────────────────
-    let loop_ctx = AgenticLoopContext {
+    let gate_adapter = ScheduledToolGate {
+        ctx: GateContext {
+            app: app_handle,
+            task,
+            assistant_name: &assistant_name,
+            run_id,
+            conversation_id,
+            cancel: &cancel_token,
+        },
+    };
+    let observer = ScheduledLoopObserver { app_handle, task_id: task.id, run_id };
+    let loop_ctx = UnattendedLoopContext {
         app_handle,
         client: &client,
         model_name: &model_name,
@@ -1440,12 +831,18 @@ async fn execute_run_inner(
         tool_call_strategy,
         llm_model_id: model_detail.model.id,
         llm_model_code: model_detail.model.code.clone(),
-        task,
-        assistant_name: &assistant_name,
-        run_id,
+        run_label: run_id,
+        limits: LoopLimits {
+            max_rounds: AGENTIC_LOOP_MAX_ROUNDS,
+            per_tool_timeout_secs: AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS,
+            total_timeout_secs: AGENTIC_LOOP_TOTAL_TIMEOUT_SECS,
+            retry_delays_secs: &LLM_RETRY_DELAYS_SECS,
+        },
         cancel_token: cancel_token.clone(),
+        gate: &gate_adapter,
+        observer: &observer,
     };
-    let loop_result = run_task_agentic_loop(&loop_ctx).await;
+    let loop_result = run_unattended_loop(&loop_ctx).await;
     log_task_message(
         app_handle,
         task.id,

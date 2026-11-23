@@ -402,6 +402,23 @@ impl AgentDriver for BuiltinDriver {
 impl super::registry::PreparedAgentSession for PreparedAgentSession {
     fn metadata(&self) -> AgentDriverMetadata { self.kind().into() }
     async fn finalize(&mut self, app: &tauri::AppHandle, conversation_id: i64, payload: String) -> Result<(), AppError> {
+        let is_proactive = crate::mcp::butler_tools::conversation_kind(app, Some(conversation_id))
+            .is_ok_and(|k| k == crate::proactive::tools::PROACTIVE_RUN_KIND);
+        if is_proactive {
+            // 主动整理后台运行时强制走审批回调与受控沙箱，防止原生 Agent 绕过 AIPP 安全审核。
+            match self {
+                Self::Codex(config) => {
+                    config.approval_policy = Some("on-request".to_string());
+                    if config.sandbox.as_deref() == Some("danger-full-access") || config.sandbox.is_none() {
+                        config.sandbox = Some("workspace-write".to_string());
+                    }
+                }
+                Self::Claude(config) => {
+                    config.permission_mode = Some("default".to_string());
+                }
+                Self::Acp(_) => {}
+            }
+        }
         self.finalize_mcp_tools(payload);
         if let Self::Claude(config) = self {
             let provider_id = config.instance_id.ok_or_else(|| super::registry::routing_error("Claude configuration has no provider instance"))?;

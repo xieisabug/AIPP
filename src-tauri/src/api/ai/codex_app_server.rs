@@ -813,8 +813,7 @@ async fn handle_approval_request(
         app_handle, conversation_id, cancellation.and_then(|c| c.source_message_id),
         "codex.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
     )?;
-    let mut review_turn = None;
-    if let Some(turn) = cancellation.and_then(|context| context.source_message_id) {
+    let (is_proactive, review_turn) = {
         let conversation = ConversationDatabase::new(app_handle)
             .map_err(|error| format!("Codex 审批连接数据库失败：{error}"))?
             .conversation_repo()
@@ -822,18 +821,36 @@ async fn handle_approval_request(
             .read(conversation_id)
             .map_err(|error| format!("Codex 审批读取会话 {conversation_id} 失败：{error}"))?
             .ok_or_else(|| format!("Codex 审批会话 {conversation_id} 不存在"))?;
-        if crate::mcp::tool_review::effective_review_mode(
-            app_handle, conversation.assistant_id.unwrap_or_default(), conversation_id,
-        ) == "auto_model" {
-            review_turn = Some(turn);
-        }
-    }
+        let is_proactive = conversation.conversation_kind == crate::proactive::tools::PROACTIVE_RUN_KIND;
+        let turn = cancellation.and_then(|context| context.source_message_id);
+        let review_turn = if is_proactive {
+            Some(turn.unwrap_or(0))
+        } else if let Some(turn) = turn {
+            if crate::mcp::tool_review::effective_review_mode(
+                app_handle, conversation.assistant_id.unwrap_or_default(), conversation_id,
+            ) == "auto_model" {
+                Some(turn)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (is_proactive, review_turn)
+    };
     permission_state.store_request_guarded(event.clone(), decision_tx, scope.clone(), butler_guard.clone()).await?;
     if let Some(turn) = review_turn {
-        tauri::async_runtime::spawn(super::agent_driver::native_agents::review_permission(
-            app_handle.clone(), event.clone(), scope, turn, "Codex",
-            params["cwd"].as_str().unwrap_or("未提供").to_string(),
-        ));
+        if is_proactive {
+            tauri::async_runtime::spawn(super::agent_driver::native_agents::review_proactive_permission(
+                app_handle.clone(), event.clone(), scope, turn, "Codex",
+                params["cwd"].as_str().unwrap_or("未提供").to_string(),
+            ));
+        } else {
+            tauri::async_runtime::spawn(super::agent_driver::native_agents::review_permission(
+                app_handle.clone(), event.clone(), scope, turn, "Codex",
+                params["cwd"].as_str().unwrap_or("未提供").to_string(),
+            ));
+        }
     } else {
         permission_state.mark_presented(&request_id, json!(event)).await;
         if let Err(error) = emit_permission_request_event(

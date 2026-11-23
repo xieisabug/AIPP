@@ -1,7 +1,14 @@
-use super::{config, connection, delivery, delta, lunar, memory, model, proposal, topics, Config};
+//! 主动整理调度与主执行器：
+//! 1. 空闲与触发判断（`idle_after_chat` / `pulse` / `digest` / `milestone` / `manual`）；
+//! 2. 轻巡检（小模型 `ACT` / `QUIET`）跳过无需介入的日常闲聊；
+//! 3. 深度运行统一交给 `agent::execute`（支持普通模型无头循环与原生 Agent），
+//!    由 AI 自主组合全局工具与主动整理专用工具完成整理；
+//! 4. 推进双水位线、收尾唤醒事项、按节律投递桌面卡片与管家飞书提醒。
+use super::{agent, config, connection, delivery, delta, lunar, prompt, proposal, topics, Config};
 use anyhow::{ensure, Context, Result};
 use chrono::{Duration, Local, NaiveDate};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, TransactionBehavior};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
@@ -28,184 +35,6 @@ pub fn event_date(raw: &str, yearly: bool, lunar: bool, today: NaiveDate) -> Res
         .context("纪念日超出有效日期范围")
 }
 
-fn verify_finding_source(conn: &Connection, source: &delta::Source, f: &model::Finding) -> Result<()> {
-    delta::verify(conn, source)?;
-    ensure!(
-        !f.quote.trim().is_empty() && source.text.contains(&f.quote),
-        "整理结果缺少可核对的原话"
-    );
-    Ok(())
-}
-
-fn occurrence(f: &model::Finding, today: NaiveDate) -> std::result::Result<NaiveDate, &'static str> {
-    if f.yearly && f.date.is_none() {
-        return Err("年度事项缺少日期");
-    }
-    match f.date.as_deref() {
-        Some(date) if f.kind != "memory" => event_date(date, f.yearly, f.lunar, today).map_err(|_| "事项日期无效"),
-        _ => Ok(today),
-    }
-}
-
-type Draft = (usize, model::Finding);
-
-pub(super) struct RejectedDate {
-    draft: Draft,
-    reason: &'static str,
-}
-
-/// Keep rejected candidates out of the reconciliation prompt and its draft indices.
-pub(super) fn split_finding_dates(findings: Vec<Draft>, today: NaiveDate) -> (Vec<Draft>, Vec<RejectedDate>) {
-    let mut valid = Vec::new();
-    let mut rejected = Vec::new();
-    for draft in findings {
-        match occurrence(&draft.1, today) {
-            Ok(_) => valid.push(draft),
-            Err(reason) => rejected.push(RejectedDate { draft, reason }),
-        }
-    }
-    (valid, rejected)
-}
-
-pub(super) fn record_rejected_dates(
-    conn: &Connection,
-    rows: &[delta::Source],
-    rejected: &[RejectedDate],
-) -> Result<()> {
-    for entry in rejected {
-        let (index, f) = &entry.draft;
-        let source = rows.get(*index).context("整理来源编号超出本批次")?;
-        // A deterministic date error must not hide source changes or database errors.
-        verify_finding_source(conn, source, f)?;
-        record_failure(conn, "finding", &anyhow::anyhow!("来源 #{} / {} 的{}", source.conversation, source.position, entry.reason))?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-pub(super) fn persist(
-    conn: &Connection,
-    source: &delta::Source,
-    f: &model::Finding,
-    chief: i64,
-    session: i64,
-    cfg: &Config,
-) -> Result<()> {
-    persist_at(conn, source, f, chief, session, cfg, Local::now().date_naive())
-}
-
-pub(super) fn persist_at(
-    conn: &Connection,
-    source: &delta::Source,
-    f: &model::Finding,
-    chief: i64,
-    session: i64,
-    cfg: &Config,
-    today: NaiveDate,
-) -> Result<()> {
-    verify_finding_source(conn, source, f)?;
-    ensure!(!f.title.trim().is_empty() && f.title.chars().count() <= 300, "事项标题为空或过长");
-    ensure!(
-        ![&f.title, &f.detail, &f.instruction].iter().any(|s| delta::sensitive(s)),
-        "整理结果含疑似敏感信息"
-    );
-    if f.kind == "memory" && !cfg.remember {
-        return Ok(());
-    }
-    ensure!(!f.yearly || f.date.is_some(), "年度事项缺少日期");
-    if matches!(f.kind.as_str(), "open_loop" | "proposal") {
-        let covered: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM scheduled_task WHERE is_enabled=1 AND assistant_id=?1
-            AND (trim(name)=trim(?2) OR (trim(?3)!='' AND trim(task_prompt)=trim(?3))))",
-            params![source.assistant.unwrap_or(chief), f.title, f.instruction],
-            |r| r.get(0),
-        )?;
-        if covered {
-            return Ok(());
-        }
-    }
-    // Before fact-specific receipts a memory could have been explicitly undone.
-    // Replaying an old digest must not recreate it after that undo.
-    if f.kind=="memory" && conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_proactive_evidence
-        WHERE conversation_id=?1 AND source_position=?2 AND kind='memory' AND quote=?3)",
-        params![source.conversation,source.position,f.quote],|r|r.get::<_,bool>(0))? {
-        return Ok(());
-    }
-    // The same user statement can support two independently actionable findings.
-    let evidence_kind = if f.kind=="memory" {
-        serde_json::to_string(&(&f.kind,f.title.trim()))?
-    } else {
-        serde_json::to_string(&(&f.kind,f.title.trim(),&f.date,f.yearly,f.lunar,f.instruction.trim()))?
-    };
-    if conn.execute(
-        "INSERT OR IGNORE INTO butler_proactive_evidence VALUES(?1,?2,?3,?4)",
-        params![source.conversation, source.position, evidence_kind, f.quote],
-    )? == 0
-    {
-        return Ok(());
-    }
-    if f.kind == "memory" {
-        if cfg.remember {
-            memory::save(conn, source, chief, &f.title, f.replaces, f.global)?;
-        }
-        return Ok(());
-    }
-    ensure!(
-        matches!(f.kind.as_str(), "open_loop" | "milestone" | "prep_topic" | "proposal"),
-        "无法识别的整理事项"
-    );
-    ensure!(f.kind != "proposal" || !f.instruction.trim().is_empty(), "建议缺少待执行指令");
-    ensure!(
-        f.detail.chars().count() <= 16_000
-            && f.instruction.chars().count() <= 4000
-            && f.lead_days <= 366,
-        "事项内容或提前天数超限"
-    );
-    let next = occurrence(f, today).map_err(anyhow::Error::msg)? - Duration::days(f.lead_days.into());
-    let owner = if source.kind == "butler_contact" { source.assistant } else { None };
-    // Earlier schemas also identify an item by its display title within one message.
-    // Distinguish two occurrences with the same label while preserving exact replays.
-    let mut title = f.title.clone();
-    let mut ordinal = 1;
-    loop {
-        let same = conn.query_row("SELECT event_date IS ?5 AND yearly=?6 AND (calendar_type='lunar')=?7 AND action_prompt=?8
-            FROM butler_proactive_item WHERE source_conversation_id=?1 AND
-            coalesce(source_message_id,(SELECT seq FROM butler_chat_group_message WHERE id=source_group_post_id),source_position)=?2
-            AND kind=?3 AND title=?4",params![source.conversation,source.position,f.kind,title,f.date,f.yearly,f.lunar,f.instruction],
-            |r|r.get::<_,bool>(0)).optional()?;
-        match same {
-            None => break,
-            Some(true) => return Ok(()),
-            Some(false) => {
-                ordinal+=1;
-                title=match (&f.date,ordinal) {
-                    (Some(date),2)=>format!("{}（{}）",f.title,date),
-                    _=>format!("{}（{}）",f.title,ordinal),
-                };
-            }
-        }
-    }
-    let inserted=conn.execute("INSERT INTO butler_proactive_item(uuid,kind,title,detail,source_conversation_id,source_position,owner_assistant_id,
-        event_date,yearly,calendar_type,lead_days,next_check_at,action_prompt,updated_at,source_message_id,source_group_post_id,high_priority)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,unixepoch(),
-            CASE WHEN ?14!='butler_group' THEN ?6 END,
-            CASE WHEN ?14='butler_group' THEN (SELECT id FROM butler_chat_group_message WHERE group_id=?5 AND seq=?6) END,?15) ON CONFLICT DO NOTHING",
-        params![uuid::Uuid::new_v4().to_string(),f.kind,title,f.detail,source.conversation,source.position,owner,
-        f.date,f.yearly,if f.lunar {"lunar"} else {"solar"},f.lead_days,next.to_string(),f.instruction,source.kind,f.high_priority])?;
-    if inserted == 0 {return Ok(());}
-    let item = conn.last_insert_rowid();
-    topics::link(conn,item,source,&f.quote)?;
-    if !f.detail.is_empty() && f.kind == "prep_topic" {
-        conn.execute("INSERT INTO message(conversation_id,message_type,content,metadata_json,token_count) VALUES(?1,'response',?2,
-            json_object('origin','proactive_brief','item_id',?3),0)",params![session,f.detail,item])?;
-        conn.execute(
-            "UPDATE butler_proactive_item SET prep_message_id=?2 WHERE id=?1",
-            params![item, conn.last_insert_rowid()],
-        )?;
-    }
-    Ok(())
-}
-
 fn trigger(conn: &Connection, cfg: &Config, manual: bool) -> Result<Option<&'static str>> {
     if manual {
         return Ok(Some("manual"));
@@ -214,7 +43,11 @@ fn trigger(conn: &Connection, cfg: &Config, manual: bool) -> Result<Option<&'sta
     let time = now.format("%H:%M").to_string();
     let day =
         if time >= cfg.digest { now.date_naive() } else { now.date_naive() - Duration::days(1) };
-    let last=conn.query_row("SELECT max(started_at) FROM butler_proactive_run WHERE trigger_kind='digest' AND status IN ('quiet','acted','failed')",[],|r|r.get::<_,Option<i64>>(0))?;
+    let last = conn.query_row(
+        "SELECT max(started_at) FROM butler_proactive_run WHERE trigger_kind='digest' AND status IN ('quiet','acted','failed')",
+        [],
+        |r| r.get::<_, Option<i64>>(0),
+    )?;
     let due = day
         .and_time(chrono::NaiveTime::parse_from_str(&cfg.digest, "%H:%M")?)
         .and_local_timezone(Local)
@@ -224,12 +57,127 @@ fn trigger(conn: &Connection, cfg: &Config, manual: bool) -> Result<Option<&'sta
     if last.is_none_or(|v| v < due) {
         return Ok(Some("digest"));
     }
-    let last=conn.query_row("SELECT max(started_at) FROM butler_proactive_run WHERE trigger_kind IN ('pulse','idle_after_chat','digest','manual')",
-        [],|r|r.get::<_,Option<i64>>(0))?.unwrap_or(0);
+    let last = conn
+        .query_row(
+            "SELECT max(started_at) FROM butler_proactive_run WHERE trigger_kind IN ('pulse','idle_after_chat','digest','manual')",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(0);
     if !cfg.quiet(&time) && now.timestamp() - last >= i64::from(cfg.pulse_hours) * 3600 {
         return Ok(Some("pulse"));
     }
     Ok(Some("idle_after_chat"))
+}
+
+fn collect_context_snapshot(
+    conn: &Connection,
+    cfg: &Config,
+    chief: i64,
+    rows: &[delta::Source],
+) -> Result<(Vec<Value>, Vec<topics::Topic>, Vec<String>, Vec<Value>)> {
+    let mut memories = Vec::new();
+    let mut seen_memory_ids = std::collections::HashSet::new();
+    let push_viewer = |memories: &mut Vec<Value>,
+                       seen_memory_ids: &mut std::collections::HashSet<i64>,
+                       viewer: crate::db::butler_memory::Viewer|
+     -> Result<()> {
+        for m in crate::db::butler_memory::list(conn, viewer)?.into_iter().take(25) {
+            if delta::sensitive(&m.content) || !seen_memory_ids.insert(m.id) {
+                continue;
+            }
+            memories.push(json!({
+                "id": m.id,
+                "revision": m.revision,
+                "scope": m.scope_type,
+                "text": m.content,
+            }));
+        }
+        Ok(())
+    };
+    push_viewer(&mut memories, &mut seen_memory_ids, crate::db::butler_memory::Viewer::Assistant(chief))?;
+    let mut visited_viewers = std::collections::HashSet::new();
+    for row in rows {
+        if row.kind == "butler_group" && visited_viewers.insert((1u8, row.conversation)) {
+            push_viewer(&mut memories, &mut seen_memory_ids, crate::db::butler_memory::Viewer::Group(row.conversation))?;
+        } else if row.kind == "butler_contact" {
+            if let Some(a) = row.assistant {
+                if visited_viewers.insert((2u8, a)) {
+                    push_viewer(&mut memories, &mut seen_memory_ids, crate::db::butler_memory::Viewer::Assistant(a))?;
+                }
+            }
+        }
+        if memories.len() >= 60 {
+            break;
+        }
+    }
+
+    let tracked = topics::active(conn, cfg)?;
+
+    let mut tasks_stmt = conn.prepare("SELECT name FROM scheduled_task WHERE is_enabled=1 ORDER BY id DESC LIMIT 40")?;
+    let existing_schedules: Vec<String> = tasks_stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|s| !delta::sensitive(s))
+        .collect();
+
+    let mut notes_stmt = conn.prepare(
+        "SELECT trigger_kind, status, summary, started_at FROM butler_proactive_run
+         WHERE summary!='' AND status IN ('acted','quiet','partial') ORDER BY started_at DESC LIMIT 6",
+    )?;
+    let recent_notes: Vec<Value> = notes_stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "trigger": r.get::<_, String>(0)?,
+                "status": r.get::<_, String>(1)?,
+                "summary": r.get::<_, String>(2)?,
+                "time": r.get::<_, i64>(3)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok((memories, tracked, existing_schedules, recent_notes))
+}
+
+async fn light_triage(
+    app: &AppHandle,
+    session: i64,
+    cfg: &Config,
+    rows: &[delta::Source],
+    tracked: &[topics::Topic],
+    existing_schedules: &[String],
+) -> Result<bool> {
+    if rows.iter().all(|s| s.text.is_empty()) {
+        return Ok(false);
+    }
+    let mut selection = cfg.small_model.clone();
+    if selection.is_empty() {
+        selection = app
+            .state::<crate::FeatureConfigState>()
+            .config_feature_map
+            .lock()
+            .await
+            .get("experimental")
+            .and_then(|m| m.get(crate::api::butler_progress::HELPER_MODEL_KEY))
+            .map(|c| c.value.clone())
+            .unwrap_or_default();
+    }
+    let input = serde_json::to_string(&json!({
+        "today": Local::now().date_naive().to_string(),
+        "new_messages": rows,
+        "tracked_items": tracked,
+        "existing_schedules": existing_schedules,
+    }))?;
+    let verdict = agent::chat_simple(app, session, &selection, &prompt::light_triage_prompt(cfg), &input).await?;
+    let trimmed = verdict.trim().to_uppercase();
+    if trimmed.starts_with("ACT") {
+        Ok(true)
+    } else if trimmed.starts_with("QUIET") {
+        Ok(false)
+    } else {
+        anyhow::bail!("轻巡检未返回 ACT 或 QUIET（实际返回：{}）", verdict.chars().take(60).collect::<String>())
+    }
 }
 
 pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
@@ -241,8 +189,6 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
     };
     let stored = config(app)?;
     if !stored.enabled {
-        // A proposal explicitly accepted by the user is an ordinary queued chat turn.
-        // Closing the settings window or disabling future scans must not discard it.
         proposal::recover(app).await?;
         if manual {
             anyhow::bail!("请先开启主动整理")
@@ -252,29 +198,32 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
     crate::sync::proactive_owner(app, true).await.map_err(anyhow::Error::msg)?;
     let mut conn = connection(app)?;
     let cfg = super::effective_config(&conn, stored.clone())?;
-    conn.execute("UPDATE butler_proactive_run SET status='failed',finished_at=unixepoch(),summary='上次整理在提交结果前中断，保留原扫描位置'
-        WHERE status='running'",[])?;
+    conn.execute(
+        "UPDATE butler_proactive_run SET status='failed',finished_at=unixepoch(),summary='上次整理在提交结果前中断，保留原扫描位置'
+         WHERE status='running'",
+        [],
+    )?;
     if let Err(e) = proposal::recover(app).await {
         record_failure(&conn, "proposal", &e)?;
     }
-    if cfg.research && !cfg.reminders {
-        let tx=conn.transaction()?;
-        delivery::schedule(&tx,Local::now(),&cfg)?;
+    {
+        let tx = conn.transaction()?;
+        delivery::schedule(&tx, Local::now(), &cfg)?;
         tx.commit()?;
     }
-    if cfg.reminders {
+    if cfg.allow_notifications {
         if let Err(e) = delivery::flush(app, &mut conn, &cfg).await {
             record_failure(&conn, "delivery", &e)?;
         }
-    }
-    if cfg.reminders {
         if let Err(e) = delivery::external(app, &cfg).await {
             record_failure(&conn, "feishu", &e)?;
         }
     }
-    let Some(kind) = trigger(&conn, &cfg, manual)? else { return Ok(String::new()) };
-    let waking=topics::pending(&conn,&cfg)? || topics::review_before_delivery(&conn,&cfg)?;
-    let kind=if waking && !matches!(kind,"digest"|"manual") {"milestone"} else {kind};
+    let Some(kind) = trigger(&conn, &cfg, manual)? else {
+        return Ok(String::new());
+    };
+    let waking = topics::pending(&conn, &cfg)? || topics::review_before_delivery(&conn, &cfg)?;
+    let kind = if waking && !matches!(kind, "digest" | "manual") { "milestone" } else { kind };
     let deep = matches!(kind, "digest" | "manual" | "milestone");
     let rows = delta::read(&conn, &cfg, deep)?;
     if !manual {
@@ -290,88 +239,165 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
         if Local::now().timestamp() - latest < if kind == "idle_after_chat" { 1200 } else { 600 } {
             return Ok(String::new());
         }
-        if kind == "idle_after_chat" && pending < 4 {
+        if kind == "idle_after_chat" && pending < 4 && !waking {
             return Ok(String::new());
         }
     }
     if rows.is_empty() && !waking {
         if kind == "digest" {
-            conn.execute("INSERT INTO butler_proactive_run(id,trigger_kind,status,started_at,finished_at,summary) VALUES(?1,'digest','quiet',unixepoch(),unixepoch(),'没有新增对话')",
-                [uuid::Uuid::new_v4().to_string()])?;
+            conn.execute(
+                "INSERT INTO butler_proactive_run(id,trigger_kind,status,started_at,finished_at,summary)
+                 VALUES(?1,'digest','quiet',unixepoch(),unixepoch(),'没有新增对话')",
+                [uuid::Uuid::new_v4().to_string()],
+            )?;
         }
         return Ok("没有新增对话，已跳过整理".into());
     }
     let main = crate::api::butler_api::active_butler_main_conversation_id(app)
         .map_err(anyhow::Error::msg)?
         .context("请先配置总管家主会话")?;
-    let chief: i64 =
-        conn.query_row("SELECT assistant_id FROM conversation WHERE id=?1", [main], |r| r.get(0))?;
-    let run = uuid::Uuid::new_v4().to_string();
+    let chief: i64 = conn.query_row("SELECT assistant_id FROM conversation WHERE id=?1", [main], |r| r.get(0))?;
+    let run_id = uuid::Uuid::new_v4().to_string();
     let session = {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("INSERT INTO conversation(name,assistant_id,conversation_kind,is_hidden_from_normal_chat_list) VALUES('管家主动整理',?1,'butler_proactive_run',1)",[chief])?;
+        tx.execute(
+            "INSERT INTO conversation(name,assistant_id,conversation_kind,is_hidden_from_normal_chat_list)
+             VALUES('管家主动整理',?1,'butler_proactive_run',1)",
+            [chief],
+        )?;
         let session = tx.last_insert_rowid();
-        tx.execute("INSERT INTO butler_proactive_run(id,trigger_kind,status,conversation_id,started_at,scanned)
-        VALUES(?1,?2,'running',?3,unixepoch(),?4)",params![run,kind,session,rows.len()])?;
+        tx.execute(
+            "INSERT INTO butler_proactive_run(id,trigger_kind,status,conversation_id,started_at,scanned)
+             VALUES(?1,?2,'running',?3,unixepoch(),?4)",
+            params![run_id, kind, session, rows.len()],
+        )?;
         tx.commit()?;
         session
     };
+
+    let (memories, tracked, existing_schedules, recent_notes) =
+        collect_context_snapshot(&conn, &cfg, chief, &rows)?;
+    let (waking_queue_ids, waking_items) = if deep {
+        topics::waking_jobs(&conn, &cfg)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // 轻巡检：聊后/定期巡检先用小模型决定是否值得唤醒深层 Agent
+    if !deep {
+        match light_triage(app, session, &cfg, &rows, &tracked, &existing_schedules).await {
+            Ok(false) => {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                delta::advance(&tx, &rows, false)?;
+                let summary = format!("扫描 {} 条新增发言，小模型初筛无需介入。", rows.len());
+                tx.execute(
+                    "UPDATE butler_proactive_run SET status='quiet',summary=?2,finished_at=unixepoch() WHERE id=?1",
+                    params![run_id, summary],
+                )?;
+                tx.commit()?;
+                cleanup(&mut conn)?;
+                return Ok(summary);
+            }
+            Ok(true) => {}
+            Err(e) => {
+                conn.execute(
+                    "UPDATE butler_proactive_run SET status='failed',summary=?2,finished_at=unixepoch() WHERE id=?1",
+                    params![run_id, format!("{e:#}")],
+                )?;
+                cleanup(&mut conn)?;
+                return Err(e.context(format!("主动整理初筛 {run_id}，会话 #{session}")));
+            }
+        }
+    }
+
     let today = Local::now().date_naive();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        async {
-            let (findings, rejected) = split_finding_dates(analyze(app, session, &cfg, &rows, deep, chief, today).await?, today);
-            let tracked=topics::active(&connection(app)?,&cfg)?;
-            let changes=if deep {topics::reconcile(app,session,&cfg,&tracked,&rows,&findings).await?}else{vec![]};
-            Ok::<_,anyhow::Error>((findings,rejected,tracked,changes))
-        },
-    )
-    .await
-    .context("整理超过 300 秒")
-    .and_then(|r| r);
-    let persisted = (|| -> Result<(String, String)> {
-        let (findings,rejected,tracked,changes) = result?;
+    let system_prompt = prompt::system_prompt(&cfg, kind);
+    let user_prompt = prompt::user_input(
+        today,
+        kind,
+        &rows,
+        &memories,
+        &tracked,
+        &existing_schedules,
+        &recent_notes,
+        &waking_items,
+    );
+
+    let exec_result = agent::execute(app, session, &cfg, chief, &system_prompt, &user_prompt).await;
+    let output = match exec_result {
+        Ok(out) => out,
+        Err(e) => {
+            conn.execute(
+                "UPDATE butler_proactive_run SET status='failed',summary=?2,finished_at=unixepoch() WHERE id=?1",
+                params![run_id, format!("{e:#}")],
+            )?;
+            cleanup(&mut conn)?;
+            return Err(e.context(format!("主动整理 {run_id}，会话 #{session}")));
+        }
+    };
+
+    let persisted = (|| -> Result<String> {
         ensure!(config(app)? == stored, "整理期间设置已改变，本批次保留待重新扫描");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        record_rejected_dates(&tx, &rows, &rejected)?;
-        let merged=topics::apply(&tx,&tracked,&rows,&findings,&changes)?;
-        for (draft,(index, f)) in findings.iter().enumerate() {
-            if merged.contains(&draft) {continue;}
-            persist_at(&tx, &rows[*index], f, chief, session, &cfg, today)?;
-        }
         delta::advance(&tx, &rows, deep)?;
-        let summary = format!("扫描 {} 条用户消息，归纳 {} 个关联事项，整理出 {} 项。", rows.len(), changes.len(), findings.len()-merged.len());
+        topics::finalize_woken(&tx, &waking_queue_ids)?;
+        let recorded_summary: String = tx
+            .query_row("SELECT summary FROM butler_proactive_run WHERE id=?1", [&run_id], |r| r.get(0))
+            .unwrap_or_default();
+        let summary = if !recorded_summary.trim().is_empty() {
+            recorded_summary
+        } else {
+            let excerpt: String = output
+                .final_text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(240)
+                .collect();
+            if excerpt.is_empty() || delta::sensitive(&excerpt) {
+                format!("扫描 {} 条用户发言，执行 {} 次工具调用。", rows.len(), output.tool_calls_total)
+            } else {
+                excerpt
+            }
+        };
         let status = if kind == "digest" && delta::pending(&tx, &cfg, true)?.0 > 0 {
             "partial"
-        } else if findings.is_empty() && changes.is_empty() && !waking {
+        } else if output.tool_calls_total == 0 && waking_queue_ids.is_empty() {
             "quiet"
         } else {
             "acted"
         };
-        tx.execute("UPDATE butler_proactive_run SET status=?2,summary=?3,finished_at=unixepoch() WHERE id=?1",params![run,status,summary])?;
+        tx.execute(
+            "UPDATE butler_proactive_run SET status=?2,summary=?3,finished_at=unixepoch() WHERE id=?1",
+            params![run_id, status, summary],
+        )?;
         tx.commit()?;
-        Ok((status.into(), summary))
+        Ok(summary)
     })();
-    let (_, summary) = match persisted {
-        Ok(done) => done,
+
+    let summary = match persisted {
+        Ok(s) => s,
         Err(e) => {
-            conn.execute("UPDATE butler_proactive_run SET status='failed',summary=?2,finished_at=unixepoch() WHERE id=?1",params![run,format!("{e:#}")])?;
+            conn.execute(
+                "UPDATE butler_proactive_run SET status='failed',summary=?2,finished_at=unixepoch() WHERE id=?1",
+                params![run_id, format!("{e:#}")],
+            )?;
             cleanup(&mut conn)?;
-            return Err(e.context(format!("主动整理 {run}，会话 #{session}")));
+            return Err(e.context(format!("主动整理提交 {run_id}，会话 #{session}")));
         }
     };
-    let mut summary=summary;
-    if cfg.research && deep && delta::pending(&conn,&cfg,true)?.0==0 {
-        let count=topics::wake(app,&mut conn,&cfg,chief,session).await?;
-        if count>0 {
-            summary.push_str(&format!(" 已重新预研 {count} 项。"));
-            conn.execute("UPDATE butler_proactive_run SET summary=?2,status='acted' WHERE id=?1",params![run,summary])?;
-        }
-    }
+
     crate::sync::schedule_sync_after_local_change(app);
     let _ = app.emit(crate::api::butler_memory::CHANGED_EVENT, ());
-    if cfg.reminders {
-        delivery::flush(app, &mut conn, &cfg).await?;
+    let _ = app.emit("butler_proactive_changed", ());
+    if cfg.allow_notifications {
+        if let Err(e) = delivery::flush(app, &mut conn, &cfg).await {
+            record_failure(&conn, "delivery", &e)?;
+        }
+        if let Err(e) = delivery::external(app, &cfg).await {
+            record_failure(&conn, "feishu", &e)?;
+        }
     }
     cleanup(&mut conn)?;
     Ok(summary)
@@ -380,15 +406,19 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
 pub(super) fn record_failure(conn: &Connection, kind: &str, error: &anyhow::Error) -> Result<()> {
     let detail = format!("{error:#}");
     tracing::warn!(kind, "主动管家：{detail}");
-    conn.execute("INSERT INTO butler_proactive_run(id,trigger_kind,status,summary,started_at,finished_at)
+    conn.execute(
+        "INSERT INTO butler_proactive_run(id,trigger_kind,status,summary,started_at,finished_at)
         SELECT ?1,?2,'failed',?3,unixepoch(),unixepoch() WHERE NOT EXISTS(SELECT 1 FROM butler_proactive_run
-        WHERE trigger_kind=?2 AND summary=?3 AND started_at>unixepoch()-3600)",params![uuid::Uuid::new_v4().to_string(),kind,detail])?;
+        WHERE trigger_kind=?2 AND summary=?3 AND started_at>unixepoch()-3600)",
+        params![uuid::Uuid::new_v4().to_string(), kind, detail],
+    )?;
     Ok(())
 }
 
 pub(super) fn cleanup(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS expired_proactive(id INTEGER PRIMARY KEY);
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS expired_proactive(id INTEGER PRIMARY KEY);
         DELETE FROM expired_proactive;
         INSERT INTO expired_proactive SELECT conversation_id FROM butler_proactive_run WHERE conversation_id IS NOT NULL
         ORDER BY started_at DESC,rowid DESC LIMIT -1 OFFSET 30;
@@ -400,127 +430,8 @@ pub(super) fn cleanup(conn: &mut Connection) -> Result<()> {
         WHERE conversation_id IN (SELECT id FROM expired_proactive) AND id IN (SELECT prep_message_id FROM butler_proactive_item UNION SELECT brief_message_id FROM butler_proactive_delivery_queue);
         DELETE FROM message WHERE conversation_id IN (SELECT id FROM expired_proactive);
         DELETE FROM conversation WHERE id IN (SELECT id FROM expired_proactive) AND conversation_kind='butler_proactive_run';
-        UPDATE butler_proactive_run SET conversation_id=NULL WHERE conversation_id IN (SELECT id FROM expired_proactive);")?;
+        UPDATE butler_proactive_run SET conversation_id=NULL WHERE conversation_id IN (SELECT id FROM expired_proactive);",
+    )?;
     tx.commit()?;
     Ok(())
-}
-
-async fn analyze(
-    app: &AppHandle,
-    session: i64,
-    cfg: &Config,
-    rows: &[delta::Source],
-    deep: bool,
-    chief: i64,
-    today: NaiveDate,
-) -> Result<Vec<Draft>> {
-    let mut output = Vec::new();
-    let mut remaining_tools = 12;
-    // Isolate each conversation, including research evidence and memory candidates.
-    let mut start = 0;
-    while start < rows.len() {
-        let sources = &rows[start..];
-        let end = sources.iter().take_while(|s| s.conversation == sources[0].conversation).count();
-        let batch = &sources[..end];
-        if batch.iter().any(|s| !s.text.is_empty()) {
-            let viewer = if batch[0].kind == "butler_group" {
-                crate::db::butler_memory::Viewer::Group(batch[0].conversation)
-            } else {
-                crate::db::butler_memory::Viewer::Assistant(if batch[0].kind == "butler_contact" {
-                    batch[0].assistant.context("缺少联系人")?
-                } else {
-                    chief
-                })
-            };
-            let memories = crate::db::butler_memory::list(&connection(app)?, viewer)?
-                .into_iter()
-                .take(30)
-                .filter(|m| !delta::sensitive(&m.content))
-                .map(|m| serde_json::json!({"id":m.id,"revision":m.revision,"text":m.content}))
-                .collect();
-            let (tracked, existing_schedules) = {
-                let db = connection(app)?;
-                let mut stmt=db.prepare("SELECT kind,title,status FROM butler_proactive_item WHERE source_conversation_id=?1 ORDER BY updated_at DESC LIMIT 30")?;
-                let tracked = stmt
-                    .query_map([batch[0].conversation], |r| {
-                        Ok(serde_json::json!({"kind":r.get::<_,String>(0)?,
-                    "title":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?}))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let mut tasks=db.prepare("SELECT name FROM scheduled_task WHERE is_enabled=1 AND assistant_id=?1 ORDER BY id DESC LIMIT 30")?;
-                let existing = tasks
-                    .query_map([batch[0].assistant.unwrap_or(chief)], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter(|s| !delta::sensitive(s))
-                    .collect();
-                (tracked, existing)
-            };
-            let input = serde_json::to_string(&model::Input {
-                today: today.to_string(),
-                sources: batch,
-                memories,
-                tracked,
-                existing_schedules,
-            })?;
-            let act = if deep {
-                true
-            } else {
-                let mut selection = cfg.small_model.clone();
-                if selection.is_empty() {
-                    selection = app
-                        .state::<crate::FeatureConfigState>()
-                        .config_feature_map
-                        .lock()
-                        .await
-                        .get("experimental")
-                        .and_then(|m| m.get(crate::api::butler_progress::HELPER_MODEL_KEY))
-                        .map(|c| c.value.clone())
-                        .unwrap_or_default();
-                }
-                match model::chat(
-                    app,
-                    session,
-                    &selection,
-                    "判断近期是否值得主动提醒。参考 tracked 里的采纳、完成和忽略记录。已安排或已忽略的同类事项，除非用户明确重新提出或出现新的截止日期，否则返回 QUIET。确有新的准备或提醒需要时返回 ACT。只输出 ACT 或 QUIET。",
-                    &input,
-                )
-                .await?
-                .as_str()
-                {
-                    "ACT" => true,
-                    "QUIET" => false,
-                    _ => anyhow::bail!("轻巡检未返回 ACT 或 QUIET"),
-                }
-            };
-            if act {
-                model::audit(
-                    app,
-                    session,
-                    &format!("整理会话 #{} 的 {} 条用户发言。", batch[0].conversation, end),
-                )?;
-                let research = super::research::Research {
-                    app,
-                    session,
-                    chief,
-                    config: cfg,
-                    source: &batch[0],
-                    sources: &[],
-                    item: None,
-                };
-                for f in model::findings(&research, &input, &mut remaining_tools).await? {
-                    ensure!(f.source < end, "整理来源编号超出本批次");
-                    output.push((start + f.source, f));
-                }
-            } else {
-                model::audit(
-                    app,
-                    session,
-                    &format!("会话 #{} 初筛结果为安静。", batch[0].conversation),
-                )?;
-            }
-        }
-        start += end;
-    }
-    Ok(output)
 }

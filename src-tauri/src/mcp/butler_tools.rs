@@ -192,10 +192,89 @@ pub fn prepare_scheduled_run_tools(app: &tauri::AppHandle, servers: &mut Vec<MCP
             Some("aipp:ui_interaction") => server.tools.retain(|t| !matches!(t.name.as_str(), "ask_user_question" | "present_choices")),
             Some("aipp:agent") => server.tools.retain(|t| {
                 !super::builtin_mcp::templates::is_butler_main_only_agent_tool(&t.name)
+                    && !super::builtin_mcp::templates::is_proactive_only_agent_tool(&t.name)
                     && !crate::api::butler_peer::is_peer_tool(&t.name)
                     && !crate::api::butler_memory::is_tool(&t.name)
             }),
             Some("aipp:superadmin") if !butler_mode => server.tools.clear(),
+            _ => {}
+        }
+    }
+    crate::vault::tool::inject(app, servers);
+    super::builtin_mcp::office::inject(app, servers);
+    servers.retain(|s| !s.tools.is_empty());
+    servers.sort_by_key(|s| s.id);
+    Ok(())
+}
+
+/// 主动整理运行的工具：使用管家全局 MCP 基线 + 主动整理专用工具（`proactive_*`）+ `load_skill` + `schedule_task`（查看）。
+/// 静默模式（`!allow_notifications`）不注入 `proactive_notify`；去掉需要人在线作答的交互工具、超管写操作和普通会话记忆/派工工具。
+pub fn prepare_proactive_run_tools(
+    app: &tauri::AppHandle,
+    servers: &mut Vec<MCPServerWithTools>,
+    allow_notifications: bool,
+) -> Result<(), AppError> {
+    let db = MCPDatabase::new(app)?;
+    add_baseline(servers, globally_enabled_servers(&db)?);
+    let stored = db.get_mcp_servers()?;
+    if let Some(server) = stored.iter().find(|s| s.is_builtin && s.command.as_deref() == Some("aipp:agent")) {
+        let tools = db.get_mcp_server_tools(server.id)?;
+        let definitions = get_builtin_tools_for_command("aipp:agent");
+        let mut wanted: Vec<&str> = vec![
+            crate::proactive::tools::TOOL_SEARCH_HISTORY,
+            crate::proactive::tools::TOOL_MEMORY,
+            crate::proactive::tools::TOOL_TRACK,
+            crate::proactive::tools::TOOL_PROPOSE,
+            crate::proactive::tools::TOOL_NOTE,
+            "load_skill",
+            "schedule_task",
+        ];
+        if allow_notifications {
+            wanted.push(crate::proactive::tools::TOOL_NOTIFY);
+        }
+        let direct: Vec<MCPToolInfo> = definitions
+            .iter()
+            .filter(|d| wanted.contains(&d.name.as_str()))
+            .filter_map(|d| {
+                let stored = tools.iter().find(|t| t.tool_name == d.name)?;
+                Some(MCPToolInfo {
+                    id: stored.id,
+                    name: d.name.clone(),
+                    description: d.description.clone(),
+                    parameters: d.input_schema.to_string(),
+                    is_enabled: true,
+                    is_auto_run: stored.is_auto_run,
+                })
+            })
+            .collect();
+        add_baseline(
+            servers,
+            vec![MCPServerWithTools {
+                id: server.id,
+                name: server.name.clone(),
+                summary: String::new(),
+                command: server.command.clone(),
+                is_enabled: true,
+                tools: direct,
+            }],
+        );
+    }
+    for server in servers.iter_mut() {
+        match server.command.as_deref() {
+            Some("aipp:ui_interaction") => {
+                server.tools.retain(|t| !matches!(t.name.as_str(), "ask_user_question" | "present_choices"))
+            }
+            Some("aipp:agent") => server.tools.retain(|t| {
+                if t.name == crate::proactive::tools::TOOL_NOTIFY {
+                    return allow_notifications;
+                }
+                !super::builtin_mcp::templates::is_butler_main_only_agent_tool(&t.name)
+                    && !crate::api::butler_peer::is_peer_tool(&t.name)
+                    && !crate::api::butler_memory::is_tool(&t.name)
+                    && t.name != "read_group_history"
+                    && t.name != "search_own_history"
+            }),
+            Some("aipp:superadmin") => server.tools.clear(),
             _ => {}
         }
     }

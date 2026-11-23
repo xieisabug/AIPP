@@ -269,13 +269,15 @@ fn publish(
             fallback_reason=?4 WHERE id=?1 AND status='queued' AND EXISTS(SELECT 1 FROM butler_proactive_item i WHERE i.id=item_id AND i.status='active' AND revision=?5)",
             params![row.queue,target,message,reason,row.revision])?;
         ensure!(changed == 1, "提醒 #{} 在投递前已变更", row.queue);
-        if !cfg.feishu_open_id.is_empty()
-            && (row.blessing(today)
-                || (row.kind == "prep_topic" && (row.high_priority || row.morning))
-                || (row.kind == "open_loop" && row.high_priority && row.stage == "due"))
+        if row.blessing(today)
+            || (row.kind == "prep_topic" && (row.high_priority || row.morning))
+            || (row.kind == "open_loop" && row.high_priority && row.stage == "due")
+            || (row.kind == "proposal" && row.high_priority)
         {
-            tx.execute("UPDATE butler_proactive_delivery_queue SET external_key=?2,external_recipient=?3,external_status='queued',external_error=NULL WHERE id=?1",
-                params![row.queue,external_key,cfg.feishu_open_id])?;
+            tx.execute(
+                "UPDATE butler_proactive_delivery_queue SET external_key=?2,external_recipient='butler_feishu',external_status='queued',external_error=NULL WHERE id=?1",
+                params![row.queue, external_key],
+            )?;
         }
     }
     tx.execute("UPDATE conversation SET updated_time=?2 WHERE id=?1", params![target, stamp])?;
@@ -334,8 +336,17 @@ async fn contact_wording(
     let input =
         serde_json::to_string(&serde_json::json!({"name":name,"description":member.description,
         "reminders":rows.iter().map(Reminder::summary).collect::<Vec<_>>()}))?;
-    let wording=tokio::time::timeout(std::time::Duration::from_secs(25),super::model::chat(app,session,&selection,
-        "用联系人的口吻自然提醒用户，限一两句，纪念日当天可送祝福。只使用摘要里的事实，不声称已执行任何建议。直接输出正文。",&input)).await??;
+    let wording = tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        super::agent::chat_simple(
+            app,
+            session,
+            &selection,
+            "用联系人的口吻自然提醒用户，限一两句，纪念日当天可送祝福。只使用摘要里的事实，不声称已执行任何建议。直接输出正文。",
+            &input,
+        ),
+    )
+    .await??;
     ensure!(
         !wording.is_empty() && wording.chars().count() <= 400 && !super::delta::sensitive(&wording),
         "联系人返回的提醒内容无效"
@@ -350,8 +361,10 @@ fn can_publish(cfg: &Config, day: NaiveDate, now: chrono::DateTime<Local>) -> bo
 }
 
 fn ready_to_publish(db: &Connection, rows: &[Reminder], cfg: &Config, today: NaiveDate) -> Result<bool> {
-    if !can_publish(cfg,today,Local::now()) { return Ok(false); }
-    Ok(!cfg.research || !rows.iter().any(|r|r.dated) || !super::delta::unread_digest(db,cfg)?)
+    if !can_publish(cfg, today, Local::now()) {
+        return Ok(false);
+    }
+    Ok(!rows.iter().any(|r| r.dated) || !super::delta::unread_digest(db, cfg)?)
 }
 
 pub async fn flush(app: &AppHandle, conn: &mut Connection, cfg: &Config) -> Result<()> {
@@ -373,7 +386,7 @@ pub async fn flush(app: &AppHandle, conn: &mut Connection, cfg: &Config) -> Resu
         return Ok(());
     }
     let mut groups: Vec<(Option<i64>, bool, Vec<Reminder>)> = Vec::new();
-    for row in due(conn, cfg.research, super::topics::review_before_delivery(conn,cfg)?)? {
+    for row in due(conn, true, super::topics::review_before_delivery(conn, cfg)?)? {
         let blessing = row.blessing(today);
         if let Some(group) = groups.iter_mut().find(|g| g.0 == row.owner && g.1 == blessing) {
             group.2.push(row)
@@ -438,14 +451,19 @@ pub async fn flush(app: &AppHandle, conn: &mut Connection, cfg: &Config) -> Resu
     Ok(())
 }
 
-fn external_summary(conn: &Connection, recipient: &str) -> Result<Option<(String, String)>> {
+fn external_summary(conn: &Connection) -> Result<Option<(String, String)>> {
     use rusqlite::OptionalExtension;
-    let row=conn.query_row("SELECT q.external_key,count(*),group_concat(DISTINCT CASE i.kind WHEN 'milestone' THEN '纪念日'
-        WHEN 'prep_topic' THEN '预研简报' ELSE '到期待办' END)
+    let row = conn
+        .query_row(
+            "SELECT q.external_key,count(*),group_concat(DISTINCT CASE i.kind WHEN 'milestone' THEN '纪念日'
+        WHEN 'prep_topic' THEN '预研简报' WHEN 'proposal' THEN '主动建议' ELSE '到期待办' END)
         FROM butler_proactive_delivery_queue q JOIN butler_proactive_item i ON i.id=q.item_id
-        WHERE q.external_status='queued' AND q.external_recipient=?1 AND q.status='delivered' AND i.status='active'
-        AND date(q.delivered_at,'unixepoch','localtime')=date('now','localtime') GROUP BY q.external_key ORDER BY min(q.id) LIMIT 1",[recipient],
-        |r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?,r.get::<_,String>(2)?))).optional()?;
+        WHERE q.external_status='queued' AND q.status='delivered' AND i.status='active'
+        AND date(q.delivered_at,'unixepoch','localtime')=date('now','localtime') GROUP BY q.external_key ORDER BY min(q.id) LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?, r.get::<_, String>(2)?)),
+        )
+        .optional()?;
     Ok(row.map(|(key, count, kinds)| {
         (key, format!("管家有 {count} 项提醒（{}），可在 AIPP 查看。", kinds.replace(',', "、")))
     }))
@@ -453,21 +471,24 @@ fn external_summary(conn: &Connection, recipient: &str) -> Result<Option<(String
 
 pub async fn external(app: &AppHandle, cfg: &Config) -> Result<()> {
     let time = Local::now().format("%H:%M").to_string();
-    if cfg.feishu_open_id.is_empty()
+    if !cfg.allow_notifications
         || cfg.quiet(&time)
         || (cfg.quiet_start != cfg.quiet_end && time >= cfg.quiet_end && time < cfg.release)
     {
         return Ok(());
     }
     let conn = super::connection(app)?;
-    if let Some((key, summary)) = external_summary(&conn, &cfg.feishu_open_id)? {
-        let result =
-            crate::feishu::send_proactive_summary(app, &cfg.feishu_open_id, &summary, &key).await;
+    if let Some((key, summary)) = external_summary(&conn)? {
+        let result = crate::feishu::send_butler_proactive_summary(app, &summary, &key).await;
         let (status, error) = match result {
-            Ok(_) => ("sent", None),
+            Ok(Some(_)) => ("sent", None),
+            Ok(None) => ("skipped", None),
             Err(error) => ("failed", Some(error)),
         };
-        conn.execute("UPDATE butler_proactive_delivery_queue SET external_status=?2,external_error=?3 WHERE external_key=?1",params![key,status,error])?;
+        conn.execute(
+            "UPDATE butler_proactive_delivery_queue SET external_status=?2,external_error=?3 WHERE external_key=?1",
+            params![key, status, error],
+        )?;
         if let Some(error) = error {
             anyhow::bail!("提醒 {key} 已在 AIPP 投递，飞书发送失败：{error}")
         }

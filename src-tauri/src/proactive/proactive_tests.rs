@@ -3,29 +3,54 @@ use crate::db::butler_memory as memories;
 
 #[test]
 fn test_proactive_confirmation_binds_displayed_body_on_equal_revision() {
-    let shown=(Some(8),3,Some("提醒我复查"));
-    assert!(!proposal::confirmation_matches(shown,(8,3,"替我预约复查")));
-    assert!(!proposal::confirmation_matches(shown,(9,3,"提醒我复查")));
-    assert!(proposal::confirmation_matches(shown,(8,3,"提醒我复查")));
+    let shown = (Some(8), 3, Some("提醒我复查"));
+    assert!(!proposal::confirmation_matches(shown, (8, 3, "替我预约复查")));
+    assert!(!proposal::confirmation_matches(shown, (9, 3, "提醒我复查")));
+    assert!(proposal::confirmation_matches(shown, (8, 3, "提醒我复查")));
 }
 
 #[test]
-fn test_proactive_research_gate_is_closed_for_side_effects() {
-    for name in ["search_http", "fetch_url", "read_file", "read_history", "load_skill"] {
-        assert!(research::allowed_operation(name));
-    }
-    for name in [
-        "shell",
-        "rm",
-        "write_file",
-        "vault_http_request",
-        "superadmin",
-        "schedule_task",
-        "send_email",
-        "unknown_mcp",
-    ] {
-        assert!(!research::allowed_operation(name));
-    }
+fn test_proactive_config_migrates_legacy_fields_and_ignores_removed_keys() {
+    let legacy = r#"{
+        "enabled": true,
+        "private_chats": true,
+        "groups": false,
+        "normal_chats": true,
+        "remember": false,
+        "research": false,
+        "reminders": false,
+        "feishu_open_id": "ou_legacy_123",
+        "pulse_hours": 2,
+        "daily_limit": 5,
+        "quiet_start": "22:30",
+        "quiet_end": "08:00",
+        "release": "08:30",
+        "digest": "23:00",
+        "small_model": "m1%%1",
+        "deep_model": "assistant:42",
+        "adaptive_window": true
+    }"#;
+    let cfg: Config = serde_json::from_str(legacy).unwrap();
+    assert!(cfg.enabled);
+    assert!(!cfg.allow_notifications, "legacy reminders=false should map to allow_notifications=false");
+    assert_eq!(cfg.deep_model, "assistant:42");
+    assert_eq!(agent::parse_native_assistant_id(&cfg.deep_model), Some(42));
+    assert_eq!(agent::parse_native_assistant_id("gpt-4o%%1"), None);
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn test_proactive_prompt_injects_custom_instructions_and_quiet_mode() {
+    let cfg = Config {
+        allow_notifications: false,
+        custom_instructions: "重点关注项目截止日和未完成承诺".into(),
+        ..Config::default()
+    };
+    let sys = prompt::system_prompt(&cfg, "digest");
+    assert!(sys.contains("静默模式"));
+    assert!(sys.contains("重点关注项目截止日和未完成承诺"));
+    let triage = prompt::light_triage_prompt(&cfg);
+    assert!(triage.contains("重点关注项目截止日和未完成承诺"));
 }
 
 pub(super) fn db() -> Connection {
@@ -48,42 +73,6 @@ pub(super) fn db() -> Connection {
     memories::schema(&db).unwrap();
     db.execute_batch(include_str!("schema.sql")).unwrap();
     db
-}
-
-#[test]
-fn test_proactive_replay_verified_findings_deduplicates_and_keeps_brief_out_of_chat() {
-    let db = db();
-    let cfg = Config::default();
-    db.execute("UPDATE message SET content='后天去成都，帮我提前看天气' WHERE id=1", []).unwrap();
-    db.execute("INSERT INTO conversation(id,assistant_id,conversation_kind) VALUES(25,8,'butler_proactive_run')",[]).unwrap();
-    let source = delta::read(&db, &cfg, true).unwrap().remove(0);
-    let mut finding:model::Finding=serde_json::from_value(json!({"source":0,"quote":"后天去成都","kind":"prep_topic","title":"成都出行简报","detail":"已准备行前资料"})).unwrap();
-    runner::persist(&db, &source, &finding, 8, 25, &cfg).unwrap();
-    runner::persist(&db, &source, &finding, 8, 25, &cfg).unwrap();
-    let (count, brief, owner): (usize, i64, i64) = db
-        .query_row(
-            "SELECT count(*),prep_message_id,owner_assistant_id FROM butler_proactive_item",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!((count, owner), (1, 8));
-    assert_eq!(
-        db.query_row("SELECT conversation_id FROM message WHERE id=?1", [brief], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        25
-    );
-    db.execute("INSERT INTO scheduled_task VALUES(8,1,'查成都天气','查询天气')", []).unwrap();
-    finding.kind = "proposal".into();
-    finding.title = "查成都天气".into();
-    finding.instruction = "查询天气".into();
-    runner::persist(&db, &source, &finding, 8, 25, &cfg).unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM butler_proactive_item", [], |r| r.get::<_, usize>(0))
-            .unwrap(),
-        1
-    );
 }
 
 #[test]
@@ -165,55 +154,6 @@ fn test_proactive_acceptance_commits_one_receipt() {
     assert_eq!(receipt, id);
 }
 
-#[test]
-fn test_proactive_malformed_date_keeps_valid_sibling_and_scan_cursor() {
-    let mut db = db();
-    let cfg = Config::default();
-    let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
-    let rows = delta::read(&db, &cfg, true).unwrap();
-    let source = &rows[0];
-    let drafts = || {
-        [
-            ("无效日期事项", "not-a-date-private-marker"),
-            ("有效待办", "2026-12-09"),
-        ]
-        .into_iter()
-        .map(|(title, date)| {
-            let finding = serde_json::from_value(json!({
-                "source":0,"quote":source.text,"kind":"open_loop","title":title,"date":date
-            })).unwrap();
-            (0, finding)
-        })
-        .collect()
-    };
-    for _ in 0..2 {
-        let (valid, rejected) = runner::split_finding_dates(drafts(), today);
-        assert_eq!(valid.len(), 1);
-        assert_eq!(valid[0].1.title, "有效待办");
-        assert_eq!(rejected.len(), 1);
-        let tx = db.transaction().unwrap();
-        runner::record_rejected_dates(&tx, &rows, &rejected).unwrap();
-        for (index, finding) in valid {
-            runner::persist_at(&tx, &rows[index], &finding, 8, 10, &cfg, today).unwrap();
-        }
-        delta::advance(&tx, &rows, true).unwrap();
-        tx.commit().unwrap();
-    }
-    let (items, date, evidence, cursor): (u32, String, u32, i64) = db.query_row(
-        "SELECT count(*),min(event_date),(SELECT count(*) FROM butler_proactive_evidence),
-            (SELECT digest_position FROM butler_proactive_cursor WHERE conversation_id=?1) FROM butler_proactive_item",
-        [source.conversation],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-    ).unwrap();
-    assert_eq!((items, date.as_str(), evidence, cursor), (1, "2026-12-09", 1, source.position));
-    let diagnostics: Vec<String> = db.prepare("SELECT summary FROM butler_proactive_run WHERE trigger_kind='finding'").unwrap()
-        .query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-    assert_eq!(diagnostics, vec![format!("来源 #{} / {} 的事项日期无效", source.conversation, source.position)]);
-    db.execute("UPDATE message SET content='源消息已编辑' WHERE id=?1", [source.position]).unwrap();
-    let (_, rejected) = runner::split_finding_dates(drafts(), today);
-    assert!(runner::record_rejected_dates(&db, &rows, &rejected).is_err());
-}
-
 #[tokio::test]
 async fn test_proactive_recovery_skips_busy_conversation_without_reordering_its_proposals() {
     let mut db = db();
@@ -279,5 +219,13 @@ fn test_proactive_retention_keeps_only_final_brief_at_original_message_id() {
             .unwrap(),
         0
     );
-    assert_eq!(db.query_row("SELECT c.conversation_kind FROM message m JOIN conversation c ON c.id=m.conversation_id WHERE m.id=72",[],|r|r.get::<_,String>(0)).unwrap(),"butler_proactive_brief");
+    assert_eq!(
+        db.query_row(
+            "SELECT c.conversation_kind FROM message m JOIN conversation c ON c.id=m.conversation_id WHERE m.id=72",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap(),
+        "butler_proactive_brief"
+    );
 }

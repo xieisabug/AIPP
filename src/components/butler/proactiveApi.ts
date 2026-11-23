@@ -2,9 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface ProactiveConfig {
     enabled: boolean; private_chats: boolean; groups: boolean; normal_chats: boolean;
-    remember: boolean; research: boolean; reminders: boolean; pulse_hours: number; daily_limit: number;
+    allow_notifications: boolean; custom_instructions: string; pulse_hours: number; daily_limit: number;
     quiet_start: string; quiet_end: string; release: string; digest: string; small_model: string; deep_model: string;
-    feishu_open_id: string; adaptive_window: boolean;
+    adaptive_window: boolean;
 }
 export interface ProactiveItem {
     id: number; kind: string; title: string; detail: string; tracking?: string; status: string; date?: string;

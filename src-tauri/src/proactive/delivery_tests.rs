@@ -76,7 +76,6 @@ fn test_proactive_batch_delivery_is_atomic_and_backoff_counts_messages() {
     let cfg = Config {
         quiet_start: "00:00".into(),
         quiet_end: "00:00".into(),
-        feishu_open_id: "ou_test".into(),
         ..Config::default()
     };
     db.execute_batch("INSERT INTO butler_proactive_item(uuid,kind,title,source_conversation_id,source_message_id,next_check_at,updated_at)
@@ -101,13 +100,12 @@ fn test_proactive_batch_delivery_is_atomic_and_backoff_counts_messages() {
         )
         .unwrap();
     assert_eq!(cards, 2);
-    let (_, external) = external_summary(&db, "ou_test").unwrap().unwrap();
+    let (_, external) = external_summary(&db).unwrap().unwrap();
     assert!(
         external.contains("2 项提醒")
             && !external.contains("联系医生")
             && !external.contains("已整理资料")
     );
-    assert!(external_summary(&db, "ou_other").unwrap().is_none());
     assert!(due(&db, true, false).unwrap().is_empty());
     assert!(!backoff(&db).unwrap());
     assert!(publish(&mut db, 10, &batch, &summary, None, &cfg, now.date_naive()).is_err());

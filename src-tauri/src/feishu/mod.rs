@@ -17,7 +17,7 @@ pub use debug::{
 pub use types::{FeishuButlerState, FeishuDebugSendResult, FeishuRuntimeStatus};
 
 pub(crate) use api::{
-    send_proactive_summary,
+    send_butler_proactive_summary,
     try_deliver_acp_permission_to_feishu, try_deliver_operation_permission_to_feishu,
 };
 pub(crate) use config::{

@@ -9,9 +9,21 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/hooks/useFilteredModels", () => ({ useFilteredModels: () => ({ models: [], loading: false, error: null }) }));
 
 const base: ProactiveConfig = {
-    enabled: true, private_chats: true, groups: true, normal_chats: false, remember: true, research: true, reminders: true,
-    pulse_hours: 3, daily_limit: 3, quiet_start: "22:30", quiet_end: "08:00", release: "08:30", digest: "23:00",
-    small_model: "", deep_model: "", feishu_open_id: "", adaptive_window: false,
+    enabled: true,
+    private_chats: true,
+    groups: true,
+    normal_chats: false,
+    allow_notifications: true,
+    custom_instructions: "",
+    pulse_hours: 3,
+    daily_limit: 3,
+    quiet_start: "22:30",
+    quiet_end: "08:00",
+    release: "08:30",
+    digest: "23:00",
+    small_model: "",
+    deep_model: "",
+    adaptive_window: false,
 };
 
 beforeEach(() => {
@@ -19,6 +31,7 @@ beforeEach(() => {
     invoke.mockImplementation(async (cmd: string) => {
         if (cmd === "get_butler_proactive_center") return { items: [], runs: [], deliveries: [], window: { release: "09:10", digest: "23:40", days: 9 } };
         if (cmd === "get_butler_proactive_config") return { ...base };
+        if (cmd === "get_assistants") return [{ id: 12, name: "Codex 助手", assistant_type: 4 }, { id: 13, name: "普通助手", assistant_type: 0 }];
         return null;
     });
 });
@@ -33,11 +46,23 @@ describe("ButlerProactiveSettings", () => {
         expect(screen.queryByRole("button", { name: /跟进事项与整理手记/ })).not.toBeInTheDocument();
     });
 
-    it("should report scope changes through onChange when a checkbox is toggled", () => {
+    it("should not render fixed ability checkboxes or separate feishu recipient input", () => {
+        render(<ButlerProactiveSettings value={base} onChange={vi.fn()} onOpenCenter={vi.fn()} />);
+        expect(screen.queryByText("可以做的事")).not.toBeInTheDocument();
+        expect(screen.queryByLabelText("飞书提醒接收人")).not.toBeInTheDocument();
+        expect(screen.getByRole("switch", { name: "主动提醒与推送" })).toBeInTheDocument();
+        expect(screen.getByRole("textbox", { name: "整理偏好与关注重点" })).toBeInTheDocument();
+    });
+
+    it("should report scope and custom instructions changes through onChange", () => {
         const onChange = vi.fn();
         render(<ButlerProactiveSettings value={base} onChange={onChange} onOpenCenter={vi.fn()} />);
         fireEvent.click(screen.getByRole("checkbox", { name: "普通聊天" }));
         expect(onChange).toHaveBeenCalledWith({ ...base, normal_chats: true });
+        fireEvent.change(screen.getByRole("textbox", { name: "整理偏好与关注重点" }), {
+            target: { value: "重点关注项目截止日期" },
+        });
+        expect(onChange).toHaveBeenCalledWith({ ...base, custom_instructions: "重点关注项目截止日期" });
     });
 
     it("should show the interval inputs when the cadence matches no preset", () => {

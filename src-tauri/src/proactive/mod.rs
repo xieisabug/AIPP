@@ -1,11 +1,13 @@
+mod agent;
 mod delivery;
 mod delta;
+pub(crate) mod gate;
 mod lunar;
 mod memory;
-mod model;
+mod prompt;
 pub(crate) mod proposal;
-mod research;
 mod runner;
+pub(crate) mod tools;
 mod topics;
 #[cfg(test)]
 #[path = "proactive_tests.rs"]
@@ -25,9 +27,11 @@ pub struct Config {
     pub private_chats: bool,
     pub groups: bool,
     pub normal_chats: bool,
-    pub remember: bool,
-    pub research: bool,
-    pub reminders: bool,
+    /// 是否允许主动发送桌面提醒与管家飞书推送（关闭为静默模式，后台照常整理）。
+    #[serde(alias = "reminders")]
+    pub allow_notifications: bool,
+    /// 可选的用户自定义整理偏好与关注重点，注入系统 Prompt 引导管家自主发挥。
+    pub custom_instructions: String,
     pub pulse_hours: u32,
     pub daily_limit: u32,
     pub quiet_start: String,
@@ -35,8 +39,8 @@ pub struct Config {
     pub release: String,
     pub digest: String,
     pub small_model: String,
+    /// 整理执行者：""=沿用总管家模型；"code%%provider_id"=普通模型；"assistant:<id>"=原生 Agent 助手
     pub deep_model: String,
-    pub feishu_open_id: String,
     pub adaptive_window: bool,
 }
 impl Default for Config {
@@ -46,9 +50,8 @@ impl Default for Config {
             private_chats: true,
             groups: true,
             normal_chats: false,
-            remember: true,
-            research: true,
-            reminders: true,
+            allow_notifications: true,
+            custom_instructions: String::new(),
             pulse_hours: 3,
             daily_limit: 3,
             quiet_start: "22:30".into(),
@@ -57,7 +60,6 @@ impl Default for Config {
             digest: "23:00".into(),
             small_model: String::new(),
             deep_model: String::new(),
-            feishu_open_id: String::new(),
             adaptive_window: false,
         }
     }
@@ -68,6 +70,10 @@ impl Config {
             (1..=24).contains(&self.pulse_hours) && self.daily_limit <= 100,
             "巡检间隔或每日条数无效"
         );
+        ensure!(
+            self.custom_instructions.chars().count() <= 4000,
+            "整理偏好与关注重点不能超过 4000 字"
+        );
         for value in [&self.quiet_start, &self.quiet_end, &self.release, &self.digest] {
             let time = NaiveTime::parse_from_str(value, "%H:%M").context("时间格式为 HH:MM")?;
             ensure!(time.format("%H:%M").to_string() == *value, "时间须使用两位小时和分钟");
@@ -75,11 +81,6 @@ impl Config {
         ensure!(
             self.release >= self.quiet_end && !self.quiet(&self.release),
             "释放时间必须在免打扰结束后的活跃时段"
-        );
-        ensure!(
-            self.feishu_open_id.is_empty()
-                || (self.feishu_open_id.starts_with("ou_") && self.feishu_open_id.len() < 128),
-            "飞书接收人须填写用户 Open ID"
         );
         Ok(())
     }
@@ -100,6 +101,9 @@ fn config(app: &AppHandle) -> Result<Config> {
         .unwrap_or_default();
     Config::validate(&config)?;
     Ok(config)
+}
+pub(crate) fn allow_notifications(app: &AppHandle) -> Result<bool> {
+    Ok(config(app)?.allow_notifications)
 }
 fn connection(app: &AppHandle) -> Result<Connection> {
     Ok(ConversationDatabase::new(app)?.get_connection()?)

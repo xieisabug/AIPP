@@ -18,7 +18,7 @@ const labels: Record<string, string> = {
     partial: "本批已整理，待续扫", running: "整理中", digest: "深度复盘", manual: "手动整理", pulse: "定期巡检",
     idle_after_chat: "聊后整理", wake: "事项重新预研", schedule: "事项排期", finding: "整理事项", milestone: "事项唤醒",
     delivery: "提醒投递", proposal: "建议派发", feishu: "飞书投递", queued: "等待送达", delivered: "已送达",
-    acknowledged: "已确认", cancelled: "已取消", sent: "已发送",
+    acknowledged: "已确认", cancelled: "已取消", sent: "已发送", skipped: "未启用飞书",
 };
 const label = (key: string) => labels[key] ?? key;
 
@@ -188,7 +188,7 @@ export default function ButlerProactiveCenter({ open, onOpenChange, enabled }: {
                                         <span className="text-xs text-muted-foreground">{d.date}</span>
                                     </div>
                                     {d.fallback && <p className="text-muted-foreground">总管家代送：{d.fallback}</p>}
-                                    {d.external && <p className={d.error ? "text-destructive" : "text-muted-foreground"}>
+                                    {d.external && d.external !== "skipped" && <p className={d.error ? "text-destructive" : "text-muted-foreground"}>
                                         飞书：{label(d.external)}{d.error ? `（${d.error}）` : ""}
                                     </p>}
                                 </article>)}</div>

@@ -182,6 +182,20 @@ impl PreparedAgentSession for Prepared {
     fn metadata(&self) -> AgentDriverMetadata { self.driver.metadata() }
     async fn finalize(&mut self, app: &tauri::AppHandle, cid: i64, payload: String) -> Result<(), AppError> {
         configure_instance(app, self.instance.provider_id, self.driver.0, &mut self.config)?;
+        if crate::mcp::butler_tools::conversation_kind(app, Some(cid))
+            .is_ok_and(|k| k == crate::proactive::tools::PROACTIVE_RUN_KIND)
+        {
+            // 主动整理后台运行时强制启用 AIPP 模型审核并关闭自动跳过审批，确保写操作受门禁保护。
+            self.config.review = true;
+            self.config.wire["aipp_review"] = json!(true);
+            self.config.wire["kiro_autopilot"] = json!("false");
+            if self.config.wire.get("pi_approval").and_then(Value::as_str) == Some("yolo") {
+                self.config.wire["pi_approval"] = json!("default");
+            }
+            if self.config.wire.get("antigravity_mode").and_then(Value::as_str) == Some("auto") {
+                self.config.wire["antigravity_mode"] = json!("default");
+            }
+        }
         if payload.trim().is_empty() || payload.trim() == "[]" { return Ok(()); }
         use crate::acp_mcp_bridge::*;
         let proxy = ensure_proxy_server(app.clone()).await.map_err(error)?;
@@ -700,31 +714,87 @@ pub(crate) async fn register_session_permission(
     turn: Option<i64>, agent: &'static str, cwd: &std::path::Path,
 ) -> Result<(), String> {
     let conversation_id = event.conversation_id.ok_or("原生权限请求缺少会话编号")?;
-    let review_turn = if let Some(id) = turn {
+    let (is_proactive, review_turn) = {
         let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
         let conversation = db.conversation_repo().map_err(|e| e.to_string())?.read(conversation_id)
             .map_err(|e| e.to_string())?.ok_or_else(|| format!("审核会话 {conversation_id} 不存在"))?;
-        let uses_model = if crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind) {
-            true
-        } else if let Some(assistant_id) = conversation.assistant_id {
-            let db = crate::db::assistant_db::AssistantDatabase::new(app).map_err(|e| e.to_string())?;
-            let mode = crate::api::assistant_api::management::config_value(&db, assistant_id, "tool_review_mode")?;
-            let state = app.state::<crate::FeatureConfigState>();
-            let features = state.config_feature_map.lock().await;
-            crate::mcp::tool_review::agent_permission_uses_model(mode.as_deref(),
-                crate::mcp::tool_review::has_configured_review_model(&features))
-        } else { false };
-        uses_model.then_some(id)
-    } else { None };
+        let is_proactive = conversation.conversation_kind == crate::proactive::tools::PROACTIVE_RUN_KIND;
+        let review_turn = if let Some(id) = turn {
+            let uses_model = if is_proactive
+                || crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind)
+            {
+                true
+            } else if let Some(assistant_id) = conversation.assistant_id {
+                let db = crate::db::assistant_db::AssistantDatabase::new(app).map_err(|e| e.to_string())?;
+                let mode = crate::api::assistant_api::management::config_value(&db, assistant_id, "tool_review_mode")?;
+                let state = app.state::<crate::FeatureConfigState>();
+                let features = state.config_feature_map.lock().await;
+                crate::mcp::tool_review::agent_permission_uses_model(mode.as_deref(),
+                    crate::mcp::tool_review::has_configured_review_model(&features))
+            } else { false };
+            uses_model.then_some(id)
+        } else if is_proactive {
+            Some(0)
+        } else { None };
+        (is_proactive, review_turn)
+    };
     let state = app.state::<crate::api::ai::acp::AcpPermissionState>();
     state.store_request_guarded(event.clone(), sender, scope.clone(), guard).await?;
     if let Some(turn) = review_turn {
-        tauri::async_runtime::spawn(review_permission(app.clone(), event.clone(), scope, turn, agent, cwd.display().to_string()));
+        if is_proactive {
+            tauri::async_runtime::spawn(review_proactive_permission(
+                app.clone(), event.clone(), scope, turn, agent, cwd.display().to_string(),
+            ));
+        } else {
+            tauri::async_runtime::spawn(review_permission(
+                app.clone(), event.clone(), scope, turn, agent, cwd.display().to_string(),
+            ));
+        }
     } else if let Err(error) = present_permission(app, event, json!(event)).await {
         state.remove_request(&event.request_id).await;
         return Err(error);
     }
     Ok(())
+}
+
+/// 主动整理后台运行时的原生权限审核：安全则自动一次性放行，不安全或异常时直接自动拒绝，绝不挂起弹窗。
+pub(crate) async fn review_proactive_permission(
+    app: tauri::AppHandle,
+    event: crate::api::ai::acp::AcpPermissionRequestEvent,
+    scope: super::approval::AgentRequestScope,
+    turn: i64,
+    agent: &'static str,
+    working_directory: String,
+) {
+    use crate::api::ai::acp::AcpPermissionState;
+    use super::approval::{AgentInteractionReply, AgentPermissionReply, AgentReplyTarget};
+    let conversation_id = event.conversation_id.unwrap_or_default();
+    let state = app.state::<AcpPermissionState>();
+    if state.get_request(&event.request_id).await.is_none() { return; }
+    let decision = crate::proactive::gate::review_native_permission(
+        &app, conversation_id, turn, agent, &event, &working_directory,
+    ).await;
+    if state.get_request(&event.request_id).await.is_none() { return; }
+    let target = AgentReplyTarget { request_id: event.request_id.clone(), scope };
+    match decision {
+        Ok(option_id) => {
+            if let Err(error) = crate::api::operation_api::resolve_agent_interaction_response(
+                &app, target, AgentInteractionReply::Permission(AgentPermissionReply::Select { option_id }),
+            ).await {
+                tracing::warn!(conversation_id, request_id = %event.request_id, agent, %error, "Proactive native permission allow failed");
+            }
+        }
+        Err((reject_option, reason)) => {
+            tracing::info!(conversation_id, request_id = %event.request_id, agent, %reason, "Proactive native permission auto-rejected");
+            let reply = match reject_option {
+                Some(option_id) => AgentPermissionReply::Select { option_id },
+                None => AgentPermissionReply::Cancel,
+            };
+            let _ = crate::api::operation_api::resolve_agent_interaction_response(
+                &app, target, AgentInteractionReply::Permission(reply),
+            ).await;
+        }
+    }
 }
 
 async fn present_permission(app: &tauri::AppHandle, event: &crate::api::ai::acp::AcpPermissionRequestEvent, payload: Value) -> Result<(), String> {

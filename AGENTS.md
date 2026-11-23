@@ -20,9 +20,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **管家开工提示**：总管家、联系人、任务助手与群成员使用 `report_progress` 说明准备做什么，工具回执后沿既有执行链路继续。按执行会话广播 `butler_progress_summary`，私聊与群成员行以气泡显示上报原话。辅助模型的最新总结在私聊居中显示，在群聊与发言气泡左对齐并标明成员名。最终交付仍由原会话处理。
 
-**管家主动整理**：`proactive/` 使用分会话的巡检与复盘水位线，后台预研仅允许经过范围校验的只读操作。采纳建议通过普通对话入口把确认指令与消息回执写入同一事务。夜间队列、双设备执行权与飞书摘要有独立投递边界。详见[主动整理与关怀](./docs/product/18-Butler任务系统.md#主动整理与关怀)。
-
-主动管家的事项级唤醒与跨会话归纳见 `proactive/topics.rs`。提醒阶段和预研结果分别持久化，受托历史读取只接受当次事项关联、能在当前扫描范围内核实的引文。跨设备映射使用事项、会话和消息的同步身份，最终简报在投递设备上生成本地预览。
+**管家主动整理**：`proactive/` 使用分会话的巡检与复盘水位线（`delta.rs`），轻巡检由小模型初筛，深度整理与事项唤醒统一作为自主 Agent 运行（`proactive/agent.rs`，支持普通模型无头循环 `unattended_loop.rs` 与原生 Agent `agent_driver::turn::send_turn`），不再限定固定工种；用户可通过 `custom_instructions` 自由引导关注重点。主动专用工具（`proactive_search_history`/`proactive_memory`/`proactive_track`/`proactive_notify`/`proactive_propose`/`proactive_note`）挂在 `aipp:agent` 下仅在 `butler_proactive_run` 会话可见，常规工具与原生 Agent 权限请求均经统一安全审核门禁（`proactive/gate.rs`），未通过绝不挂起而是引导生成建议卡片。采纳建议通过普通对话入口把确认指令与消息回执写入同一事务。夜间队列、双设备执行权与管家飞书自动沿用（`feishu::send_butler_proactive_summary`，不单设飞书接收人）有独立投递边界；跨设备映射沿用事项、会话和消息的同步身份，最终简报在投递设备上生成本地预览。详见[主动整理与关怀](./docs/product/18-Butler任务系统.md#主动整理与关怀)。
 
 
 管家简洁聊天按实际发生时间排列每次成功上报、问答与预览，普通正文只展示本轮完成时的最后答复。原生通道通过 `db/butler_execution.rs` 记录最终正文边界，执行记录保留完整内容。私聊投影在 `butlerTimeline.ts`，群聊通过成员执行轮次的输入、回复与结束时间定位交互（`butlerGroupResults.tsx`）。恢复实时问答按执行会话和原请求 ID 匹配。

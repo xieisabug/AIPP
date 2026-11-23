@@ -239,14 +239,46 @@ async fn execute_proxy_tool(
         let conn = db.get_connection().map_err(|error| error.to_string())?;
         prompt.validate_connection(&conn)?;
     }
+    let is_proactive = crate::mcp::butler_tools::conversation_kind(app_handle, Some(conversation_id))
+        .map(|k| k == crate::proactive::tools::PROACTIVE_RUN_KIND)
+        .unwrap_or(false);
     prompt.ensure_active()?;
-    let execute = dynamic::dispatch(&db,server,tool_name,&parameters,conversation_id,&access,
-        |target| async move {
-            crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
-                app_handle,&target.server,&target.tool_name,&target.parameters,
-                Some(conversation_id),Some(cancel),
-            ).await
-        });
+    let execute = dynamic::dispatch(&db, server, tool_name, &parameters, conversation_id, &access, |target| async move {
+        let audited_call_id = if is_proactive {
+            crate::proactive::gate::admit_proxy_tool(
+                app_handle,
+                conversation_id,
+                &target.server,
+                &target.tool_name,
+                &target.parameters,
+            )
+            .await?
+        } else {
+            None
+        };
+        let out = crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
+            app_handle,
+            &target.server,
+            &target.tool_name,
+            &target.parameters,
+            Some(conversation_id),
+            Some(cancel),
+        )
+        .await;
+        if let Some(call_id) = audited_call_id {
+            if let Ok(mcp_db) = MCPDatabase::new(app_handle) {
+                match &out {
+                    Ok(res) => {
+                        let _ = mcp_db.update_mcp_tool_call_status(call_id, "success", Some(res), None);
+                    }
+                    Err(err) => {
+                        let _ = mcp_db.update_mcp_tool_call_status(call_id, "failed", None, Some(err));
+                    }
+                }
+            }
+        }
+        out
+    });
     let result = prompt.run(execute).await?;
 
     Ok(json!({

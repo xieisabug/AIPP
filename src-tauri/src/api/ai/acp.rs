@@ -233,7 +233,14 @@ pub fn build_selected_mcp_tools_with_catalog(
                 }).collect(),
         }).collect();
     let kind = crate::mcp::butler_tools::conversation_kind(app_handle, conversation_id).map_err(|e| e.to_string())?;
+    let is_proactive = kind == crate::proactive::tools::PROACTIVE_RUN_KIND;
     let mut dynamic_catalog = Vec::new();
+    if is_proactive {
+        let allow_notifications = crate::proactive::allow_notifications(app_handle).unwrap_or(true);
+        crate::mcp::butler_tools::prepare_proactive_run_tools(app_handle, &mut servers, allow_notifications)
+            .map_err(|e| e.to_string())?;
+        return Ok((selected_tools_payload(servers)?, dynamic_catalog));
+    }
     if dynamic {
         servers = crate::mcp::prompt::collect_all_enabled_servers_for_dynamic_mode(app_handle).map_err(|e|e.to_string())?;
         let access = crate::mcp::assistant_access::Restrictions::conversation(app_handle,conversation_id)?;
