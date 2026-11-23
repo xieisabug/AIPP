@@ -192,12 +192,17 @@ pub fn build_completion_items_from_skills(
     items
 }
 
-fn build_cached_index(scanner: &SkillScanner, skills: Vec<ScannedSkill>) -> CachedSkillsIndex {
-    let items = build_completion_items_from_skills(&skills);
+pub(crate) fn index_scanned_skills(
+    app_handle: &tauri::AppHandle, scanner: &SkillScanner, skills: &[ScannedSkill],
+) -> Result<CachedSkillsIndex, AppError> {
+    let items = build_completion_items_from_skills(skills);
     let (by_identifier, by_invoke_name, by_alias) = build_lookup_maps(&items);
-    let fingerprints = build_fingerprints(scanner, &skills);
+    let fingerprints = build_fingerprints(scanner, skills);
 
-    CachedSkillsIndex { items, by_identifier, by_invoke_name, by_alias, fingerprints }
+    let index = CachedSkillsIndex { items, by_identifier, by_invoke_name, by_alias, fingerprints };
+    let state = app_handle.state::<SlashRegistryCacheState>();
+    *state.skills_index.write().map_err(|_| cache_lock_error())? = Some(index.clone());
+    Ok(index)
 }
 
 pub async fn rebuild_skills_index(
@@ -205,10 +210,7 @@ pub async fn rebuild_skills_index(
 ) -> Result<CachedSkillsIndex, AppError> {
     let scanner = create_scanner(app_handle);
     let skills = scanner.scan_all();
-    let index = build_cached_index(&scanner, skills);
-    let state = app_handle.state::<SlashRegistryCacheState>();
-    *state.skills_index.write().map_err(|_| cache_lock_error())? = Some(index.clone());
-    Ok(index)
+    index_scanned_skills(app_handle, &scanner, &skills)
 }
 
 pub async fn get_cached_skills_index(

@@ -1,6 +1,6 @@
 //! Skills prompt integration - collects and formats skills for AI prompts
 
-use crate::api::skill_api::{get_enabled_assistant_skills_internal, scan_skills};
+use crate::api::skill_api::{create_scanner, select_assistant_skills};
 use crate::db::conversation_db::{AttachmentType, MessageAttachment};
 use crate::errors::AppError;
 use crate::skills::types::ScannedSkill;
@@ -9,7 +9,7 @@ use crate::slash::ActiveSkillInvocation;
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 /// Skills information for an assistant
 #[derive(Debug, Clone)]
@@ -76,45 +76,36 @@ pub async fn collect_skills_info_for_assistant_with_additions(
     assistant_id: i64,
     temporary_skill_identifiers: &[String],
 ) -> Result<SkillsInfoForAssistant, AppError> {
-    let enabled_skills = get_enabled_assistant_skills_internal(app_handle, assistant_id).await?;
-    if normalize_skill_identifiers(temporary_skill_identifiers).is_empty() {
-        debug!(enabled_skills_count = enabled_skills.len(), "Collected skills info for assistant");
-        return Ok(SkillsInfoForAssistant { enabled_skills });
-    }
-
-    let available_skills = scan_skills(app_handle.clone())
-        .await
-        .map_err(AppError::UnknownError)?
-        .into_iter()
-        .map(|skill| (skill.identifier.clone(), skill))
-        .collect::<HashMap<_, _>>();
-
-    let merged_skills =
-        merge_temporary_skills(enabled_skills, &available_skills, temporary_skill_identifiers);
-
-    debug!(enabled_skills_count = merged_skills.len(), "Collected skills info for assistant");
-
-    Ok(SkillsInfoForAssistant { enabled_skills: merged_skills })
+    collect_turn_skills(app_handle, assistant_id, temporary_skill_identifiers, false)
 }
 
-/// 管家模式：与总管家一致，已安装的 Skills 全部可用（只在本次对话生效，不写回助手配置）。
+/// 管家模式按助手配置、临时指定、其余已安装 Skills 的顺序提供。
 pub async fn collect_all_skills_for_assistant(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
     temporary_skill_identifiers: &[String],
 ) -> Result<SkillsInfoForAssistant, AppError> {
-    let mut skills = collect_skills_info_for_assistant_with_additions(app_handle, assistant_id, temporary_skill_identifiers)
-        .await?
-        .enabled_skills;
-    let mut available = scan_skills(app_handle.clone()).await.map_err(AppError::UnknownError)?;
-    available.sort_by(|left, right| left.identifier.cmp(&right.identifier));
-    let mut seen: HashSet<String> = skills.iter().map(|skill| skill.identifier.clone()).collect();
-    for skill in available {
-        if seen.insert(skill.identifier.clone()) {
-            skills.push(skill);
-        }
+    collect_turn_skills(app_handle, assistant_id, temporary_skill_identifiers, true)
+}
+
+fn collect_turn_skills(
+    app_handle: &tauri::AppHandle, assistant_id: i64, temporary: &[String], include_all: bool,
+) -> Result<SkillsInfoForAssistant, AppError> {
+    if !include_all && temporary.iter().all(|id| id.trim().is_empty()) {
+        return Ok(SkillsInfoForAssistant { enabled_skills: select_assistant_skills(app_handle, assistant_id, None)? });
     }
-    Ok(SkillsInfoForAssistant { enabled_skills: skills })
+    let mut available = create_scanner(app_handle).scan_all();
+    let enabled = select_assistant_skills(app_handle, assistant_id, Some(&available))?;
+    let mut enabled_skills = if temporary.is_empty() { enabled } else {
+        let by_id = available.iter().map(|s| (s.identifier.clone(), s.clone())).collect();
+        merge_temporary_skills(enabled, &by_id, temporary)
+    };
+    if include_all {
+        available.sort_by(|a,b| a.identifier.cmp(&b.identifier));
+        let mut seen: HashSet<_> = enabled_skills.iter().map(|s| s.identifier.clone()).collect();
+        enabled_skills.extend(available.into_iter().filter(|s| seen.insert(s.identifier.clone())));
+    }
+    Ok(SkillsInfoForAssistant { enabled_skills })
 }
 
 /// Format skills into the assistant prompt

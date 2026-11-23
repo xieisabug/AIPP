@@ -16,7 +16,7 @@ use crate::skills::installer::{
 use crate::skills::parser::SkillParser;
 use crate::skills::scanner::SkillScanner;
 use crate::skills::types::{ScannedSkill, SkillContent, SkillSourceConfig, SkillWithConfig};
-use crate::slash::{get_skills_for_completion, rebuild_skills_index, SlashSkillCompletionItem};
+use crate::slash::{get_skills_for_completion, SlashSkillCompletionItem};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -307,7 +307,7 @@ pub fn migrate_skills_to_agents_dir(app_handle: &tauri::AppHandle) -> Result<(),
 pub async fn scan_skills(app_handle: tauri::AppHandle) -> Result<Vec<ScannedSkill>, String> {
     let scanner = create_scanner(&app_handle);
     let skills = scanner.scan_all();
-    rebuild_skills_index(&app_handle).await.map_err(|e| e.to_string())?;
+    crate::slash::cache::index_scanned_skills(&app_handle, &scanner, &skills).map_err(|e| e.to_string())?;
     let _ = app_handle.emit("skills-registry-changed", ());
     info!("Scanned {} skills", skills.len());
     Ok(skills)
@@ -439,35 +439,36 @@ pub async fn get_enabled_assistant_skills_internal(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
 ) -> Result<Vec<ScannedSkill>, crate::errors::AppError> {
-    let assistant_db = AssistantDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
-    let assistant =
-        assistant_db.get_assistant(assistant_id).map_err(crate::errors::AppError::from)?;
-    if is_butler_system_assistant_name(&assistant.name) {
-        let scanner = create_scanner(app_handle);
-        let mut all_skills = scanner.scan_all();
-        all_skills.sort_by(|left, right| left.identifier.cmp(&right.identifier));
-        return Ok(all_skills);
+    select_assistant_skills(app_handle, assistant_id, None)
+}
+
+/// Reuse a caller's scan when it also needs temporary or globally available skills.
+pub(crate) fn select_assistant_skills(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    available: Option<&[ScannedSkill]>,
+) -> Result<Vec<ScannedSkill>, crate::errors::AppError> {
+    let assistant = AssistantDatabase::new(app_handle)?.get_assistant(assistant_id)?;
+    let chief = is_butler_system_assistant_name(&assistant.name);
+    let configs = if chief { Vec::new() } else {
+        SkillDatabase::new(app_handle)?.get_enabled_skill_configs(assistant_id)?
+    };
+    if !chief && configs.is_empty() { return Ok(Vec::new()); }
+    let scanned;
+    let available = match available {
+        Some(skills) => skills,
+        None => {
+            scanned = create_scanner(app_handle).scan_all();
+            &scanned
+        }
+    };
+    if chief {
+        let mut skills = available.to_vec();
+        skills.sort_by(|a,b| a.identifier.cmp(&b.identifier));
+        return Ok(skills);
     }
-
-    let db = SkillDatabase::new(app_handle).map_err(crate::errors::AppError::from)?;
-    let configs =
-        db.get_enabled_skill_configs(assistant_id).map_err(crate::errors::AppError::from)?;
-
-    if configs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Scan all skills to check existence
-    let scanner = create_scanner(app_handle);
-    let existing_skills = scanner.scan_all_as_map();
-
-    // Filter to only existing skills, maintaining priority order
-    let result: Vec<ScannedSkill> = configs
-        .into_iter()
-        .filter_map(|config| existing_skills.get(&config.skill_identifier).cloned())
-        .collect();
-
-    Ok(result)
+    let by_id: std::collections::HashMap<_, _> = available.iter().map(|s| (&s.identifier, s)).collect();
+    Ok(configs.iter().filter_map(|cfg| by_id.get(&cfg.skill_identifier).map(|s| (*s).clone())).collect())
 }
 
 /// 检查 Agent load_skill 是否已就绪（全局 + 助手级）
