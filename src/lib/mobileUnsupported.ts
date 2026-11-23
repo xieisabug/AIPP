@@ -14,7 +14,7 @@ export type MobileUnsupportedFeature =
     | "autostart"
     // 全局快捷键：Rust 侧仅桌面平台编译注册（global shortcut 插件无移动端实现）
     | "global_shortcut"
-    // 应用内更新：Rust 侧 check_update / download_and_install_update 在移动端返回 Err
+    // 应用内检查、下载与安装命令仅注册在桌面端
     | "app_updater"
     // 脚本/代码执行：Android 无 shell 环境，代码块"运行"按钮与 aipp:operation execute_bash 运行期必败
     | "script_execution"

@@ -1,6 +1,6 @@
-import { act, fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { invoke } from "@/__tests__/mocks/tauri";
+import { invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import ChatUIInfomation from "./ChatUIInfomation";
 
 const platformState = vi.hoisted(() => ({ mobile: false }));
@@ -41,6 +41,13 @@ describe("ChatUIInfomation platform gating", () => {
         expect(vi.mocked(invoke)).toHaveBeenCalledWith("open_config_window");
         expect(listener).not.toHaveBeenCalled();
         window.removeEventListener("aipp:mobile-navigate", listener);
+    });
+
+    it("should show a ready update beside the desktop settings button", async () => {
+        mockInvokeHandler("get_app_update_status", () => ({ revision: 1, version: "2.0", phase: "ready" }));
+        render(<ChatUIInfomation />);
+        const update = await screen.findByRole("button", { name: /点击安装更新/ });
+        expect(slot("chat-info-open-config")?.nextElementSibling).toBe(update);
     });
 
     it("mobile: opens collections and config in the single WebView", async () => {

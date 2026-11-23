@@ -1,91 +1,52 @@
-import { useState, useCallback, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import { UpdateInfo } from "@/data/Update";
+import type { AppUpdateStatus } from "@/data/Update";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 
-export const useAppUpdater = () => {
-    const [currentVersion, setCurrentVersion] = useState<string>("");
-    const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-    const [isChecking, setIsChecking] = useState(false);
-    const [isCheckingWithProxy, setIsCheckingWithProxy] = useState(false);
-    const [isDownloading, setIsDownloading] = useState(false);
-    const [isDownloadingWithProxy, setIsDownloadingWithProxy] = useState(false);
+export function useAppUpdater() {
+    const available = useFeatureAvailableOnPlatform("app_updater");
+    const [status, setStatus] = useState<AppUpdateStatus | null>(null);
+    const [readError, setReadError] = useState("");
 
-    // 获取当前版本
     useEffect(() => {
-        invoke<string>("get_app_version").then(setCurrentVersion);
-    }, []);
+        if (!available) return;
+        let active = true;
+        let unlisten: (() => void) | undefined;
+        const apply = (next: AppUpdateStatus) => {
+            if (!active) return;
+            setReadError("");
+            setStatus(previous => !previous || next.revision > previous.revision ? next : previous);
+        };
+        const refresh = () => {
+            void invoke<AppUpdateStatus>("get_app_update_status").then(apply).catch(error => {
+                if (active) setReadError(`读取更新进度失败：${String(error)}`);
+            });
+        };
+        // Subscribe first so a change during hydration cannot be missed.
+        void listen<AppUpdateStatus>("app-update-status", event => apply(event.payload)).then(stop => {
+            if (!active) { stop(); return; }
+            unlisten = stop;
+            refresh();
+        }).catch(error => {
+            if (active) setReadError(`订阅更新进度失败：${String(error)}`);
+        });
+        window.addEventListener("focus", refresh);
+        return () => {
+            active = false;
+            unlisten?.();
+            window.removeEventListener("focus", refresh);
+        };
+    }, [available]);
 
-    // 检查更新
-    const checkUpdate = useCallback(async () => {
-        setIsChecking(true);
-        try {
-            const info = await invoke<UpdateInfo>("check_update");
-            setUpdateInfo(info);
-            if (info.available) {
-                toast.success(`发现新版本: ${info.latest_version}`);
-            } else {
-                toast.info("当前已是最新版本");
-            }
-        } catch (e) {
-            toast.error("检查更新失败: " + e);
-        } finally {
-            setIsChecking(false);
-        }
-    }, []);
+    return { available, status, readError };
+}
 
-    // 使用代理检查更新
-    const checkUpdateWithProxy = useCallback(async () => {
-        setIsCheckingWithProxy(true);
-        try {
-            const info = await invoke<UpdateInfo>("check_update_with_proxy");
-            setUpdateInfo(info);
-            if (info.available) {
-                toast.success(`发现新版本: ${info.latest_version}`);
-            } else {
-                toast.info("当前已是最新版本");
-            }
-        } catch (e) {
-            toast.error("代理检查更新失败: " + e);
-        } finally {
-            setIsCheckingWithProxy(false);
-        }
-    }, []);
+export function checkAppUpdate(useProxy = false) {
+    return invoke("check_app_update", { useProxy }).catch(error => toast.error(String(error)));
+}
 
-    // 下载并安装更新
-    const downloadAndInstall = useCallback(async () => {
-        setIsDownloading(true);
-        try {
-            const msg = await invoke<string>("download_and_install_update");
-            toast.success(msg);
-        } catch (e) {
-            toast.error("更新失败: " + e);
-            setIsDownloading(false);
-        }
-    }, []);
-
-    // 使用代理下载并安装更新
-    const downloadAndInstallWithProxy = useCallback(async () => {
-        setIsDownloadingWithProxy(true);
-        try {
-            const msg = await invoke<string>("download_and_install_update_with_proxy");
-            toast.success(msg);
-        } catch (e) {
-            toast.error("代理更新失败: " + e);
-            setIsDownloadingWithProxy(false);
-        }
-    }, []);
-
-    return {
-        currentVersion,
-        updateInfo,
-        isChecking,
-        isCheckingWithProxy,
-        isDownloading,
-        isDownloadingWithProxy,
-        checkUpdate,
-        checkUpdateWithProxy,
-        downloadAndInstall,
-        downloadAndInstallWithProxy,
-    };
-};
+export function installAppUpdate(version: string) {
+    return invoke("install_app_update", { version }).catch(error => toast.error(String(error)));
+}

@@ -143,10 +143,9 @@ use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{
     get_butler_group_token_stats, get_conversation_token_stats, get_message_token_stats,
 };
-use crate::api::updater_api::{
-    check_update, check_update_with_proxy, download_and_install_update,
-    download_and_install_update_with_proxy, get_app_version,
-};
+use crate::api::updater_api::get_app_version;
+#[cfg(desktop)]
+use crate::api::updater_api::desktop::{check_app_update, get_app_update_status, install_app_update};
 use crate::artifacts::artifact_bridge_api::{
     artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
     artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
@@ -928,6 +927,8 @@ pub fn run() {
             todo_state.set_app_handle(app_handle.clone());
 
             app.manage(initialize_state(&app_handle));
+            #[cfg(desktop)]
+            crate::api::updater_api::desktop::start(app_handle);
             app.manage(initialize_name_cache_state(&app_handle));
             let choices_app = app_handle.clone();
             match mcp::builtin_mcp::choices::unfinished_calls(&choices_app) {
@@ -1468,10 +1469,12 @@ pub fn run() {
             crate::api::mobile_recovery::save_mobile_draft,
             crate::api::plugin_api::validate_mobile_plugin_command,
             // Updater commands
-            check_update,
-            check_update_with_proxy,
-            download_and_install_update,
-            download_and_install_update_with_proxy,
+            #[cfg(desktop)]
+            get_app_update_status,
+            #[cfg(desktop)]
+            check_app_update,
+            #[cfg(desktop)]
+            install_app_update,
             get_app_version,
             list_scheduled_tasks,
             get_scheduled_task,

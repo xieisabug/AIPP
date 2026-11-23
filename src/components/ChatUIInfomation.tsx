@@ -1,6 +1,7 @@
 import { PackageOpen, Settings, CalendarClock, Eye, EyeOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import AnimatedLogo from "./AnimatedLogo";
+import { AppUpdateNotice } from "./AppUpdateNotice";
 import { useLogoState } from "../hooks/useLogoState";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { Button } from "./ui/button";
@@ -90,7 +91,7 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
             <div className="flex items-center gap-2 bg-secondary" data-aipp-slot="chat-info-logo">
                 <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
             </div>
-            <div className="flex items-center gap-2" data-aipp-slot="chat-info-actions">
+            <div className="flex flex-wrap items-center justify-end gap-1" data-aipp-slot="chat-info-actions">
                 {/* 防泄露模式眼睛图标按钮 */}
                 {antiLeakageEnabled && (
                     <Button
@@ -105,6 +106,7 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
                 <Button onClick={openConfig} variant={"ghost"} data-aipp-slot="chat-info-open-config">
                     <Settings />
                 </Button>
+                <AppUpdateNotice />
                 {canShowArtifacts && (
                     <Button onClick={openArtifactsCollections} variant={"ghost"} data-aipp-slot="chat-info-open-artifacts">
                         <PackageOpen />

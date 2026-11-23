@@ -6,8 +6,9 @@ import { mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
 describe("ButlerContactList", () => {
     beforeEach(() => { mockInvokeHandler("get_butler_contact_order", () => []); });
-    it("should open settings from the top-left of the contact list", () => {
+    it("should open settings and show a downloading update beside it in the contact list", async () => {
         const onOpenSettings = vi.fn();
+        mockInvokeHandler("get_app_update_status", () => ({ revision: 1, version: "2.0", phase: "downloading" }));
         render(<ButlerContactList
             chief="总管家"
             contacts={[]}
@@ -28,6 +29,8 @@ describe("ButlerContactList", () => {
         />);
 
         const settings = screen.getByRole("button", { name: "总管家设置" });
+        const update = await screen.findByRole("button", { name: /正在下载/ });
+        expect(settings.nextElementSibling).toBe(update);
         const search = screen.getByRole("button", { name: "搜索管家消息" });
         expect(settings.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(settings).not.toBeDisabled();

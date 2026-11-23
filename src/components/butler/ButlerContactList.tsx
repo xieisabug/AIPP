@@ -12,6 +12,7 @@ import ButlerSortableList from "./ButlerSortableList";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview } from "./butlerGroupModel";
+import { AppUpdateNotice } from "@/components/AppUpdateNotice";
 
 /** 待审批和头像未读标记分别展示。 */
 function ApprovalDot() {
@@ -101,10 +102,11 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
         </button></AssistantItemContextMenu> };
     });
     return <>
-        <div className="flex h-12 shrink-0 items-center justify-between gap-1.5 px-3">
+        <div className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-1.5 px-3 py-1">
             <div className="flex items-center gap-1.5">
                 <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="总管家设置" title="总管家设置"
                     onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
+                <AppUpdateNotice rounded />
                 {onOpenProactive && <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="主动整理" title="主动整理：跟进事项与整理手记"
                     disabled={!ready} onClick={onOpenProactive} data-aipp-slot="butler-proactive-open"><CalendarHeart/></Button>}
             </div>
