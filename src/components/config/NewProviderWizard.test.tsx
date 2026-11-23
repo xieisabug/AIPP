@@ -197,6 +197,26 @@ describe("NewProviderWizard", () => {
         expect(onClose).toHaveBeenCalled();
     });
 
+    it("should require at least one model when finishing the model step", async () => {
+        const { onCreated } = setup();
+        fireEvent.click(screen.getByRole("button", { name: /OpenAI API/ }));
+        fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+        const checkbox = await screen.findByRole("checkbox", { name: "gpt-a" });
+        const finish = screen.getByRole("button", { name: "完成" });
+
+        expect(finish).toBeDisabled();
+        expect(screen.getByRole("status")).toHaveTextContent(/^请至少选择一个模型$/);
+        fireEvent.click(finish);
+        expect(onCreated).not.toHaveBeenCalled();
+
+        fireEvent.click(checkbox);
+        expect(finish).toBeEnabled();
+        expect(screen.getByRole("status")).toHaveTextContent(/^已选 1 个模型$/);
+        fireEvent.click(checkbox);
+        expect(finish).toBeDisabled();
+        expect(screen.getByRole("status")).toHaveTextContent(/^请至少选择一个模型$/);
+    });
+
     it("should select a fetched model instead of duplicating it as a custom model", async () => {
         setup();
         fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
@@ -407,7 +427,7 @@ describe("NewProviderWizard · DeepSeek 全家桶", () => {
         fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: apiKey } });
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-        await screen.findByRole("checkbox", { name: "gpt-a" });
+        fireEvent.click(await screen.findByRole("checkbox", { name: "gpt-a" }));
     }
 
     const builtinEnvs = () => (invoke.mock.calls.find(([command]) => command === "add_or_update_aipp_builtin_server")?.[1] as {
@@ -513,7 +533,7 @@ describe("NewProviderWizard · DeepSeek 全家桶", () => {
         const { onClose } = setup();
         fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
         fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
-        await screen.findByRole("checkbox", { name: "gpt-a" });
+        fireEvent.click(await screen.findByRole("checkbox", { name: "gpt-a" }));
         expect(screen.getByRole("checkbox", { name: "同时用于搜索工具" })).toBeDisabled();
         expect(screen.queryByTestId("wizard-deepseek-balance")).toBeNull();
         expect(invoke).not.toHaveBeenCalledWith("get_deepseek_balance", expect.anything());

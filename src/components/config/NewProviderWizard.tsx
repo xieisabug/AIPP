@@ -324,9 +324,12 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         }
     }, [apiType, busy, name, otherNames, isHttp, endpointStatus.kind, saveConnection, enableProvider, models, loadModels, apiKey]);
 
+    const selectedCount = models.filter((model) => model.is_selected).length + customCodes.length;
+    const finishDisabled = busy || fetchState.status === "loading" || (!finishedRef.current && selectedCount === 0);
+
     const finish = useCallback(async () => {
         const draft = draftRef.current;
-        if (!apiType || !draft || busy) return;
+        if (!apiType || !draft || finishDisabled) return;
         const withSearch = apiType.value === "deepseek" && suiteSearch && !!apiKey.trim();
         setBusy(true);
         try {
@@ -348,7 +351,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         } finally {
             setBusy(false);
         }
-    }, [apiType, busy, models, customCodes, enableProvider, name, suiteSearch, apiKey, connectSuite]);
+    }, [apiType, finishDisabled, models, customCodes, enableProvider, name, suiteSearch, apiKey, connectSuite]);
 
     const addCustomModel = useCallback(() => {
         const code = customInput.trim();
@@ -378,8 +381,6 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         // pinyinReady：拼音库加载完成后重新过滤
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [models, search, pinyinReady]);
-
-    const selectedCount = models.filter((model) => model.is_selected).length + customCodes.length;
 
     const addedCounts = useMemo(() => {
         const draftId = draftRef.current?.id;
@@ -735,8 +736,10 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                         上一步
                     </Button>
                     <div className="ml-auto flex items-center gap-3">
-                        {step === 3 && (
-                            <span className="text-xs text-muted-foreground">已选 {selectedCount} 个模型</span>
+                        {step === 3 && !finishedRef.current && (
+                            <span role="status" className="text-xs text-muted-foreground">
+                                {selectedCount === 0 ? "请至少选择一个模型" : `已选 ${selectedCount} 个模型`}
+                            </span>
                         )}
                         {step === 2 ? (
                             <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={busy} onClick={() => void submitConnection()}>
@@ -744,7 +747,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                                 {isHttp ? "下一步" : "完成"}
                             </Button>
                         ) : (
-                            <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={busy || fetchState.status === "loading"} onClick={() => void finish()}>
+                            <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={finishDisabled} onClick={() => void finish()}>
                                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                                 {suiteError ? "重试" : "完成"}
                             </Button>
