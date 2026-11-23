@@ -52,6 +52,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [nameDraft, setNameDraft] = useState("");
     const pendingPost = useRef<{ signature: string; key: string } | null>(null);
+    const [localPost, setLocalPost] = useState<ButlerGroupMessage>();
     const historyLoaded = useRef(false);
     const loadedThrough = useRef(0);
     const revision = useRef(0);
@@ -104,6 +105,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     }, [groupId, refresh]);
 
     const messages = detail?.messages ?? [];
+    const displayMessages = useMemo(() =>
+        localPost?.group_id === groupId && !messages.some(row => row.request_key === localPost.request_key)
+            ? [...messages, localPost] : messages, [localPost, groupId, messages]);
     const focused = useFocusedWindow();
     const lastSeq = messages.length ? messages[messages.length - 1].seq : 0;
     const marked = useRef(new Set<number>());
@@ -144,16 +148,25 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         if (pendingPost.current?.signature !== signature) {
             pendingPost.current = { signature, key: crypto.randomUUID() };
         }
+        const requestKey = pendingPost.current.key;
+        setLocalPost({
+            group_id: groupId, seq: Number.MAX_SAFE_INTEGER, request_key: requestKey, sendStatus: "sending",
+            sender_member: null, sender_assistant: null, sender_name: "", kind: "message", body,
+            reply_to: replyTo, created_at: new Date().toISOString(), source_conversation_id: null, source_message_id: null,
+        });
         setSending(true);
+        setDraft("");
         try {
-            const message = await groups.postButlerGroupMessage(groupId, pendingPost.current.key, body, replyTo);
+            const message = await groups.postButlerGroupMessage(groupId, requestKey, body, replyTo);
             pendingPost.current = null;
-            setDraft("");
-            setQuote(null);
-            // 本地先并入自己的发言：列表看到新的“末尾用户消息”，播放与私聊相同的发送滑动并贴底。
+            setLocalPost(undefined);
+            setQuote(current => current === quote ? null : current);
+            // 用同一 request_key 将正式序号交给已经上屏的气泡。
             setDetail(previous => previous ? { ...previous, routing: true, messages: mergeMessages(previous.messages, [message]) } : previous);
             void refresh();
         } catch (error) {
+            setLocalPost(current => current && { ...current, sendStatus: "failed", sendError: String(error) });
+            setDraft(current => current || body);
             // 草稿保留，重试时沿用同一个 request key，后端不会重复入群
             toast.error(`发送群消息失败：${error}`);
         } finally {
@@ -247,7 +260,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         {/* 消息列表与私聊同一套（见 ButlerGroupTranscript）：输入框悬浮在列表底部之上，尾部空间由列表留出。 */}
         <ButlerGroupTranscript historyLoaded={detail.id === groupId && historyLoaded.current} groupId={groupId}
             sourceSeq={sourceSeq} onSourceLocated={onSourceLocated}
-            messages={messages} members={members} running={running} turns={detail.interaction_turns} />
+            messages={displayMessages} members={members} running={running} turns={detail.interaction_turns} />
 
         {/* 群聊消息只有正文和引用，暂不支持附件，所以不传附件能力。 */}
         <InputArea

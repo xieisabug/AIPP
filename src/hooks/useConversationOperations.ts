@@ -1,8 +1,9 @@
+import { newComposerMessage, type ComposerReceipt } from "@/utils/composerMessage";
 import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { throttle } from "lodash";
-import { Message, Conversation, FileInfo } from "../data/Conversation";
+import { Message, Conversation, FileInfo, QueuedConversationMessage } from "../data/Conversation";
 import { AssistantListItem } from "../data/Assistant";
 import { extractAssistantFromMessage } from "../utils/assistantMentions";
 import useConversationManager from "./useConversationManager";
@@ -14,6 +15,10 @@ import type { ArtifactRunBinding } from "../components/chat-sidebar/types";
 
 export interface UseConversationOperationsProps {
     conversation?: Conversation;
+    viewConversationId?: string;
+    onQueuedAccepted?: (row: QueuedConversationMessage) => void;
+    onComposerMessage?: (row: Message) => void;
+    onComposerResult?: (key: string, receipt: ComposerReceipt) => boolean | void;
     selectedAssistant: number;
     assistants: AssistantListItem[];
     setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
@@ -69,6 +74,7 @@ export interface UseConversationOperationsReturn {
 
 export function useConversationOperations({
     conversation,
+    viewConversationId, onComposerMessage, onComposerResult, onQueuedAccepted,
     selectedAssistant,
     assistants,
     setMessages,
@@ -96,12 +102,36 @@ export function useConversationOperations({
     clearQuote,
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
     const isMobilePlatform = useIsMobilePlatform();
-    const latestInput = useRef({ conversationId: conversation?.id, fileInfoList });
-    latestInput.current = { conversationId: conversation?.id, fileInfoList };
+    const viewId = viewConversationId ?? String(conversation?.id ?? "");
+    const latestComposer = useRef({ viewId, quote, fileInfoList });
+    latestComposer.current = { viewId, quote, fileInfoList };
     const clearAcceptedMobileInput = () => {
         setInputText(current => current === inputText ? "" : current);
-        if (latestInput.current.conversationId === conversation?.id &&
-            latestInput.current.fileInfoList === fileInfoList) clearFileInfoList();
+        if (latestComposer.current.viewId === viewId && latestComposer.current.fileInfoList === fileInfoList) clearFileInfoList();
+    };
+
+    const beginSend = (text: string, direct: { prompt: string } | undefined) => {
+        if (direct || !onComposerMessage) return;
+        const row = newComposerMessage(conversation?.id ?? 0, text);
+        onComposerMessage(row);
+        if (!isMobilePlatform) setInputText("");
+        return row.clientRequestId;
+    };
+    const finishSend = (key: string | undefined, receipt: ComposerReceipt) => {
+        if (!key) return;
+        const accepted = onComposerResult?.(key, receipt);
+        if (receipt.error && !accepted) {
+            // setInputText is bound to the draft in which this submission was made.
+            setInputText(text => text || inputText);
+            return accepted;
+        }
+        if (isMobilePlatform) setInputText(text => text === inputText ? "" : text);
+        const current = latestComposer.current;
+        if (current.viewId === viewId) {
+            if (current.fileInfoList === fileInfoList) clearFileInfoList();
+            if (current.quote === quote) clearQuote?.();
+        }
+        return accepted;
     };
 
     // 对话标题管理相关状态
@@ -350,9 +380,11 @@ export function useConversationOperations({
                 }
 
                 const overrides = buildAgentOverrides(parsedAssistantId);
-                invoke("enqueue_conversation_message", {
+                const key = beginSend(finalPrompt, direct);
+                invoke<QueuedConversationMessage>("enqueue_conversation_message", {
                     overrideModelConfig: overrides.overrideModelConfig,
                     request: {
+                        client_request_id: key,
                         prompt: finalPrompt,
                         conversation_id: String(conversation.id),
                         assistant_id: parsedAssistantId,
@@ -362,13 +394,18 @@ export function useConversationOperations({
                     },
                     queueKind: (busyOverride ?? busySendBehavior) === "interrupt" ? "interrupt" : "normal",
                 })
-                    .then(() => {
+                    .then((queued) => {
+                        if (key) {
+                            if (!finishSend(key, { conversationId: conversation.id })) onQueuedAccepted?.(queued);
+                            return;
+                        }
                         if (direct) return;
                         clearQuote?.();
                         if (isMobilePlatform) clearAcceptedMobileInput();
                         else { setInputText(""); clearFileInfoList(); }
                     })
                     .catch((error) => {
+                        finishSend(key, { conversationId: conversation.id, error: describeAskAiError(error) });
                         console.error("Queue message error:", error);
                         toast.error("消息排队失败: " + describeAskAiError(error));
                     });
@@ -531,8 +568,10 @@ export function useConversationOperations({
                     assistant_type: assistantData?.assistant_type,
                 });
                 const agentOverrides = buildAgentOverrides(parsedAssistantId);
+                const key = beginSend(finalPrompt, direct);
                 await invoke<AskAiResponse>("ask_ai", {
                     request: {
+                        client_request_id: key,
                         prompt: finalPrompt,
                         conversation_id: conversationId,
                         assistant_id: parsedAssistantId,
@@ -545,29 +584,36 @@ export function useConversationOperations({
                     .then((res) => {
                         console.log("ask ai response", res);
                         // 先切到对话（新对话也能立即出现在列表和消息区），再处理请求前失败
-                        if (conversationId != String(res.conversation_id)) {
+                        finishSend(key, { conversationId: res.conversation_id, messageId: res.user_message_id });
+                        if (conversationId != String(res.conversation_id) && latestComposer.current.viewId === viewId) {
                             onChangeConversationId(String(res.conversation_id));
                         }
                         if (res.error_message) {
-                            setAiIsResponsing(false);
-                            clearShiningMessages();
+                            if (latestComposer.current.viewId === viewId || latestComposer.current.viewId === String(res.conversation_id)) {
+                                setAiIsResponsing(false);
+                                clearShiningMessages();
+                            }
                             console.error("Ask AI preparation error:", {conversationId: res.conversation_id, error: res.error_message});
                             if (!quietRuntimeErrors) toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
                                 description: res.error_message,
                             });
-                        } else if (isMobilePlatform && !direct) {
+                        } else if (isMobilePlatform && !direct && !key) {
                             clearAcceptedMobileInput();
                         }
                     })
                     .catch((error) => {
+                        finishSend(key, { conversationId: Number(conversationId), error: describeAskAiError(error) });
                         console.error("Send message error:", error);
-                        setAiIsResponsing(false);
-                        clearShiningMessages();
+                        if (latestComposer.current.viewId === viewId) {
+                            setAiIsResponsing(false);
+                            clearShiningMessages();
+                        }
                         const assistantName = assistantData?.name ?? "Agent";
                         if (!quietRuntimeErrors) toast.error(`${assistantName} 运行失败`, {
                             description: describeAskAiError(error),
                         });
                     });
+                if (key) return;
             }
 
             if (!direct) {
@@ -578,7 +624,7 @@ export function useConversationOperations({
                 }
             }
         }
-    }, 200);
+    }, 200, { trailing: false });
 
     return {
         // 对话管理

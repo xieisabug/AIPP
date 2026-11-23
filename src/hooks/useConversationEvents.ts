@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
     StreamEvent,
     ConversationEvent,
+    MessageAddEvent,
     MessageUpdateEvent,
     MessageTypeEndEvent,
     GroupMergeEvent,
@@ -32,7 +33,7 @@ import { finalizeStreamingEventWithPending } from "@/utils/streamingOverlayHando
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
-    onMessageAdd?: (messageData: any) => void;
+    onMessageAdd?: (messageData: MessageAddEvent) => void;
     onMessageUpdate?: (streamEvent: StreamEvent) => void;
     onGroupMerge?: (groupMergeData: GroupMergeEvent) => void;
     onMCPToolCallUpdate?: (mcpUpdateData: MCPToolCallUpdateEvent) => void;
@@ -706,7 +707,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
             if (conversationEvent.type === "message_add") {
                 // 处理消息添加事件
-                const messageAddData = conversationEvent.data as any;
+                const messageAddData = conversationEvent.data as MessageAddEvent;
 
                 // 如果是用户消息，设置为等待回复的消息，而不是直接设置边框
                 if (messageAddData.message_type === "user") {

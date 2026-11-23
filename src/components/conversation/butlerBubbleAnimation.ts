@@ -1,3 +1,4 @@
+import { sendRowSelector } from "@/utils/composerMessage";
 /** Butler-only entry. Geometry stays unchanged so virtual rows and scroll anchors do not jump. */
 export const BUTLER_BUBBLE_ENTRY_MS = 400;
 export const BUTLER_BUBBLE_SHRINK_MS = 300;
@@ -36,12 +37,12 @@ export function playButlerBubbleAnimation(bubble: HTMLElement): () => void {
 }
 
 /** Virtualized rows can mount after the send commit. Never fall back to the Chat animation. */
-export function playButlerSentBubble(container: HTMLElement, messageId: number): () => void {
+export function playButlerSentBubble(container: HTMLElement, messageId: number | string): () => void {
     let frame = 0;
     let attempts = 0;
     let stop = () => {};
     const run = () => {
-        const bubble = container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${messageId}'] [data-bubble-entry-id]`);
+        const bubble = container.querySelector<HTMLElement>(`${sendRowSelector(messageId)} [data-bubble-entry-id]`);
         if (bubble) { stop = playButlerBubbleAnimation(bubble); return; }
         if (++attempts < 10) frame = requestAnimationFrame(run);
     };

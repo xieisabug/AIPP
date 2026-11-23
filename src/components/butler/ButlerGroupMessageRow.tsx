@@ -36,6 +36,9 @@ export function toChatMessage(groupId: number, message: ButlerGroupMessage, quot
         target: quoted ? quoted.seq : undefined,
     };
     return {
+        clientRequestId: fromUser ? message.request_key : undefined,
+        sendStatus: message.sendStatus,
+        sendError: message.sendError,
         id: !fromUser && message.source_message_id ? message.source_message_id : -message.seq,
         conversation_id: message.source_conversation_id ?? groupId,
         message_type: fromUser ? "user" : message.source_message_id ? "response" : "assistant",

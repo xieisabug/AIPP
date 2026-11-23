@@ -24,6 +24,7 @@ fn member(id: i64, name: &str) -> Member {
 
 fn message(seq: i64, sender: Option<&Member>, body: &str) -> Message {
     Message {
+        request_key: None,
         group_id: 1, seq, sender_member: sender.map(|m| m.id), sender_assistant: sender.map(|m| m.assistant_id),
         sender_name: sender.map(|m| m.name.clone()).unwrap_or_else(|| "我".into()), kind: "message".into(),
         body: body.into(), reply_to: None, created_at: String::new(), source_conversation_id: None, source_message_id: None,

@@ -1,3 +1,4 @@
+import { composerKey, upsertPersistedRow, type ComposerReceipt } from "@/utils/composerMessage";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { useMobileResume } from "@/hooks/useMobileResume";
 import MobileRecoveryNotice from "./conversation/MobileRecoveryNotice";
@@ -18,6 +19,7 @@ import {
 import {
     Conversation,
     ConversationCancelEvent,
+    MessageAddEvent,
     Message,
     QueuedConversationMessage,
     StreamEvent,
@@ -412,13 +414,50 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // only publish an authoritative snapshot with the internal trigger's provenance.
         const [persistedSnapshot, setPersistedSnapshot] = useState<ConversationWithMessages>();
         const persistedSnapshotRevision = useRef(0);
+        const [composerRows, setComposerRows] = useState<Message[]>([]);
+        const currentView = useRef(conversationId);
+        currentView.current = conversationId;
+        // Only the initiating composer may adopt a newly allocated conversation ID.
+        const submitting = useRef(new Map<string, { conversationId: number; accepted: boolean }>());
+        useEffect(() => {
+            const subscription = listen<{client_request_id: string; conversation_id: number}>("composer_conversation_created", ({payload}) => {
+                const request = submitting.current.get(payload.client_request_id);
+                if (!request || request.conversationId !== 0) return;
+                request.accepted = true;
+                setComposerRows(rows => rows.map(row => row.clientRequestId === payload.client_request_id
+                    ? { ...row, conversation_id: payload.conversation_id } : row));
+                if (!currentView.current) onChangeConversationId(String(payload.conversation_id));
+            });
+            return () => { void subscription.then(stop => stop()); };
+        }, [onChangeConversationId]);
+        const beginComposerMessage = useCallback((row: Message) => {
+            submitting.current.set(row.clientRequestId!, {conversationId: row.conversation_id, accepted: false});
+            setComposerRows(previous => [...previous.filter(item => item.conversation_id !== row.conversation_id
+                || item.sendStatus !== "failed"), row]);
+        }, []);
+        // Preserve incremental updates that arrive while a full snapshot is in flight.
+        const snapshotInFlight = useRef(false);
+        const snapshotDeltas = useRef(new Map<number, Message>());
+        const rowReads = useRef(new Map<number, symbol>());
+        const startSnapshot = useCallback(() => {
+            snapshotInFlight.current = true;
+            snapshotDeltas.current.clear();
+            rowReads.current.clear();
+            return ++persistedSnapshotRevision.current;
+        }, []);
         const acceptPersistedSnapshot = useCallback((snapshot: ConversationWithMessages, revision: number) => {
             if (revision !== persistedSnapshotRevision.current) return;
-            // Butler's concise view renders straight from this snapshot. Reuse unchanged
-            // message objects so each refetch only re-renders what actually changed.
+            snapshotInFlight.current = false;
+            for (const row of snapshotDeltas.current.values()) {
+                if (row.conversation_id === snapshot.conversation.id) {
+                    snapshot = { ...snapshot, messages: upsertPersistedRow(snapshot.messages, row) };
+                }
+            }
+            snapshotDeltas.current.clear();
             setPersistedSnapshot((previous) => previous?.conversation.id === snapshot.conversation.id
                 ? { ...snapshot, messages: reuseEquivalentMessages(previous.messages, snapshot.messages) }
                 : snapshot);
+            return snapshot;
         }, []);
         const syncScrollPositionRef = useRef<{ conversationId: string; top: number } | null>(null);
         const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
@@ -550,22 +589,48 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 事件处理逻辑 =============
 
         const handleMessageAdd = useCallback(
-            (messageAddData: any) => {
-                const snapshotRevision = ++persistedSnapshotRevision.current;
+            (messageAddData: Partial<MessageAddEvent>, confirmedByCommand = false) => {
                 // 设置函数映射
                 if (messageAddData.message_id != null) setFunctionMapForMessage(messageAddData.message_id);
 
                 // 发送新消息时，重置防泄露模式的临时显示状态
                 resetReveal();
 
+                const id = messageAddData.message_id;
+                if (id != null && (resultOnly || confirmedByCommand || (messageAddData.message && composerKey(messageAddData.message)))) {
+                    const token = Symbol();
+                    rowReads.current.set(id, token);
+                    const apply = (row: Message | null) => {
+                        if (currentView.current !== conversationId || rowReads.current.get(id) !== token) return;
+                        rowReads.current.delete(id);
+                        if (!row || row.id !== id || row.conversation_id !== Number(conversationId)) return;
+                        const key = composerKey(row);
+                        const request = key ? submitting.current.get(key) : undefined;
+                        if (request) request.accepted = true;
+                        if (snapshotInFlight.current) snapshotDeltas.current.set(id, row);
+                        setPersistedSnapshot(previous => previous?.conversation.id === row.conversation_id
+                            ? { ...previous, messages: upsertPersistedRow(previous.messages, row) } : previous);
+                        setMessages(previous => upsertPersistedRow(previous, row));
+                    };
+                    if (messageAddData.message) apply(messageAddData.message);
+                    else void invoke<Message | null>("get_conversation_message", { conversationId: Number(conversationId), messageId: id })
+                        .then(apply).catch(error => {
+                            if (rowReads.current.get(id) !== token) return;
+                            rowReads.current.delete(id);
+                            toast.error(`读取会话 ${conversationId} 的消息 #${id} 失败：${error}`);
+                        });
+                    return;
+                }
+                const snapshotRevision = startSnapshot();
                 // 重新获取对话消息，以确保获得完整的消息数据（包括generation_group_id等）
                 invoke<ConversationWithMessages>("get_conversation_with_messages", {
                     conversationId: +conversationId,
                 })
                     .then((updatedConversation) => {
-                        acceptPersistedSnapshot(updatedConversation, snapshotRevision);
+                        const accepted = acceptPersistedSnapshot(updatedConversation, snapshotRevision);
+                        if (!accepted || currentView.current !== conversationId) return;
                         setMessages((prevMessages) =>
-                            mergeMessagesWithStreamingState(updatedConversation.messages, {
+                            mergeMessagesWithStreamingState(accepted.messages, {
                                 conversationId: updatedConversation.conversation.id,
                                 currentMessages: prevMessages,
                                 streamingSnapshot: streamingMessagesRef.current,
@@ -574,7 +639,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     })
                     .catch((error) => {
                         console.error("Failed to reload conversation after message_add:", error);
-                        if (windowLabel === "butler_experiment" || messageAddData.message_id == null) return;
+                        if (currentView.current !== conversationId || windowLabel === "butler_experiment" || messageAddData.message_id == null || !messageAddData.message_type) return;
 
                         // 降级处理：仍然添加基本的消息信息
                         const newMessage: Message = {
@@ -597,8 +662,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         setMessages((prevMessages) => [...prevMessages, newMessage]);
                     });
             },
-            [conversationId, resetReveal, setFunctionMapForMessage, acceptPersistedSnapshot, windowLabel]
+            [conversationId, resetReveal, setFunctionMapForMessage, acceptPersistedSnapshot, windowLabel, resultOnly, startSnapshot]
         );
+
+        const finishComposerMessage = useCallback((key: string, { conversationId: id, messageId, error }: ComposerReceipt) => {
+            const wasAccepted = submitting.current.get(key)?.accepted ?? false;
+            submitting.current.delete(key);
+            if (error && wasAccepted) return true;
+            setComposerRows(previous => previous.map(row => row.clientRequestId === key
+                ? { ...row, conversation_id: id, sendStatus: error ? "failed" : row.sendStatus, sendError: error } : row));
+            if (!wasAccepted && !error && messageId && currentView.current === String(id)) {
+                handleMessageAdd({ message_id: messageId, message_type: "user" }, true);
+            }
+            return wasAccepted;
+        }, [handleMessageAdd]);
 
         const handleGroupMerge = useCallback((groupMergeData: GroupMergeEvent) => {
             // 设置组合并关系
@@ -630,6 +707,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, []);
 
         const upsertQueuedMessage = useCallback((queued: QueuedConversationMessage) => {
+            let key: string | undefined;
+            try { key = JSON.parse(queued.request_json).client_request_id; } catch { /* Legacy queue record. */ }
+            if (key) {
+                const request = submitting.current.get(key);
+                if (request) request.accepted = true;
+                setComposerRows(rows => rows.filter(row => row.clientRequestId !== key));
+            }
+            if (String(queued.conversation_id) !== currentView.current) return;
             setQueuedMessages((current) => {
                 const withoutCurrent = current.filter((item) => item.id !== queued.id);
                 return [...withoutCurrent, queued].sort((left, right) => left.id - right.id);
@@ -908,11 +993,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return queuedMessages.map((queued) => {
                 const queueKind = queued.queue_kind === "interrupt" ? "interrupt" : "normal";
                 const createdTime = queued.created_time ? new Date(queued.created_time) : new Date();
-                let recoveryId: string | undefined;
-                if (queueKind === "interrupt") {
-                    try { recoveryId = JSON.parse(queued.request_json).recovered_question_id; } catch { /* Legacy queue record. */ }
-                }
+                let payload: { recovered_question_id?: string; client_request_id?: string } = {};
+                try { payload = JSON.parse(queued.request_json); } catch { /* Legacy queue record. */ }
+                const recoveryId = queueKind === "interrupt" ? payload.recovered_question_id : undefined;
                 return {
+                    clientRequestId: payload.client_request_id,
                     id: -queued.id,
                     conversation_id: queued.conversation_id,
                     message_type: "user",
@@ -942,10 +1027,28 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const persistedMessages = persistedSnapshot?.conversation.id === Number(conversationId)
             ? persistedSnapshot.messages
             : undefined;
-        const messagesWithQueued = useMemo(
-            () => [...(resultOnly ? persistedMessages ?? [] : messages), ...queuedDisplayMessages],
-            [messages, queuedDisplayMessages, resultOnly, persistedMessages]
-        );
+        const savedRows = resultOnly ? persistedMessages : messages;
+        const acceptedComposerKeys = useMemo(() => new Set((savedRows ?? []).map(composerKey).filter(Boolean)), [savedRows]);
+        const messagesWithQueued = useMemo(() => {
+            const rows = [...(savedRows ?? [])];
+            const keys = new Set(acceptedComposerKeys);
+            for (const queued of queuedDisplayMessages) {
+                if (queued.conversation_id !== Number(conversationId)) continue;
+                const key = composerKey(queued);
+                if (key && keys.has(key)) continue;
+                if (key) keys.add(key);
+                rows.push(queued);
+            }
+            for (const row of composerRows) {
+                if (row.conversation_id === Number(conversationId) && !keys.has(row.clientRequestId!)) rows.push(row);
+            }
+            return rows;
+        }, [savedRows, acceptedComposerKeys, queuedDisplayMessages, composerRows, conversationId]);
+        useEffect(() => {
+            if (composerRows.some(row => acceptedComposerKeys.has(row.clientRequestId))) {
+                setComposerRows(rows => rows.filter(row => !acceptedComposerKeys.has(row.clientRequestId)));
+            }
+        }, [acceptedComposerKeys, composerRows]);
 
         // 当 functionMap 变化时更新事件处理器
         useEffect(() => {
@@ -1212,6 +1315,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
+            beginComposerMessage, finishComposerMessage,
             conversation,
             selectedAssistant,
             inputText,
@@ -1265,6 +1369,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         } = useConversationOperations({
             quote: butlerQuote?.quote ?? null,
             clearQuote: clearButlerQuote,
+            viewConversationId: conversationId,
+            onQueuedAccepted: upsertQueuedMessage,
+            onComposerMessage: beginComposerMessage,
+            onComposerResult: finishComposerMessage,
             quietRuntimeErrors: resultOnly,
             conversation,
             selectedAssistant,
@@ -1403,7 +1511,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 注意：为避免 React StrictMode 下的双调用导致“取消”标记错误触发，使用 requestId 跳过过期请求
         useEffect(() => {
             const requestId = ++loadRequestIdRef.current;
-            const snapshotRevision = ++persistedSnapshotRevision.current;
+            const snapshotRevision = startSnapshot();
             // 仅依赖 conversationId，保持函数引用稳定
             if (!conversationId) {
                 // 无对话 ID时，清理状态并加载助手列表
@@ -1456,8 +1564,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
 
                     const setStateStartTime = performance.now();
-                    acceptPersistedSnapshot(res, snapshotRevision);
-                    setMessages(res.messages);
+                    const accepted = acceptPersistedSnapshot(res, snapshotRevision);
+                    if (accepted) setMessages(accepted.messages);
                     setConversation(res.conversation);
                     setRenderingConversationId(conversationId);
                     setIsLoadingShow(false); // 这里会触发 useLayoutEffect 中的聚焦
@@ -1490,19 +1598,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             refresh: async (isCurrent) => {
                 if (!conversationId) return;
                 const requestId = ++loadRequestIdRef.current;
-                const snapshotRevision = ++persistedSnapshotRevision.current;
+                const snapshotRevision = startSnapshot();
                 const result = await invoke<ConversationWithMessages>("get_conversation_with_messages", {
                     conversationId: +conversationId,
                 });
                 if (!isCurrent() || requestId !== loadRequestIdRef.current) return;
-                acceptPersistedSnapshot(result, snapshotRevision);
+                const accepted = acceptPersistedSnapshot(result, snapshotRevision);
+                if (!accepted) return;
                 setConversation(result.conversation);
                 const container = scrollContainerRef.current;
                 if (container) syncScrollPositionRef.current = { conversationId, top: container.scrollTop };
                 // The local run has finished: the persisted snapshot is authoritative,
                 // including remote edits that shorten content or delete messages.
                 clearStreamingMessages();
-                setMessages((previous) => reuseEquivalentMessages(previous, result.messages));
+                setMessages((previous) => reuseEquivalentMessages(previous, accepted.messages));
                 setIsLoadingShow(false);
             },
             onError: (error) => toast.error(`同步后刷新聊天失败（conversation=${conversationId}）: ${String(error)}`),
@@ -2410,7 +2519,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 butlerBubbleMotion={windowLabel === "butler_experiment"}
                                 historyLoaded={!isLoadingShow && String(conversation?.id) === conversationId}
                                 isMobile={isMobile}
-                                conversationId={conversationId}
+                                conversationId={conversationId || (composerRows.some(row => row.conversation_id === 0) ? "0" : "")}
                                 // MessageList props
                                 allDisplayMessages={transcript}
                                 streamingMessages={resultOnly ? EMPTY_STREAMS : streamingMessages}
@@ -2611,7 +2720,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         onSaveAndRegenerate={handleEditSaveAndRegenerate}
                     />
 
-                    {isLoadingShow || renderingConversationId === conversationId ? (
+                    {(isLoadingShow || renderingConversationId === conversationId) && !composerRows.some(row => row.conversation_id === Number(conversationId)) ? (
                         <div
                             className="bg-background/95 inset-0 absolute z-20 flex items-center justify-center gap-2 rounded-xl"
                             data-aipp-slot="chat-loading-overlay"

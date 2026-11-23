@@ -1,3 +1,4 @@
+import { composerKey } from "@/utils/composerMessage";
 import React, { useCallback, useMemo, useState } from "react";
 import ProactiveCard from "./butler/ProactiveCard";
 import { deliveryMetadata } from "./butler/proactiveApi";
@@ -614,7 +615,7 @@ const MessageItem = React.memo<MessageItemProps>(
         };
 
         const bubbleElement = (
-            <MessageContextMenu actions={actionProps}>
+            <MessageContextMenu actions={message.sendStatus ? null : actionProps}>
             <div
                 data-bubble-entry-id={message.id}
                 className={`group relative inline-block ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2" : "max-w-[65%] px-5 py-4"} rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}
@@ -681,7 +682,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     messageId={message.id}
                 />
 
-                <MessageActionButtons {...actionProps} />
+                {!message.sendStatus && <MessageActionButtons {...actionProps} />}
             </div>
             </MessageContextMenu>
         );
@@ -692,7 +693,13 @@ const MessageItem = React.memo<MessageItemProps>(
                 data-message-item
                 data-message-id={message.id}
                 data-message-type={message.message_type}
+                data-send-key={composerKey(message)}
             >
+                {message.sendStatus === "sending" && <span role="status" className="self-center text-xs text-muted-foreground">发送中…</span>}
+                {message.sendStatus === "failed" && <details className="max-w-[36%] self-center text-xs text-destructive">
+                    <summary>发送失败</summary>
+                    <p className="whitespace-pre-wrap break-words">{message.sendError}</p>
+                </details>}
                 {isUserMessage && queuedMessageMeta ? (
                     <QueuedMessageIndicator
                         meta={queuedMessageMeta}
@@ -709,6 +716,7 @@ const MessageItem = React.memo<MessageItemProps>(
 // 自定义比较函数，只在关键属性变化时才重新渲染
 const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.message.isSupersededError !== nextProps.message.isSupersededError) return false;
+    if (prevProps.message.sendStatus !== nextProps.message.sendStatus || prevProps.message.sendError !== nextProps.message.sendError) return false;
     // 基本消息属性比较
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;

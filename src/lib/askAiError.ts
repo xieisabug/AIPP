@@ -10,6 +10,7 @@ export const NO_MODEL_CONFIGURED_MESSAGE =
  */
 export interface AskAiResponse {
     conversation_id: number;
+    user_message_id?: number;
     request_prompt_result_with_context?: string;
     error_message?: string | null;
 }

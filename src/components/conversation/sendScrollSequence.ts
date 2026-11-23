@@ -1,3 +1,4 @@
+import { sendRowSelector } from "@/utils/composerMessage";
 import { BUTLER_BUBBLE_ENTRY_MS, playButlerSentBubble } from './butlerBubbleAnimation';
 import type { SendLayout } from './SendLayoutSnapshot';
 import { playSentBubbleAnimation, SENT_BUBBLE_ANIMATION_MS } from './sentBubbleAnimation';
@@ -11,7 +12,7 @@ export function startSendScrollSequence({ container, content, previousLayout, me
     container: HTMLDivElement;
     content?: HTMLDivElement | null;
     previousLayout?: SendLayout | null;
-    messageId: number;
+    messageId: number | string;
     butlerBubbleMotion?: boolean;
     onComplete: () => void;
     onUserRelease: () => void;
@@ -93,14 +94,14 @@ export function startSendScrollSequence({ container, content, previousLayout, me
     if (content) entryResize?.observe(content);
     entryResize?.observe(container);
     const bubbleReady = () => {
-        const bubble = container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${messageId}']`)?.lastElementChild;
+        const bubble = container.querySelector<HTMLElement>(sendRowSelector(messageId))?.lastElementChild;
         if (!bubble) return true;
         if (butlerBubbleMotion && Array.from(bubble.children).some(child => Number.parseFloat(getComputedStyle(child).opacity) < .99)) return false;
         const opacity = Number.parseFloat(getComputedStyle(bubble).opacity);
         return !Number.isFinite(opacity) || opacity >= .99;
     };
     const target = () => {
-        const row = container.querySelector<HTMLElement>(`[data-message-item][data-message-id='${messageId}']`);
+        const row = container.querySelector<HTMLElement>(sendRowSelector(messageId));
         if (!row) return null;
         return Math.max(0, Math.min(container.scrollHeight - container.clientHeight + (animateHeight ? finalHeight - content!.getBoundingClientRect().height : 0),
             container.scrollTop + row.getBoundingClientRect().top - container.getBoundingClientRect().top - 8 - displayedOffset));

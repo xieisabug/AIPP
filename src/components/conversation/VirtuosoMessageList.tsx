@@ -1,3 +1,4 @@
+import { rowIdentity } from "@/utils/composerMessage";
 import { useButlerReplyEntry } from "./useButlerReplyEntry";
 import { SendLayoutSnapshot, type SendLayout } from "./SendLayoutSnapshot";
 import { flushSync } from "react-dom";
@@ -397,15 +398,16 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const initialBottomPinConversationRef = useRef<string | null>(null);
     /** 打开后用户已用滚轮或滚动条上翻；效果重跑时不再钉底或跟滚。 */
     const userReleasedInitialScrollRef = useRef<string | null>(null);
-    const lastPinnedUserMessageIdRef = useRef<number | null>(null);
+    const lastComposerEntry = useRef<string | null>(null);
+    const lastPinnedUserMessageIdRef = useRef<number | string | null>(null);
     const committedUserMessagesRef = useRef<{
         conversationId: string;
         messages: UseMessageListElementsProps["allDisplayMessages"];
-        latestId: number | null;
+        latestId: number | string | null;
     } | null>(null);
     /** 当前这次发送：视觉滑动 + 用户是否已接手；effect 重跑时沿用 */
     const sendScrollStateRef = useRef<{
-        messageId: number;
+        messageId: number | string;
         releasedByUser: boolean;
         pinning: boolean;
         layout: SendLayout | null;
@@ -430,7 +432,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         () => sendScrollStateRef.current?.pinning ?? false,
         [],
     );
-    const latestUserMessageIdRef = useRef<number | null>(null);
+    const latestUserMessageIdRef = useRef<number | string | null>(null);
     const streamingActiveRef = useRef(false);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
     const [viewportHeight, setViewportHeight] = useState(0);
@@ -474,7 +476,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         // The last user turn, rather than the last row, identifies the send.
         const messages = messageListProps.allDisplayMessages;
         for (let index = messages.length - 1; index >= 0; index -= 1) {
-            if (messages[index].message_type === "user") return messages[index].id;
+            if (messages[index].message_type === "user") return rowIdentity(messages[index]);
         }
         return null;
     }, [messageListProps.allDisplayMessages]);
@@ -558,7 +560,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             previous?.conversationId === conversationId
             && previous.latestId !== latestUserMessageId
             && (latestUserMessageId === null || previous.messages.some(
-                (message) => message.message_type === "user" && message.id === latestUserMessageId,
+                (message) => message.message_type === "user" && rowIdentity(message) === latestUserMessageId,
             ))
         ) {
             stopSendScroll();
@@ -795,7 +797,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         }
 
         // 本会话首次带消息渲染 = 打开会话，不是发送：交给初始贴底流程，不播动画
-        if (renderedConversationRef.current !== conversationId) {
+        if (renderedConversationRef.current !== conversationId && !messageListProps.allDisplayMessages.some(row => row.sendStatus === "sending")) {
             lastPinnedUserMessageIdRef.current = latestUserMessageId;
             return;
         }
@@ -816,6 +818,13 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             layout = { ...layout, anchorId: previousLayout.anchorId, anchorTop: previousLayout.anchorTop };
         }
         stopSendScroll();
+        if (typeof latestUserMessageId === "string") {
+            if (lastComposerEntry.current === latestUserMessageId) {
+                lastPinnedUserMessageIdRef.current = latestUserMessageId;
+                return;
+            }
+            lastComposerEntry.current = latestUserMessageId;
+        }
         const pinningMessageId = latestUserMessageId;
         lastPinnedUserMessageIdRef.current = pinningMessageId;
         const sendState = {

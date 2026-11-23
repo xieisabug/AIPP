@@ -471,6 +471,60 @@ pub fn conversation_exists(app_handle: tauri::AppHandle, conversation_id: i64) -
         .map(|row| row.is_some()).map_err(|e| e.to_string())
 }
 
+fn build_message_details(messages: Vec<(Message, Option<MessageAttachment>)>, butler: bool) -> Vec<MessageDetail> {
+    let mut grouped = HashMap::new();
+    for (message, attachment) in messages {
+        let (_, attachments) = grouped.entry(message.id).or_insert_with(|| (message, Vec::new()));
+        attachments.extend(attachment);
+    }
+    grouped.into_values().map(|(row, files)| message_detail(row, files, butler)).collect()
+}
+
+pub(crate) fn message_detail(message: Message, attachment_list: Vec<MessageAttachment>, butler: bool) -> MessageDetail {
+    let large_message_preview = build_large_message_preview_metadata(
+        &message.message_type,
+        &message.content,
+    );
+    MessageDetail {
+        butler_final_text: if butler
+            && matches!(message.message_type.as_str(), "response" | "assistant") && message.finish_time.is_some() {
+            crate::db::butler_execution::agent_final_text(&message.content, message.metadata_json.as_deref())
+        } else { None },
+        id: message.id,
+        parent_id: message.parent_id,
+        conversation_id: message.conversation_id,
+        message_type: message.message_type,
+        content: message.content,
+        llm_model_id: message.llm_model_id,
+        created_time: message.created_time,
+        start_time: message.start_time,
+        finish_time: message.finish_time,
+        token_count: message.token_count,
+        input_token_count: message.input_token_count,
+        output_token_count: message.output_token_count,
+        generation_group_id: message.generation_group_id,
+        parent_group_id: message.parent_group_id,
+        tool_calls_json: message.tool_calls_json,
+        metadata_json: message.metadata_json,
+        first_token_time: message.first_token_time,
+        ttft_ms: message.ttft_ms,
+        attachment_list,
+        regenerate: Vec::new(),
+        large_message_preview,
+    }
+}
+
+#[tauri::command]
+pub async fn get_conversation_message(
+    app_handle: tauri::AppHandle, conversation_id: i64, message_id: i64,
+) -> Result<Option<MessageDetail>, AppError> {
+    let db = ConversationDatabase::new(&app_handle)?;
+    let butler = db.conversation_repo()?.read(conversation_id)?
+        .is_some_and(|c| c.conversation_kind.starts_with("butler"));
+    let rows = db.message_repo()?.query_conversation_messages(conversation_id, Some(message_id))?;
+    Ok(build_message_details(rows, butler).pop())
+}
+
 #[tauri::command]
 pub async fn get_conversation_with_messages(
     app_handle: tauri::AppHandle,
@@ -503,55 +557,8 @@ pub async fn get_conversation_with_messages(
     let msg_query_duration = msg_query_start.elapsed();
     println!("[PERF] 查询 messages 耗时: {:?}, 消息数量: {}", msg_query_duration, messages.len());
 
-    let mut message_details: Vec<MessageDetail> = Vec::new();
-    let mut attachment_map: HashMap<i64, Vec<MessageAttachment>> = HashMap::new();
-
-    for (message, attachment) in messages.clone() {
-        if let Some(attachment) = attachment {
-            attachment_map.entry(message.id).or_default().push(attachment);
-        }
-    }
-
-    // Convert messages to a HashMap to preserve it for the second pass
     let process_start = Instant::now();
-    let message_map: HashMap<i64, Message> =
-        messages.clone().into_iter().map(|(message, _)| (message.id, message)).collect();
-
-    // Second pass: Create MessageDetail with the collected attachments
-    for (message_id, message) in message_map {
-        let attachment_list = attachment_map.get(&message_id).cloned().unwrap_or_default();
-        let large_message_preview = build_large_message_preview_metadata(
-            &message.message_type,
-            &message.content,
-        );
-        message_details.push(MessageDetail {
-            butler_final_text: if conversation.conversation_kind.starts_with("butler")
-                && matches!(message.message_type.as_str(), "response" | "assistant") && message.finish_time.is_some() {
-                crate::db::butler_execution::agent_final_text(&message.content, message.metadata_json.as_deref())
-            } else { None },
-            id: message.id,
-            parent_id: message.parent_id,
-            conversation_id: message.conversation_id,
-            message_type: message.message_type,
-            content: message.content,
-            llm_model_id: message.llm_model_id,
-            created_time: message.created_time,
-            start_time: message.start_time,
-            finish_time: message.finish_time,
-            token_count: message.token_count,
-            input_token_count: message.input_token_count,
-            output_token_count: message.output_token_count,
-            generation_group_id: message.generation_group_id,
-            parent_group_id: message.parent_group_id,
-            tool_calls_json: message.tool_calls_json,
-            metadata_json: message.metadata_json,
-            first_token_time: message.first_token_time,
-            ttft_ms: message.ttft_ms,
-            attachment_list,
-            regenerate: Vec::new(),
-            large_message_preview,
-        });
-    }
+    let message_details = build_message_details(messages, conversation.conversation_kind.starts_with("butler"));
     let process_duration = process_start.elapsed();
     println!("[PERF] 构建 MessageDetail 耗时: {:?}", process_duration);
 

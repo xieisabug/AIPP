@@ -226,7 +226,7 @@ async fn dispatch(app: &AppHandle, turn: &group::Turn, member: &group::Member, r
         super::ai::types::AiRequest {
             conversation_id: member.conversation_id.to_string(), assistant_id: member.assistant_id, prompt: input,
             model: None, override_model_id: None, temperature: None, top_p: None, max_tokens: None, stream: Some(true),
-            attachment_list: None, quote: None, butler_intent: None, butler_goal_revision: None,
+            attachment_list: None, quote: None, butler_intent: None, client_request_id: None, butler_goal_revision: None,
         },
         None, None, None, Some(prefix), Some(format!("butler_group/{}", turn.id))).await
         .map_err(|e| format!("{e}"))?;

@@ -1,3 +1,5 @@
+import { newComposerMessage, type ComposerReceipt } from "@/utils/composerMessage";
+import { describeAskAiError } from "@/lib/askAiError";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useRef } from "react";
@@ -7,6 +9,8 @@ import { AssistantDetail } from "../data/Assistant";
 export interface UseAssistantRuntimeProps {
     conversation?: Conversation;
     selectedAssistant: number;
+    beginComposerMessage: (row: Message) => void;
+    finishComposerMessage: (key: string, receipt: ComposerReceipt) => boolean;
     inputText: string;
     fileInfoList?: FileInfo[];
     setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
@@ -23,7 +27,7 @@ export interface UseAssistantRuntimeReturn {
 
 export function useAssistantRuntime({
     conversation,
-    selectedAssistant,
+    selectedAssistant, beginComposerMessage, finishComposerMessage,
     inputText,
     fileInfoList: _fileInfoList,
     setMessages,
@@ -88,27 +92,18 @@ export function useAssistantRuntime({
                 suppressConversationSwitch,
             } = options;
 
-            let userMessage: any;
+            let clientRequestId: string | undefined;
             if (onCustomUserMessage) {
-                userMessage = onCustomUserMessage(question, assistantId, conversationId);
-            } else {
-                userMessage = {
-                    id: 0,
-                    conversation_id: conversationId ? +conversationId : -1,
-                    llm_model_id: -1,
-                    content: question,
-                    token_count: 0,
-                    message_type: "user",
-                    created_time: new Date(),
-                    attachment_list: [],
-                    regenerate: null,
-                };
-
-                setMessages((prevMessages) => [...prevMessages, userMessage]);
+                onCustomUserMessage(question, assistantId, conversationId);
+            } else if (!suppressConversationSwitch || Number(conversationId) === conversation?.id) {
+                const row = newComposerMessage(Number(conversationId) || 0, question);
+                clientRequestId = row.clientRequestId;
+                beginComposerMessage(row);
             }
 
-            return invoke<AiResponse>("ask_ai", {
+            return invoke<AiResponse & {user_message_id?: number}>("ask_ai", {
                 request: {
+                    client_request_id: clientRequestId,
                     prompt: question,
                     conversation_id: conversationId,
                     assistant_id: +assistantId,
@@ -120,6 +115,9 @@ export function useAssistantRuntime({
                 overrideMcpConfig: overrideMcpConfig,
             })
                 .then((res) => {
+                    if (clientRequestId) finishComposerMessage(clientRequestId, {
+                        conversationId: res.conversation_id, messageId: res.user_message_id,
+                    });
                     console.log("ask assistant response", res);
 
                     if (!suppressConversationSwitch && conversationId != res.conversation_id + "") {
@@ -136,6 +134,9 @@ export function useAssistantRuntime({
                     return res;
                 })
                 .catch((e) => {
+                    if (clientRequestId) finishComposerMessage(clientRequestId, {
+                        conversationId: Number(conversationId) || 0, error: describeAskAiError(e),
+                    });
                     console.error("ask assistant error", e);
                     setAiIsResponsing(false);
                     clearShiningMessages();

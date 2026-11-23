@@ -93,6 +93,7 @@ async fn dispatch(app: &AppHandle, key: &str) -> Result<()> {
         attachment_list: None,
         quote: None,
         butler_intent: None,
+        client_request_id: None,
         butler_goal_revision: None,
     };
     let result = ACCEPTANCE

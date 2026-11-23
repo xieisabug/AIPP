@@ -862,12 +862,23 @@ impl MessageRepository {
         &self,
         conversation_id: i64,
     ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
-        let mut stmt = self.conn.prepare("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.metadata_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count, ma.id as attachment_id
+        self.query_conversation_messages(conversation_id, None)
+    }
+
+    pub fn query_conversation_messages(
+        &self, conversation_id: i64, message_id: Option<i64>,
+    ) -> Result<Vec<(Message, Option<MessageAttachment>)>> {
+        let predicate = if message_id.is_some() {
+            "message.conversation_id = ?1 AND message.id = ?2"
+        } else { "message.conversation_id = ?1" };
+        let sql = format!("SELECT message.id, message.parent_id, message.conversation_id, message.message_type, message.content, message.llm_model_id, message.llm_model_name, message.created_time, message.start_time, message.finish_time, message.token_count, message.input_token_count, message.output_token_count, message.generation_group_id, message.parent_group_id, message.tool_calls_json, message.metadata_json, message.first_token_time, message.ttft_ms, ma.attachment_type, ma.attachment_url, ma.attachment_content, ma.use_vector as attachment_use_vector, ma.token_count as attachment_token_count, ma.id as attachment_id
                                           FROM message
                                           LEFT JOIN message_attachment ma ON message.id = ma.message_id
-                                          WHERE message.conversation_id = ?1
-                                          ORDER BY message.created_time ASC")?;
-        let rows = stmt.query_map(&[&conversation_id], |row| {
+                                          WHERE {predicate}
+                                          ORDER BY message.created_time ASC");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let parameters = std::iter::once(conversation_id).chain(message_id);
+        let rows = stmt.query_map(rusqlite::params_from_iter(parameters), |row| {
             let attachment_type_int: Option<i64> = row.get(19).ok();
             let attachment_type = attachment_type_int.map(AttachmentType::try_from).transpose()?;
             let message = Message {

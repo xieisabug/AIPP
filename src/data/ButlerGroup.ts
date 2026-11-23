@@ -9,6 +9,9 @@ export interface ButlerGroupMember {
 }
 
 export interface ButlerGroupMessage {
+    request_key?: string;
+    sendStatus?: "sending" | "failed";
+    sendError?: string;
     group_id: number;
     seq: number;
     sender_member: number | null;

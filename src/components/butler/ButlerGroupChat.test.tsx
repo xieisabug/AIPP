@@ -105,8 +105,8 @@ beforeEach(() => {
         return { ...current, messages: [...current.messages, ...posted] };
     });
     api.onButlerGroupChanged.mockResolvedValue(() => {});
-    api.postButlerGroupMessage.mockImplementation(async (_group: number, _key: string, body: string, replyTo: number | null) => {
-        const message = { group_id: 7, seq: 4 + posted.length, sender_member: null, sender_assistant: null, sender_name: "我",
+    api.postButlerGroupMessage.mockImplementation(async (_group: number, request_key: string, body: string, replyTo: number | null) => {
+        const message = { request_key, group_id: 7, seq: 4 + posted.length, sender_member: null, sender_assistant: null, sender_name: "我",
             kind: "message" as const, body, reply_to: replyTo, created_at: "2026-11-09 08:03:00", source_conversation_id: null, source_message_id: null };
         posted.push(message);
         return message;
@@ -137,6 +137,26 @@ describe("ButlerGroupChat", () => {
         await waitFor(() => expect(api.postButlerGroupMessage).toHaveBeenCalledWith(7, expect.any(String), "再精简一点", null));
         expect(await screen.findByText("再精简一点")).toBeInTheDocument();
         await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+    });
+
+    it("should confirm a pending group bubble in place and keep a later draft", async () => {
+        let accept!: () => void;
+        const persist = api.postButlerGroupMessage.getMockImplementation()!;
+        api.postButlerGroupMessage.mockImplementationOnce(async (...args) => {
+            await new Promise<void>(resolve => { accept = resolve; });
+            return { ...await persist(...args), request_key: args[1] };
+        });
+        renderChat();
+        const input = await screen.findByLabelText("群聊消息");
+        fireEvent.change(input, { target: { value: "确认这一条" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+        const row = screen.getByText("确认这一条").closest("[data-message-item]");
+        expect(row).toHaveTextContent("发送中");
+        fireEvent.change(input, { target: { value: "下一条" } });
+        await act(async () => accept());
+        await waitFor(() => expect(row).not.toHaveTextContent("发送中"));
+        expect(screen.getByText("确认这一条").closest("[data-message-item]")).toBe(row);
+        expect(input).toHaveValue("下一条");
     });
 
     it("should not send when Enter confirms an IME composition", async () => {

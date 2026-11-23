@@ -747,6 +747,7 @@ async fn process_incoming_text_message(
             attachment_list: None,
             quote: None,
             butler_intent: None,
+            client_request_id: None,
             butler_goal_revision: None,
         };
         ask_ai(

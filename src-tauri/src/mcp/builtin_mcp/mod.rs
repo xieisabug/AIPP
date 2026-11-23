@@ -2038,6 +2038,7 @@ pub async fn execute_aipp_builtin_tool(
                                             attachment_list: None,
                                             quote: None,
             butler_intent: None,
+            client_request_id: None,
             butler_goal_revision: None,
                                         };
                                         match ask_ai(

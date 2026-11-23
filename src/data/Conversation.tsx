@@ -22,6 +22,9 @@ export interface ConversationWithMessages {
 }
 
 export interface Message {
+    clientRequestId?: string;
+    sendStatus?: "sending" | "failed";
+    sendError?: string;
     /** Display-only communication row in the desktop Butler timeline. */
     butler_interaction?: import("react").ReactNode;
     butler_event_order?: number;
@@ -136,7 +139,7 @@ export interface ConversationEvent {
 export interface MessageAddEvent {
     message_id: number;
     message_type: string;
-    temp_message_id: number; // 用于取消操作的临时ID
+    message?: Message; // 已入库的完整用户消息，旧事件只携带 ID。
 }
 
 export interface MessageUpdateEvent {

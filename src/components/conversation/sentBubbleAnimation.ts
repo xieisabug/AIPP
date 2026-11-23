@@ -1,3 +1,4 @@
+import { sendRowSelector } from "@/utils/composerMessage";
 /** 新发送的 user 气泡入场动画时长；略短于视口滑动，让气泡先站稳 */
 export const SENT_BUBBLE_ANIMATION_MS = 140;
 const MAX_LOOKUP_FRAMES = 10;
@@ -17,7 +18,7 @@ function prefersReducedMotion(): boolean {
  */
 export function playSentBubbleAnimation(
     container: HTMLElement,
-    messageId: number,
+    messageId: number | string,
 ): () => void {
     if (prefersReducedMotion()) {
         return () => {};
@@ -34,7 +35,7 @@ export function playSentBubbleAnimation(
             return;
         }
         const row = container.querySelector<HTMLElement>(
-            `[data-message-item][data-message-id='${messageId}']`,
+            sendRowSelector(messageId),
         );
         // 行容器是 justify-end 的整行，真正的气泡是最后一个子元素（前面可能是排队指示器）
         const bubble = row?.lastElementChild as HTMLElement | null | undefined;

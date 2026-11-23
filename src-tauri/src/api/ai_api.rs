@@ -916,8 +916,6 @@ fn dispatch_queued_target(
     queued: QueuedConversationMessage,
     target: Option<native_queue::SteerTarget>,
 ) -> Result<bool, AppError> {
-    emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id);
-
     #[derive(serde::Deserialize)]
     struct QueuedInput {
         #[serde(flatten)]
@@ -928,10 +926,14 @@ fn dispatch_queued_target(
     let QueuedInput { request, recovered_question_id, override_model_config } = serde_json::from_str(&queued.request_json)
         .map_err(|error| AppError::UnknownError(format!("解析排队消息失败: {error}")))?;
 
+    // A keyed queue row becomes the saved user row in place; keep it visible until then.
+    let keyed = request.client_request_id.is_some();
+    if !keyed { emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id); }
     if let Some(revision)=request.butler_goal_revision {
         let db=ConversationDatabase::new(&app_handle)?;
         if crate::db::butler_goal::assert_current(&db.get_connection()?,queued.conversation_id,revision).is_err() {
             db.queued_message_repo()?.finish_dispatch(queued.id)?;
+            if keyed { emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id); }
             return Ok(false);
         }
     }
@@ -965,6 +967,7 @@ fn dispatch_queued_target(
 
         match response {
             Ok(_) => {
+                if keyed { emit_queued_message_remove(&app_handle, queued.conversation_id, queued.id); }
                 match db.queued_message_repo() {
                     Ok(repo) => {
                         if let Err(error) = repo.finish_dispatch(queued_id) {
@@ -1791,7 +1794,7 @@ pub async fn ask_ai(
         }
         if crate::api::butler_peer::defer_if_busy(&app_handle,id,relay_origin.as_deref().unwrap_or_default())
             .await.map_err(|e|AppError::UnknownError(e.to_string()))? {
-            return Ok(AiResponse {conversation_id:id,request_prompt_result_with_context:String::new(),error_message:None});
+            return Ok(AiResponse {user_message_id: None, conversation_id:id,request_prompt_result_with_context:String::new(),error_message:None});
         }
     }
     let admission = if let Some(id) = contact_id {
@@ -1806,10 +1809,14 @@ pub async fn ask_ai(
         }
         if peer_turn && crate::api::butler_peer::defer_if_busy(&app_handle,id,relay_origin.as_deref().unwrap_or_default())
             .await.map_err(|e|AppError::UnknownError(e.to_string()))? {
-            return Ok(AiResponse{ conversation_id:id, request_prompt_result_with_context:String::new(), error_message:None });
+            return Ok(AiResponse{ user_message_id: None, conversation_id:id, request_prompt_result_with_context:String::new(), error_message:None });
         }
         Some(guard)
     } else { None };
+    let mut user_metadata = work_context.metadata.clone();
+    if let Some(key) = processed_request.client_request_id {
+        user_metadata.get_or_insert_with(|| serde_json::json!({}))["client_request_id"] = serde_json::json!(key);
+    }
     let (
         conversation_id,
         _new_message_id,
@@ -1829,9 +1836,16 @@ pub async fn ask_ai(
         override_prompt.clone(),
         active_skill_attachments,
         relay_origin.as_deref(),
-        work_context.metadata.as_ref().map(|value| value.to_string()),
+        user_metadata.as_ref().map(|value| value.to_string()),
     )
     .await?;
+    if request.conversation_id.is_empty() {
+        if let Some(key) = request.client_request_id {
+            let _ = window.emit_to(window.label(), "composer_conversation_created", serde_json::json!({
+                "client_request_id": key, "conversation_id": conversation_id, "message_id": user_message_id,
+            }));
+        }
+    }
     if let Some(revision)=processed_request.butler_goal_revision {
         let conn=ConversationDatabase::new(&app_handle)?.get_connection()?;
         crate::db::butler_goal::assert_current(&conn,conversation_id,revision).map_err(|e|AppError::UnknownError(e.to_string()))?;
@@ -1880,7 +1894,7 @@ pub async fn ask_ai(
     }
 
     if steering {
-        return Ok(AiResponse { conversation_id, request_prompt_result_with_context, error_message: None });
+        return Ok(AiResponse { user_message_id: Some(user_message_id), conversation_id, request_prompt_result_with_context, error_message: None });
     }
 
     let execution_cancel_token = Some(message_token_manager.reset_cancel_token(conversation_id).await);
@@ -1908,7 +1922,10 @@ pub async fn ask_ai(
                 feature_configs: &_config_feature_map,
                 messages: &init_message_list,
             },
-        ).await;
+        ).await.map(|mut response| {
+            response.user_message_id = Some(user_message_id);
+            response
+        });
     }
 
     // 非 ACP 助手，继续原有流程
@@ -1933,6 +1950,7 @@ pub async fn ask_ai(
             )
             .await;
             return Ok(AiResponse {
+                user_message_id: Some(user_message_id),
                 conversation_id,
                 request_prompt_result_with_context: processed_request.prompt,
                 error_message: Some(error_text),
@@ -2334,7 +2352,7 @@ pub async fn ask_ai(
 
     info!("Ask AI end");
 
-    Ok(AiResponse { conversation_id, request_prompt_result_with_context, error_message: None })
+    Ok(AiResponse { user_message_id: Some(user_message_id), conversation_id, request_prompt_result_with_context, error_message: None })
 }
 
 #[instrument(skip(app_handle, feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
@@ -2459,6 +2477,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             "interrupt queued message dispatched before tool-result continuation"
         );
         return Ok(AiResponse {
+            user_message_id: None,
             conversation_id: conversation_id_i64,
             request_prompt_result_with_context: "Queued interrupt message dispatched".to_string(),
             error_message: None,
@@ -2821,6 +2840,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     info!("Tool result continuation end");
 
     Ok(AiResponse {
+        user_message_id: None,
         conversation_id: conversation_id_i64,
         request_prompt_result_with_context: format!("Tool result: {}", tool_result),
         error_message: None,
@@ -2868,6 +2888,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             "interrupt queued message dispatched before batch tool-result continuation"
         );
         return Ok(AiResponse {
+            user_message_id: None,
             conversation_id,
             request_prompt_result_with_context: "Queued interrupt message dispatched".to_string(),
             error_message: None,
@@ -3215,6 +3236,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     info!("Batch tool result continuation end");
 
     Ok(AiResponse {
+        user_message_id: None,
         conversation_id,
         request_prompt_result_with_context: "Batch tool results sent".to_string(),
         error_message: None,
@@ -3402,7 +3424,7 @@ pub async fn regenerate_ai(
         let request = AiRequest {
             conversation_id: conversation_id.to_string(), assistant_id, prompt,
             model: None, override_model_id: None, temperature: None, top_p: None, max_tokens: None,
-            stream: None, attachment_list: None, quote: None, butler_intent: None, butler_goal_revision: None,
+            stream: None, attachment_list: None, quote: None, butler_intent: None, client_request_id: None, butler_goal_revision: None,
         };
         return ask_ai(app_handle.clone(), app_handle.state(), app_handle.state(), feature_config_state,
             message_token_manager, activity_manager, window, request, None, None, None, None, None).await;
@@ -3850,7 +3872,7 @@ pub async fn regenerate_ai(
 
     info!("Regenerate AI dispatched (background task started)");
 
-    Ok(AiResponse { conversation_id, request_prompt_result_with_context: String::new(), error_message: None })
+    Ok(AiResponse { user_message_id: None, conversation_id, request_prompt_result_with_context: String::new(), error_message: None })
 }
 
 pub(crate) fn add_message(
@@ -4236,13 +4258,14 @@ async fn initialize_conversation(
         }
 
         // 发送消息添加事件
+        let files = message_attachment_list.iter().cloned().map(|mut row| {
+            row.message_id = user_message.id;
+            row
+        }).collect();
+        let detail = super::conversation_api::message_detail(user_message.clone(), files, false);
         let add_event = ConversationEvent {
             r#type: "message_add".to_string(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: user_message.id,
-                message_type: "user".to_string(),
-            })
-            .unwrap(),
+            data: serde_json::json!({"message_id": user_message.id, "message_type": "user", "message": detail}),
         };
 
         let _ =

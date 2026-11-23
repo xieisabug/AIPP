@@ -1,3 +1,4 @@
+import { rowIdentity } from "@/utils/composerMessage";
 import React, { useContext, useMemo, useRef } from "react";
 import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
 import { StreamRetryAttemptSections } from "./StreamRetryAttemptSections";
@@ -558,7 +559,7 @@ export function useMessageListElements({
                     estimatedHeight: estimatedHeightByMessageId.get(message.id) ?? 0,
                     messageElement: (
                         <MessageItem
-                            key={`message-${message.id}`}
+                            key={`message-${rowIdentity(message)}`}
                             message={message}
                             streamEvent={streamEvent}
                             onCodeRun={onCodeRun}
@@ -725,7 +726,7 @@ export function useMessageListElements({
                     messageId: message.id,
                     messageElement: (
                         <MessageItem
-                            key={`message-${message.id}`}
+                            key={`message-${rowIdentity(message)}`}
                             message={message}
                             streamEvent={streamEvent}
                             onCodeRun={onCodeRun}
@@ -879,11 +880,11 @@ export function useMessageListElements({
         let turnKey = "head";
 
         const pushMessageWithVersion = (entry: MessageElementEntry, lastTurn: boolean) => {
-            if (messageById.get(entry.messageId)?.message_type === "user") {
-                turnKey = `user-${entry.messageId}`;
-            }
+            const message = messageById.get(entry.messageId);
+            const identity = message ? rowIdentity(message) : entry.messageId;
+            if (message?.message_type === "user") turnKey = `user-${identity}`;
             const turn = { turnKey, ...(lastTurn ? { lastTurn: true } : {}) };
-            const sourceMessage = messageById.get(entry.messageId) ?? allDisplayMessages[0];
+            const sourceMessage = message ?? allDisplayMessages[0];
             const shouldKeepLive =
                 lastTurn
                 || sourceMessage?.message_type === "reasoning"
@@ -904,7 +905,7 @@ export function useMessageListElements({
                 });
             } else {
                 items.push({
-                    key: entry.rowKey ?? `message-${entry.messageId}`,
+                    key: entry.rowKey ?? `message-${identity}`,
                     messageId: entry.messageId,
                     messageIds: entry.messageIds ?? [entry.messageId],
                     estimatedHeight:

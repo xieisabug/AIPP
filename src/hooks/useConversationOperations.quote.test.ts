@@ -35,6 +35,45 @@ describe("useConversationOperations quote reply", () => {
         vi.mocked(invoke).mockClear();
     });
 
+    it("should publish the request before IPC completes and preserve newer input on rejection", async () => {
+        let reject!: (error: Error) => void;
+        mockInvokeHandler("ask_ai", () => new Promise((_resolve, fail) => { reject = fail; }));
+        let draft = "再改短一点";
+        const onComposerMessage = vi.fn();
+        const onComposerResult = vi.fn();
+        const { result, props } = setup(false, { onComposerMessage, onComposerResult,
+            setInputText: (value: string | ((text: string) => string)) => { draft = typeof value === "function" ? value(draft) : value; },
+        });
+        act(() => { result.current.handleSend(); });
+        const row = onComposerMessage.mock.calls[0][0];
+        expect(row).toMatchObject({content: "再改短一点", sendStatus: "sending", conversation_id: 20});
+        expect(invoke).toHaveBeenCalledWith("ask_ai", expect.objectContaining({
+            request: expect.objectContaining({client_request_id: row.clientRequestId}),
+        }));
+        expect(draft).toBe("");
+        draft = "后写的草稿";
+        await act(async () => reject(new Error("插件拒绝")));
+        expect(draft).toBe("后写的草稿");
+        expect(onComposerResult).toHaveBeenCalledWith(row.clientRequestId, { conversationId: 20, error: "插件拒绝" });
+        expect(props.clearQuote).not.toHaveBeenCalled();
+    });
+
+    it("should use the queue receipt when its notification has not arrived", async () => {
+        let confirm!: (value: unknown) => void;
+        mockInvokeHandler("enqueue_conversation_message", () => new Promise(resolve => { confirm = resolve; }));
+        const onComposerMessage = vi.fn();
+        const onQueuedAccepted = vi.fn();
+        const { result } = setup(true, { onComposerMessage, onQueuedAccepted, onComposerResult: () => false });
+        act(() => { result.current.handleSend(); });
+        const row = onComposerMessage.mock.calls[0][0];
+        const queued = { id: 7, conversation_id: 20, request_json: JSON.stringify({client_request_id: row.clientRequestId}) };
+        expect(invoke).toHaveBeenCalledWith("enqueue_conversation_message", expect.objectContaining({
+            request: expect.objectContaining({client_request_id: row.clientRequestId}), queueKind: "interrupt",
+        }));
+        await act(async () => confirm(queued));
+        expect(onQueuedAccepted).toHaveBeenCalledWith(queued);
+    });
+
     it("should send the continuation through the current conversation with its attachments", async () => {
         mockInvokeHandler("ask_ai", () => ({ conversation_id: 20 }));
         const { result } = setup(false, { inputText: " ", fileInfoList: [{ id: 12 }] });

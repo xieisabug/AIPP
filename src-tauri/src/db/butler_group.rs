@@ -239,6 +239,8 @@ pub struct Member {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Message {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_key: Option<String>,
     pub group_id: i64,
     pub seq: i64,
     pub sender_member: Option<i64>,
@@ -302,7 +304,7 @@ pub fn credential_request_anchor(conn: &Connection, conversation: i64, source_me
 
 const GROUP_COLUMNS: &str = "id,name,seq,created_at,updated_at";
 const MEMBER_COLUMNS: &str = "id,group_id,assistant_id,name,conversation_id,joined_after,delivered_through,active";
-const MESSAGE_COLUMNS: &str = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,created_at,source_conversation_id,source_message_id";
+const MESSAGE_COLUMNS: &str = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,created_at,source_conversation_id,source_message_id,request_key";
 const TURN_COLUMNS: &str = "id,group_id,member_id,trigger_seq,origin_seq,depth,round,rounds,state,input_through,input_message_id,reply_seq,error";
 
 fn group_row(r: &Row<'_>) -> rusqlite::Result<Group> {
@@ -318,7 +320,7 @@ fn message_row(r: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         group_id: r.get(0)?, seq: r.get(1)?, sender_member: r.get(2)?, sender_assistant: r.get(3)?,
         sender_name: r.get(4)?, kind: r.get(5)?, body: r.get(6)?, reply_to: r.get(7)?, created_at: r.get(8)?,
-        source_conversation_id: r.get(9)?, source_message_id: r.get(10)?,
+        source_conversation_id: r.get(9)?, source_message_id: r.get(10)?, request_key: r.get(11)?,
     })
 }
 fn turn_row(r: &Row<'_>) -> rusqlite::Result<Turn> {
@@ -411,7 +413,7 @@ fn public_messages_sql() -> String {
 
 fn public_message_row(r: &Row<'_>) -> rusqlite::Result<Message> {
     let mut row = message_row(r)?;
-    if let (Some(body), Some(meta)) = (r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?) {
+    if let (Some(body), Some(meta)) = (r.get::<_, Option<String>>(12)?, r.get::<_, Option<String>>(13)?) {
         if row.body == body.trim() {
             if let Some(text) = super::butler_execution::agent_final_text(&body, Some(&meta)) {
                 row.body = text.trim().to_owned();

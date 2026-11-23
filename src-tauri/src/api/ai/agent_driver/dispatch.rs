@@ -84,6 +84,7 @@ pub(super) async fn dispatch_prepared<E: TurnEffects>(
         return Err(AppError::UnknownError(detail));
     }
     Ok(AiResponse {
+        user_message_id: None,
         conversation_id,
         request_prompt_result_with_context: input.display_prompt,
         error_message: None,
@@ -107,7 +108,7 @@ pub(super) async fn reject_preparation<E: TurnEffects>(effects: &E, metadata: Ag
         data: serde_json::to_value(MessageAddEvent { message_id: message.id, message_type: "response".into() }).unwrap(),
     });
     effects.fail(conversation_id, message.id, metadata, &detail).await;
-    Ok(AiResponse { conversation_id, request_prompt_result_with_context: display_prompt, error_message: Some(detail) })
+    Ok(AiResponse { user_message_id: None, conversation_id, request_prompt_result_with_context: display_prompt, error_message: Some(detail) })
 }
 
 #[cfg(test)]

@@ -337,6 +337,7 @@ async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: Strin
             attachment_list: None,
             quote: None,
             butler_intent: None,
+            client_request_id: None,
             butler_goal_revision: None,
         },
         None,

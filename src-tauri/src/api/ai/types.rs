@@ -16,6 +16,9 @@ pub struct McpOverrideConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AiRequest {
+    /// Identifies the composer row across enqueue, persistence and event delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<uuid::Uuid>,
     pub conversation_id: String,
     pub assistant_id: i64,
     pub prompt: String,
@@ -44,6 +47,8 @@ pub struct WorkQuote {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AiResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<i64>,
     pub conversation_id: i64,
     pub request_prompt_result_with_context: String,
     /// 对话已创建（用户消息已落库），但请求在调用模型前就失败（如助手未配置模型）。

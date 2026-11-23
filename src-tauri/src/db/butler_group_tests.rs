@@ -86,6 +86,8 @@ fn test_group_post_user_is_idempotent_and_waits_for_routing() {
     let again = post_user(&mut conn, group.id, "k1", "大家好", None).unwrap();
     assert_eq!(first, again);
     assert_eq!(first.body, "大家好");
+    assert_eq!(first.request_key.as_deref(), Some("k1"));
+    assert_eq!(message(&conn, group.id, first.seq).unwrap().request_key, first.request_key);
     assert!(first.from_user());
     assert!(post_user(&mut conn, group.id, "k1", "别的内容", None).is_err());
     assert_eq!(pending_routes(&conn).unwrap().iter().map(|m| m.seq).collect::<Vec<_>>(), vec![first.seq]);

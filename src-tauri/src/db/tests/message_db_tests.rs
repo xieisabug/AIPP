@@ -87,6 +87,17 @@ fn test_list_messages_by_conversation_id() {
     assert!(contents.contains(&"Message 3".to_string()));
 }
 
+#[test]
+fn test_incremental_message_read_is_scoped_to_the_conversation() {
+    let (_, _, repo, conversation) = create_shared_test_db();
+    let first = repo.create(&create_test_message(conversation.id, "user", "first", None, None)).unwrap();
+    repo.create(&create_test_message(conversation.id, "user", "second", None, None)).unwrap();
+    let rows = repo.query_conversation_messages(conversation.id, Some(first.id)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.id, first.id);
+    assert!(repo.query_conversation_messages(conversation.id + 1, Some(first.id)).unwrap().is_empty());
+}
+
 /// 测试支持的消息类型
 ///
 /// 验证内容：

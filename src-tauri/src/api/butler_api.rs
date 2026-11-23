@@ -1781,6 +1781,7 @@ async fn enqueue_butler_main_followup(
             attachment_list: None,
             quote: None,
             butler_intent: None,
+            client_request_id: None,
             butler_goal_revision: None,
         };
 
@@ -3171,6 +3172,7 @@ async fn enqueue_butler_task_attention_followup(
         attachment_list: None,
         quote: None,
         butler_intent: None,
+        client_request_id: None,
         butler_goal_revision: None,
     };
 
@@ -3755,6 +3757,7 @@ async fn spawn_butler_task_inner(
         attachment_list: None,
         quote: None,
         butler_intent: None,
+        client_request_id: None,
         butler_goal_revision: None,
     };
 

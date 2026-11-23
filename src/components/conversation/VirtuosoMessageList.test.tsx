@@ -1161,6 +1161,25 @@ describe("VirtuosoMessageList send ownership", () => {
         HTMLElement.prototype.animate = original;
     });
 
+    it("should play one entry through sending, queue confirmation and persistence", () => {
+        const slide = vi.spyOn(sendSlide, "startSendScrollSequence");
+        const fixture = setup();
+        const key = "1092c4ef-6e05-45e7-a2ff-c508298e4a86";
+        const pending = makeMessage({ id: -400, message_type: "user", content: "同一条",
+            clientRequestId: key, sendStatus: "sending" });
+        fixture.update([pending]);
+        const original = screen.getByText("同一条").closest("[data-message-item]");
+        fixture.update([makeMessage({ id: -7, message_type: "user", content: "同一条", clientRequestId: key,
+            metadata_json: JSON.stringify({queue_status: "queued", queue_id: 7}) })]);
+        expect(screen.getByText("同一条").closest("[data-message-item]")).toBe(original);
+        fixture.update([makeMessage({ id: 55, message_type: "user", content: "同一条",
+            metadata_json: JSON.stringify({client_request_id: key}) })]);
+        expect(slide).toHaveBeenCalledTimes(1);
+        expect(slide.mock.calls[0][0].messageId).toBe(key);
+        expect(screen.getByText("同一条").closest("[data-message-item]")).toBe(original);
+        fixture.unmount();
+    });
+
     it("should animate each new user once and cancel the previous send on conversation change", () => {
         const bubble = vi.spyOn(sentBubble, "playSentBubbleAnimation");
         const cancel = vi.fn();
