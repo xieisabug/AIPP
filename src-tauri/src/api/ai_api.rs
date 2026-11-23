@@ -4008,6 +4008,13 @@ async fn initialize_conversation(
     // 返回值：(conversation_id, add_message_id, user_message_id, request_prompt_with_context, init_message_list, message_ids, db_token_counts)
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
 
+    let attachment_ids = request.attachment_list.as_deref().unwrap_or_default();
+    let mut message_attachment_list = db.attachment_repo()?.list_by_id(attachment_ids)?;
+    if let Some(missing) = attachment_ids.iter().find(|id| !message_attachment_list.iter().any(|a| a.id == **id)) {
+        return Err(AppError::ProviderError(format!("准备消息附件失败 [attachment_id={missing}]：附件记录不存在")));
+    }
+    message_attachment_list.extend(extra_user_attachments);
+
     let system_prompt = override_prompt.unwrap_or(assistant_prompt_result);
 
     let (
@@ -4019,11 +4026,6 @@ async fn initialize_conversation(
         message_ids,
         db_token_counts,
     ) = if request.conversation_id.is_empty() {
-        let mut message_attachment_list = db
-            .attachment_repo()
-            .unwrap()
-            .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
-        message_attachment_list.extend(extra_user_attachments.clone());
         // 新对话逻辑
         let text_attachments: Vec<String> = message_attachment_list
             .iter()
@@ -4134,11 +4136,6 @@ async fn initialize_conversation(
         }
 
         // 获取到消息的附件列表
-        let mut message_attachment_list = db
-            .attachment_repo()
-            .unwrap()
-            .list_by_id(&request.attachment_list.clone().unwrap_or(vec![]))?;
-        message_attachment_list.extend(extra_user_attachments.clone());
         // 过滤出文本附件
         let text_attachments: Vec<String> = message_attachment_list
             .iter()
@@ -4177,7 +4174,10 @@ async fn initialize_conversation(
                     .map_err(|e| AppError::ProviderError(e.to_string()))?;
                 Ok((target.session.handle.clone(), target.turn.clone()))
             })?;
-            crate::api::ai::agent_driver::validate_text_attachments(handle.metadata(), conversation_id, &message_attachment_list)?;
+            crate::api::ai::agent_driver::validate_prompt_attachments(
+                handle.metadata(), crate::api::ai::agent_driver::capabilities::AttachmentInput::PromptText,
+                conversation_id, &message_attachment_list,
+            )?;
             handle.steer(turn, runtime_user_prompt_with_context.clone()).await?;
         }
         // 添加用户消息

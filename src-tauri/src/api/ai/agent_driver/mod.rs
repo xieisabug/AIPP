@@ -2,7 +2,7 @@
 //! remain authoritative. Do not fall back between providers on an error.
 pub(crate) mod session;
 mod turn;
-pub(crate) use turn::{send_turn, validate_text_attachments, AgentTurnRequest};
+pub(crate) use turn::{send_turn, validate_prompt_attachments, AgentTurnRequest};
 pub(crate) mod failure;
 mod dispatch;
 

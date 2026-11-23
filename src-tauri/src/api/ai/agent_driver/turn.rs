@@ -1,5 +1,6 @@
 //! The application turn path is selected by driver registration, never by a
 //! central transport switch. Conversations and native session stores stay intact.
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::dispatch::{dispatch_prepared, response_message, TurnEffects, TurnInput};
 use super::lifecycle::{bind_session, AgentSessionBinding};
 use super::registry::{registry, AgentDriverMetadata, AgentDriverRegistry, AgentInstanceConfig, PreparedAgentSession};
@@ -9,7 +10,7 @@ use crate::api::ai::events::ConversationEvent;
 use crate::api::ai::types::AiResponse;
 use crate::api::ai_api::parse_agent_model_override;
 use crate::api::assistant_api::{AssistantDetail, resolve_acp_provider_id};
-use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment, Repository};
+use crate::db::conversation_db::{AttachmentType, ConversationDatabase, Message, MessageAttachment, Repository};
 use crate::db::llm_db::{LLMDatabase, LLMProviderConfig, ModelRequestError};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
@@ -64,17 +65,25 @@ fn read_turn_provider(
 /// runtime user message. Text-only transports must receive that exact prompt;
 /// structured transports receive raw text plus attachments once, not twice.
 pub(super) fn prompt_for_driver(metadata: AgentDriverMetadata, request: &AgentTurnRequest<'_>) -> Result<String, AppError> {
-    if metadata.operations.structured_attachments { return Ok(request.prompt.clone()); }
+    if metadata.operations.attachment_input == AttachmentInput::Structured { return Ok(request.prompt.clone()); }
     let Some((_, contextual_prompt, attachments)) = request.messages.iter().rev().find(|(kind, _, _)| kind == "user") else {
         return Ok(request.prompt.clone());
     };
-    validate_text_attachments(metadata, request.conversation_id, attachments)?;
+    validate_prompt_attachments(metadata, metadata.operations.attachment_input, request.conversation_id, attachments)?;
     Ok(contextual_prompt.clone())
 }
 
-pub(crate) fn validate_text_attachments(metadata: AgentDriverMetadata, conversation_id: i64, attachments: &[MessageAttachment]) -> Result<(), AppError> {
-    if let Some(unsupported) = attachments.iter().find(|attachment| !matches!(attachment.attachment_type, crate::db::conversation_db::AttachmentType::Text | crate::db::conversation_db::AttachmentType::Skill)) {
-        return Err(AppError::ProviderError(format!("{} prompt preparation failed [conversation_id={}, attachment_id={}]: this driver accepts text context only; the {:?} attachment cannot be sent without losing user input", metadata.id, conversation_id, unsupported.id, unsupported.attachment_type)));
+pub(crate) fn validate_prompt_attachments(metadata: AgentDriverMetadata, input: AttachmentInput, conversation_id: i64, attachments: &[MessageAttachment]) -> Result<(), AppError> {
+    for attachment in attachments {
+        let accepted = match attachment.attachment_type {
+            AttachmentType::Text | AttachmentType::Skill => true,
+            AttachmentType::Image => input != AttachmentInput::PromptText,
+            _ => input == AttachmentInput::Structured,
+        };
+        if !accepted {
+            return Err(AppError::ProviderError(format!("{} prompt preparation failed [conversation_id={}, attachment_id={}]: the {:?} attachment cannot be sent without losing user input (input mode: {:?})",
+                metadata.id, conversation_id, attachment.id, attachment.attachment_type, input)));
+        }
     }
     Ok(())
 }
@@ -87,7 +96,7 @@ struct RegisteredPreparedSession {
 pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Window, mut request: AgentTurnRequest<'_>) -> Result<AiResponse, AppError> {
     let mut metadata = AgentDriverMetadata {
         id: "unresolved", display_name: "Agent", message_model_name: "agent",
-        operations: super::session::AgentSessionCapabilities { structured_attachments: false, cancel_prompt: false, set_config_option: false },
+        operations: super::session::AgentSessionCapabilities { attachment_input: AttachmentInput::PromptText, cancel_prompt: false, set_config_option: false },
     };
     let mut provider_id = None;
     let mut preparation_stage = super::failure::AgentFailureStage::Configuration;

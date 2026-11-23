@@ -117,7 +117,7 @@ pub trait AgentDriver: Send + Sync {
     fn capabilities(&self) -> AgentCapabilities {
         let metadata = self.metadata();
         AgentCapabilities::baseline(metadata.id, AgentCapabilityDeclaration::unknown(
-            metadata.operations.cancel_prompt, metadata.operations.set_config_option, metadata.operations.structured_attachments,
+            metadata.operations.cancel_prompt, metadata.operations.set_config_option, metadata.operations.attachment_input,
         ))
     }
     fn session_capabilities(&self, snapshot: &serde_json::Value) -> Result<AgentCapabilities, AppError> {

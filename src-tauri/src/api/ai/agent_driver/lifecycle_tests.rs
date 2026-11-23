@@ -1,3 +1,4 @@
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 use super::super::registry::AgentDriverMetadata;
 use super::super::session::{AgentPromptContext, AgentSessionCapabilities, AgentSessionControl, AgentSessionHandle};
@@ -8,7 +9,7 @@ struct Control(&'static str);
 #[async_trait::async_trait]
 impl AgentSessionControl for Control {
     fn metadata(&self) -> AgentDriverMetadata {
-        AgentDriverMetadata { id: self.0, display_name: self.0, message_model_name: self.0, operations: AgentSessionCapabilities { structured_attachments: false, cancel_prompt: true, set_config_option: true } }
+        AgentDriverMetadata { id: self.0, display_name: self.0, message_model_name: self.0, operations: AgentSessionCapabilities { attachment_input: AttachmentInput::PromptText, cancel_prompt: true, set_config_option: true } }
     }
     fn send_prompt(&self, _: i64, _: String, _: Vec<MessageAttachment>, _: &dyn AgentPromptContext) -> Result<(), AppError> { Ok(()) }
     async fn cancel_current_prompt(&self) -> Result<(), AppError> { Ok(()) }

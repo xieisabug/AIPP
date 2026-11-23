@@ -1471,7 +1471,7 @@ impl MessageAttachmentRepository {
     }
 
     #[instrument(level = "debug", skip(self, id_list), fields(id_count = id_list.len()))]
-    pub fn list_by_id(&self, id_list: &Vec<i64>) -> Result<Vec<MessageAttachment>> {
+    pub fn list_by_id(&self, id_list: &[i64]) -> Result<Vec<MessageAttachment>> {
         let id_list_str: Vec<String> = id_list.iter().map(|id| id.to_string()).collect();
         let id_list_str = id_list_str.join(",");
         let query = format!("SELECT id, message_id, attachment_type, attachment_url, attachment_content, attachment_hash, use_vector, token_count FROM message_attachment WHERE id IN ({})", id_list_str);
@@ -1490,7 +1490,12 @@ impl MessageAttachmentRepository {
                 token_count: row.get(7)?,
             })
         })?;
-        rows.collect()
+        let mut attachments = rows.collect::<Result<Vec<_>>>()?;
+        // SQLite IN returns a set. Keep the sender's order when referring to multiple images.
+        let positions: std::collections::HashMap<_, _> = id_list.iter().enumerate().rev()
+            .map(|(index, id)| (*id, index)).collect();
+        attachments.sort_by_key(|attachment| positions[&attachment.id]);
+        Ok(attachments)
     }
 
     pub fn read_by_attachment_hash(

@@ -83,3 +83,22 @@ fn test_turn_text_drivers_reject_non_text_attachments_instead_of_dropping_them()
     let error = prompt_for_driver(AgentSessionKind::Codex.into(), &request).err().unwrap().to_string();
     assert!(error.contains("attachment_id=12")); assert!(error.contains("without losing user input"));
 }
+
+#[test]
+fn test_claude_images_keep_text_context_and_reject_other_files() {
+    let assistant = assistant();
+    let features = HashMap::new();
+    for (kind, accepted) in [(AttachmentType::Image, true), (AttachmentType::PDF, false)] {
+        let messages = vec![("user".into(), "question + notes + turn context".into(), vec![attachment(AttachmentType::Text), attachment(kind)])];
+        let request = AgentTurnRequest { source_message_id: None, native_butler_role: None, assistant: &assistant, conversation_id: 42,
+            prompt: "question".into(), display_prompt: "question".into(), override_model_id: None, overrides: &None,
+            feature_configs: &features, messages: &messages };
+        let result = prompt_for_driver(AgentSessionKind::Claude.into(), &request);
+        if accepted {
+            assert_eq!(result.unwrap(), messages[0].1);
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("attachment_id=12") && error.contains("PDF"));
+        }
+    }
+}

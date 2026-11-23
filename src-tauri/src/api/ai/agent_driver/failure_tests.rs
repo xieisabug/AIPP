@@ -1,3 +1,4 @@
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 use crate::api::ai::agent_driver::dispatch::response_message;
 use crate::api::ai::agent_driver::session::AgentSessionKind;
@@ -179,7 +180,7 @@ fn test_agent_failure_registered_extension_retains_custom_driver_and_model() {
     let metadata = super::super::registry::AgentDriverMetadata {
         id: "test_extension", display_name: "Custom Agent", message_model_name: "custom-model",
         operations: super::super::session::AgentSessionCapabilities {
-            structured_attachments: true, cancel_prompt: true, set_config_option: true,
+            attachment_input: AttachmentInput::Structured, cancel_prompt: true, set_config_option: true,
         },
     };
     let repo = MessageRepository::new(database_fixture::create_test_db());

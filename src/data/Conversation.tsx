@@ -334,7 +334,7 @@ export interface AgentCapabilityDeclaration {
     cancel_prompt: boolean;
     set_config_option: boolean;
     respond_permission: boolean | null;
-    attachment_input: "structured" | "prompt_text";
+    attachment_input: "structured" | "prompt_text" | "prompt_text_with_images";
     image_input: boolean | null;
     audio_input: boolean | null;
     embedded_context_input: boolean | null;
@@ -355,7 +355,7 @@ export interface AgentCapabilities {
         respond_permission: AgentCapability;
     };
     attachments: {
-        input: "structured" | "prompt_text";
+        input: "structured" | "prompt_text" | "prompt_text_with_images";
         structured: AgentCapability;
         image: AgentCapability;
         audio: AgentCapability;

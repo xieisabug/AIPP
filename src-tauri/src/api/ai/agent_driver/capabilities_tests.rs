@@ -124,15 +124,20 @@ fn test_capabilities_same_driver_instances_keep_independent_live_catalogs() {
 }
 
 #[test]
-fn test_capabilities_native_text_adapters_do_not_claim_structured_inputs() {
+fn test_capabilities_native_prompt_and_image_input() {
     for (driver, declaration) in [("codex_app_server", AgentCapabilityDeclaration::codex()), ("claude_sdk", AgentCapabilityDeclaration::claude())] {
-        let capabilities = AgentCapabilities::baseline(driver, declaration).with_session(&json!({
+        let baseline = AgentCapabilities::baseline(driver, declaration);
+        let supports_images = declaration.image_input == Some(true);
+        assert_eq!(supports_images, driver == "claude_sdk");
+        assert_eq!(baseline.attachments.image.support, if supports_images { CapabilitySupport::Unknown } else { CapabilitySupport::Unsupported });
+        let capabilities = baseline.with_session(&json!({
             "session_id": "s", "prompt_capabilities": {"image": true, "audio": true, "embedded_context": true},
             "load_session_supported": false, "session_resume_supported": true,
         })).unwrap();
-        assert_eq!(capabilities.attachments.input, AttachmentInput::PromptText);
-        assert_eq!(capabilities.attachments.structured.support, CapabilitySupport::Unsupported);
-        assert_eq!(capabilities.attachments.image.support, CapabilitySupport::Unsupported);
+        assert_eq!(capabilities.attachments.input, if supports_images { AttachmentInput::PromptTextWithImages } else { AttachmentInput::PromptText });
+        let support = if supports_images { CapabilitySupport::Supported } else { CapabilitySupport::Unsupported };
+        assert_eq!(capabilities.attachments.structured.support, support);
+        assert_eq!(capabilities.attachments.image.support, support);
         assert_eq!(capabilities.attachments.audio.support, CapabilitySupport::Unsupported);
         assert_eq!(capabilities.sessions.resume.support, CapabilitySupport::Supported);
         assert_eq!(capabilities.operations.respond_permission.support, CapabilitySupport::Supported);
@@ -142,7 +147,7 @@ fn test_capabilities_native_text_adapters_do_not_claim_structured_inputs() {
 #[test]
 fn test_capabilities_custom_driver_needs_no_builtin_kind_branch() {
     let custom = AgentCapabilities::baseline("future-driver", AgentCapabilityDeclaration {
-        respond_permission: Some(false), ..AgentCapabilityDeclaration::unknown(false, false, false)
+        respond_permission: Some(false), ..AgentCapabilityDeclaration::unknown(false, false, AttachmentInput::PromptText)
     });
     for operation in [AgentOperation::CancelPrompt, AgentOperation::SetConfigOption, AgentOperation::RespondPermission] {
         let error = custom.require_operation(operation).unwrap_err().to_string();
@@ -156,7 +161,7 @@ fn test_capabilities_custom_driver_needs_no_builtin_kind_branch() {
 
 #[test]
 fn test_capabilities_unknown_permission_is_not_claimed_as_supported() {
-    let custom = AgentCapabilities::baseline("custom", AgentCapabilityDeclaration::unknown(true, true, true));
+    let custom = AgentCapabilities::baseline("custom", AgentCapabilityDeclaration::unknown(true, true, AttachmentInput::Structured));
     assert_eq!(custom.operations.respond_permission.support, CapabilitySupport::Unknown);
     let live = custom.with_session(&json!({"session_id": "s", "prompt_capabilities": {"image": true}})).unwrap();
     assert_eq!(live.attachments.image.support, CapabilitySupport::Unknown);
@@ -224,7 +229,7 @@ fn test_capabilities_snapshot_events_preserve_clear_and_live_legacy_payloads() {
 #[test]
 fn test_capabilities_custom_discovery_attachment_does_not_reproject_overrides() {
     let mut discovered = AgentCapabilities::baseline(
-        "custom", AgentCapabilityDeclaration::unknown(true, true, false),
+        "custom", AgentCapabilityDeclaration::unknown(true, true, AttachmentInput::PromptText),
     );
     discovered.operations.cancel_prompt = Capability::known(false, CapabilitySource::Session);
     let wire = discovered.attach_to_snapshot(json!({"session_id": "custom-session"})).unwrap();

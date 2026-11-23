@@ -1,3 +1,4 @@
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 use super::super::capabilities::CapabilitySupport;
 use super::super::dispatch::{dispatch_prepared, response_message, TurnEffects, TurnInput};
@@ -16,7 +17,7 @@ type Actions = Arc<Mutex<Vec<String>>>;
 struct FourthDriver { actions: Actions, operations: AgentSessionCapabilities, send_prompt_support: CapabilitySupport }
 impl FourthDriver {
     fn new(actions: Actions) -> Self {
-        Self { actions, operations: AgentSessionCapabilities { structured_attachments: true, cancel_prompt: true, set_config_option: true }, send_prompt_support: CapabilitySupport::Supported }
+        Self { actions, operations: AgentSessionCapabilities { attachment_input: AttachmentInput::Structured, cancel_prompt: true, set_config_option: true }, send_prompt_support: CapabilitySupport::Supported }
     }
 }
 fn metadata(operations: AgentSessionCapabilities) -> AgentDriverMetadata {
@@ -28,7 +29,7 @@ impl AgentDriver for FourthDriver {
     fn metadata(&self) -> AgentDriverMetadata { metadata(self.operations) }
     fn capabilities(&self) -> AgentCapabilities {
         let mut capabilities = AgentCapabilities::baseline(self.metadata().id, AgentCapabilityDeclaration::unknown(
-            self.operations.cancel_prompt, self.operations.set_config_option, self.operations.structured_attachments,
+            self.operations.cancel_prompt, self.operations.set_config_option, self.operations.attachment_input,
         ));
         capabilities.operations.send_prompt.support = self.send_prompt_support;
         capabilities
@@ -182,7 +183,7 @@ async fn test_registry_fourth_driver_runs_production_dispatch_and_controls() {
 #[tokio::test]
 async fn test_registry_unsupported_controls_never_call_registered_actor() {
     let actions = Arc::new(Mutex::new(Vec::new()));
-    let metadata = metadata(AgentSessionCapabilities { structured_attachments: false, cancel_prompt: false, set_config_option: false });
+    let metadata = metadata(AgentSessionCapabilities { attachment_input: AttachmentInput::PromptText, cancel_prompt: false, set_config_option: false });
     let handle = AgentSessionHandle::new(FourthControl { actions: actions.clone(), metadata }, "run".into());
     assert!(handle.cancel_current_prompt().await.err().unwrap().to_string().contains("test_extension"));
     assert!(handle.set_config_option("mode".into(), "plan".into()).await.is_err());

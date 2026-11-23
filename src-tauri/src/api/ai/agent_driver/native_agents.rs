@@ -1,5 +1,6 @@
 //! Native Pi RPC, Cursor SDK, OpenCode HTTP/SSE and Kiro/Antigravity ACP adapters. The Node transport
 //! is private to these drivers; all application routing uses the shared facade.
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::registry::{AgentDriver, AgentDriverMetadata, AgentInstanceConfig, AgentSessionLookup, AgentSessionHost, PreparedAgentSession, AgentConfigField, AgentConfigValueType};
 use super::session::{AgentSessionCapabilities, AgentSessionControl, AgentSessionHandle, AgentPromptContext};
 use super::events::{AgentEventIdentity, WindowEventSink, emit_to_window};
@@ -35,7 +36,7 @@ impl NativeDriver {
         AgentCapabilityDeclaration { respond_permission: Some(self.0 != "cursor"),
             image_input: Some(false), audio_input: Some(false), embedded_context_input: Some(false),
             resume_session: (self.0 != "kiro").then_some(true), load_session: (self.0 != "kiro").then_some(false),
-            ..AgentCapabilityDeclaration::unknown(true, true, false) }
+            ..AgentCapabilityDeclaration::unknown(true, true, AttachmentInput::PromptText) }
     }
 }
 
@@ -44,7 +45,7 @@ impl AgentDriver for NativeDriver {
     fn metadata(&self) -> AgentDriverMetadata {
         AgentDriverMetadata { id: self.0, display_name: match self.0 { "pi" => "Pi", "cursor" => "Cursor", "kiro" => "Kiro", "antigravity" => "Antigravity", _ => "OpenCode" },
             message_model_name: self.0,
-            operations: AgentSessionCapabilities { structured_attachments: false, cancel_prompt: true, set_config_option: true } }
+            operations: AgentSessionCapabilities { attachment_input: AttachmentInput::PromptText, cancel_prompt: true, set_config_option: true } }
     }
     fn matches_provider(&self, api_type: &str, _: &[LLMProviderConfig]) -> bool { api_type == self.0 }
     fn config_schema(&self) -> Vec<AgentConfigField> {

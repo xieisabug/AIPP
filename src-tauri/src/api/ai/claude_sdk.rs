@@ -20,7 +20,7 @@ use crate::mcp::builtin_mcp::interaction::{
     request_ask_user_question_scoped, AskUserQuestionItem, AskUserQuestionMetadata,
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
 };
-use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::db::conversation_db::{AttachmentType, ConversationDatabase, MessageAttachment, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
@@ -309,7 +309,7 @@ pub struct ClaudeConversationSessionState {
 }
 
 enum SessionCommand {
-    Prompt { message_id: i64, prompt: String, window: tauri::Window, cancel_generation: u64 },
+    Prompt { message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, window: tauri::Window, cancel_generation: u64 },
     Cancel { response: oneshot::Sender<Result<(), String>> },
     SetConfig { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
 }
@@ -420,11 +420,12 @@ impl ClaudeSessionHandle {
         &self,
         message_id: i64,
         prompt: String,
+        attachments: Vec<MessageAttachment>,
         window: tauri::Window,
     ) -> Result<(), AppError> {
         self.sender
             .send(SessionCommand::Prompt {
-                message_id, prompt, window, cancel_generation: *self.cancel_signal.borrow(),
+                message_id, prompt, attachments, window, cancel_generation: *self.cancel_signal.borrow(),
             })
             .map_err(|_| AppError::UnknownError("Claude Code session closed".into()))
     }
@@ -1245,6 +1246,52 @@ async fn spawn_claude_process_with_diagnostics(
     Ok((child, stdin, BufReader::new(stdout).lines()))
 }
 
+fn claude_attachment_image(attachment: &MessageAttachment) -> anyhow::Result<crate::utils::prompt_image::PromptImage> {
+    use crate::utils::prompt_image::{prepare, prepare_data_url};
+    use anyhow::{anyhow, Context};
+
+    if attachment.attachment_type != AttachmentType::Image {
+        return Err(anyhow!("不支持的附件类型 {:?}", attachment.attachment_type));
+    }
+    let url = attachment.attachment_url.as_deref().unwrap_or_default();
+    if let Some(data) = attachment.attachment_content.as_deref().filter(|s| s.starts_with("data:")) {
+        return prepare_data_url(data);
+    }
+    if url.starts_with("data:") {
+        return prepare_data_url(url);
+    }
+    let path = if url.starts_with("file://") {
+        tauri::Url::parse(url)?.to_file_path().map_err(|_| anyhow!("无效的本机文件 URI"))?
+    } else {
+        PathBuf::from(url)
+    };
+    if !path.is_absolute() {
+        return Err(anyhow!("缺少图片数据或有效的本机绝对路径"));
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("读取图片文件失败 ({})", path.display()))?;
+    prepare(&bytes)
+}
+
+pub(super) async fn claude_user_input(prompt: String, attachments: Vec<MessageAttachment>, session_id: Option<String>) -> Result<Value, String> {
+    let mut content = Vec::new();
+    if !prompt.is_empty() || attachments.is_empty() {
+        content.push(json!({"type": "text", "text": prompt}));
+    }
+    if !attachments.is_empty() {
+        content = tokio::task::spawn_blocking(move || {
+            for attachment in attachments {
+                let image = claude_attachment_image(&attachment).map_err(|error|
+                    format!("Claude Code 图片附件准备失败 [attachment_id={}]: {error:#}", attachment.id))?;
+                content.push(json!({"type": "image", "source": {
+                    "type": "base64", "media_type": image.mime, "data": image.base64,
+                }}));
+            }
+            Ok::<_, String>(content)
+        }).await.map_err(|error| format!("Claude Code 图片处理任务失败：{error}"))??;
+    }
+    Ok(json!({"type": "user", "message": {"role": "user", "content": content}, "session_id": session_id}))
+}
+
 fn build_claude_command(
     config: &ClaudeSdkConfig,
     session_id: Option<&str>,
@@ -1532,7 +1579,7 @@ pub fn spawn_claude_session_task(
                     )
                     .await;
                 }
-                SessionCommand::Prompt { message_id, prompt, window, cancel_generation } => {
+                SessionCommand::Prompt { message_id, prompt, attachments, window, cancel_generation } => {
                     let _mcp_prompt = match config.mcp_scope.as_ref().map(|scope| scope.begin_prompt(message_id)).transpose() {
                         Ok(guard) => guard.map(|guard| guard.watch_cancellation(cancellation.clone(), cancel_generation)),
                         Err(error) => {
@@ -1542,7 +1589,18 @@ pub fn spawn_claude_session_task(
                         }
                     };
                     event_identity.response_message_id = Some(message_id);
-                    let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
+                    let input = match claude_user_input(prompt, attachments, session_id.clone()).await {
+                        Ok(input) => input,
+                        Err(error) => {
+                            emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
+                                AgentFailureStage::SendPrompt, diagnostics.diagnostics(None, None));
+                            if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                                manager.clear_agent_focus(&app, &event_identity, false).await;
+                            }
+                            crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, false).await;
+                            continue;
+                        }
+                    };
                     if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
                         emit_claude_run_failure(
                             &app,

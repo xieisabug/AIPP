@@ -239,3 +239,17 @@ async fn test_dispatch_preparation_persistence_failure_clears_focus_without_phan
     assert_eq!(*effects.actions.lock().unwrap(), ["persist:42", "clear_focus:42"]);
     assert!(effects.events.lock().unwrap().is_empty()); assert!(effects.submitted.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_claude_images_dispatch_only_current_images_in_order_with_prepared_text() {
+    let effects = RecordingEffects::new();
+    let image = |id| MessageAttachment { attachment_type: AttachmentType::Image, ..attachment(id, "image") };
+    let messages = vec![
+        ("user".into(), "old".into(), vec![image(1)]),
+        ("user".into(), "current".into(), vec![image(7), attachment(4, "notes"), image(3)]),
+    ];
+    dispatch_prepared(&effects, (42, AgentSessionKind::Claude), AgentSessionKind::Claude, input(42, &messages)).await.unwrap();
+    let submitted = effects.submitted.lock().unwrap();
+    assert_eq!(submitted[0].prompt, "runtime prompt with attachment text");
+    assert_eq!(submitted[0].attachments.iter().map(|a| a.id).collect::<Vec<_>>(), [7, 3]);
+}

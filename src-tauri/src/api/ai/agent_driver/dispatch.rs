@@ -1,5 +1,6 @@
 //! The shared turn sequence, separated from desktop I/O so its ordering and
 //! failure contract can be tested without a display, process or real database.
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::registry::AgentDriverMetadata;
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent};
 use crate::api::ai::types::AiResponse;
@@ -66,14 +67,13 @@ pub(super) async fn dispatch_prepared<E: TurnEffects>(
             return Err(AppError::ProviderError(detail));
         }
     };
-    // Native Codex/Claude already receive attachment text in the runtime prompt.
-    let attachments = if metadata.operations.structured_attachments {
-        input.messages.iter().rev()
-            .find(|(message_type, _, _)| message_type == "user")
-            .map(|(_, _, attachments)| attachments.clone())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+    let latest = input.messages.iter().rev().find(|(role, _, _)| role == "user");
+    let attachments = match (metadata.operations.attachment_input, latest) {
+        (AttachmentInput::Structured, Some((_, _, attachments))) => attachments.clone(),
+        (AttachmentInput::PromptTextWithImages, Some((_, _, attachments))) => attachments.iter()
+            .filter(|a| a.attachment_type == crate::db::conversation_db::AttachmentType::Image)
+            .cloned().collect(),
+        _ => Vec::new(),
     };
     if let Err(error) = effects.submit(&handle, message.id, input.prompt, attachments) {
         let detail = format!(

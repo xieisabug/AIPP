@@ -1,3 +1,4 @@
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 
 fn cli_config(name: &str, value: &str) -> LLMProviderConfig {
@@ -56,7 +57,11 @@ fn test_driver_capabilities_match_native_handle_contracts() {
         let capabilities = kind.capabilities();
         assert!(capabilities.cancel_prompt);
         assert!(capabilities.set_config_option);
-        assert_eq!(capabilities.structured_attachments, kind == AgentSessionKind::Acp);
+        assert_eq!(capabilities.attachment_input, match kind {
+            AgentSessionKind::Acp => AttachmentInput::Structured,
+            AgentSessionKind::Claude => AttachmentInput::PromptTextWithImages,
+            AgentSessionKind::Codex => AttachmentInput::PromptText,
+        });
         assert_eq!(AgentSessionKind::from_provider(kind.api_type(), &[]).unwrap(), kind);
     }
 }
@@ -64,14 +69,14 @@ fn test_driver_capabilities_match_native_handle_contracts() {
 #[test]
 fn test_driver_attachments_reject_unsupported_input_without_silent_loss() {
     assert!(AgentSessionKind::Acp.validate_attachments(2, 42).is_ok());
-    for kind in [AgentSessionKind::Codex, AgentSessionKind::Claude] {
-        assert!(kind.validate_attachments(0, 42).is_ok());
-        let error = kind.validate_attachments(2, 42).unwrap_err().to_string();
-        assert!(error.contains(kind.api_type()));
-        assert!(error.contains("message_id=42"));
-        assert!(error.contains("received 2"));
-        assert!(error.contains("does not accept structured attachments"));
-    }
+    assert!(AgentSessionKind::Claude.validate_attachments(2, 42).is_ok());
+    let kind = AgentSessionKind::Codex;
+    assert!(kind.validate_attachments(0, 42).is_ok());
+    let error = kind.validate_attachments(2, 42).unwrap_err().to_string();
+    assert!(error.contains(kind.api_type()));
+    assert!(error.contains("message_id=42"));
+    assert!(error.contains("received 2"));
+    assert!(error.contains("does not accept structured attachments"));
 }
 
 fn control_fixture(

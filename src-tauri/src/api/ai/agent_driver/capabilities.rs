@@ -33,7 +33,7 @@ impl Capability {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AttachmentInput { Structured, PromptText }
+pub enum AttachmentInput { Structured, PromptText, PromptTextWithImages }
 
 /// Registered adapter contract, never a claim about an unconnected server.
 /// Optional fields are deliberately unknown for third-party driver declarations.
@@ -55,10 +55,10 @@ pub struct AgentCapabilityDeclaration {
 }
 
 impl AgentCapabilityDeclaration {
-    pub fn unknown(cancel_prompt: bool, set_config_option: bool, structured_attachments: bool) -> Self {
+    pub fn unknown(cancel_prompt: bool, set_config_option: bool, attachment_input: AttachmentInput) -> Self {
         Self {
             send_prompt: true, cancel_prompt, set_config_option, respond_permission: None,
-            attachment_input: if structured_attachments { AttachmentInput::Structured } else { AttachmentInput::PromptText },
+            attachment_input,
             image_input: None, audio_input: None, embedded_context_input: None,
             load_session: None, resume_session: None, config_catalog_complete: false,
         }
@@ -67,7 +67,7 @@ impl AgentCapabilityDeclaration {
     pub fn acp() -> Self {
         Self {
             respond_permission: Some(true), image_input: Some(true), audio_input: Some(false),
-            embedded_context_input: Some(true), ..Self::unknown(true, true, true)
+            embedded_context_input: Some(true), ..Self::unknown(true, true, AttachmentInput::Structured)
         }
     }
 
@@ -75,15 +75,15 @@ impl AgentCapabilityDeclaration {
         Self {
             respond_permission: Some(true), image_input: Some(false), audio_input: Some(false),
             embedded_context_input: Some(false), load_session: Some(false), resume_session: Some(true),
-            config_catalog_complete: true, ..Self::unknown(true, true, false)
+            config_catalog_complete: true, ..Self::unknown(true, true, AttachmentInput::PromptText)
         }
     }
 
     pub fn claude() -> Self {
         Self {
-            respond_permission: Some(true), image_input: Some(false), audio_input: Some(false),
+            respond_permission: Some(true), image_input: Some(true), audio_input: Some(false),
             embedded_context_input: Some(false), load_session: Some(false), resume_session: Some(true),
-            config_catalog_complete: true, ..Self::unknown(true, true, false)
+            config_catalog_complete: true, ..Self::unknown(true, true, AttachmentInput::PromptTextWithImages)
         }
     }
 }
@@ -164,7 +164,7 @@ impl AgentCapabilities {
             },
             attachments: AgentAttachmentCapabilities {
                 input: adapter.attachment_input,
-                structured: adapter_fact(adapter.attachment_input == AttachmentInput::Structured),
+                structured: adapter_fact(adapter.attachment_input != AttachmentInput::PromptText),
                 image: attachment(adapter.image_input), audio: attachment(adapter.audio_input),
                 embedded_context: attachment(adapter.embedded_context_input),
             },

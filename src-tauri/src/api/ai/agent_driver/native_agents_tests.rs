@@ -1,3 +1,4 @@
+use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 
 #[test]
@@ -152,7 +153,7 @@ fn test_native_agents_register_distinct_drivers_without_acp_aliases() {
         let driver = registry.driver(id).unwrap();
         assert!(!driver.matches_provider("acp", &[]));
         assert!(driver.metadata().operations.cancel_prompt);
-        assert!(!driver.metadata().operations.structured_attachments);
+        assert_eq!(driver.metadata().operations.attachment_input, AttachmentInput::PromptText);
         let caps = serde_json::to_value(driver.capabilities()).unwrap();
         assert_eq!(caps["sessions"]["resume"]["support"], "supported");
         assert_eq!(caps["attachments"]["image"]["support"], "unsupported");

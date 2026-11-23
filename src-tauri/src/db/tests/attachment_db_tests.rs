@@ -241,14 +241,9 @@ fn test_attachment_list_by_id() {
         ids.push(created.id);
     }
 
-    // 批量查询
+    ids.reverse();
     let result = repo.list_by_id(&ids).unwrap();
-    assert_eq!(result.len(), 3);
-
-    // 验证返回的附件 ID 都在请求列表中
-    for att in result.iter() {
-        assert!(ids.contains(&att.id));
-    }
+    assert_eq!(result.iter().map(|attachment| attachment.id).collect::<Vec<_>>(), ids);
 }
 
 /// 测试批量查询空列表
