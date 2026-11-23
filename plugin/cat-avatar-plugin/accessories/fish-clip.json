@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "fish-clip",
+  "label": "小鱼干发卡",
+  "description": "夹在耳边的萌系小鱼干发卡，支持摇头晃动交互",
+  "slot": "head",
+  "anchor": "clip",
+  "action": "jingle",
+  "previewViewBox": "-68 -42 136 84",
+  "layers": [
+    {
+      "type": "path",
+      "d": "M28 0 L56 -22 Q62 -10 58 0 Q62 10 56 22 Z",
+      "fill": "#8AB9E6",
+      "stroke": "#2E547A",
+      "strokeWidth": 5,
+      "strokeLinejoin": "round"
+    },
+    {
+      "type": "ellipse",
+      "cx": -8,
+      "cy": 0,
+      "rx": 44,
+      "ry": 24,
+      "fill": "#A8D4FA",
+      "stroke": "#2E547A",
+      "strokeWidth": 5
+    },
+    {
+      "type": "path",
+      "d": "M-16 -22 Q-2 -8 -16 22 M2 -22 Q16 -8 2 22",
+      "fill": "none",
+      "stroke": "#5B8EC2",
+      "strokeWidth": 4,
+      "strokeLinecap": "round"
+    },
+    {
+      "type": "circle",
+      "cx": -30,
+      "cy": -4,
+      "r": 5,
+      "fill": "#1F3752"
+    },
+    {
+      "type": "circle",
+      "cx": -31.5,
+      "cy": -5.5,
+      "r": 1.8,
+      "fill": "#FFFFFF"
+    }
+  ]
+}

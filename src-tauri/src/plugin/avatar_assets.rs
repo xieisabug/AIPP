@@ -1189,22 +1189,23 @@ mod tests {
     }
 
     #[test]
-    fn bundled_example_cute_pets_plugin_passes_validation() {
+    fn bundled_example_cat_avatar_plugin_passes_validation() {
         let plugin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../plugin/cute-pets-avatar-plugin");
+            .join("../plugin/cat-avatar-plugin");
         let raw = fs::read_to_string(plugin_dir.join("plugin.json")).unwrap();
         let manifest: JsonValue = serde_json::from_str(&raw).unwrap();
         let avatars = manifest["contributions"]["avatars"].as_array().unwrap();
         let accessories = manifest["contributions"]["accessories"].as_array().unwrap();
         let bundle = load_plugin_avatar_assets_from_dir(
             &plugin_dir,
-            "cute-pets-avatar-plugin",
-            "萌宠形象与配饰包",
+            "cat-avatar-plugin",
+            "小猫形象插件",
             avatars,
             accessories,
         )
-        .expect("bundled example plugin should pass all validations");
-        assert_eq!(bundle.avatars.len(), 2);
+        .expect("bundled cat example plugin should pass all validations");
+        assert_eq!(bundle.avatars.len(), 1);
+        assert_eq!(bundle.avatars[0].id, "cat-avatar-plugin:cat");
         assert_eq!(bundle.accessories.len(), 2);
     }
 }

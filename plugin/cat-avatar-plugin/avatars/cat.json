@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "cat",
+  "label": "小猫",
+  "description": "带尖耳朵、额头猫纹与胡须的圆润小猫形象，支持双色自定义",
+  "artworkScale": 1.05,
+  "faceColorSlot": "primary",
+  "defaultColors": {
+    "primary": "#FFF4D6",
+    "secondary": "#E08A4F"
+  },
+  "parts": [
+    {
+      "type": "path",
+      "d": "M90 218 L72 78 Q70 50 98 62 L192 118 Q255 100 318 118 L412 62 Q440 50 438 78 L420 218 C452 262 460 326 430 380 C396 440 330 466 255 466 C180 466 114 440 80 380 C50 326 58 262 90 218 Z",
+      "fill": "secondary",
+      "stroke": "secondary",
+      "strokeWidth": 6,
+      "strokeLinejoin": "round"
+    },
+    {
+      "type": "path",
+      "d": "M108 168 L96 92 L162 130 Z",
+      "fill": "#FFB7C5"
+    },
+    {
+      "type": "path",
+      "d": "M402 168 L414 92 L348 130 Z",
+      "fill": "#FFB7C5"
+    },
+    {
+      "type": "ellipse",
+      "cx": 255,
+      "cy": 296,
+      "rx": 148,
+      "ry": 124,
+      "fill": "primary"
+    },
+    {
+      "type": "path",
+      "d": "M234 112 L242 156 M255 108 L255 162 M276 112 L268 156",
+      "fill": "none",
+      "stroke": "#8C4D27",
+      "strokeWidth": 10,
+      "strokeLinecap": "round",
+      "opacity": 0.48
+    },
+    {
+      "type": "path",
+      "d": "M241 300 Q255 290 269 300 Q255 316 241 300 Z",
+      "fill": "#FF8FA3"
+    },
+    {
+      "type": "path",
+      "d": "M255 314 L255 324 Q244 334 233 324 M255 324 Q266 334 277 324",
+      "fill": "none",
+      "stroke": "#624735",
+      "strokeWidth": 5,
+      "strokeLinecap": "round",
+      "opacity": 0.55
+    },
+    {
+      "type": "path",
+      "d": "M88 286 L142 296 M82 320 L138 320 M422 286 L368 296 M428 320 L372 320",
+      "fill": "none",
+      "stroke": "#624735",
+      "strokeWidth": 7,
+      "strokeLinecap": "round",
+      "opacity": 0.45
+    }
+  ],
+  "anchors": {
+    "face": { "x": 255, "y": 250, "scale": 1.12 },
+    "crown": { "x": 255, "y": 108, "scale": 0.92 },
+    "headphones": { "x": 255, "y": 98, "scale": 0.92, "scaleY": 0.88 },
+    "clip": { "x": 150, "y": 124, "scale": 0.92, "rotation": -22 },
+    "propDock": { "x": 408, "y": 356, "scale": 0.8, "rotation": -24 }
+  },
+  "colorLabels": {
+    "primary": "脸部",
+    "secondary": "毛色"
+  },
+  "capabilities": ["eyes", "headwear"]
+}

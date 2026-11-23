@@ -4,7 +4,7 @@
 
 这类插件使用**纯声明式静态多色矢量轮廓**（JSON），**不需要编写或编译 `dist/main.js`**，自动接入宿主全部 53 种状态动画、视线追踪、17 种内置配饰及预置配饰动作，并在桌面端与 Android 移动端保持一致体验。
 
-示例插件见 `plugin/cute-pets-avatar-plugin/`。
+示例插件见 `plugin/cat-avatar-plugin/`。
 
 ---
 
@@ -182,5 +182,5 @@
 - 所有图形仅使用白名单 `VectorLayer`（`path` / `rect` / `circle` / `ellipse`），严禁原始 SVG HTML 字符串；颜色支持槽位 `primary` / `secondary` / `white` / `core` / `none` 及固定 `#RRGGBB`。
 - 形象统一使用 **510×510 坐标系**（中心 `255,255`），至少提供 `face` 锚点，推荐同步校准 `crown`、`headphones`、`clip`、`propDock` 及 `defaultColors`、`faceColorSlot`。
 - 配饰以 `(0, 0)` 为锚点原点绘制，设置 `slot`（`eyes` | `head`）、`anchor`（`face` | `crown` | `headphones` | `clip`）、`previewViewBox`（4 个数字）及可选预置 `action`（如 `glasses` / `peer` / `hat` / `straighten-crown` / `listen`）。
-- 完整 Schema、校验红线与示例见仓库 `docs/avatar-plugin-development.md` 与 `plugin/cute-pets-avatar-plugin/`。
+- 完整 Schema、校验红线与示例见仓库 `docs/avatar-plugin-development.md` 与 `plugin/cat-avatar-plugin/`。
 ```
