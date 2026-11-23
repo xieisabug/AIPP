@@ -63,9 +63,9 @@ it("should preview a published Markdown project and browse its snapshot on mobil
     const frame = await screen.findByTitle("Book");
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame.getAttribute("srcdoc")).toContain('src="data:image/png;base64,AA=="');
-    fireEvent.click(screen.getByRole("button", { name: "工程源码" }));
+    fireEvent.click(screen.getByRole("radio", { name: "工程源码" }));
     expect(screen.getByRole("combobox")).toHaveValue("docs/index.md");
-    fireEvent.click(screen.getByRole("button", { name: "预览" }));
+    fireEvent.click(screen.getByRole("radio", { name: "预览" }));
     expect(await screen.findByTitle("Book")).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("open_choice_build", expect.anything());
     invoke.mockClear();

@@ -14,6 +14,14 @@ import { hasActionablePreviewResources } from "@/utils/previewExternalResources"
 import type { Candidate, ChoiceCard } from "@/utils/presentChoices";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import runtimeUrl from "./projectRuntime.ts?worker&url";
+import { Code, Eye } from "lucide-react";
+import { cn } from "@/utils/utils";
+import { ChoiceSegmented, type SegmentOption } from "./ChoiceControls";
+
+const PROJECT_VIEWS: SegmentOption<"preview" | "source">[] = [
+    { value: "preview", label: "预览", icon: <Eye /> },
+    { value: "source", label: "工程源码", icon: <Code /> },
+];
 
 export type ChoiceRef = { conversationId: number; requestId: string; candidateId: string };
 type CollectionRef = { collectionId: number; conversationId?: never; requestId?: never; candidateId?: never };
@@ -315,9 +323,26 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
     const doc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${url} ${diagram} 'unsafe-eval'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"><div id="root"></div><pre id="error" role="alert"></pre>${diagram ? `<script src="${diagram}"></script>` : ""}<script src="${url}"></script>`;
     return (
         <>
-            <Button className={mobile ? "min-h-11" : undefined} variant="ghost" size="sm" onClick={() => setShowSource(!showSource)}>
-                {showSource ? "预览" : "工程源码"}
-            </Button>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+                <ChoiceSegmented
+                    label="工程视图"
+                    value={showSource ? "source" : "preview"}
+                    options={PROJECT_VIEWS}
+                    onChange={(view) => setShowSource(view === "source")}
+                />
+                {showSource && (
+                    <select
+                        aria-label="工程文件"
+                        className={cn("max-w-full rounded-md border bg-background px-2 text-sm", mobile ? "h-11" : "h-8")}
+                        value={file}
+                        onChange={(e) => setFile(e.target.value)}
+                    >
+                        {Object.keys(files).map((p) => (
+                            <option key={p}>{p}</option>
+                        ))}
+                    </select>
+                )}
+            </div>
             {!mobile && !buildView && files["package.json"] && (
                 <details className="my-2">
                     <summary>工程构建</summary>
@@ -352,16 +377,9 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
             )}
             {buildError && <p role="alert">{buildError}</p>}
             {showSource ? (
-                <>
-                    <select aria-label="工程文件" value={file} onChange={(e) => setFile(e.target.value)}>
-                        {Object.keys(files).map((p) => (
-                            <option key={p}>{p}</option>
-                        ))}
-                    </select>
-                    <pre className="max-h-96 overflow-auto whitespace-pre-wrap">
-                        {files[file] !== undefined ? source(files, file) : ""}
-                    </pre>
-                </>
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap">
+                    {files[file] !== undefined ? source(files, file) : ""}
+                </pre>
             ) : buildView ? (
                 <iframe
                     title={candidate.title}
@@ -373,7 +391,7 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
             ) : html !== undefined ? (
                 <MarkupPreview candidate={{ ...candidate, type: "html", content: html }} reference={reference} files={files} />
             ) : /\.drawio$/i.test(candidate.entry_file || "") ? (
-                mobile ? <p>此 Drawio 工程可在桌面端授权预览，也可点「工程源码」查看文件。</p> : <DrawioPreview candidate={candidate} />
+                mobile ? <p>此 Drawio 工程可在桌面端授权预览，也可切换到源码视图查看文件。</p> : <DrawioPreview candidate={candidate} />
             ) : /\.(md|markdown)$/i.test(candidate.entry_file || "") ? (
                 <MarkupPreview candidate={{ ...candidate, type: "markdown" }} reference={reference} files={files} />
             ) : !/\.(?:html?|[cm]?[jt]sx?|vue|svg|mmd|mermaid|txt)$/i.test(candidate.entry_file || "") ? (
