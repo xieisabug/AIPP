@@ -15,6 +15,7 @@ import { Bot, KeyRound, ListChecks, Puzzle, Server, Settings, Sparkles } from "l
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
+import { MacTitleBarInset } from "../components/window/MacTitleBarInset";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
@@ -399,10 +400,12 @@ function ConfigWindow() {
             >
                 {/* 侧边栏 */}
                 <div
-                    className="aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 py-6 overflow-y-auto"
+                    className={`aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 ${platform === "macos" ? "pt-1 pb-6" : "py-6"} overflow-y-auto`}
                     data-theme-slot="settings-menu-container"
                     data-aipp-slot="config-menu"
                 >
+                    {/* macOS Overlay 标题栏：红黄绿按钮占位 + 拖拽 */}
+                    <MacTitleBarInset />
                     {renderMenuItems((id) => requestConfigLeave(() => goToSection(id)))}
                 </div>
 

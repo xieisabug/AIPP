@@ -9,6 +9,8 @@ import { memo } from "react";
 import { navigateMobile } from "../mobile/navigation";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
+import { useMacOverlayTitleBar } from "./window/MacTitleBarInset";
+import { cn } from "../utils/utils";
 
 interface ChatUIInfomationProps {
     onNavigate?: () => void;
@@ -31,6 +33,8 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
     const isMobilePlatform = useIsMobilePlatform();
     const multiWindowAvailable = useFeatureAvailableOnPlatform("desktop_multi_window");
+    // macOS Overlay 标题栏：上方已有红黄绿按钮拖拽条，收紧顶部留白并让信息栏空白处也可拖动窗口
+    const macOverlayTitleBar = useMacOverlayTitleBar();
     // 导航取决于运行平台，桌面窄窗口仍使用桌面窗口。
     const useInAppNav = isMobilePlatform;
 
@@ -87,7 +91,11 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     };
 
     return (
-        <div className="flex justify-between py-4 px-5 border-border bg-secondary " data-aipp-slot="chat-info-bar">
+        <div
+            className={cn("flex justify-between px-5 border-border bg-secondary", macOverlayTitleBar ? "pt-1 pb-4" : "py-4")}
+            data-tauri-drag-region={macOverlayTitleBar || undefined}
+            data-aipp-slot="chat-info-bar"
+        >
             <div className="flex items-center gap-2 bg-secondary" data-aipp-slot="chat-info-logo">
                 <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
             </div>

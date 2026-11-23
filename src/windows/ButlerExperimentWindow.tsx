@@ -15,6 +15,7 @@ import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
+import { MacTitleBarInset, useMacOverlayTitleBar } from "@/components/window/MacTitleBarInset";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1158,6 +1159,7 @@ function ButlerExperimentWindow() {
     const headerAssistantId = contact?.assistantId ?? 0;
     const headerState = contactActivity.visuals.get(headerAssistantId)?.state ?? "idle";
     const contactRail = useContactRailWidth();
+    const macOverlayTitleBar = useMacOverlayTitleBar();
 
     useAppShortcuts("butler", {
         new: () => {
@@ -1192,6 +1194,7 @@ function ButlerExperimentWindow() {
                     style={{ width: contactRail.width }}
                     data-aipp-slot="butler-task-rail"
                 >
+                    <MacTitleBarInset />
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
                         focused={focused} ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
@@ -1344,6 +1347,7 @@ function ButlerExperimentWindow() {
                             ) : (
                             <div
                                 className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
+                                data-tauri-drag-region={macOverlayTitleBar || undefined}
                                 data-aipp-slot="butler-main-header"
                             >
                                 <div className="flex min-w-0 items-center">

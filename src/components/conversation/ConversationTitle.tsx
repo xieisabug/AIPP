@@ -9,6 +9,7 @@ import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
 import ConversationExportDialog from "./ConversationExportDialog";
 import DeepSeekBalanceBadge from "./DeepSeekBalanceBadge";
+import { useMacOverlayTitleBar } from "../window/MacTitleBarInset";
 
 const ConversationTitle: React.FC<{
     conversation: Conversation | undefined;
@@ -36,6 +37,8 @@ const ConversationTitle: React.FC<{
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] = useState<boolean>(false);
     const { deleteConversation } = useConversationManager();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+    // macOS Overlay 标题栏下没有原生标题栏，标题栏空白处承担窗口拖动
+    const macOverlayTitleBar = useMacOverlayTitleBar();
 
     // 判断是否需要脱敏
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -69,8 +72,8 @@ const ConversationTitle: React.FC<{
 
     return (
         <>
-            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-aipp-slot="chat-conversation-title-bar">
-                <div className="flex-1 overflow-hidden" data-aipp-slot="chat-conversation-title">
+            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-tauri-drag-region={macOverlayTitleBar || undefined} data-aipp-slot="chat-conversation-title-bar">
+                <div className="flex-1 overflow-hidden" data-tauri-drag-region={macOverlayTitleBar || undefined} data-aipp-slot="chat-conversation-title">
                     <div
                         className={`text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon ${allowRename ? "cursor-pointer" : ""}`}
                         onClick={allowRename ? onEdit : undefined}

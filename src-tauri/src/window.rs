@@ -11,6 +11,20 @@ use crate::api::system_api::mobile_unsupported_error;
 #[cfg(desktop)]
 const SCREEN_MARGIN_RATIO: f64 = 0.9;
 
+/// macOS 主窗口（聊天 / 管家 / 设置）使用内容延伸到标题栏的 Overlay 样式，
+/// 红黄绿按钮悬浮在侧边栏顶部。前端在侧边栏顶部预留同高的拖拽条
+/// （`src/components/window/MacTitleBarInset.tsx` 的 `MAC_TITLEBAR_INSET_HEIGHT`），
+/// 两边的数值需保持一致：按钮高约 14pt，y=11 时垂直居中于 36pt 的条内。
+#[cfg(target_os = "macos")]
+fn with_macos_overlay_titlebar<'a, R: tauri::Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(LogicalPosition::new(16.0, 11.0))
+}
+
 /// 将隐藏的目标窗口重新定位到来源窗口所在的显示器上（居中）。
 /// 仅当目标窗口不可见时才会执行重定位，避免干扰用户手动放置的窗口。
 #[cfg(desktop)]
@@ -303,6 +317,9 @@ fn create_config_window_with_visibility(app: &AppHandle, visible: bool) {
         #[cfg(not(target_os = "macos"))]
         let window_builder = window_builder.transparent(false);
 
+        #[cfg(target_os = "macos")]
+        let window_builder = with_macos_overlay_titlebar(window_builder);
+
         match window_builder.build() {
             Ok(window) => {
                 info!(visible=%visible, "Config window built");
@@ -399,6 +416,9 @@ fn create_chat_ui_window_with_visibility(app: &AppHandle, visible: bool) {
         #[cfg(not(target_os = "macos"))]
         let window_builder = window_builder.transparent(false);
 
+        #[cfg(target_os = "macos")]
+        let window_builder = with_macos_overlay_titlebar(window_builder);
+
         match window_builder.build() {
             Ok(window) => {
                 info!(visible=%visible, "Chat UI window built");
@@ -464,6 +484,9 @@ fn create_butler_experiment_window_with_visibility(app: &AppHandle, visible: boo
 
         #[cfg(not(target_os = "macos"))]
         let window_builder = window_builder.transparent(false);
+
+        #[cfg(target_os = "macos")]
+        let window_builder = with_macos_overlay_titlebar(window_builder);
 
         match window_builder.build() {
             Ok(window) => {

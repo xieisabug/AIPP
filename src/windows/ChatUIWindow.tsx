@@ -4,6 +4,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
+import { MacTitleBarInset } from "../components/window/MacTitleBarInset";
 import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, {
     ConversationUIRef,
@@ -987,6 +988,7 @@ function ChatUIWindow() {
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                 <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2" data-aipp-slot="chat-sidebar">
+                    <MacTitleBarInset className="bg-secondary" />
                     <ChatUIInfomation />
                     <ChatUIToolbar
                         onNewConversation={handleNewConversation}
