@@ -60,10 +60,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
 } from "@/components/ui/dialog";
 import {
     AlertDialog,
@@ -1455,23 +1454,26 @@ function ButlerExperimentWindow() {
                     open={isSettingsDialogOpen}
                     onOpenChange={setIsSettingsDialogOpen}
                 >
-                    <DialogContent className="flex max-h-[90vh] w-[50vw] min-w-[50vw] max-w-none flex-col overflow-hidden p-0">
-                        <DialogHeader className="border-b px-6 py-4">
-                            <DialogTitle>总管家实验设置</DialogTitle>
-                            <DialogDescription>
-                                {"在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。其他通用配置请前往"}
+                    <CompactDialogContent className="sm:max-w-3xl">
+                        <CompactDialogHeader
+                            title="总管家实验设置"
+                            description="在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。"
+                            actions={
                                 <button
                                     type="button"
                                     onClick={handleOpenAppSettings}
-                                    className="ml-1 inline-flex items-center gap-1 align-baseline font-medium text-foreground underline underline-offset-4 hover:text-foreground/80"
+                                    className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                                     data-aipp-slot="butler-settings-open-app-settings"
                                 >
                                     AIPP 设置
                                     <ExternalLink className="h-3 w-3" />
                                 </button>
-                            </DialogDescription>
-                        </DialogHeader>
-                        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+                            }
+                        />
+                        <CompactDialogBody className="space-y-4">
+                            <p className="text-xs text-muted-foreground">
+                                在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。其他通用配置请前往右上角「AIPP 设置」。
+                            </p>
                             <ExperimentalConfigForm
                                 form={butlerSettingsForm}
                                 onSave={handleSaveButlerSettings}
@@ -1487,8 +1489,8 @@ function ButlerExperimentWindow() {
                                     />
                                 }
                             />
-                        </div>
-                    </DialogContent>
+                        </CompactDialogBody>
+                    </CompactDialogContent>
                 </Dialog>
                 <ButlerProactiveCenter
                     open={proactiveCenterOpen}
@@ -1528,14 +1530,18 @@ function ButlerExperimentWindow() {
                     selectGroup(created);
                 }} />
             <AlertDialog open={deleteGroupTarget !== null} onOpenChange={open => { if (!open) setDeleteGroupTarget(null); }}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>删除群聊「{deleteGroupTarget?.name}」？</AlertDialogTitle>
-                        <AlertDialogDescription>群消息和成员在本群的执行记录都会删除，成员的私聊不受影响。正在进行的回复会先停止。</AlertDialogDescription>
+                <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md">
+                    <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                        <AlertDialogTitle className="text-base font-semibold">删除群聊「{deleteGroupTarget?.name}」？</AlertDialogTitle>
                     </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel>取消</AlertDialogCancel>
-                        <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => {
+                    <div className="px-4 py-4 sm:px-5">
+                        <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
+                            群消息和成员在本群的执行记录都会删除，成员的私聊不受影响。正在进行的回复会先停止。
+                        </AlertDialogDescription>
+                    </div>
+                    <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                        <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9">取消</AlertDialogCancel>
+                        <AlertDialogAction className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9" onClick={() => {
                             const target = deleteGroupTarget;
                             if (!target) return;
                             butlerGroups.deleteButlerGroup(target.id).then(() => {

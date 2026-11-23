@@ -4,7 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import { useTheme } from "@/hooks/useTheme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from "@/components/ui/dialog";
 import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
@@ -396,53 +402,59 @@ export default function ScheduleWindow() {
             />
 
             <Dialog open={!!selectedToolLog} onOpenChange={(open) => !open && setSelectedToolLog(null)}>
-                <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-[680px]">
-                    <DialogHeader>
-                        <DialogTitle className="text-base">工具调用详情</DialogTitle>
-                    </DialogHeader>
-                    {toolPayload ? (
-                        <div className="space-y-3 text-xs">
-                            <div className="rounded border bg-muted/20 p-2">
-                                <div>
-                                    <span className="text-muted-foreground">工具：</span>
-                                    {toolPayload.serverName ?? "-"} / {toolPayload.toolName ?? "-"}
-                                </div>
-                                {"success" in toolPayload && (
+                <CompactDialogContent className="sm:max-w-2xl">
+                    <CompactDialogHeader
+                        title="工具调用详情"
+                        subtitle={toolPayload ? `${toolPayload.serverName ?? "-"} / ${toolPayload.toolName ?? "-"}` : undefined}
+                        description="查看本次定时任务工具调用的参数与返回结果"
+                    />
+                    <CompactDialogBody>
+                        {toolPayload ? (
+                            <div className="space-y-3 text-xs">
+                                <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
                                     <div>
-                                        <span className="text-muted-foreground">状态：</span>
-                                        {toolPayload.success ? "成功" : "未执行或失败"}
+                                        <span className="text-muted-foreground">工具：</span>
+                                        {toolPayload.serverName ?? "-"} / {toolPayload.toolName ?? "-"}
+                                    </div>
+                                    {"success" in toolPayload && (
+                                        <div>
+                                            <span className="text-muted-foreground">状态：</span>
+                                            {toolPayload.success ? "成功" : "未执行或失败"}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="space-y-1">
+                                    <div className="font-medium">参数</div>
+                                    <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/30 p-2.5 font-mono">
+                                        {formatToolLogValue(toolPayload.parameters)}
+                                    </pre>
+                                </div>
+                                {"result" in toolPayload && (
+                                    <div className="space-y-1">
+                                        <div className="font-medium">返回结果</div>
+                                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/30 p-2.5 font-mono">
+                                            {formatToolLogValue(toolPayload.result)}
+                                        </pre>
                                     </div>
                                 )}
                             </div>
-                            <div className="space-y-1">
-                                <div className="font-medium">参数</div>
-                                <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded border bg-muted/20 p-2">
-                                    {formatToolLogValue(toolPayload.parameters)}
-                                </pre>
-                            </div>
-                            {"result" in toolPayload && (
-                                <div className="space-y-1">
-                                    <div className="font-medium">返回结果</div>
-                                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded border bg-muted/20 p-2">
-                                        {formatToolLogValue(toolPayload.result)}
-                                    </pre>
-                                </div>
-                            )}
-                        </div>
-                    ) : (
-                        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded border bg-muted/20 p-2 text-xs">
-                            {selectedToolLog?.content ?? ""}
-                        </pre>
-                    )}
-                </DialogContent>
+                        ) : (
+                            <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/30 p-2.5 font-mono text-xs">
+                                {selectedToolLog?.content ?? ""}
+                            </pre>
+                        )}
+                    </CompactDialogBody>
+                </CompactDialogContent>
             </Dialog>
 
             <Dialog open={isHelpOpen} onOpenChange={setIsHelpOpen}>
-                <DialogContent className="sm:max-w-[520px]">
-                    <DialogHeader>
-                        <DialogTitle className="text-base">定时任务怎么工作</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-4 text-xs leading-relaxed text-muted-foreground">
+                <CompactDialogContent className="sm:max-w-lg">
+                    <CompactDialogHeader
+                        icon={<HelpCircle className="h-4 w-4" />}
+                        title="定时任务怎么工作"
+                        description="了解定时任务的运行、审核与通知机制"
+                    />
+                    <CompactDialogBody className="space-y-3 text-xs leading-relaxed text-muted-foreground">
                         <p>
                             到点后，执行助手会在一个全新的会话里完成指令，然后把结果以它的身份发给你：默认发到它的管家私聊，也可以让结果单独出现在聊天列表里。
                             助手看不到之前的聊天，所以背景和要求都要写进指令。
@@ -454,13 +466,13 @@ export default function ScheduleWindow() {
                             每次到点都会留下记录：已发送、无新内容、失败、跳过或错过，并写明原因。连续失败 2 次会提醒你，5 次会自动暂停。应用没开时错过的时段默认补跑最近一次。
                         </p>
                         <p>也可以直接在聊天里让助手安排，例如「每周四下午 4 点提醒我今天休息」「工作日每天 9 点帮我看一下 X 有没有更新，有变化再告诉我」。</p>
-                    </div>
-                    <DialogFooter>
-                        <Button size="sm" onClick={() => setIsHelpOpen(false)}>
+                    </CompactDialogBody>
+                    <CompactDialogFooter>
+                        <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={() => setIsHelpOpen(false)}>
                             知道了
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
+                    </CompactDialogFooter>
+                </CompactDialogContent>
             </Dialog>
 
             <ConfirmDialog

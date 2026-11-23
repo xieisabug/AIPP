@@ -1,13 +1,18 @@
 import React, { useState, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Separator } from '@/components/ui/separator';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
+import { AlertTriangle, Eye, Loader2, Mic, Video, Search } from 'lucide-react';
+import { cn } from '@/utils/utils';
 import { PinyinFilter, usePinyinReady } from '../../utils/pinyinFilter';
 import {
     ModelForSelection,
@@ -59,8 +64,8 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     }, [selectedModels, searchQuery, pinyinReady]);
 
     const handleModelToggle = (modelCode: string, checked: boolean) => {
-        setSelectedModels(prev => 
-            prev.map(model => 
+        setSelectedModels(prev =>
+            prev.map(model =>
                 model.code === modelCode && (!checked || model.request_mode !== "unsupported")
                     ? { ...model, is_selected: checked }
                     : model
@@ -69,13 +74,13 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     };
 
     const handleSelectAll = () => {
-        setSelectedModels(prev => 
+        setSelectedModels(prev =>
             prev.map(model => ({ ...model, is_selected: model.request_mode !== "unsupported" }))
         );
     };
 
     const handleDeselectAll = () => {
-        setSelectedModels(prev => 
+        setSelectedModels(prev =>
             prev.map(model => ({ ...model, is_selected: false }))
         );
     };
@@ -85,126 +90,117 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     if (!modelData) return null;
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-2xl">
-                <DialogHeader>
-                    <DialogTitle>选择模型</DialogTitle>
-                </DialogHeader>
+        <Dialog open={open} onOpenChange={(next) => { if (!loading) onOpenChange(next); }}>
+            <CompactDialogContent className="sm:max-w-2xl">
+                <CompactDialogHeader
+                    title="选择模型"
+                    subtitle={`已选 ${selectedCount} / ${modelData.available_models.length}`}
+                    description="勾选要启用的模型"
+                    closeDisabled={loading}
+                />
+
                 <TooltipProvider>
-                
-                <div className="space-y-4">
-                    {/* 操作按钮 */}
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex gap-2">
-                            <Button 
-                                variant="outline" 
-                                size="sm" 
+                    <CompactDialogBody className="flex flex-col gap-3 overflow-hidden">
+                        {/* 搜索框与批量操作 */}
+                        <div className="flex shrink-0 items-center gap-2">
+                            <div className="relative flex-1">
+                                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                                <Input
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    placeholder="搜索模型..."
+                                    className="h-8 pl-8 text-sm"
+                                />
+                            </div>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
                                 onClick={handleSelectAll}
                             >
                                 全选
                             </Button>
-                            <Button 
-                                variant="outline" 
-                                size="sm" 
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
                                 onClick={handleDeselectAll}
                             >
                                 取消全选
                             </Button>
                         </div>
-                        <div className="text-sm text-muted-foreground">
-                            已选择 {selectedCount} / {modelData.available_models.length} 个模型
-                        </div>
-                    </div>
 
-                    {/* 搜索框 */}
-                    <div className="relative">
-                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                        <Input
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            placeholder="搜索模型..."
-                            className="pl-8 h-8 text-sm"
-                        />
-                    </div>
-
-                    {/* 缺失模型提醒 */}
-                    {modelData.missing_models.length > 0 && (
-                        <div className="p-3 bg-orange-50/80 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg">
-                            <div className="flex items-center gap-2 text-orange-800 dark:text-orange-200 font-medium mb-2">
-                                <AlertTriangle className="h-4 w-4" />
-                                以下模型未找到，将自动删除
+                        {/* 缺失模型提醒 */}
+                        {modelData.missing_models.length > 0 && (
+                            <div className="shrink-0 rounded-lg border border-orange-200 bg-orange-50/80 p-3 dark:border-orange-800 dark:bg-orange-900/20">
+                                <div className="mb-1.5 flex items-center gap-2 text-xs font-medium text-orange-800 dark:text-orange-200">
+                                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                    以下模型未找到，将自动删除
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                    {modelData.missing_models.map((model, index) => (
+                                        <Badge key={index} variant="outline" className="border-orange-300 text-xs text-orange-700 dark:border-orange-700 dark:text-orange-300">
+                                            {model}
+                                        </Badge>
+                                    ))}
+                                </div>
                             </div>
-                            <div className="flex flex-wrap gap-1">
-                                {modelData.missing_models.map((model, index) => (
-                                    <Badge key={index} variant="outline" className="text-orange-700 dark:text-orange-300 border-orange-300 dark:border-orange-700">
-                                        {model}
-                                    </Badge>
-                                ))}
-                            </div>
-                        </div>
-                    )}
+                        )}
 
-                    <Separator />
-
-                    {/* 模型列表 */}
-                    <ScrollArea className="h-96">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {/* 模型列表 */}
+                        <div className="grid min-h-0 max-h-[52vh] flex-1 grid-cols-1 content-start gap-1.5 overflow-y-auto pr-0.5 sm:grid-cols-2">
                             {filteredModels.map((model) => (
-                                <div 
-                                    key={model.code} 
-                                    className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted cursor-pointer"
-                                    onClick={() => handleModelToggle(model.code, !model.is_selected)}
+                                <label
+                                    key={model.code}
+                                    className={cn(
+                                        "flex min-w-0 cursor-pointer items-center gap-2.5 rounded-md border border-border px-2.5 py-2 transition-colors hover:bg-muted/60",
+                                        model.is_selected && "border-foreground/40 bg-muted/60",
+                                    )}
                                 >
                                     <Checkbox
                                         aria-label={model.name}
                                         checked={model.is_selected}
                                         disabled={model.request_mode === "unsupported" && !model.is_selected}
-                                        onCheckedChange={(checked) => 
-                                            handleModelToggle(model.code, checked as boolean)
+                                        onCheckedChange={(checked) =>
+                                            handleModelToggle(model.code, checked === true)
                                         }
-                                        onClick={(e) => e.stopPropagation()}
                                     />
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2">
-                                            <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                    <div className="min-w-0 flex-1 break-words font-medium">
-                                                        {model.name}
-                                                    </div>
-                                                </TooltipTrigger>
-                                                <TooltipContent>
-                                                    <p>{model.name}</p>
-                                                </TooltipContent>
-                                            </Tooltip>
-                                            <div className="flex shrink-0 gap-1">
-                                                {model.vision_support && (
-                                                    <Eye className="h-3 w-3 text-blue-500" />
-                                                )}
-                                                {model.audio_support && (
-                                                    <Mic className="h-3 w-3 text-green-500" />
-                                                )}
-                                                {model.video_support && (
-                                                    <Video className="h-3 w-3 text-purple-500" />
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <span className="min-w-0 flex-1 truncate text-sm">
+                                                {model.name}
+                                            </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                            <p>{model.name}</p>
+                                        </TooltipContent>
+                                    </Tooltip>
+                                    <span className="flex shrink-0 gap-1 text-muted-foreground">
+                                        {model.vision_support && <Eye className="h-3 w-3" />}
+                                        {model.audio_support && <Mic className="h-3 w-3" />}
+                                        {model.video_support && <Video className="h-3 w-3" />}
+                                    </span>
+                                </label>
                             ))}
                         </div>
-                    </ScrollArea>
-                </div>
+                    </CompactDialogBody>
                 </TooltipProvider>
 
-                <DialogFooter>
-                    <Button variant="outline" onClick={() => onOpenChange(false)}>
+                <CompactDialogFooter>
+                    <span className="mr-auto text-xs text-muted-foreground">
+                        已选择 {selectedCount} / {modelData.available_models.length} 个模型
+                    </span>
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={loading} onClick={() => onOpenChange(false)}>
                         取消
                     </Button>
-                    <Button onClick={() => onConfirm(selectedModels)} disabled={loading}>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={() => onConfirm(selectedModels)} disabled={loading}>
+                        {loading && <Loader2 className="h-4 w-4 animate-spin" />}
                         {loading ? '更新中...' : '确认更新'}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

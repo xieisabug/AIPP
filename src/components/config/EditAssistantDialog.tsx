@@ -5,7 +5,12 @@ import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, parseAppearance } from "@/components/butler/butlerAppearance";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import type { FeatureConfig } from "@/hooks/feature/useFeatureConfig";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+} from "@/components/ui/dialog";
 
 interface EditAssistantDialogProps {
     isOpen: boolean;
@@ -36,9 +41,14 @@ const EditAssistantDialog: React.FC<EditAssistantDialogProps> = ({
     }, [isOpen, id, loadFeatureConfig]);
     if (!isOpen || !currentAssistant) return null;
     if (!loaded || loaded.id !== id) return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-        <DialogContent><DialogHeader><DialogTitle>编辑助手</DialogTitle></DialogHeader>
-            <p role={error ? "alert" : "status"}>{error || "正在读取助手形象…"}</p>
-        </DialogContent>
+        <CompactDialogContent className="sm:max-w-md">
+            <CompactDialogHeader title="编辑助手" description="正在读取助手形象配置" />
+            <CompactDialogBody>
+                <p role={error ? "alert" : "status"} className={error ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
+                    {error || "正在读取助手形象…"}
+                </p>
+            </CompactDialogBody>
+        </CompactDialogContent>
     </Dialog>;
     return <ButlerProfileDialog
         key={id}

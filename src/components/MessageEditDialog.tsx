@@ -56,49 +56,54 @@ const MessageEditDialog: React.FC<MessageEditDialogProps> = ({
             {/* 模态框内容 */}
             <div role="dialog" aria-modal="true" aria-label="编辑消息" data-mobile-panel
                 onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } }}
-                className={compact ? "fixed inset-0 bg-background flex flex-col safe-top safe-bottom" : "relative bg-background rounded-xl shadow-2xl w-[50%] min-w-[32rem] h-[70%] min-h-[28rem] max-w-[90%] max-h-[90%] transform transition-all duration-200 scale-100 flex flex-col"}>
+                className={compact ? "fixed inset-0 bg-background flex flex-col safe-top safe-bottom" : "relative flex h-[70%] max-h-[88dvh] min-h-[28rem] w-[50%] max-w-[90%] min-w-[32rem] flex-col overflow-hidden rounded-lg border border-border bg-background shadow-lg"}>
                 {/* 标题栏 */}
-                <div className="flex items-center justify-between p-6 border-b border-border">
-                    <h2 className="text-xl font-semibold text-foreground">编辑消息</h2>
+                <div className="flex shrink-0 items-center justify-between gap-2.5 border-b border-border px-4 py-2.5 sm:px-5">
+                    <h2 className="truncate text-base font-semibold text-foreground">编辑消息</h2>
                     <button
+                        type="button"
                         onClick={onClose}
                         aria-label="关闭编辑"
-                        className="h-11 w-11 flex items-center justify-center hover:bg-muted rounded-lg transition-colors duration-200 flex-shrink-0"
+                        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                     >
-                        <X className="h-5 w-5 text-muted-foreground" />
+                        <X className="h-4 w-4" />
                     </button>
                 </div>
 
                 {/* 内容区域 */}
-                <div className="flex-1 p-6 flex flex-col min-h-0">
+                <div className="flex min-h-0 flex-1 flex-col px-4 py-4 sm:px-5">
                     <Textarea
                         value={content}
                         onChange={(e) => setContent(e.target.value)}
-                        className="w-full flex-1 min-h-0 resize-none"
+                        className="min-h-0 w-full flex-1 resize-none"
                         placeholder="请输入消息内容..."
                         autoFocus
                     />
                 </div>
 
                 {/* 按钮区域 */}
-                <div className="flex flex-wrap shrink-0 justify-end gap-3 p-4 [&_button]:min-h-11">
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
                     <Button
+                        type="button"
                         variant="outline"
                         onClick={onClose}
-                        className="px-6"
+                        className="min-h-11 px-4 sm:min-h-9"
                     >
                         取消
                     </Button>
                     <Button
+                        type="button"
+                        variant={messageType === "user" ? "outline" : "default"}
                         onClick={handleSave}
-                        className="px-6 bg-primary hover:bg-primary/90 text-primary-foreground shadow-md hover:shadow-lg transition-all"
+                        className="min-h-11 px-4 sm:min-h-9"
                     >
                         修改
                     </Button>
                     {messageType === "user" && (
                         <Button
+                            type="button"
                             onClick={handleSaveAndRegenerate}
-                            className="px-6 bg-primary hover:bg-primary/90 text-primary-foreground shadow-md hover:shadow-lg transition-all"
+                            className="min-h-11 px-5 sm:min-h-9"
                         >
                             修改并重新生成
                         </Button>

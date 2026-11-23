@@ -1,9 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from "@/components/ui/dialog";
 import type { AssistantListItem } from "@/data/Assistant";
+import { cn } from "@/utils/utils";
 import ButlerAvatar from "./ButlerAvatar";
 
 export interface GroupMemberPickerResult {
@@ -56,35 +64,50 @@ export default function ButlerGroupMemberPicker({ open, onOpenChange, mode, chie
         }
     };
     const row = (key: string, checked: boolean, onToggle: () => void, avatar: ReactNode, label: string) =>
-        <label key={key} className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-muted">
+        <label
+            key={key}
+            className={cn(
+                "flex cursor-pointer items-center gap-3 rounded-lg border border-transparent px-2.5 py-2 transition-colors hover:bg-muted/60",
+                checked && "border-foreground/30 bg-muted/60",
+            )}
+        >
             <Checkbox checked={checked} onCheckedChange={onToggle} disabled={busy} aria-label={label} />
             {avatar}
             <span className="min-w-0 flex-1 truncate text-sm">{label}</span>
         </label>;
     return <Dialog open={open} onOpenChange={value => { if (!busy) onOpenChange(value); }}>
-        <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-                <DialogTitle>{mode === "create" ? "发起群聊" : "邀请成员"}</DialogTitle>
-                <DialogDescription>
+        <CompactDialogContent className="sm:max-w-md">
+            <CompactDialogHeader
+                title={mode === "create" ? "发起群聊" : "邀请成员"}
+                subtitle={`已选 ${count} 位`}
+                description={mode === "create" ? "选择要拉进群的助手。群里直接发消息就行，会由合适的成员回复。" : "新成员只会看到加入之后的群消息。"}
+                closeDisabled={busy}
+            />
+            <CompactDialogBody className="space-y-3">
+                <p className="text-xs text-muted-foreground">
                     {mode === "create" ? "选择要拉进群的助手。群里直接发消息就行，会由合适的成员回复。" : "新成员只会看到加入之后的群消息。"}
-                </DialogDescription>
-            </DialogHeader>
-            {mode === "create" && <Input aria-label="群聊名称" placeholder="群聊名称（可不填）" value={name} maxLength={60}
-                disabled={busy} onChange={event => setName(event.target.value)} />}
-            <div className="max-h-72 space-y-0.5 overflow-y-auto" role="group" aria-label="选择成员">
-                {showChief && row("chief", includeChief, () => setIncludeChief(value => !value),
-                    <ButlerAvatar id={0} chief size={28} figure />, chiefName)}
-                {candidates.map(assistant => row(String(assistant.id), selected.includes(assistant.id), () => toggle(assistant.id),
-                    <ButlerAvatar id={assistant.id} size={28} figure />, assistant.name))}
-                {!showChief && !candidates.length && <p className="px-2 py-6 text-center text-sm text-muted-foreground">所有助手都已经在群里了</p>}
-            </div>
-            {error && <p role="alert" className="whitespace-pre-wrap text-sm text-destructive">{error}</p>}
-            <DialogFooter className="items-center sm:justify-between">
-                <span className="text-xs text-muted-foreground">已选 {count} 位</span>
-                <Button disabled={busy || count < minimum} onClick={() => void confirm()}>
+                </p>
+                {mode === "create" && <Input aria-label="群聊名称" placeholder="群聊名称（可不填）" value={name} maxLength={60}
+                    disabled={busy} onChange={event => setName(event.target.value)} />}
+                <div className="max-h-72 space-y-1 overflow-y-auto pr-0.5" role="group" aria-label="选择成员">
+                    {showChief && row("chief", includeChief, () => setIncludeChief(value => !value),
+                        <ButlerAvatar id={0} chief size={28} figure />, chiefName)}
+                    {candidates.map(assistant => row(String(assistant.id), selected.includes(assistant.id), () => toggle(assistant.id),
+                        <ButlerAvatar id={assistant.id} size={28} figure />, assistant.name))}
+                    {!showChief && !candidates.length && <p className="px-2 py-6 text-center text-sm text-muted-foreground">所有助手都已经在群里了</p>}
+                </div>
+                {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 whitespace-pre-wrap text-xs text-destructive">{error}</p>}
+            </CompactDialogBody>
+            <CompactDialogFooter>
+                <span className="mr-auto text-xs text-muted-foreground">已选 {count} 位</span>
+                <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={busy} onClick={() => onOpenChange(false)}>
+                    取消
+                </Button>
+                <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={busy || count < minimum} onClick={() => void confirm()}>
+                    {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                     {busy ? "请稍候…" : mode === "create" ? "创建群聊" : "邀请"}
                 </Button>
-            </DialogFooter>
-        </DialogContent>
+            </CompactDialogFooter>
+        </CompactDialogContent>
     </Dialog>;
 }

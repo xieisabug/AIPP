@@ -2,10 +2,9 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
     DialogTrigger,
 } from "@/components/ui/dialog";
 import IconButton from "../IconButton";
@@ -194,28 +193,28 @@ export function ConversationStatsDialog({
             <DialogTrigger asChild>
                 <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border title={title} />
             </DialogTrigger>
-            <DialogContent className="max-h-[85vh] flex flex-col sm:min-w-2xl sm:max-w-[50vw]">
-                <DialogHeader>
-                    <DialogTitle>{title}</DialogTitle>
-                    <DialogDescription>
-                        {isGroup ? "该群聊所有成员的执行记录与调度用量" : "该对话的详细信息和统计"}
-                    </DialogDescription>
-                </DialogHeader>
+            <CompactDialogContent className="sm:max-w-2xl">
+                <CompactDialogHeader
+                    icon={<Info className="h-4 w-4" />}
+                    title={title}
+                    subtitle={isGroup ? "群聊执行与调度用量" : "详细信息与统计"}
+                    description={isGroup ? "该群聊所有成员的执行记录与调度用量" : "该对话的详细信息和统计"}
+                />
 
-                {loading && (
-                    <div className="flex-1 flex items-center justify-center px-6">
-                        <p className="text-muted-foreground">加载统计中...</p>
-                    </div>
-                )}
+                <CompactDialogBody>
+                    {loading && (
+                        <div className="flex items-center justify-center py-10">
+                            <p className="text-sm text-muted-foreground">加载统计中...</p>
+                        </div>
+                    )}
 
-                {error && (
-                    <div className="flex-1 flex items-center justify-center px-6">
-                        <p className="text-destructive">{error}</p>
-                    </div>
-                )}
+                    {error && (
+                        <div className="flex items-center justify-center py-10">
+                            <p className="text-sm text-destructive">{error}</p>
+                        </div>
+                    )}
 
-                {stats && !loading && !error && (
-                    <div className="flex-1 overflow-y-auto px-6 pb-6">
+                    {stats && !loading && !error && (
                         <div className="space-y-6">
                             <div className="flex items-center justify-between gap-3">
                                 <div>
@@ -455,9 +454,9 @@ export function ConversationStatsDialog({
                                 </div>
                             </div>
                         </div>
-                    </div>
-                )}
-            </DialogContent>
+                    )}
+                </CompactDialogBody>
+            </CompactDialogContent>
         </Dialog>
     );
 }

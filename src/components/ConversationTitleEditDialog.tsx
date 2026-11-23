@@ -2,8 +2,17 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import { Sparkles, X } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { Button } from './ui/button';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from './ui/dialog';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
 import { getErrorMessage, isInsufficientMessagesError } from "../utils/error";
 
 interface ConversationTitleEditDialogProps {
@@ -13,6 +22,9 @@ interface ConversationTitleEditDialogProps {
     onClose: () => void;
     onSave?: (title: string) => void; // 可选的保存回调
 }
+
+const isEnterSubmit = (event: React.KeyboardEvent) =>
+    event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229;
 
 const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = ({
     isOpen,
@@ -37,7 +49,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
 
         const unsubscribe = listen("title_change", (event) => {
             const [eventConversationId, newTitle] = event.payload as [number, string];
-            
+
             // 只更新当前正在编辑的对话的标题
             if (eventConversationId === conversationId) {
                 setTitle(newTitle);
@@ -67,7 +79,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
             toast.success("标题已重新生成");
         } catch (error) {
             console.error("重新生成标题失败:", error);
-            
+
             // 处理特定的错误类型，提供更友好的提示
             if (isInsufficientMessagesError(error)) {
                 toast.error("对话内容不足，需要至少包含一条用户消息才能生成标题");
@@ -102,80 +114,69 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
         });
     }, [conversationId, title, onSave, onClose]);
 
-    if (!isOpen) return null;
-
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-aipp-slot="legacy-modal">
-            {/* 背景遮罩 */}
-            <div
-                className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                onClick={onClose}
-            />
+        <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+            <CompactDialogContent className="sm:max-w-md">
+                <CompactDialogHeader
+                    title="修改对话标题"
+                    description="编辑当前对话标题或使用 AI 重新生成"
+                />
 
-            {/* 模态框内容 */}
-            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-200 scale-100" data-aipp-slot="legacy-modal-panel">
-                {/* 标题栏 */}
-                <div className="flex items-center justify-between p-6 border-b border-border">
-                    <h2 className="text-xl font-semibold text-foreground truncate pr-4">修改对话标题</h2>
-                    <button
-                        onClick={onClose}
-                        className="p-2 hover:bg-muted rounded-lg transition-colors duration-200 flex-shrink-0"
-                    >
-                        <X className="h-5 w-5 text-muted-foreground" />
-                    </button>
-                </div>
-
-                {/* 内容区域 */}
-                <div className="p-6" data-aipp-slot="legacy-modal-body">
-                    <div className="space-y-4">
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <label className="text-sm font-medium leading-none text-foreground">
-                                    标题
-                                </label>
-                                <button
-                                    type="button"
-                                    onClick={handleRegenerateTitle}
-                                    disabled={isRegeneratingTitle}
-                                    className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 px-2 py-1"
-                                    title="重新生成标题"
-                                >
-                                    <Sparkles className={`h-4 w-4 ${isRegeneratingTitle ? 'animate-pulse' : ''}`} />
-                                </button>
-                            </div>
-                            <input
-                                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
-                                type="text"
-                                autoCapitalize="none"
-                                enterKeyHint="done"
-                                name="name"
-                                value={title}
-                                onChange={(e) => setTitle(e.target.value)}
-                                placeholder="请输入对话标题"
-                                autoFocus
-                            />
+                <CompactDialogBody className="space-y-4">
+                    <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                            <Label htmlFor="conversation-title-input">标题</Label>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={handleRegenerateTitle}
+                                disabled={isRegeneratingTitle}
+                                className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                                title="重新生成标题"
+                            >
+                                <Sparkles className={`h-3.5 w-3.5 ${isRegeneratingTitle ? 'animate-pulse' : ''}`} />
+                                {isRegeneratingTitle ? '生成中…' : 'AI 生成'}
+                            </Button>
                         </div>
+                        <Input
+                            id="conversation-title-input"
+                            type="text"
+                            autoComplete="off"
+                            enterKeyHint="done"
+                            name="name"
+                            value={title}
+                            onChange={(e) => setTitle(e.target.value)}
+                            onKeyDown={(event) => {
+                                if (!isEnterSubmit(event)) return;
+                                event.preventDefault();
+                                handleSubmit();
+                            }}
+                            placeholder="请输入对话标题"
+                            autoFocus
+                        />
                     </div>
-                </div>
+                </CompactDialogBody>
 
-                {/* 按钮区域 */}
-                <div className="flex justify-end gap-3 p-6 pt-0" data-aipp-slot="legacy-modal-actions">
+                <CompactDialogFooter>
                     <Button
+                        type="button"
                         variant="outline"
                         onClick={onClose}
-                        className="px-6"
+                        className="min-h-11 px-4 sm:min-h-9"
                     >
                         取消
                     </Button>
                     <Button
+                        type="button"
                         onClick={handleSubmit}
-                        className="px-6 bg-primary hover:bg-primary/90 text-primary-foreground shadow-md hover:shadow-lg transition-all"
+                        className="min-h-11 px-5 sm:min-h-9"
                     >
                         确认
                     </Button>
-                </div>
-            </div>
-        </div>
+                </CompactDialogFooter>
+            </CompactDialogContent>
+        </Dialog>
     );
 };
 

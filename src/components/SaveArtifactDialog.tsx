@@ -6,11 +6,10 @@ import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -162,209 +161,205 @@ export default function SaveArtifactDialog({
     }, [isOpen, form, initialDbId, initialAssistantId]);
 
     return (
-        <Dialog open={isOpen} onOpenChange={handleCancel}>
-            <DialogContent className="sm:max-w-[525px] max-h-[80vh] overflow-y-auto">
-                <DialogHeader>
-                    <DialogTitle>保存 Artifact 到合集</DialogTitle>
-                    <DialogDescription asChild>
-                        <div>
-                            <span>{choiceReference ? "收藏当前候选的快照。工程会一并保存源文件、图片和已有的构建产物。" : <>将当前的 {artifactType} artifact 保存到您的合集中，方便以后快速访问。</>}</span>
-                            <div className="mt-2">
-                                <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={handleGenerateMetadata}
-                                    disabled={isGeneratingMetadata}
-                                    className="gap-2"
-                                >
-                                    <Sparkles className={`h-4 w-4 ${isGeneratingMetadata ? "animate-pulse" : ""}`} />
-                                    {isGeneratingMetadata ? "生成中..." : "智能填写"}
-                                </Button>
-                            </div>
-                        </div>
-                    </DialogDescription>
-                </DialogHeader>
+        <Dialog open={isOpen} onOpenChange={(open) => { if (!open && !isLoading) handleCancel(); }}>
+            <CompactDialogContent className="sm:max-w-lg">
+                <CompactDialogHeader
+                    title="保存 Artifact 到合集"
+                    subtitle={artifactType}
+                    description="将当前 artifact 保存到合集中"
+                    closeDisabled={isLoading}
+                    actions={
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={handleGenerateMetadata}
+                            disabled={isGeneratingMetadata || isLoading}
+                            className="h-8 gap-1 px-2 text-xs"
+                        >
+                            <Sparkles className={`h-3.5 w-3.5 ${isGeneratingMetadata ? "animate-pulse" : ""}`} />
+                            {isGeneratingMetadata ? "生成中..." : "智能填写"}
+                        </Button>
+                    }
+                />
 
-                <Form {...form}>
-                    <form onSubmit={form.handleSubmit(handleSave)} className="space-y-6 py-4">
-                        <FormField
-                            control={form.control}
-                            name="icon"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">
-                                        图标
-                                    </FormLabel>
+                <CompactDialogBody className="space-y-4">
+                    <p className="text-xs text-muted-foreground">
+                        {choiceReference
+                            ? "收藏当前候选的快照。工程会一并保存源文件、图片和已有的构建产物。"
+                            : <>将当前的 {artifactType} artifact 保存到您的合集中，方便以后快速访问。</>}
+                    </p>
+
+                    <Form {...form}>
+                        <form onSubmit={form.handleSubmit(handleSave)} className="space-y-4">
+                            <FormField
+                                control={form.control}
+                                name="icon"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>图标</FormLabel>
+                                        <FormControl>
+                                            <EmojiPicker
+                                                className="focus:ring-ring/20 focus:border-ring"
+                                                value={field.value}
+                                                onChange={field.onChange}
+                                            />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="name"
+                                rules={{ required: "请输入 artifact 名称" }}
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>名称 *</FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                className="focus:ring-ring/20 focus:border-ring"
+                                                placeholder="输入 artifact 名称"
+                                                autoFocus
+                                                {...field}
+                                            />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="description"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>描述</FormLabel>
+                                        <FormControl>
+                                            <Textarea
+                                                className="resize-none focus:ring-ring/20 focus:border-ring"
+                                                placeholder="描述这个 artifact 的用途或特点..."
+                                                rows={3}
+                                                {...field}
+                                            />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="tags"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>标签</FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                className="focus:ring-ring/20 focus:border-ring"
+                                                placeholder="用逗号分隔多个标签，如: 图表,数据,可视化"
+                                                {...field}
+                                            />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="db_id"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel className="flex items-center gap-1.5">
+                                            <Database className="h-3.5 w-3.5 text-muted-foreground" />
+                                            数据库标识
+                                        </FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                className="focus:ring-ring/20 focus:border-ring"
+                                                placeholder="例如: my-todo-app（留空则不启用数据库）"
+                                                {...field}
+                                            />
+                                        </FormControl>
+                                        <p className="text-xs text-muted-foreground">
+                                            为 artifact 分配独立的数据库，只能包含字母、数字、下划线和连字符
+                                        </p>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="assistant_id"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel className="flex items-center gap-1.5">
+                                            <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+                                            关联助手
+                                        </FormLabel>
+                                        <Select onValueChange={field.onChange} value={field.value}>
+                                            <FormControl>
+                                                <SelectTrigger className="w-full focus:ring-ring/20 focus:border-ring">
+                                                    <SelectValue placeholder="选择一个助手（可选）" />
+                                                </SelectTrigger>
+                                            </FormControl>
+                                            <SelectContent>
+                                                <SelectItem value="none">不关联助手</SelectItem>
+                                                {assistants.map((assistant) => (
+                                                    <SelectItem key={assistant.id} value={String(assistant.id)}>
+                                                        <span className="flex items-center gap-2">
+                                                            <span>{assistant.icon}</span>
+                                                            <span>{assistant.name}</span>
+                                                        </span>
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                        <p className="text-xs text-muted-foreground">
+                                            关联后 artifact 可以调用此助手进行 AI 对话
+                                        </p>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormItem className="space-y-1.5">
+                                <FormLabel>类型</FormLabel>
+                                <FormControl>
+                                    <div className="rounded-md bg-muted/50 px-3 py-2">
+                                        <Badge variant="secondary" className="text-xs">
+                                            {artifactType}
+                                        </Badge>
+                                    </div>
+                                </FormControl>
+                            </FormItem>
+
+                            {!choiceReference && (
+                                <FormItem className="space-y-1.5">
+                                    <FormLabel>代码预览</FormLabel>
                                     <FormControl>
-                                        <EmojiPicker
-                                            className="focus:ring-ring/20 focus:border-ring"
-                                            value={field.value}
-                                            onChange={field.onChange}
-                                        />
+                                        <pre className="max-h-32 overflow-y-auto rounded-md border border-border bg-muted/40 p-3 font-mono text-xs">
+                                            {code}
+                                        </pre>
                                     </FormControl>
-                                    <FormMessage />
                                 </FormItem>
                             )}
-                        />
+                        </form>
+                    </Form>
+                </CompactDialogBody>
 
-                        <FormField
-                            control={form.control}
-                            name="name"
-                            rules={{ required: "请输入 artifact 名称" }}
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">
-                                        名称 *
-                                    </FormLabel>
-                                    <FormControl>
-                                        <Input
-                                            className="focus:ring-ring/20 focus:border-ring"
-                                            placeholder="输入 artifact 名称"
-                                            autoFocus
-                                            {...field}
-                                        />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-
-                        <FormField
-                            control={form.control}
-                            name="description"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">
-                                        描述
-                                    </FormLabel>
-                                    <FormControl>
-                                        <Textarea
-                                            className="focus:ring-ring/20 focus:border-ring"
-                                            placeholder="描述这个 artifact 的用途或特点..."
-                                            rows={3}
-                                            {...field}
-                                        />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-
-                        <FormField
-                            control={form.control}
-                            name="tags"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">
-                                        标签
-                                    </FormLabel>
-                                    <FormControl>
-                                        <Input
-                                            className="focus:ring-ring/20 focus:border-ring"
-                                            placeholder="用逗号分隔多个标签，如: 图表,数据,可视化"
-                                            {...field}
-                                        />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-
-                        <FormField
-                            control={form.control}
-                            name="db_id"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center gap-2 font-semibold text-sm text-foreground">
-                                        <Database className="h-4 w-4" />
-                                        数据库标识
-                                    </FormLabel>
-                                    <FormControl>
-                                        <Input
-                                            className="focus:ring-ring/20 focus:border-ring"
-                                            placeholder="例如: my-todo-app（留空则不启用数据库）"
-                                            {...field}
-                                        />
-                                    </FormControl>
-                                    <p className="text-xs text-muted-foreground">
-                                        为 artifact 分配独立的数据库，只能包含字母、数字、下划线和连字符
-                                    </p>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-
-                        <FormField
-                            control={form.control}
-                            name="assistant_id"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center gap-2 font-semibold text-sm text-foreground">
-                                        <Bot className="h-4 w-4" />
-                                        关联助手
-                                    </FormLabel>
-                                <Select onValueChange={field.onChange} value={field.value}>
-                                    <FormControl>
-                                        <SelectTrigger className="focus:ring-ring/20 focus:border-ring">
-                                            <SelectValue placeholder="选择一个助手（可选）" />
-                                        </SelectTrigger>
-                                    </FormControl>
-                                    <SelectContent>
-                                        <SelectItem value="none">不关联助手</SelectItem>
-                                        {assistants.map((assistant) => (
-                                            <SelectItem key={assistant.id} value={String(assistant.id)}>
-                                                <span className="flex items-center gap-2">
-                                                    <span>{assistant.icon}</span>
-                                                        <span>{assistant.name}</span>
-                                                    </span>
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
-                                    <p className="text-xs text-muted-foreground">
-                                        关联后 artifact 可以调用此助手进行 AI 对话
-                                    </p>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-
-                        <FormItem className="space-y-3">
-                            <FormLabel className="flex items-center font-semibold text-sm text-foreground">
-                                类型
-                            </FormLabel>
-                            <FormControl>
-                                <div className="px-3 py-2 bg-muted rounded-md">
-                                    <Badge variant="secondary" className="text-sm">
-                                        {artifactType}
-                                    </Badge>
-                                </div>
-                            </FormControl>
-                        </FormItem>
-
-                        {!choiceReference && <FormItem className="space-y-3">
-                            <FormLabel className="flex items-center font-semibold text-sm text-foreground">
-                                代码预览
-                            </FormLabel>
-                            <FormControl>
-                                <pre className="bg-muted p-3 rounded-md text-xs max-h-32 overflow-y-auto border">
-                                    {code}
-                                </pre>
-                            </FormControl>
-                        </FormItem>}
-                    </form>
-                </Form>
-
-                <DialogFooter>
-                    <Button variant="outline" onClick={handleCancel}>
+                <CompactDialogFooter>
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={isLoading} onClick={handleCancel}>
                         取消
                     </Button>
-                    <Button onClick={form.handleSubmit(handleSave)} disabled={isLoading}>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={form.handleSubmit(handleSave)} disabled={isLoading}>
                         {isLoading ? "保存中..." : "保存"}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 }

@@ -19,11 +19,10 @@ import {
 } from "../ui/collapsible";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
@@ -1040,29 +1039,37 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             />
             {/* 手动输入 Token 对话框 */}
             <Dialog open={manualTokenDialogOpen} onOpenChange={setManualTokenDialogOpen}>
-                <DialogContent className="sm:max-w-md">
-                    <DialogHeader>
-                        <DialogTitle>输入 OAuth Token</DialogTitle>
-                        <DialogDescription>
+                <CompactDialogContent className="sm:max-w-md">
+                    <CompactDialogHeader
+                        title="输入 OAuth Token"
+                        description="请输入 GitHub Copilot 的 OAuth Token (ghu_ 或 gho_ 开头)"
+                    />
+                    <CompactDialogBody className="space-y-3">
+                        <p className="text-xs text-muted-foreground">
                             请输入 GitHub Copilot 的 OAuth Token (ghu_ 或 gho_ 开头)
-                        </DialogDescription>
-                    </DialogHeader>
-                    <div className="flex flex-col gap-4 py-4">
-                        <Input autoComplete="off" enterKeyHint="done"
+                        </p>
+                        <Input
+                            autoFocus
+                            autoComplete="off"
+                            enterKeyHint="done"
                             placeholder="ghu_xxxxxxxxx 或 gho_xxxxxxxxx..."
                             value={manualToken}
                             onChange={(e) => setManualToken(e.target.value)}
                             className="font-mono"
                         />
-                    </div>
-                    <DialogFooter>
+                    </CompactDialogBody>
+                    <CompactDialogFooter>
                         <Button
+                            type="button"
                             variant="outline"
+                            className="min-h-11 px-4 sm:min-h-9"
                             onClick={() => setManualTokenDialogOpen(false)}
                         >
                             取消
                         </Button>
                         <Button
+                            type="button"
+                            className="min-h-11 px-5 sm:min-h-9"
                             onClick={async () => {
                                 await copilot.manualTokenAuth(manualToken);
                                 setManualTokenDialogOpen(false);
@@ -1071,8 +1078,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         >
                             保存
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
+                    </CompactDialogFooter>
+                </CompactDialogContent>
             </Dialog>
             <Dialog
                 open={scanTokenDialogOpen}
@@ -1084,52 +1091,62 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     }
                 }}
             >
-                <DialogContent className="sm:max-w-2xl">
-                    <DialogHeader>
-                        <DialogTitle>选择扫描到的 Copilot 授权</DialogTitle>
-                        <DialogDescription>
+                <CompactDialogContent className="sm:max-w-2xl">
+                    <CompactDialogHeader
+                        title="选择扫描到的 Copilot 授权"
+                        subtitle={scanCandidates.length > 0 ? `${scanCandidates.length} 个候选` : undefined}
+                        description="选择当前机器上扫描到的 Copilot 授权候选"
+                    />
+                    <CompactDialogBody className="space-y-3">
+                        <p className="text-xs text-muted-foreground">
                             下面列出了当前机器上扫描到的授权候选。仅展示前 5 位，后续内容已脱敏。请选择你想导入的 Token。
-                        </DialogDescription>
-                    </DialogHeader>
-                    <div className="py-4">
+                        </p>
                         <RadioGroup
                             value={selectedScanCandidateId}
                             onValueChange={setSelectedScanCandidateId}
-                            className="space-y-2"
+                            className="space-y-1.5"
                         >
                             {scanCandidates.map((candidate) => (
                                 <label
                                     key={candidate.id}
-                                    className="flex items-start gap-3 rounded-md border border-border px-3 py-3 cursor-pointer"
+                                    className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2.5 transition-colors hover:bg-muted/60 ${
+                                        selectedScanCandidateId === candidate.id
+                                            ? "border-foreground/40 bg-muted/60"
+                                            : "border-border"
+                                    }`}
                                 >
                                     <RadioGroupItem
                                         value={candidate.id}
                                         id={candidate.id}
-                                        className="mt-1"
+                                        className="mt-0.5"
                                     />
-                                    <div className="space-y-1 text-sm min-w-0">
-                                        <div className="font-medium font-mono">
+                                    <div className="min-w-0 space-y-0.5 text-sm">
+                                        <div className="font-mono font-medium">
                                             {candidate.maskedToken}
                                         </div>
                                         <div className="text-xs text-muted-foreground">
                                             来源：{candidate.source}
                                         </div>
-                                        <div className="text-xs text-muted-foreground break-all">
+                                        <div className="break-all text-xs text-muted-foreground">
                                             位置：{candidate.location}
                                         </div>
                                     </div>
                                 </label>
                             ))}
                         </RadioGroup>
-                    </div>
-                    <DialogFooter>
+                    </CompactDialogBody>
+                    <CompactDialogFooter>
                         <Button
+                            type="button"
                             variant="outline"
+                            className="min-h-11 px-4 sm:min-h-9"
                             onClick={() => setScanTokenDialogOpen(false)}
                         >
                             取消
                         </Button>
                         <Button
+                            type="button"
+                            className="min-h-11 px-5 sm:min-h-9"
                             onClick={async () => {
                                 if (!selectedScanCandidate) {
                                     toast.error("请先选择一个授权候选");
@@ -1143,45 +1160,53 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         >
                             导入所选 Token
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
+                    </CompactDialogFooter>
+                </CompactDialogContent>
             </Dialog>
             {/* 改名对话框 */}
             <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>
-                <DialogContent className="sm:max-w-md">
-                    <DialogHeader>
-                        <DialogTitle>重命名提供商</DialogTitle>
-                        <DialogDescription>
+                <CompactDialogContent className="sm:max-w-md">
+                    <CompactDialogHeader
+                        title="重命名提供商"
+                        description="请输入新的提供商名称"
+                    />
+                    <CompactDialogBody className="space-y-3">
+                        <p className="text-xs text-muted-foreground">
                             请输入新的提供商名称
-                        </DialogDescription>
-                    </DialogHeader>
-                    <div className="flex flex-col gap-4 py-4">
-                        <Input autoComplete="off" enterKeyHint="done"
+                        </p>
+                        <Input
+                            autoFocus
+                            autoComplete="off"
+                            enterKeyHint="done"
                             placeholder="请输入提供商名称"
                             value={newProviderName}
                             onChange={(e) => setNewProviderName(e.target.value)}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter' && newProviderName.trim()) {
+                                if (e.key === 'Enter' && !e.nativeEvent.isComposing && newProviderName.trim()) {
                                     handleConfirmRename();
                                 }
                             }}
                         />
-                    </div>
-                    <DialogFooter>
+                    </CompactDialogBody>
+                    <CompactDialogFooter>
                         <Button
+                            type="button"
                             variant="outline"
+                            className="min-h-11 px-4 sm:min-h-9"
                             onClick={() => setRenameDialogOpen(false)}
                         >
                             取消
                         </Button>
                         <Button
+                            type="button"
+                            className="min-h-11 px-5 sm:min-h-9"
                             onClick={handleConfirmRename}
                             disabled={!newProviderName.trim()}
                         >
                             确定
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
+                    </CompactDialogFooter>
+                </CompactDialogContent>
             </Dialog>
         </>
     );

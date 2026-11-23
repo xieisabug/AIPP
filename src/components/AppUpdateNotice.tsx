@@ -3,7 +3,12 @@ import { ArrowUpFromLine, Download, Globe } from "lucide-react";
 import type { AppUpdateStatus } from "@/data/Update";
 import { checkAppUpdate, installAppUpdate, useAppUpdater } from "@/hooks/useAppUpdater";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+} from "@/components/ui/dialog";
 
 const phaseLabel: Record<AppUpdateStatus["phase"], string> = {
     idle: "", checking: "正在检查更新…", up_to_date: "已是最新版本",
@@ -62,10 +67,12 @@ export function AppUpdateNotice({ rounded = false }: { rounded?: boolean }) {
             <span aria-hidden className="absolute right-1 top-1 size-1.5 rounded-full bg-primary" />
         </Button>
         <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent aria-describedby={undefined}>
-                <DialogHeader><DialogTitle>应用更新</DialogTitle></DialogHeader>
-                <AppUpdateDetails status={status} />
-            </DialogContent>
+            <CompactDialogContent className="sm:max-w-md" aria-describedby={undefined}>
+                <CompactDialogHeader title="应用更新" subtitle={version ? `v${version}` : undefined} />
+                <CompactDialogBody>
+                    <AppUpdateDetails status={status} />
+                </CompactDialogBody>
+            </CompactDialogContent>
         </Dialog>
     </>;
 }

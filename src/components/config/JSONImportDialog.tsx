@@ -2,7 +2,14 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Button } from '../ui/button';
 import { Textarea } from '../ui/textarea';
 import { Label } from '../ui/label';
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from '../ui/dialog';
+import { Input } from '../ui/input';
 import { toast } from 'sonner';
 import { MCPServerRequest } from '../../data/MCP';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
@@ -220,30 +227,81 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
     }, [onClose]);
 
     return (
-        <Dialog open={isOpen} onOpenChange={(open) => !open && handleCancel()}>
-            <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
-                <DialogHeader>
-                    <DialogTitle>JSON导入MCP服务器配置</DialogTitle>
-                </DialogHeader>
+        <Dialog open={isOpen} onOpenChange={(open) => !open && !submitting && handleCancel()}>
+            <CompactDialogContent className="sm:max-w-2xl">
+                <CompactDialogHeader
+                    title="JSON 导入 MCP 服务器配置"
+                    subtitle={reviewing ? '确认配置' : '粘贴 JSON'}
+                    description="粘贴标准 MCP JSON 配置并预览导入"
+                    closeDisabled={submitting}
+                />
 
-                {reviewing ? <div className="min-h-0 overflow-y-auto space-y-4 py-4">
-                    {catalog && <p>来源：AIPP 应用目录 · {catalog}。打开详情可查看服务地址和登录要求，再决定是否连接。</p>}
-                    {preview.map((config, i) => <section key={i} className="space-y-2 rounded-md border p-3 text-sm">
-                        <p>来源：导入的自定义 MCP · {config.transport_type}</p>
-                        <label className="block">连接名称<input className="block w-full rounded border p-2" value={config.name} onChange={e => update(i, 'name', e.target.value)} /></label>
-                        <label className="block">{config.transport_type === 'stdio' ? '本地命令（启用后可执行）' : '服务地址'}
-                            <Textarea value={config.transport_type === 'stdio' ? config.command ?? '' : config.url ?? ''} onChange={e => update(i, config.transport_type === 'stdio' ? 'command' : 'url', e.target.value)} />
-                        </label>
-                        <p>认证：{config.headers || config.environment_variables ? '配置含请求头或环境变量，请核对来源' : '未导入凭据，如服务需要请在设置中填写'}。</p>
-                    </section>)}
-                    {preview.length > 0 && <p className="text-sm">导入后保持停用。保存配置不会启动程序、登录或授权工具。</p>}
-                    <Button variant="outline" disabled={submitting} onClick={() => {setCatalog('');setPreview([]);}}>返回 JSON</Button>
-                </div> : <div className="min-h-0 overflow-y-auto space-y-4 py-4">
-                    <div className="space-y-2">
-                        <Label htmlFor="json-content">JSON配置</Label>
-                        <Textarea
-                            id="json-content"
-                            placeholder={`标准MCP配置格式：
+                <CompactDialogBody className="space-y-4">
+                    {reviewing ? (
+                        <div className="space-y-4">
+                            {catalog && (
+                                <p className="rounded-lg bg-muted/50 px-3 py-2 text-sm">
+                                    来源：AIPP 应用目录 · {catalog}。打开详情可查看服务地址和登录要求，再决定是否连接。
+                                </p>
+                            )}
+                            {preview.map((config, i) => (
+                                <section key={i} className="space-y-3 rounded-lg border border-border p-3 text-sm">
+                                    <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                                        <span>来源：导入的自定义 MCP</span>
+                                        <span className="rounded bg-muted px-1.5 py-0.5 font-mono">{config.transport_type}</span>
+                                    </div>
+                                    <label className="block space-y-1.5">
+                                        <span className="text-sm font-medium">连接名称</span>
+                                        <Input value={config.name} onChange={e => update(i, 'name', e.target.value)} />
+                                    </label>
+                                    <label className="block space-y-1.5">
+                                        <span className="text-sm font-medium">{config.transport_type === 'stdio' ? '本地命令（启用后可执行）' : '服务地址'}</span>
+                                        <Textarea
+                                            rows={2}
+                                            className="font-mono text-xs"
+                                            value={config.transport_type === 'stdio' ? config.command ?? '' : config.url ?? ''}
+                                            onChange={e => update(i, config.transport_type === 'stdio' ? 'command' : 'url', e.target.value)}
+                                        />
+                                    </label>
+                                    <p className="text-xs text-muted-foreground">
+                                        认证：{config.headers || config.environment_variables ? '配置含请求头或环境变量，请核对来源' : '未导入凭据，如服务需要请在设置中填写'}。
+                                    </p>
+                                </section>
+                            ))}
+                            {preview.length > 0 && (
+                                <p className="text-xs text-muted-foreground">导入后保持停用。保存配置不会启动程序、登录或授权工具。</p>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="json-content">JSON配置</Label>
+                                <div className="flex items-center gap-1.5">
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-xs"
+                                        onClick={loadClipboardContent}
+                                        disabled={isLoading}
+                                    >
+                                        {isLoading ? '读取中...' : '从剪切板读取'}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-xs"
+                                        onClick={() => setJsonText('')}
+                                        disabled={!jsonText}
+                                    >
+                                        清空
+                                    </Button>
+                                </div>
+                            </div>
+                            <Textarea
+                                id="json-content"
+                                placeholder={`标准MCP配置格式：
 {
   "mcpServers": {
     "context7": {
@@ -263,47 +321,46 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
   "command": "npx server-command",
   "description": "My MCP server"
 }`}
-                            rows={15}
-                            value={jsonText}
-                            onChange={(e) => setJsonText(e.target.value)}
-                            className="font-mono text-sm"
-                        />
-                    </div>
+                                rows={14}
+                                value={jsonText}
+                                onChange={(e) => setJsonText(e.target.value)}
+                                className="font-mono text-xs"
+                            />
+                        </div>
+                    )}
+                </CompactDialogBody>
 
-                    <div className="flex gap-2">
+                <CompactDialogFooter>
+                    {reviewing && (
                         <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={loadClipboardContent}
-                            disabled={isLoading}
+                            type="button"
+                            variant="ghost"
+                            disabled={submitting}
+                            className="mr-auto min-h-11 px-3 sm:min-h-9"
+                            onClick={() => { setCatalog(''); setPreview([]); }}
                         >
-                            {isLoading ? '读取中...' : '从剪切板读取'}
+                            返回 JSON
                         </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setJsonText('')}
-                        >
-                            清空
-                        </Button>
-                    </div>
-                </div>}
-
-                <DialogFooter className="shrink-0">
+                    )}
                     <Button
+                        type="button"
                         variant="outline"
                         onClick={handleCancel}
+                        disabled={submitting}
+                        className="min-h-11 px-4 sm:min-h-9"
                     >
                         取消
                     </Button>
                     <Button
+                        type="button"
                         onClick={handleImport}
                         disabled={submitting || !jsonText.trim()}
+                        className="min-h-11 px-5 sm:min-h-9"
                     >
                         {catalog ? '查看目录详情' : reviewing ? '保存为停用连接' : '预览配置'}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

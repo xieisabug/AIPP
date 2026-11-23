@@ -812,17 +812,19 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
     const leaveDialog = (
         <>{itemActions.dialogs}<AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
-            <AlertDialogContent data-aipp-slot="assistant-leave-dialog">
-                <AlertDialogHeader>
-                    <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
-                    <AlertDialogDescription>
+            <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md" data-aipp-slot="assistant-leave-dialog">
+                <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                    <AlertDialogTitle className="text-base font-semibold">有未保存的助手配置</AlertDialogTitle>
+                </AlertDialogHeader>
+                <div className="px-4 py-4 sm:px-5">
+                    <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
                         离开当前页或切换助手前，请选择保存或放弃更改。未保存时界面上的模型选择不会写入实际请求。
                     </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                    <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
-                    <Button type="button" variant="secondary" disabled={isSaving} onClick={handleLeaveDiscard}>放弃</Button>
-                    <Button type="button" disabled={isSaving} onClick={() => { void handleLeaveSave(); }}>{isSaving ? "保存中…" : "保存"}</Button>
+                </div>
+                <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={() => setLeavePrompt(null)}>取消</Button>
+                    <Button type="button" variant="secondary" className="min-h-11 px-4 sm:min-h-9" disabled={isSaving} onClick={handleLeaveDiscard}>放弃</Button>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={isSaving} onClick={() => { void handleLeaveSave(); }}>{isSaving ? "保存中…" : "保存"}</Button>
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog></>

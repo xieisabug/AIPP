@@ -23,11 +23,6 @@ const darkColors = [
 
 const accessorySlots = [["eyes", "脸部"], ["head", "头部"]] as const;
 
-/** 新增与编辑助手对话框共用的固定尺寸：高度固定，切换页面或内容多少都不改变大小。 */
-export const PROFILE_DIALOG_CLASS = "flex h-[min(820px,90vh)] flex-col overflow-hidden sm:max-w-[760px]";
-/** 底部操作栏：贴在对话框底部，不随表单滚动。 */
-export const PROFILE_FOOTER_CLASS = "-mx-6 shrink-0 border-t border-border px-6 pt-4";
-
 function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
     const artwork = {
         mustache: <MustacheArtwork />, bandage: <BandageArtwork />, eyepatch: <><EyepatchStrap /><EyepatchArtwork /></>,

@@ -6,11 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from "@/components/ui/dialog";
 import {
     ContextMenu,
@@ -269,22 +268,25 @@ export default function ArtifactCollectionsWindow() {
             />
 
             <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-                <DialogContent>
-                    <DialogHeader>
-                        <DialogTitle>确认删除</DialogTitle>
-                        <DialogDescription>
-                            确定要删除 "{deletingArtifact?.name}" 吗？此操作无法撤销。
-                        </DialogDescription>
-                    </DialogHeader>
-                    <DialogFooter>
-                        <Button variant="outline" onClick={() => setShowDeleteDialog(false)}>
+                <CompactDialogContent className="sm:max-w-md">
+                    <CompactDialogHeader
+                        title="确认删除"
+                        description="此操作无法撤销"
+                    />
+                    <CompactDialogBody>
+                        <p className="text-sm text-muted-foreground">
+                            确定要删除 &quot;{deletingArtifact?.name}&quot; 吗？此操作无法撤销。
+                        </p>
+                    </CompactDialogBody>
+                    <CompactDialogFooter>
+                        <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={() => setShowDeleteDialog(false)}>
                             取消
                         </Button>
-                        <Button variant="destructive" onClick={confirmDelete}>
+                        <Button type="button" variant="destructive" className="min-h-11 px-5 sm:min-h-9" onClick={confirmDelete}>
                             删除
                         </Button>
-                    </DialogFooter>
-                </DialogContent>
+                    </CompactDialogFooter>
+                </CompactDialogContent>
             </Dialog>
         </div>
     );

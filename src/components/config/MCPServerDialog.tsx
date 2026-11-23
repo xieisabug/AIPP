@@ -5,7 +5,13 @@ import { Switch } from '../ui/switch';
 import { Textarea } from '../ui/textarea';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from '../ui/dialog';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '../ui/accordion';
 import { toast } from 'sonner';
 import { MCPServer, MCPServerRequest, MCP_TRANSPORT_TYPES } from '../../data/MCP';
@@ -284,16 +290,26 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
     }, [onClose]);
 
     return (
-        <Dialog open={isOpen} onOpenChange={(open) => !open && handleCancel()}>
-            <DialogContent className="max-w-3xl h-[85vh] flex flex-col">
-                {fieldError && <p role="alert" className="text-destructive text-sm">{fieldError.field}: {fieldError.message}</p>}
-                <DialogHeader>
-                    <DialogTitle>
-                        {editingServer ? '编辑MCP服务器' : '新增MCP服务器'}
-                    </DialogTitle>
-                </DialogHeader>
-                {readOnly && <p role="status">此工具依赖桌面执行能力，移动端只读保留原配置。</p>}
-                <fieldset disabled={readOnly} className="space-y-6 py-4 overflow-y-auto pr-1 flex-1 min-h-0">
+        <Dialog open={isOpen} onOpenChange={(open) => !open && !isSubmitting && handleCancel()}>
+            <CompactDialogContent className="h-[min(760px,88dvh)] sm:max-w-3xl">
+                <CompactDialogHeader
+                    title={editingServer ? '编辑 MCP 服务器' : '新增 MCP 服务器'}
+                    subtitle={editingServer?.name}
+                    description="配置 MCP 服务器连接参数与高级选项"
+                    closeDisabled={isSubmitting}
+                />
+                <CompactDialogBody className="flex flex-col gap-4">
+                    {fieldError && (
+                        <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                            {fieldError.field}: {fieldError.message}
+                        </p>
+                    )}
+                    {readOnly && (
+                        <p role="status" className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                            此工具依赖桌面执行能力，移动端只读保留原配置。
+                        </p>
+                    )}
+                    <fieldset disabled={readOnly} className="space-y-5">
                     {/* 基本信息 */}
                     <div className="space-y-4">
                         <div className="space-y-2">
@@ -500,26 +516,31 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                     </Accordion>
                 </fieldset>
                 {usesVault && vaultTarget && (
-                    <p className="text-xs text-muted-foreground" data-aipp-slot="mcp-vault-confirm-hint">
+                    <p className="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground" data-aipp-slot="mcp-vault-confirm-hint">
                         保存后，引用的保险箱凭据将被确认用于 {vaultTarget}
                     </p>
                 )}
-                <DialogFooter className="flex-shrink-0">
+                </CompactDialogBody>
+                <CompactDialogFooter>
                     <Button
+                        type="button"
                         variant="outline"
                         onClick={handleCancel}
                         disabled={isSubmitting}
+                        className="min-h-11 px-4 sm:min-h-9"
                     >
                         取消
                     </Button>
                     <Button
+                        type="button"
                         onClick={handleSubmit}
                         disabled={isSubmitting || readOnly}
+                        className="min-h-11 px-5 sm:min-h-9"
                     >
                         {isSubmitting ? '保存中...' : '确定'}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

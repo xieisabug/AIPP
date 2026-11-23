@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+} from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { formatUsageDollars } from "./formatUsageDollars";
 import IconButton from "../IconButton";
@@ -225,12 +230,12 @@ export function MessageTokenStatsDialog({
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="max-w-sm" aria-describedby={undefined}>
-                <DialogHeader>
-                    <DialogTitle>消息信息</DialogTitle>
-                </DialogHeader>
-                <MessageTokenStatsBody stats={stats} loading={loading} error={error} />
-            </DialogContent>
+            <CompactDialogContent className="sm:max-w-sm" aria-describedby={undefined}>
+                <CompactDialogHeader icon={<Info className="h-4 w-4" />} title="消息信息" />
+                <CompactDialogBody>
+                    <MessageTokenStatsBody stats={stats} loading={loading} error={error} />
+                </CompactDialogBody>
+            </CompactDialogContent>
         </Dialog>
     );
 }

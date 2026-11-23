@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Keyboard } from "lucide-react";
@@ -146,29 +145,33 @@ export const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
     const displayKeys = Array.from(pressedKeys).map(formatKey).join(" + ");
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-[425px]">
-                <DialogHeader>
-                    <DialogTitle>录入快捷键</DialogTitle>
-                    <DialogDescription>在窗口内按下你想设置的快捷键组合，然后点击保存</DialogDescription>
-                </DialogHeader>
+        <Dialog open={open} onOpenChange={(next) => { if (!next) handleCancel(); else onOpenChange(next); }}>
+            <CompactDialogContent className="sm:max-w-md">
+                <CompactDialogHeader
+                    icon={<Keyboard className="h-4 w-4" />}
+                    title="录入快捷键"
+                    description="在窗口内按下你想设置的快捷键组合，然后点击保存"
+                />
 
-                <div className="py-6">
-                    <div className="flex flex-col items-center gap-4">
+                <CompactDialogBody className="space-y-4">
+                    <p className="text-xs text-muted-foreground">
+                        在窗口内按下你想设置的快捷键组合，然后点击保存。
+                    </p>
+                    <div className="flex flex-col items-center gap-3">
                         {/* 显示区域 */}
-                        <div className="w-full min-h-[100px] border-2 border-dashed rounded-lg flex items-center justify-center bg-muted/50">
+                        <div className="flex min-h-[104px] w-full items-center justify-center rounded-lg border-2 border-dashed border-border bg-muted/40">
                             {recording ? (
-                                <div className="flex flex-col items-center gap-2 text-center px-4">
-                                    <Keyboard className="h-8 w-8 text-muted-foreground animate-pulse" />
-                                    <p className="text-sm text-muted-foreground">当前捕获：{recordedShortcut || "未捕获"}</p>
+                                <div className="flex flex-col items-center gap-1.5 px-4 text-center">
+                                    <Keyboard className="h-7 w-7 animate-pulse text-muted-foreground" />
+                                    <p className="text-sm font-medium">当前捕获：{recordedShortcut || "未捕获"}</p>
                                     <p className="text-xs text-muted-foreground">按下中：{displayKeys || "无"}</p>
                                     <p className="text-xs text-muted-foreground">提示：请按下 修饰键 + 任意键，然后松开以确认本次组合</p>
                                 </div>
                             ) : (
-                                <div className="flex flex-col items-center gap-2">
-                                    <Keyboard className="h-8 w-8 text-muted-foreground" />
+                                <div className="flex flex-col items-center gap-1.5">
+                                    <Keyboard className="h-7 w-7 text-muted-foreground" />
                                     {recordedShortcut ? (
-                                        <p className="text-lg font-medium">
+                                        <p className="font-mono text-base font-semibold">
                                             {recordedShortcut}
                                         </p>
                                     ) : (
@@ -179,23 +182,23 @@ export const ShortcutRecorder: React.FC<ShortcutRecorderProps> = ({
                         </div>
 
                         {/* 提示信息 */}
-                        <div className="w-full text-xs text-muted-foreground space-y-1">
+                        <div className="w-full space-y-1 text-xs text-muted-foreground">
                             <p>• 支持的修饰键：Alt/Option、Ctrl、Shift、Cmd</p>
                             <p>• 快捷键格式：修饰键 + 任意键（如 Ctrl+Shift+I 或 Alt+Space）</p>
                             <p>• macOS 推荐使用 Option+Space，Windows 推荐使用 Alt+Space（若被系统占用，请选择其他组合）</p>
                         </div>
                     </div>
-                </div>
+                </CompactDialogBody>
 
-                <DialogFooter>
-                    <Button variant="outline" onClick={handleCancel}>
+                <CompactDialogFooter>
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={handleCancel}>
                         取消
                     </Button>
-                    <Button onClick={handleSave} disabled={!recordedShortcut}>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={handleSave} disabled={!recordedShortcut}>
                         保存
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

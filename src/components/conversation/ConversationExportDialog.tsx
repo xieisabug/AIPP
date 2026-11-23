@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
     DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -153,92 +152,95 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                     />
                 </DialogTrigger>
             ) : null}
-            <DialogContent className="max-w-md">
-                <DialogHeader>
-                    <DialogTitle>导出对话</DialogTitle>
-                    <DialogDescription>
-                        选择要包含的内容并选择导出格式
-                    </DialogDescription>
-                </DialogHeader>
+            <CompactDialogContent className="sm:max-w-md">
+                <CompactDialogHeader
+                    icon={<Download className="h-4 w-4" />}
+                    title="导出对话"
+                    subtitle="选择内容与格式"
+                    description="选择要包含的内容并选择导出格式"
+                    closeDisabled={isExporting}
+                />
 
-                <div className="space-y-4 py-4">
+                <CompactDialogBody className="space-y-4">
                     {/* 导出选项 */}
-                    <div className="space-y-3">
-                        <h4 className="text-sm font-medium">导出选项</h4>
+                    <div className="space-y-2.5">
+                        <h4 className="text-xs font-medium text-muted-foreground">导出选项</h4>
 
-                        <div className="flex items-center space-x-2">
-                            <Checkbox
-                                id="include-system"
-                                checked={options.includeSystemPrompt}
-                                onCheckedChange={(checked) =>
-                                    updateOption("includeSystemPrompt", checked as boolean)
-                                }
-                                disabled={loading || isExporting}
-                            />
-                            <Label
-                                htmlFor="include-system"
-                                className="text-sm cursor-pointer"
-                            >
-                                包含系统提示词
-                            </Label>
-                        </div>
+                        <div className="space-y-2 rounded-lg border border-border p-3">
+                            <div className="flex items-center space-x-2">
+                                <Checkbox
+                                    id="include-system"
+                                    checked={options.includeSystemPrompt}
+                                    onCheckedChange={(checked) =>
+                                        updateOption("includeSystemPrompt", checked as boolean)
+                                    }
+                                    disabled={loading || isExporting}
+                                />
+                                <Label
+                                    htmlFor="include-system"
+                                    className="cursor-pointer text-sm font-normal"
+                                >
+                                    包含系统提示词
+                                </Label>
+                            </div>
 
-                        <div className="flex items-center space-x-2">
-                            <Checkbox
-                                id="include-reasoning"
-                                checked={options.includeReasoning}
-                                onCheckedChange={(checked) =>
-                                    updateOption("includeReasoning", checked as boolean)
-                                }
-                                disabled={loading || isExporting}
-                            />
-                            <Label
-                                htmlFor="include-reasoning"
-                                className="text-sm cursor-pointer"
-                            >
-                                包含推理过程
-                            </Label>
-                        </div>
+                            <div className="flex items-center space-x-2">
+                                <Checkbox
+                                    id="include-reasoning"
+                                    checked={options.includeReasoning}
+                                    onCheckedChange={(checked) =>
+                                        updateOption("includeReasoning", checked as boolean)
+                                    }
+                                    disabled={loading || isExporting}
+                                />
+                                <Label
+                                    htmlFor="include-reasoning"
+                                    className="cursor-pointer text-sm font-normal"
+                                >
+                                    包含推理过程
+                                </Label>
+                            </div>
 
-                        <div className="flex items-center space-x-2">
-                            <Checkbox
-                                id="include-tool-params"
-                                checked={options.includeToolParams}
-                                onCheckedChange={(checked) =>
-                                    updateOption("includeToolParams", checked as boolean)
-                                }
-                                disabled={loading || isExporting}
-                            />
-                            <Label
-                                htmlFor="include-tool-params"
-                                className="text-sm cursor-pointer"
-                            >
-                                包含工具调用参数
-                            </Label>
-                        </div>
+                            <div className="flex items-center space-x-2">
+                                <Checkbox
+                                    id="include-tool-params"
+                                    checked={options.includeToolParams}
+                                    onCheckedChange={(checked) =>
+                                        updateOption("includeToolParams", checked as boolean)
+                                    }
+                                    disabled={loading || isExporting}
+                                />
+                                <Label
+                                    htmlFor="include-tool-params"
+                                    className="cursor-pointer text-sm font-normal"
+                                >
+                                    包含工具调用参数
+                                </Label>
+                            </div>
 
-                        <div className="flex items-center space-x-2">
-                            <Checkbox
-                                id="include-tool-results"
-                                checked={options.includeToolResults}
-                                onCheckedChange={(checked) =>
-                                    updateOption("includeToolResults", checked as boolean)
-                                }
-                                disabled={loading || isExporting}
-                            />
-                            <Label
-                                htmlFor="include-tool-results"
-                                className="text-sm cursor-pointer"
-                            >
-                                包含工具执行结果
-                            </Label>
+                            <div className="flex items-center space-x-2">
+                                <Checkbox
+                                    id="include-tool-results"
+                                    checked={options.includeToolResults}
+                                    onCheckedChange={(checked) =>
+                                        updateOption("includeToolResults", checked as boolean)
+                                    }
+                                    disabled={loading || isExporting}
+                                />
+                                <Label
+                                    htmlFor="include-tool-results"
+                                    className="cursor-pointer text-sm font-normal"
+                                >
+                                    包含工具执行结果
+                                </Label>
+                            </div>
                         </div>
                     </div>
 
                     {/* 加载状态 */}
                     {loading && (
                         <div className="flex items-center justify-center py-4">
-                            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
                             <span className="ml-2 text-sm text-muted-foreground">
                                 加载中...
                             </span>
@@ -247,7 +249,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
 
                     {!loading && loadError && (
                         <div
-                            className="flex flex-col items-start gap-2 rounded-md border border-destructive/40 p-3 text-sm"
+                            className="flex flex-col items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm"
                             role="alert"
                             data-aipp-slot="conversation-export-load-error"
                         >
@@ -257,10 +259,10 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                className="min-h-11 gap-1"
+                                className="min-h-11 gap-1 sm:min-h-8"
                                 onClick={() => setLoadAttempt((attempt) => attempt + 1)}
                             >
-                                <RotateCcw className="h-4 w-4" />
+                                <RotateCcw className="h-3.5 w-3.5" />
                                 重试
                             </Button>
                         </div>
@@ -268,14 +270,14 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
 
                     {/* 导出按钮 */}
                     {!loading && exportData && (
-                        <div className="space-y-3 pt-2">
-                            <h4 className="text-sm font-medium">导出格式</h4>
+                        <div className="space-y-2.5">
+                            <h4 className="text-xs font-medium text-muted-foreground">导出格式</h4>
                             <div className="grid grid-cols-4 gap-2">
                                 <Button
                                     variant="outline"
                                     onClick={() => handleExport("markdown")}
                                     disabled={isExporting}
-                                    className="flex flex-col items-center gap-1 h-auto py-3"
+                                    className="flex h-auto flex-col items-center gap-1 py-3"
                                 >
                                     {exporting === "markdown" ? (
                                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -289,7 +291,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                     variant="outline"
                                     onClick={() => handleExport("word")}
                                     disabled={isExporting}
-                                    className="flex flex-col items-center gap-1 h-auto py-3"
+                                    className="flex h-auto flex-col items-center gap-1 py-3"
                                 >
                                     {exporting === "word" ? (
                                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -303,7 +305,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                     variant="outline"
                                     onClick={() => handleExport("pdf")}
                                     disabled={isExporting}
-                                    className="flex flex-col items-center gap-1 h-auto py-3"
+                                    className="flex h-auto flex-col items-center gap-1 py-3"
                                 >
                                     {exporting === "pdf" ? (
                                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -317,7 +319,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                     variant="outline"
                                     onClick={() => handleExport("png")}
                                     disabled={isExporting}
-                                    className="flex flex-col items-center gap-1 h-auto py-3"
+                                    className="flex h-auto flex-col items-center gap-1 py-3"
                                 >
                                     {exporting === "png" ? (
                                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -334,8 +336,8 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                             ) : null}
                         </div>
                     )}
-                </div>
-            </DialogContent>
+                </CompactDialogBody>
+            </CompactDialogContent>
         </Dialog>
     );
 };

@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    DialogTrigger,
+} from "@/components/ui/dialog";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import ButlerAvatar from "./ButlerAvatar";
 import type { PeerPost } from "./butlerTimeline";
@@ -100,12 +106,14 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
                 </DialogTrigger>
             </div>
         </div>}
-        <DialogContent className="sm:max-w-xl max-h-[75vh] flex flex-col">
-            <DialogHeader>
-                <DialogTitle>助手对话</DialogTitle>
-                <DialogDescription>这次委托的起因与助手往来</DialogDescription>
-            </DialogHeader>
-            <div className="min-h-0 overflow-y-auto space-y-5 text-sm" data-aipp-slot="butler-exchange-context">
+        <CompactDialogContent className="sm:max-w-xl">
+            <CompactDialogHeader
+                title="助手对话"
+                subtitle="这次委托的起因与助手往来"
+                description="这次委托的起因与助手往来"
+                closeLabel="Close"
+            />
+            <CompactDialogBody className="space-y-5 text-sm" data-aipp-slot="butler-exchange-context">
                 {!current && <p className="text-muted-foreground">正在读取…</p>}
                 {current?.unavailable && <button onClick={() => setRetry(n => n + 1)} className="text-muted-foreground hover:underline">重新读取对话</button>}
                 {current?.episodes.map((episode, index) => <section key={index} className="space-y-3">
@@ -118,7 +126,7 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
                         {["failed", "stopped"].includes(episode.status) ? "本次对话未完成" : "等待后续回复…"}
                     </p>}
                 </section>)}
-            </div>
-        </DialogContent>
+            </CompactDialogBody>
+        </CompactDialogContent>
     </Dialog>;
 }

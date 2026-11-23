@@ -6,13 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from "@/components/ui/dialog";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/utils/utils";
 import { getErrorMessage } from "@/utils/error";
 import {
     describePreviewResourceOrigin,
@@ -179,41 +178,46 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
     };
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-3xl">
-                <DialogHeader>
-                    <DialogTitle className="flex items-center gap-2">
-                        <ShieldCheck className="h-5 w-5" />
-                        外部资源授权
-                    </DialogTitle>
-                    <DialogDescription>
+        <Dialog open={open} onOpenChange={(next) => { if (!isSubmitting) onOpenChange(next); }}>
+            <CompactDialogContent className="sm:max-w-3xl">
+                <CompactDialogHeader
+                    icon={<ShieldCheck className="h-4 w-4" />}
+                    title="外部资源授权"
+                    subtitle={resources.length > 0 ? `${resources.length} 项待处理` : undefined}
+                    description="预览引用了外部资源，默认不加载。勾选的资源由本机下载后提供给预览。"
+                    closeDisabled={isSubmitting}
+                />
+
+                <CompactDialogBody className="flex flex-col gap-3 overflow-hidden">
+                    <p className="shrink-0 text-xs text-muted-foreground">
                         预览引用了下列外部资源，默认不加载。勾选的资源由本机下载后提供给预览；允许样式表时，会一并加载它引用的字体和图片。
-                    </DialogDescription>
-                </DialogHeader>
+                    </p>
 
-                {visibleError && (
-                    <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                        {visibleError}
-                    </div>
-                )}
+                    {visibleError && (
+                        <div className="shrink-0 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                            {visibleError}
+                        </div>
+                    )}
 
-                {isLoading && resources.length === 0 ? (
-                    <div className="rounded-md border border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
-                        正在检测外部资源...
-                    </div>
-                ) : resources.length === 0 && blocked.length === 0 ? (
-                    <div className="rounded-md border border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
-                        当前预览没有待处理的外部资源。
-                    </div>
-                ) : (
-                    <ScrollArea className="max-h-[56vh] pr-3">
-                        <div className="space-y-3">
+                    {isLoading && resources.length === 0 ? (
+                        <div className="rounded-lg border border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
+                            正在检测外部资源...
+                        </div>
+                    ) : resources.length === 0 && blocked.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
+                            当前预览没有待处理的外部资源。
+                        </div>
+                    ) : (
+                        <div className="min-h-0 max-h-[54vh] flex-1 space-y-2.5 overflow-y-auto pr-0.5">
                             {resources.map((resource) => {
                                 const checked = selectedIds.has(resource.id);
                                 return (
                                     <label
                                         key={resource.id}
-                                        className="flex gap-3 rounded-md border border-border p-3"
+                                        className={cn(
+                                            "flex cursor-pointer gap-3 rounded-lg border border-border p-3 transition-colors hover:bg-muted/50",
+                                            checked && "border-foreground/40 bg-muted/50",
+                                        )}
                                     >
                                         <Checkbox
                                             className="mt-1"
@@ -271,7 +275,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                                     {blocked.map((resource) => (
                                         <div
                                             key={resource.id}
-                                            className="space-y-1 rounded-md border border-dashed border-border p-3"
+                                            className="space-y-1 rounded-lg border border-dashed border-border p-3"
                                         >
                                             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                                 <Badge variant="outline">{previewResourceTypeLabel(resource.type)}</Badge>
@@ -283,10 +287,10 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                                 </section>
                             )}
                         </div>
-                    </ScrollArea>
-                )}
+                    )}
+                </CompactDialogBody>
 
-                <DialogFooter className="items-center">
+                <CompactDialogFooter>
                     {proxyConfigured === false && resources.length > 0 && (
                         <span className="mr-auto text-xs text-muted-foreground">
                             未配置网络代理（设置 → 网络配置）
@@ -296,6 +300,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                         <Button
                             type="button"
                             variant="outline"
+                            className="min-h-11 px-3 sm:min-h-9"
                             onClick={onRetryScan}
                             disabled={isSubmitting || isLoading}
                         >
@@ -305,6 +310,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <Button
                         type="button"
                         variant="outline"
+                        className="min-h-11 px-3 sm:min-h-9"
                         onClick={() => onOpenChange(false)}
                         disabled={isSubmitting}
                     >
@@ -313,6 +319,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <Button
                         type="button"
                         variant="outline"
+                        className="min-h-11 px-3 sm:min-h-9"
                         disabled={authorizeDisabled}
                         onClick={() => void submit(true)}
                     >
@@ -321,6 +328,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <Button
                         type="button"
                         variant="outline"
+                        className="min-h-11 px-3 sm:min-h-9"
                         disabled={authorizeDisabled || proxyConfigured === false}
                         onClick={() => void submit(false, true)}
                     >
@@ -328,13 +336,14 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     </Button>
                     <Button
                         type="button"
+                        className="min-h-11 px-4 sm:min-h-9"
                         disabled={authorizeDisabled}
                         onClick={() => void submit(false)}
                     >
                         允许本次加载
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 }

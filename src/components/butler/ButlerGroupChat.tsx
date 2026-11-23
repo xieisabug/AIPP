@@ -335,14 +335,18 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             }} />
 
         <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-            <AlertDialogContent>
-                <AlertDialogHeader>
-                    <AlertDialogTitle>删除群聊「{detail.name}」？</AlertDialogTitle>
-                    <AlertDialogDescription>群消息和成员在本群的执行记录都会删除，成员的私聊不受影响。正在进行的回复会先停止。</AlertDialogDescription>
+            <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md">
+                <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                    <AlertDialogTitle className="text-base font-semibold">删除群聊「{detail.name}」？</AlertDialogTitle>
                 </AlertDialogHeader>
-                <AlertDialogFooter>
-                    <AlertDialogCancel>取消</AlertDialogCancel>
-                    <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => void deleteGroup()}>删除</AlertDialogAction>
+                <div className="px-4 py-4 sm:px-5">
+                    <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
+                        群消息和成员在本群的执行记录都会删除，成员的私聊不受影响。正在进行的回复会先停止。
+                    </AlertDialogDescription>
+                </div>
+                <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                    <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9">取消</AlertDialogCancel>
+                    <AlertDialogAction className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9" onClick={() => void deleteGroup()}>删除</AlertDialogAction>
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog>

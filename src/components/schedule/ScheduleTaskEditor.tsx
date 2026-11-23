@@ -8,7 +8,13 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from "@/components/ui/dialog";
 import {
     WEEK_DAY_ORDER,
     buildSchedule,
@@ -277,16 +283,19 @@ export default function ScheduleTaskEditor({ open, task, assistants, saving, onO
     };
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-[640px] max-h-[88vh] overflow-y-auto" data-aipp-slot="schedule-editor-dialog">
-                <DialogHeader>
-                    <DialogTitle className="text-base">{task ? "编辑定时任务" : "新建定时任务"}</DialogTitle>
-                    <DialogDescription className="text-xs">
-                        每次运行都是一个全新的会话，助手看不到之前的聊天；需要的背景和要求请都写进指令里。
-                    </DialogDescription>
-                </DialogHeader>
+        <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
+            <CompactDialogContent className="sm:max-w-2xl" data-aipp-slot="schedule-editor-dialog">
+                <CompactDialogHeader
+                    title={task ? "编辑定时任务" : "新建定时任务"}
+                    subtitle={task?.name}
+                    description="每次运行都是一个全新的会话，助手看不到之前的聊天；需要的背景和要求请都写进指令里。"
+                    closeDisabled={saving}
+                />
 
-                <div className="space-y-5 py-1">
+                <CompactDialogBody className="space-y-4">
+                    <p className="text-xs text-muted-foreground">
+                        每次运行都是一个全新的会话，助手看不到之前的聊天；需要的背景和要求请都写进指令里。
+                    </p>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         <div className="space-y-1.5">
                             <FieldLabel>名称</FieldLabel>
@@ -423,17 +432,17 @@ export default function ScheduleTaskEditor({ open, task, assistants, saving, onO
                         <Switch checked={form.enabled} onCheckedChange={(enabled) => set({ enabled })} aria-label="启用任务" />
                         保存后立即启用
                     </label>
-                </div>
+                </CompactDialogBody>
 
-                <DialogFooter>
-                    <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+                <CompactDialogFooter>
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={saving} onClick={() => onOpenChange(false)}>
                         取消
                     </Button>
-                    <Button size="sm" onClick={submit} disabled={!canSubmit}>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={submit} disabled={!canSubmit}>
                         {saving ? "保存中…" : "保存"}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 }

@@ -1,6 +1,15 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { X, Copy, Check, Share2 } from 'lucide-react';
+import { Copy, Check, Share2 } from 'lucide-react';
 import { Button } from './ui/button';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from './ui/dialog';
+import { Label } from './ui/label';
+import { Textarea } from './ui/textarea';
 import { toast } from 'sonner';
 
 interface ShareDialogProps {
@@ -10,11 +19,11 @@ interface ShareDialogProps {
     onClose: () => void;
 }
 
-const ShareDialog: React.FC<ShareDialogProps> = ({ 
-    title, 
-    shareCode, 
-    isOpen, 
-    onClose 
+const ShareDialog: React.FC<ShareDialogProps> = ({
+    title,
+    shareCode,
+    isOpen,
+    onClose,
 }) => {
     const [copied, setCopied] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -26,7 +35,6 @@ const ShareDialog: React.FC<ShareDialogProps> = ({
             toast.success('分享码已复制到剪贴板');
             setTimeout(() => setCopied(false), 2000);
         } catch (error) {
-            // Fallback for older browsers
             if (textareaRef.current) {
                 textareaRef.current.select();
                 textareaRef.current.setSelectionRange(0, 99999);
@@ -47,97 +55,77 @@ const ShareDialog: React.FC<ShareDialogProps> = ({
         }
     }, []);
 
-    if (!isOpen) return null;
-
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-aipp-slot="legacy-modal">
-            {/* 背景遮罩 */}
-            <div
-                className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                onClick={onClose}
-            />
+        <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+            <CompactDialogContent className="sm:max-w-xl">
+                <CompactDialogHeader
+                    icon={<Share2 className="h-4 w-4" />}
+                    title={`分享 ${title}`}
+                    description="复制分享码发送给其他人以导入相同配置"
+                />
 
-            {/* 模态框内容 */}
-            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-2xl transform transition-all duration-200 scale-100" data-aipp-slot="legacy-modal-panel">
-                {/* 标题栏 */}
-                <div className="flex items-center justify-between p-6 border-b border-border">
-                    <div className="flex items-center gap-3">
-                        <Share2 className="h-5 w-5 text-primary" />
-                        <h2 className="text-xl font-semibold text-foreground">分享 {title}</h2>
-                    </div>
-                    <button
-                        onClick={onClose}
-                        className="p-2 hover:bg-muted rounded-lg transition-colors duration-200 flex-shrink-0"
-                    >
-                        <X className="h-5 w-5 text-muted-foreground" />
-                    </button>
-                </div>
-
-                {/* 内容区域 */}
-                <div className="p-6" data-aipp-slot="legacy-modal-body">
-                    <div className="space-y-4">
-                        <div>
-                            <label className="text-sm font-medium text-foreground mb-2 block">
-                                分享码
-                            </label>
-                            <div className="relative">
-                                <textarea
-                                    ref={textareaRef}
-                                    value={shareCode}
-                                    readOnly
-                                    onClick={handleSelectAll}
-                                    className="w-full h-32 px-3 py-2 pr-12 border border-input rounded-lg bg-muted/20 text-foreground text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
-                                    placeholder="生成中..."
-                                />
-                                <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={handleCopy}
-                                    className="absolute top-2 right-2 h-8 w-8 p-0 hover:bg-background/80"
-                                >
-                                    {copied ? (
-                                        <Check className="h-4 w-4 text-green-500" />
-                                    ) : (
-                                        <Copy className="h-4 w-4" />
-                                    )}
-                                </Button>
-                            </div>
-                            <p className="text-xs text-muted-foreground mt-2">
-                                点击文本区域全选，或点击复制按钮复制分享码
-                            </p>
+                <CompactDialogBody className="space-y-4">
+                    <div className="space-y-1.5">
+                        <Label htmlFor="share-code-textarea">分享码</Label>
+                        <div className="relative">
+                            <Textarea
+                                id="share-code-textarea"
+                                ref={textareaRef}
+                                value={shareCode}
+                                readOnly
+                                onClick={handleSelectAll}
+                                className="h-32 resize-none bg-muted/30 pr-11 font-mono text-xs"
+                                placeholder="生成中..."
+                            />
+                            <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                onClick={handleCopy}
+                                aria-label="复制分享码"
+                                className="absolute right-1.5 top-1.5 h-8 w-8 hover:bg-background/80"
+                            >
+                                {copied ? (
+                                    <Check className="h-4 w-4 text-green-500" />
+                                ) : (
+                                    <Copy className="h-4 w-4" />
+                                )}
+                            </Button>
                         </div>
-
-                        <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-                            <h4 className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2">
-                                分享说明
-                            </h4>
-                            <ul className="text-xs text-blue-700 dark:text-blue-300 space-y-1">
-                                <li>• 将此分享码发送给其他人，他们可以导入相同的配置</li>
-                                <li>• 分享码已经过压缩，请完整复制</li>
-                                <li>• 如果是Provider分享，接收方需要输入正确的密码才能导入</li>
-                            </ul>
-                        </div>
+                        <p className="text-xs text-muted-foreground">
+                            点击文本区域全选，或点击右上角按钮复制分享码。
+                        </p>
                     </div>
-                </div>
 
-                {/* 按钮区域 */}
-                <div className="flex justify-end gap-3 p-6 pt-0" data-aipp-slot="legacy-modal-actions">
+                    <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+                        <p className="mb-1 font-medium text-foreground">分享说明</p>
+                        <ul className="space-y-1">
+                            <li>• 将此分享码发送给其他人，他们可以导入相同的配置</li>
+                            <li>• 分享码已经过压缩，请完整复制</li>
+                            <li>• 如果是 Provider 分享，接收方需要输入正确的密码才能导入</li>
+                        </ul>
+                    </div>
+                </CompactDialogBody>
+
+                <CompactDialogFooter>
                     <Button
+                        type="button"
                         variant="outline"
                         onClick={onClose}
-                        className="px-6"
+                        className="min-h-11 px-4 sm:min-h-9"
                     >
                         关闭
                     </Button>
                     <Button
+                        type="button"
                         onClick={handleCopy}
-                        className="px-6 bg-primary hover:bg-primary/90 text-primary-foreground shadow-md hover:shadow-lg transition-all"
+                        className="min-h-11 px-5 sm:min-h-9"
                     >
                         {copied ? '已复制' : '复制分享码'}
                     </Button>
-                </div>
-            </div>
-        </div>
+                </CompactDialogFooter>
+            </CompactDialogContent>
+        </Dialog>
     );
 };
 

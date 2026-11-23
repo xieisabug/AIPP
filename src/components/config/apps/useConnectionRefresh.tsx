@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from '@/components/ui/dialog';
 import { reviewRefresh, type RefreshPreview } from './connectionManagement';
 
 function changeLabel(field: string) {
@@ -41,12 +47,13 @@ export function useConnectionRefresh() {
     const knownNames = new Set(groups.flatMap(group => group.names));
     const extraPermissions = preview?.permissions?.filter(line => !knownNames.has(line.split('：')[0])) ?? [];
     const refreshDialog = <Dialog open={!!preview} onOpenChange={open => { if (!open) finish(false); }}>
-        <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden sm:max-w-xl">
-            <DialogHeader className="shrink-0 pr-6">
-                <DialogTitle>确认工具更新</DialogTitle>
-                <DialogDescription>服务提供了新的工具信息。请查看变化后应用更新。</DialogDescription>
-            </DialogHeader>
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain pr-1">
+        <CompactDialogContent className="sm:max-w-xl">
+            <CompactDialogHeader
+                title="确认工具更新"
+                description="服务提供了新的工具信息。请查看变化后应用更新。"
+            />
+            <CompactDialogBody className="space-y-4">
+                <p className="text-xs text-muted-foreground">服务提供了新的工具信息。请查看变化后应用更新。</p>
                 {groups.filter(group => group.names.length > 0).map(group => <section key={group.title} className="space-y-2">
                     <h3 className="text-sm font-medium">{group.title} <span className="text-muted-foreground">{group.names.length} 个工具</span></h3>
                     <p className="text-xs leading-5 text-muted-foreground">{group.hint}</p>
@@ -78,12 +85,12 @@ export function useConnectionRefresh() {
                     <h3 className="text-sm font-medium">权限说明</h3>
                     {extraPermissions.map((line, index) => <p key={index} className="break-words text-sm text-muted-foreground">{line}</p>)}
                 </section>}
-            </div>
-            <DialogFooter className="shrink-0 border-t pt-4">
-                <Button variant="outline" className="min-h-11" onClick={() => finish(false)}>取消</Button>
-                <Button className="min-h-11" onClick={() => finish(true)}>应用更新</Button>
-            </DialogFooter>
-        </DialogContent>
+            </CompactDialogBody>
+            <CompactDialogFooter>
+                <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={() => finish(false)}>取消</Button>
+                <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={() => finish(true)}>应用更新</Button>
+            </CompactDialogFooter>
+        </CompactDialogContent>
     </Dialog>;
     return { refreshConnection, refreshDialog };
 }

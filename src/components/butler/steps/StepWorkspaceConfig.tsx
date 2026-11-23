@@ -197,27 +197,26 @@ const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
 
             {/* Trust-all confirmation dialog */}
             <AlertDialog open={showTrustAllConfirm} onOpenChange={setShowTrustAllConfirm}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle className="flex items-center gap-2">
-                            <ShieldAlert className="h-5 w-5 text-destructive" />
+                <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md">
+                    <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                        <AlertDialogTitle className="flex items-center gap-2 text-base font-semibold">
+                            <ShieldAlert className="h-4 w-4 text-destructive" />
                             确认信任所有工作区？
                         </AlertDialogTitle>
-                        <AlertDialogDescription className="space-y-2">
-                            <p>
-                                开启此选项后，总管家将对<strong>任意路径</strong>的文件操作自动放行，
-                                包括读取、写入、删除等操作，不再弹出权限确认弹窗。
-                            </p>
-                            <p className="text-destructive font-medium">
-                                ⚠️ 这意味着 AI 可以不经确认地修改你电脑上的任何文件，
-                                请确保你了解相关风险。
-                            </p>
-                        </AlertDialogDescription>
                     </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel>取消</AlertDialogCancel>
+                    <div className="space-y-2.5 px-4 py-4 sm:px-5">
+                        <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
+                            开启此选项后，总管家将对<strong className="text-foreground">任意路径</strong>的文件操作自动放行，
+                            包括读取、写入、删除等操作，不再弹出权限确认弹窗。
+                        </AlertDialogDescription>
+                        <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs font-medium text-destructive">
+                            这意味着 AI 可以不经确认地修改你电脑上的任何文件，请确保你了解相关风险。
+                        </p>
+                    </div>
+                    <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                        <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9">取消</AlertDialogCancel>
                         <AlertDialogAction
-                            className="bg-destructive hover:bg-destructive/90"
+                            className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9"
                             onClick={() => onTrustAllChange(true)}
                         >
                             我了解风险，确认开启

@@ -19,14 +19,12 @@ import { Card, CardDescription, CardHeader, CardTitle } from '../ui/card';
 import { Checkbox } from '../ui/checkbox';
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
-import { Separator } from '../ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 interface InstallStep {
@@ -989,77 +987,78 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
     ) : null;
 
     return (
-        <Dialog open={isOpen} onOpenChange={(open) => !open && handleCloseDialog()}>
-            <DialogContent className="!w-[50vw] !max-w-[50vw] h-[85vh] max-h-[85vh] overflow-hidden flex flex-col">
-                <DialogHeader>
-                    <DialogTitle className="flex items-center gap-2">
-                        <BookOpen className="h-5 w-5" />
-                        Skills 安装
-                    </DialogTitle>
-                    <DialogDescription>
-                        支持推荐来源、GitHub 仓库或 ZIP 链接。预览后可批量勾选要安装的 Skills，并在失败时切换代理重试。
-                    </DialogDescription>
-                </DialogHeader>
+        <Dialog open={isOpen} onOpenChange={(open) => !open && !isInstalling && handleCloseDialog()}>
+            <CompactDialogContent className="h-[min(780px,88dvh)] sm:max-w-3xl">
+                <CompactDialogHeader
+                    icon={<BookOpen className="h-4 w-4" />}
+                    title="Skills 安装"
+                    subtitle={inspection ? `发现 ${inspection.skills.length} 个 Skills` : undefined}
+                    description="支持推荐来源、GitHub 仓库或 ZIP 链接。预览后可批量勾选要安装的 Skills，并在失败时切换代理重试。"
+                    closeDisabled={isInstalling}
+                />
 
-                {!inspection && sharedErrorPanel}
+                <CompactDialogBody className="flex flex-col gap-3 overflow-hidden">
+                    {!inspection && sharedErrorPanel}
 
-                {previewContent ?? (
-                    <Tabs
-                        value={activeTab}
-                        onValueChange={(value) => setActiveTab(value as InstallTab)}
-                        className="flex-1 min-h-0 overflow-hidden flex flex-col"
-                    >
-                        <TabsList className="w-full justify-start">
-                            <TabsTrigger value="recommended" className="flex-1">
-                                推荐来源
-                            </TabsTrigger>
-                            <TabsTrigger value="remote" className="flex-1">
-                                仓库 / ZIP
-                            </TabsTrigger>
-                            <TabsTrigger value="manual" className="flex-1">
-                                手动安装
-                            </TabsTrigger>
-                        </TabsList>
-
-                        <TabsContent
-                            value="recommended"
-                            className="mt-4 flex flex-1 min-h-0 flex-col overflow-hidden"
+                    {previewContent ?? (
+                        <Tabs
+                            value={activeTab}
+                            onValueChange={(value) => setActiveTab(value as InstallTab)}
+                            className="flex min-h-0 flex-1 flex-col overflow-hidden"
                         >
-                            {recommendedContent}
-                        </TabsContent>
+                            <TabsList className="w-full shrink-0 justify-start">
+                                <TabsTrigger value="recommended" className="flex-1">
+                                    推荐来源
+                                </TabsTrigger>
+                                <TabsTrigger value="remote" className="flex-1">
+                                    仓库 / ZIP
+                                </TabsTrigger>
+                                <TabsTrigger value="manual" className="flex-1">
+                                    手动安装
+                                </TabsTrigger>
+                            </TabsList>
 
-                        <TabsContent
-                            value="remote"
-                            className="mt-4 flex flex-1 min-h-0 flex-col overflow-hidden"
-                        >
-                            {remoteContent}
-                        </TabsContent>
+                            <TabsContent
+                                value="recommended"
+                                className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden"
+                            >
+                                {recommendedContent}
+                            </TabsContent>
 
-                        <TabsContent
-                            value="manual"
-                            className="mt-4 flex flex-1 min-h-0 flex-col overflow-hidden"
-                        >
-                            {manualContent}
-                        </TabsContent>
-                    </Tabs>
-                )}
+                            <TabsContent
+                                value="remote"
+                                className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden"
+                            >
+                                {remoteContent}
+                            </TabsContent>
 
-                <Separator className="mt-4" />
+                            <TabsContent
+                                value="manual"
+                                className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden"
+                            >
+                                {manualContent}
+                            </TabsContent>
+                        </Tabs>
+                    )}
+                </CompactDialogBody>
 
-                <DialogFooter className="mt-4 flex-shrink-0">
+                <CompactDialogFooter>
                     {inspection && inspectionRequest ? (
                         <>
                             <Button
+                                type="button"
                                 variant="outline"
+                                className="min-h-11 px-4 sm:min-h-9"
                                 onClick={handleBackToSourceList}
                                 disabled={isInspecting || isInstalling}
                             >
                                 返回
                             </Button>
                             <Button
+                                type="button"
                                 onClick={() => runInstall(inspectionRequest)}
                                 disabled={selectedSkillCount === 0 || isInspecting || isInstalling}
-                                className="gap-1"
+                                className="min-h-11 gap-1 px-5 sm:min-h-9"
                             >
                                 {isInstalling ? (
                                     <>
@@ -1075,10 +1074,12 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
                             </Button>
                         </>
                     ) : (
-                        <Button onClick={handleCloseDialog}>关闭</Button>
+                        <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={handleCloseDialog}>
+                            关闭
+                        </Button>
                     )}
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

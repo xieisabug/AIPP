@@ -31,10 +31,9 @@ import { Textarea } from "../ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
 } from "../ui/dialog";
 import {
     DropdownMenu,
@@ -1506,30 +1505,32 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 <ConfigPageLoading />
             )}
             <Dialog open={installDialogOpen} onOpenChange={handleCloseInstallDialog}>
-                <DialogContent className={`flex h-[85vh] max-h-[85vh] flex-col overflow-hidden sm:max-w-5xl ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
-                    <DialogHeader>
-                        <DialogTitle>安装插件</DialogTitle>
-                        <DialogDescription>
-                            安装官方推荐插件，或从 GitHub / ZIP 来源安装已经编译好的插件包。
-                        </DialogDescription>
-                    </DialogHeader>
-                    <Tabs
-                        value={installDialogTab}
-                        onValueChange={(value) => setInstallDialogTab(value as "recommended" | "source")}
-                        className="flex min-h-0 flex-1 flex-col overflow-hidden"
-                    >
-                        <TabsList>
-                            <TabsTrigger value="recommended">推荐插件</TabsTrigger>
-                            <TabsTrigger value="source">来源安装</TabsTrigger>
-                        </TabsList>
-                        <TabsContent value="recommended" className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
-                            {recommendedPluginsContent}
-                        </TabsContent>
-                        <TabsContent value="source" className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
-                            {sourceInstallContent}
-                        </TabsContent>
-                    </Tabs>
-                </DialogContent>
+                <CompactDialogContent className={`h-[min(780px,88dvh)] sm:max-w-4xl ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
+                    <CompactDialogHeader
+                        icon={<Puzzle className="h-4 w-4" />}
+                        title="安装插件"
+                        subtitle="推荐插件或从来源安装"
+                        description="安装官方推荐插件，或从 GitHub / ZIP 来源安装已经编译好的插件包。"
+                    />
+                    <CompactDialogBody className="flex flex-col overflow-hidden">
+                        <Tabs
+                            value={installDialogTab}
+                            onValueChange={(value) => setInstallDialogTab(value as "recommended" | "source")}
+                            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+                        >
+                            <TabsList className="shrink-0">
+                                <TabsTrigger value="recommended">推荐插件</TabsTrigger>
+                                <TabsTrigger value="source">来源安装</TabsTrigger>
+                            </TabsList>
+                            <TabsContent value="recommended" className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+                                {recommendedPluginsContent}
+                            </TabsContent>
+                            <TabsContent value="source" className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+                                {sourceInstallContent}
+                            </TabsContent>
+                        </Tabs>
+                    </CompactDialogBody>
+                </CompactDialogContent>
             </Dialog>
             <AlertDialog
                 open={!!pendingUninstallPlugin}
@@ -1539,19 +1540,21 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     }
                 }}
             >
-                <AlertDialogContent className={isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : undefined}>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>确认卸载插件</AlertDialogTitle>
-                        <AlertDialogDescription>
+                <AlertDialogContent className={`flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
+                    <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                        <AlertDialogTitle className="text-base font-semibold">确认卸载插件</AlertDialogTitle>
+                    </AlertDialogHeader>
+                    <div className="px-4 py-4 sm:px-5">
+                        <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
                             {pendingUninstallPlugin
                                 ? `卸载后将删除插件「${pendingUninstallPlugin.name}」的文件夹和数据库记录，且不可恢复。`
                                 : "卸载后将删除插件文件夹和数据库记录，且不可恢复。"}
                         </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel disabled={actionBusy}>取消</AlertDialogCancel>
+                    </div>
+                    <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                        <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9" disabled={actionBusy}>取消</AlertDialogCancel>
                         <AlertDialogAction
-                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9"
                             onClick={handleConfirmUninstallPlugin}
                             disabled={actionBusy}
                         >

@@ -5,10 +5,10 @@ import { CheckCircle2, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from "@/components/ui/dialog";
 import { useModels } from "@/hooks/useModels";
 import { saveExperimentalConfigValues } from "@/components/config/feature/forms/experimentalConfigShared";
@@ -194,70 +194,64 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     const currentStepValid = isStepValid(state.currentStep);
 
     return (
-        <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col p-0 gap-0">
-                <DialogHeader className="px-6 pt-6 pb-4 border-b border-border/50">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <DialogTitle className="text-lg">总管家设置向导</DialogTitle>
-                            <DialogDescription className="mt-1">
-                                按步骤完成总管家的基本配置
-                            </DialogDescription>
-                        </div>
-                    </div>
+        <Dialog open={open} onOpenChange={(next) => { if (!saving) onOpenChange(next); }}>
+            <CompactDialogContent className="sm:max-w-2xl">
+                <CompactDialogHeader
+                    title="总管家设置向导"
+                    subtitle={`${state.currentStep + 1}/${STEP_LABELS.length} · ${STEP_LABELS[state.currentStep]}`}
+                    description="按步骤完成总管家的基本配置"
+                    closeDisabled={saving}
+                >
+                    <div
+                        aria-hidden
+                        className="absolute bottom-[-1px] left-0 h-0.5 bg-foreground/70 transition-[width] duration-300"
+                        style={{ width: `${((state.currentStep + 1) / STEP_LABELS.length) * 100}%` }}
+                    />
+                </CompactDialogHeader>
 
-                    {/* Step indicator */}
-                    <div className="flex items-center justify-center gap-1 pt-3">
-                        {STEP_LABELS.map((label, index) => (
-                            <React.Fragment key={index}>
-                                {index > 0 && (
-                                    <div
-                                        className={`h-px w-8 transition-colors ${
-                                            index <= state.currentStep
-                                                ? "bg-primary"
-                                                : "bg-border"
-                                        }`}
-                                    />
-                                )}
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        // Only allow going back or to completed steps
-                                        if (index <= state.currentStep) {
-                                            // Direct access via goToStep from hook
-                                            // Use goPrev/goNext pattern
-                                        }
-                                    }}
-                                    className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors ${
-                                        index === state.currentStep
-                                            ? "text-primary bg-primary/10"
-                                            : index < state.currentStep
-                                              ? "text-green-600 dark:text-green-400"
-                                              : "text-muted-foreground"
+                {/* Step indicator */}
+                <div className="flex shrink-0 items-center justify-center gap-1 border-b border-border/60 bg-muted/20 px-4 py-2 sm:px-5">
+                    {STEP_LABELS.map((label, index) => (
+                        <React.Fragment key={index}>
+                            {index > 0 && (
+                                <div
+                                    className={`h-px w-6 transition-colors ${
+                                        index <= state.currentStep
+                                            ? "bg-foreground/50"
+                                            : "bg-border"
                                     }`}
-                                >
-                                    {index < state.currentStep ? (
-                                        <CheckCircle2 className="h-3.5 w-3.5" />
-                                    ) : (
-                                        <span
-                                            className={`w-5 h-5 rounded-full text-[11px] flex items-center justify-center ${
-                                                index === state.currentStep
-                                                    ? "bg-primary text-primary-foreground"
-                                                    : "bg-muted text-muted-foreground"
-                                            }`}
-                                        >
-                                            {index + 1}
-                                        </span>
-                                    )}
-                                    <span className="hidden sm:inline">{label}</span>
-                                </button>
-                            </React.Fragment>
-                        ))}
-                    </div>
-                </DialogHeader>
+                                />
+                            )}
+                            <span
+                                className={`flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
+                                    index === state.currentStep
+                                        ? "bg-muted text-foreground"
+                                        : index < state.currentStep
+                                          ? "text-muted-foreground"
+                                          : "text-muted-foreground/70"
+                                }`}
+                            >
+                                {index < state.currentStep ? (
+                                    <CheckCircle2 className="h-3.5 w-3.5 text-foreground/70" />
+                                ) : (
+                                    <span
+                                        className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] ${
+                                            index === state.currentStep
+                                                ? "bg-foreground text-background"
+                                                : "bg-muted text-muted-foreground"
+                                        }`}
+                                    >
+                                        {index + 1}
+                                    </span>
+                                )}
+                                <span className="hidden sm:inline">{label}</span>
+                            </span>
+                        </React.Fragment>
+                    ))}
+                </div>
 
                 {/* Step content */}
-                <div className="flex-1 overflow-y-auto px-6 py-5">
+                <CompactDialogBody>
                     {state.currentStep === 0 && (
                         <StepModelConfig
                             modelId={state.modelId}
@@ -311,18 +305,20 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                             onBaseUrlChange={setFeishuBaseUrl}
                         />
                     )}
-                </div>
+                </CompactDialogBody>
 
                 {/* Footer navigation */}
-                <div className="flex items-center justify-between px-6 py-4 border-t border-border/50 bg-muted/20">
+                <CompactDialogFooter className="justify-between">
                     <div>
                         {canGoPrev && (
                             <Button
+                                type="button"
                                 variant="ghost"
+                                className="min-h-11 gap-1 px-3 sm:min-h-9"
                                 onClick={goPrev}
                                 disabled={saving}
                             >
-                                <ChevronLeft className="h-4 w-4 mr-1" />
+                                <ChevronLeft className="h-4 w-4" />
                                 上一步
                             </Button>
                         )}
@@ -330,7 +326,9 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                     <div className="flex items-center gap-2">
                         {canGoNext && state.currentStep > 0 && (
                             <Button
+                                type="button"
                                 variant="ghost"
+                                className="min-h-11 px-3 sm:min-h-9"
                                 onClick={() => void handleSkip()}
                                 disabled={saving || state.currentStep === 3}
                             >
@@ -338,6 +336,8 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                             </Button>
                         )}
                         <Button
+                            type="button"
+                            className="min-h-11 gap-1 px-5 sm:min-h-9"
                             onClick={() => void handleNext()}
                             disabled={!currentStepValid || saving}
                         >
@@ -348,13 +348,13 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                             ) : (
                                 <>
                                     下一步
-                                    <ChevronRight className="h-4 w-4 ml-1" />
+                                    <ChevronRight className="h-4 w-4" />
                                 </>
                             )}
                         </Button>
                     </div>
-                </div>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

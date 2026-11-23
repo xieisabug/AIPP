@@ -148,45 +148,51 @@ export function useOfficeSaveFlow() {
     const ext = request?.format ?? "docx";
     const dialog = (
         <AlertDialog open={request !== null} onOpenChange={(open) => !open && !busy && finish({ status: "cancelled" })}>
-            <AlertDialogContent data-testid="office-save-dialog">
+            <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md" data-testid="office-save-dialog">
                 {step.kind === "confirm-overwrite" ? (
                     <>
-                        <AlertDialogHeader>
-                            <AlertDialogTitle>覆盖「{baseName(step.target)}」？</AlertDialogTitle>
-                            <AlertDialogDescription>
+                        <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                            <AlertDialogTitle className="truncate text-base font-semibold">覆盖「{baseName(step.target)}」？</AlertDialogTitle>
+                        </AlertDialogHeader>
+                        <div className="px-4 py-4 sm:px-5">
+                            <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
                                 这个位置已经有同名文件，覆盖会替换它的内容。新内容先写入临时文件，完整写好后才替换；写入失败时原有文件保持不变。
                             </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                            <Button variant="outline" onClick={() => setStep({ kind: "notice" })}>
+                        </div>
+                        <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                            <Button variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={() => setStep({ kind: "notice" })}>
                                 换个位置
                             </Button>
-                            <Button variant="destructive" onClick={() => void write(step.target, true)} data-testid="office-save-overwrite">
+                            <Button variant="destructive" className="min-h-11 px-5 sm:min-h-9" onClick={() => void write(step.target, true)} data-testid="office-save-overwrite">
                                 覆盖
                             </Button>
                         </AlertDialogFooter>
                     </>
                 ) : step.kind === "error" ? (
                     <>
-                        <AlertDialogHeader>
-                            <AlertDialogTitle>{step.title}</AlertDialogTitle>
-                            <AlertDialogDescription className="break-words">
+                        <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                            <AlertDialogTitle className="text-base font-semibold">{step.title}</AlertDialogTitle>
+                        </AlertDialogHeader>
+                        <div className="px-4 py-4 sm:px-5">
+                            <AlertDialogDescription className="break-words text-sm leading-relaxed text-muted-foreground">
                                 {step.message}。原文件未受影响，没有生成不完整的文件。
                             </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                            <Button variant="outline" onClick={() => finish({ status: "cancelled" })}>
+                        </div>
+                        <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                            <Button variant="outline" className="min-h-11 px-4 sm:min-h-9" onClick={() => finish({ status: "cancelled" })}>
                                 关闭
                             </Button>
-                            <Button onClick={() => void chooseAndSave()}>重新选择位置</Button>
+                            <Button className="min-h-11 px-5 sm:min-h-9" onClick={() => void chooseAndSave()}>重新选择位置</Button>
                         </AlertDialogFooter>
                     </>
                 ) : (
                     <>
-                        <AlertDialogHeader>
-                            <AlertDialogTitle>另存为新文件</AlertDialogTitle>
+                        <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                            <AlertDialogTitle className="text-base font-semibold">另存为新文件</AlertDialogTitle>
+                        </AlertDialogHeader>
+                        <div className="px-4 py-4 sm:px-5">
                             <AlertDialogDescription asChild>
-                                <div className="space-y-2 text-sm text-muted-foreground">
+                                <div className="space-y-2 text-sm leading-relaxed text-muted-foreground">
                                     <p>
                                         {request?.purpose === "output" ? "这份修改后的副本" : "修改后的内容"}会保存为新文件，原文件「{request?.fileName}」保持不变。
                                     </p>
@@ -194,12 +200,12 @@ export function useOfficeSaveFlow() {
                                     <p>另存的文件可在 Microsoft Office 与 WPS 中打开；复杂排版与特性不保证完全无损。</p>
                                 </div>
                             </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                            <Button variant="outline" disabled={busy} onClick={() => finish({ status: "cancelled" })}>
+                        </div>
+                        <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                            <Button variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={busy} onClick={() => finish({ status: "cancelled" })}>
                                 取消
                             </Button>
-                            <Button disabled={busy} onClick={() => void chooseAndSave()} data-testid="office-save-choose">
+                            <Button className="min-h-11 px-5 sm:min-h-9" disabled={busy} onClick={() => void chooseAndSave()} data-testid="office-save-choose">
                                 {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                                 {mobile ? "保存到手机" : "选择位置并保存"}
                             </Button>

@@ -44,4 +44,27 @@ describe("VaultMigrationDialog", () => {
         const serializedCalls = JSON.stringify(vi.mocked(invoke).mock.calls);
         expect(serializedCalls).not.toContain("secret-value");
     });
+
+    it("should support select-all and clear actions for multiple candidates", async () => {
+        const user = userEvent.setup();
+        const second = {
+            ...candidate,
+            configId: 5,
+            label: "Second Provider · API Key",
+            suggestedName: "Second Provider · API Key",
+            suggestedKey: "second_provider_api_key",
+        };
+        mockInvokeHandler("vault_migration_candidates", () => [candidate, second]);
+        render(<VaultMigrationDialog onComplete={vi.fn()} />);
+
+        await user.click(screen.getByRole("button", { name: "迁移明文" }));
+        expect(await screen.findByText(second.label)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "确认迁移 0 项" })).toBeDisabled();
+
+        await user.click(screen.getByRole("button", { name: "全选" }));
+        expect(screen.getByRole("button", { name: "确认迁移 2 项" })).toBeEnabled();
+
+        await user.click(screen.getByRole("button", { name: "清空" }));
+        expect(screen.getByRole("button", { name: "确认迁移 0 项" })).toBeDisabled();
+    });
 });

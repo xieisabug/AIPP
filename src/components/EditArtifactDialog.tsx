@@ -4,11 +4,10 @@ import { useForm } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -106,12 +105,11 @@ export default function EditArtifactDialog({ isOpen, onClose, artifact, onUpdate
         <Dialog
             open={isOpen}
             onOpenChange={(open) => {
-                if (!open) handleCancel();
+                if (!open && !isLoading) handleCancel();
             }}
         >
-            <DialogContent
-                className="sm:max-w-[525px] max-h-[80vh] overflow-y-auto"
-
+            <CompactDialogContent
+                className="sm:max-w-lg"
                 onInteractOutside={(e) => {
                     const target = e.target as HTMLElement | null;
                     // Try to detect via composedPath first for reliability across WebView2
@@ -146,85 +144,89 @@ export default function EditArtifactDialog({ isOpen, onClose, artifact, onUpdate
                     if (inEmoji) e.preventDefault();
                 }}
             >
-                <DialogHeader>
-                    <DialogTitle>编辑 Artifact</DialogTitle>
-                    <DialogDescription>修改 artifact 的基本信息</DialogDescription>
-                </DialogHeader>
+                <CompactDialogHeader
+                    title="编辑 Artifact"
+                    subtitle="修改基本信息"
+                    description="修改 artifact 的基本信息"
+                    closeDisabled={isLoading}
+                />
 
-                <Form {...form}>
-                    <form onSubmit={form.handleSubmit(handleSave)} className="space-y-6 py-4">
-                        {/* 图标选择 */}
-                        <FormField
-                            control={form.control}
-                            name="icon"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">图标</FormLabel>
-                                    <FormControl>
-                                        <EmojiPicker className="focus:ring-ring/20 focus:border-ring" value={field.value} onChange={field.onChange} />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
+                <CompactDialogBody>
+                    <Form {...form}>
+                        <form onSubmit={form.handleSubmit(handleSave)} className="space-y-4">
+                            {/* 图标选择 */}
+                            <FormField
+                                control={form.control}
+                                name="icon"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>图标</FormLabel>
+                                        <FormControl>
+                                            <EmojiPicker className="focus:ring-ring/20 focus:border-ring" value={field.value} onChange={field.onChange} />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
 
-                        {/* 名称 */}
-                        <FormField
-                            control={form.control}
-                            name="name"
-                            rules={{ required: '请输入 artifact 名称' }}
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">名称 *</FormLabel>
-                                    <FormControl>
-                                        <Input className="focus:ring-ring/20 focus:border-ring" placeholder="输入 artifact 名称" autoFocus {...field} />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
+                            {/* 名称 */}
+                            <FormField
+                                control={form.control}
+                                name="name"
+                                rules={{ required: '请输入 artifact 名称' }}
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>名称 *</FormLabel>
+                                        <FormControl>
+                                            <Input className="focus:ring-ring/20 focus:border-ring" placeholder="输入 artifact 名称" autoFocus {...field} />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
 
-                        {/* 描述 */}
-                        <FormField
-                            control={form.control}
-                            name="description"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">描述</FormLabel>
-                                    <FormControl>
-                                        <Textarea className="focus:ring-ring/20 focus:border-ring" placeholder="描述这个 artifact 的用途或特点..." rows={3} {...field} />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
+                            {/* 描述 */}
+                            <FormField
+                                control={form.control}
+                                name="description"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>描述</FormLabel>
+                                        <FormControl>
+                                            <Textarea className="resize-none focus:ring-ring/20 focus:border-ring" placeholder="描述这个 artifact 的用途或特点..." rows={3} {...field} />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
 
-                        {/* 标签 */}
-                        <FormField
-                            control={form.control}
-                            name="tags"
-                            render={({ field }) => (
-                                <FormItem className="space-y-3">
-                                    <FormLabel className="flex items-center font-semibold text-sm text-foreground">标签</FormLabel>
-                                    <FormControl>
-                                        <Input className="focus:ring-ring/20 focus:border-ring" placeholder="用逗号分隔多个标签，如: 图表,数据,可视化" {...field} />
-                                    </FormControl>
-                                    <FormMessage />
-                                </FormItem>
-                            )}
-                        />
-                    </form>
-                </Form>
+                            {/* 标签 */}
+                            <FormField
+                                control={form.control}
+                                name="tags"
+                                render={({ field }) => (
+                                    <FormItem className="space-y-1.5">
+                                        <FormLabel>标签</FormLabel>
+                                        <FormControl>
+                                            <Input className="focus:ring-ring/20 focus:border-ring" placeholder="用逗号分隔多个标签，如: 图表,数据,可视化" {...field} />
+                                        </FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                        </form>
+                    </Form>
+                </CompactDialogBody>
 
-                <DialogFooter>
-                    <Button variant="outline" onClick={handleCancel}>
+                <CompactDialogFooter>
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={isLoading} onClick={handleCancel}>
                         取消
                     </Button>
-                    <Button onClick={form.handleSubmit(handleSave)} disabled={isLoading}>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={form.handleSubmit(handleSave)} disabled={isLoading}>
                         {isLoading ? '保存中...' : '保存'}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 }

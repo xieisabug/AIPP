@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { ArrowRight, KeyRound, Plus, ShieldOff } from "lucide-react";
+import { AlertTriangle, ArrowRight, KeyRound, Plus, ShieldOff } from "lucide-react";
 import { ConfigPageLayout, EmptyState, ListItemButton, SidebarList, ConfigPageLoading } from "@/components/common";
 import type { SelectOption } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -25,6 +25,8 @@ interface VaultConfigProps {
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const simpleValueWarning = "凭据过于简单可能导致普通内容被误遮盖，建议使用较长且独特的值。";
+const isEnterSubmit = (event: React.KeyboardEvent) =>
+    event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229;
 
 /**
  * 只在需要用户处理时出现：其他设备开启了同步、口令已更换，或有条目还没解密。
@@ -63,9 +65,11 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const [createOpen, setCreateOpen] = useState(false);
     const [create, setCreate] = useState<CreateState>(blankCreate);
     const [createError, setCreateError] = useState<string | null>(null);
+    const [createSaving, setCreateSaving] = useState(false);
     /** 替换对话框里输入的新值；null 表示对话框关闭。 */
     const [replaceValue, setReplaceValue] = useState<string | null>(null);
     const [replaceError, setReplaceError] = useState<string | null>(null);
+    const [replaceSaving, setReplaceSaving] = useState(false);
     const [deleteOpen, setDeleteOpen] = useState(false);
     const [referenceState, setReferenceState] = useState<{ itemId: string; list: VaultConfigReference[] } | null>(null);
     const createValueIsSimple = isSimpleVaultValue(create.value);
@@ -142,6 +146,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     };
 
     const submitCreate = async () => {
+        if (createSaving) return;
         const name = create.name.trim();
         const problem = !name ? "请填写名称" : keyError(create.key, keys) ?? (create.value.trim() ? null : "请填写值");
         if (problem) {
@@ -156,6 +161,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
             allowedSites: [],
             syncEnabled: true,
         };
+        setCreateSaving(true);
         try {
             const created = await invoke<VaultItem>("vault_create", { input });
             closeCreate();
@@ -164,6 +170,8 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
             toast.success("已加密保存，之后不会再显示这个值");
         } catch (error) {
             setCreateError(errorText(error));
+        } finally {
+            setCreateSaving(false);
         }
     };
 
@@ -180,11 +188,12 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     }, [selected, reload]);
 
     const submitReplace = async () => {
-        if (!selected || replaceValue === null) return;
+        if (!selected || replaceValue === null || replaceSaving) return;
         if (!replaceValue.trim()) {
             setReplaceError("请填写新的值");
             return;
         }
+        setReplaceSaving(true);
         try {
             await invoke<VaultItem>("vault_replace_secret", { id: selected.id, value: replaceValue });
             setReplaceValue(null);
@@ -192,6 +201,8 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
             toast.success("值已替换");
         } catch (error) {
             setReplaceError(errorText(error));
+        } finally {
+            setReplaceSaving(false);
         }
     };
 
@@ -268,29 +279,56 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
         );
     }
 
+    const handleCreateEnter: React.KeyboardEventHandler<HTMLInputElement> = (event) => {
+        if (!isEnterSubmit(event)) return;
+        event.preventDefault();
+        void submitCreate();
+    };
+
+    const handleReplaceEnter: React.KeyboardEventHandler<HTMLInputElement> = (event) => {
+        if (!isEnterSubmit(event)) return;
+        event.preventDefault();
+        void submitReplace();
+    };
+
     const dialogs = (
         <>
-            <FormDialog title="新建条目" isOpen={createOpen} onClose={closeCreate} onSubmit={submitCreate}>
-                <div className="space-y-5">
-                    <div className="space-y-2">
+            <FormDialog
+                title="新建条目"
+                subtitle="加密保存在安全存储中"
+                isOpen={createOpen}
+                submitting={createSaving}
+                onClose={closeCreate}
+                onSubmit={() => void submitCreate()}
+            >
+                <div className="space-y-4">
+                    <div className="space-y-1.5">
                         <Label htmlFor="vault-create-name">名称</Label>
                         <Input
                             id="vault-create-name"
+                            autoFocus
+                            autoComplete="off"
                             placeholder="例如：GitHub 令牌、身份证号"
                             value={create.name}
                             onChange={(event) => {
                                 const name = event.target.value;
                                 setCreate((state) => ({ ...state, name, key: state.keyEdited ? state.key : suggestKey(name, keys) }));
+                                if (createError) setCreateError(null);
                             }}
+                            onKeyDown={handleCreateEnter}
                         />
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-1.5">
                         <Label htmlFor="vault-create-key">键</Label>
                         <VaultKeyInput
                             id="vault-create-key"
                             value={create.key}
                             describedBy={genericKey ? "vault-create-key-hint" : undefined}
-                            onChange={(key) => setCreate((state) => ({ ...state, key, keyEdited: true }))}
+                            onChange={(key) => {
+                                setCreate((state) => ({ ...state, key, keyEdited: true }));
+                                if (createError) setCreateError(null);
+                            }}
+                            onKeyDown={handleCreateEnter}
                         />
                         {genericKey && (
                             <p id="vault-create-key-hint" className="text-xs text-muted-foreground">
@@ -298,52 +336,85 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                             </p>
                         )}
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-1.5">
                         <Label htmlFor="vault-create-value">值</Label>
                         <PasswordInput
                             id="vault-create-value"
                             autoComplete="off"
+                            placeholder="输入或粘贴凭据值"
                             aria-describedby={createValueIsSimple ? "vault-create-value-warning" : undefined}
                             value={create.value}
-                            onChange={(event) => setCreate((state) => ({ ...state, value: event.target.value }))}
+                            onChange={(event) => {
+                                setCreate((state) => ({ ...state, value: event.target.value }));
+                                if (createError) setCreateError(null);
+                            }}
+                            onKeyDown={handleCreateEnter}
                         />
                         {createValueIsSimple && <p id="vault-create-value-warning" className="text-xs text-amber-600 dark:text-amber-400">{simpleValueWarning}</p>}
                         <p className="text-xs text-muted-foreground">只填值本身，令牌不要带 Bearer 前缀。</p>
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-1.5">
                         <Label htmlFor="vault-create-description">给助手的说明（可选）</Label>
                         <Textarea
                             id="vault-create-description"
                             rows={2}
+                            className="resize-none"
                             placeholder="例如：GitHub API 令牌，可读写我的仓库"
                             value={create.description}
                             onChange={(event) => setCreate((state) => ({ ...state, description: event.target.value }))}
                         />
                     </div>
-                    {createError && <p role="alert" className="text-sm text-destructive">{createError}</p>}
+                    {createError && (
+                        <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span className="min-w-0 flex-1 break-words">{createError}</span>
+                        </div>
+                    )}
                 </div>
             </FormDialog>
 
             <FormDialog
-                title={`替换「${selected?.name ?? ""}」`}
+                title="替换凭据值"
+                subtitle={selected?.name}
                 isOpen={replaceValue !== null}
-                onClose={() => setReplaceValue(null)}
-                onSubmit={submitReplace}
+                submitting={replaceSaving}
+                onClose={() => { if (!replaceSaving) setReplaceValue(null); }}
+                onSubmit={() => void submitReplace()}
             >
                 <div className="space-y-4">
-                    <p className="text-sm text-muted-foreground">旧值不会显示，请输入新的值。自动允许的网站保持不变。</p>
-                    <div className="space-y-2">
+                    {selected && (
+                        <div className="flex items-center justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2">
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">{selected.name}</div>
+                                <div className="truncate font-mono text-xs text-muted-foreground">{`<vault:${selected.key}>`}</div>
+                            </div>
+                            <span className="shrink-0 text-xs text-muted-foreground">已加密</span>
+                        </div>
+                    )}
+                    <div className="space-y-1.5">
                         <Label htmlFor="vault-replace-value">新的值</Label>
                         <PasswordInput
                             id="vault-replace-value"
+                            autoFocus
                             autoComplete="off"
+                            placeholder="输入新的凭据值"
                             aria-describedby={replaceValueIsSimple ? "vault-replace-value-warning" : undefined}
                             value={replaceValue ?? ""}
-                            onChange={(event) => setReplaceValue(event.target.value)}
+                            onChange={(event) => {
+                                setReplaceValue(event.target.value);
+                                if (replaceError) setReplaceError(null);
+                            }}
+                            onKeyDown={handleReplaceEnter}
                         />
                         {replaceValueIsSimple && <p id="vault-replace-value-warning" className="text-xs text-amber-600 dark:text-amber-400">{simpleValueWarning}</p>}
+                        <p className="text-xs text-muted-foreground">旧值不会显示，请输入新的值。自动允许的网站保持不变。</p>
                     </div>
-                    {replaceError && <p role="alert" className="text-sm text-destructive">{replaceError}</p>}
+                    {replaceError && (
+                        <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span className="min-w-0 flex-1 break-words">{replaceError}</span>
+                        </div>
+                    )}
                 </div>
             </FormDialog>
 

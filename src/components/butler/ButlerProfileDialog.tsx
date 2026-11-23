@@ -7,11 +7,17 @@ import { Button } from "@/components/ui/button";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { navigateMobileConfig } from "@/mobile/navigation";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useFilteredModels, type ModelForSelect } from "@/hooks/useFilteredModels";
-import AssistantProfileEditor, { PROFILE_DIALOG_CLASS, PROFILE_FOOTER_CLASS } from "./AssistantProfileEditor";
+import AssistantProfileEditor from "./AssistantProfileEditor";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
@@ -177,17 +183,23 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
             <ModelSelect field={modelField} picked={pickedModel} onPick={setPickedModel} />
         </>}
     </>;
-    const errorLine = error && <p role="alert" className="shrink-0 break-words text-sm text-destructive">{error}</p>;
-    const footer = <DialogFooter className={PROFILE_FOOTER_CLASS}>
-        <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
-        <Button type="submit" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
-    </DialogFooter>;
+    const errorLine = error && (
+        <p role="alert" className="mx-4 mb-2 shrink-0 break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive sm:mx-5">
+            {error}
+        </p>
+    );
+    const footer = <CompactDialogFooter>
+        <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={saving} onClick={onClose}>取消</Button>
+        <Button type="submit" className="min-h-11 px-5 sm:min-h-9" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
+    </CompactDialogFooter>;
     const onSubmit = (event: FormEvent) => { event.preventDefault(); void save(); };
 
-    const profileForm = <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
-        <AssistantProfileEditor name={name} appearance={appearance} onAppearanceChange={setAppearance} disabled={saving}>
-            {profileFields}
-        </AssistantProfileEditor>
+    const profileForm = <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+        <CompactDialogBody className="flex flex-col overflow-hidden">
+            <AssistantProfileEditor name={name} appearance={appearance} onAppearanceChange={setAppearance} disabled={saving}>
+                {profileFields}
+            </AssistantProfileEditor>
+        </CompactDialogBody>
         {errorLine}
         {footer}
     </form>;
@@ -199,20 +211,24 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
             ? "资料和形象一起保存。记忆的修改立即生效。"
             : "修改助手的基本信息，并搭配属于它的形象。";
     return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
-        <DialogContent className={PROFILE_DIALOG_CLASS} showCloseButton={!saving}>
-            <DialogHeader className="shrink-0">
-                <DialogTitle>{title}</DialogTitle>
-                <DialogDescription>{descriptionText}</DialogDescription>
-            </DialogHeader>
-            {!tabbed ? profileForm : <Tabs value={tab} onValueChange={setTab} className="min-h-0 flex-1 gap-4">
-                <TabsList className="grid w-full shrink-0 grid-cols-3">
-                    <TabsTrigger value="profile">资料</TabsTrigger>
-                    <TabsTrigger value="appearance">形象</TabsTrigger>
-                    <TabsTrigger value="memory">记忆</TabsTrigger>
-                </TabsList>
+        <CompactDialogContent className="h-[min(780px,88dvh,var(--aipp-vv-height,88dvh))] sm:max-w-[760px]">
+            <CompactDialogHeader
+                title={title}
+                subtitle={initialName}
+                description={descriptionText}
+                showCloseButton={!saving}
+            />
+            {!tabbed ? profileForm : <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col gap-0">
+                <div className="shrink-0 border-b border-border/60 px-4 py-2.5 sm:px-5">
+                    <TabsList className="grid w-full grid-cols-3">
+                        <TabsTrigger value="profile">资料</TabsTrigger>
+                        <TabsTrigger value="appearance">形象</TabsTrigger>
+                        <TabsTrigger value="memory">记忆</TabsTrigger>
+                    </TabsList>
+                </div>
                 {/* 记忆页不放进这个表单：页内按钮会误触发表单。切到记忆时藏起保存栏。 */}
-                <form hidden={tab === "memory"} onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
-                    <TabsContent value="profile" className="flex min-h-0 flex-col overflow-y-auto">
+                <form hidden={tab === "memory"} onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+                    <TabsContent value="profile" className="mt-0 flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4 sm:px-5">
                         <div className="space-y-4 px-1 pb-1">
                             <div className="flex justify-center py-2">
                                 <ButlerAvatar id={0} chief size={88} appearance={{ ...appearance, motion: true }} />
@@ -227,18 +243,18 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
                             </button>
                         </div>}
                     </TabsContent>
-                    <TabsContent value="appearance" className="flex min-h-0 flex-col">
+                    <TabsContent value="appearance" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-4 sm:px-5">
                         <AssistantProfileEditor name={name} appearance={appearance} onAppearanceChange={setAppearance} disabled={saving} />
                     </TabsContent>
                     {errorLine}
                     {footer}
                 </form>
-                <TabsContent value="memory" className="min-h-0 overflow-y-auto pr-1">
+                <TabsContent value="memory" className="mt-0 min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5">
                     {memoryConversationId !== undefined
                         ? <ButlerMemoryPanel conversationId={memoryConversationId} scope="assistant" />
                         : <p className="text-sm text-muted-foreground">还没有私聊。开始对话后，可以在这里查看和管理记忆。</p>}
                 </TabsContent>
             </Tabs>}
-        </DialogContent>
+        </CompactDialogContent>
     </Dialog>;
 }

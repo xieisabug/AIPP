@@ -1,7 +1,13 @@
 import AppIcon from './apps/AppIcon';
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from "../ui/dialog";
 import { Label } from "../ui/label";
 import { Button } from "../ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -423,12 +429,15 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     }, [envValues, browserOpenDefault]);
 
     return (
-        <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-            <DialogContent className="max-w-4xl min-w-xl w-1/2 sm:max-w-none max-h-[80vh] flex flex-col">
-                <DialogHeader>
-                    <DialogTitle>{editing ? "编辑内置工具" : "添加内置工具"}</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 overflow-y-auto flex-1 min-h-0 px-1 sm:px-4">
+        <Dialog open={isOpen} onOpenChange={(open) => !open && !busy && onClose()}>
+            <CompactDialogContent className="sm:max-w-3xl">
+                <CompactDialogHeader
+                    title={editing ? "编辑内置工具" : "添加内置工具"}
+                    subtitle={editing ? initialCommand : selected?.command}
+                    description="配置内置工具的超时时间与环境变量"
+                    closeDisabled={busy}
+                />
+                <CompactDialogBody className="space-y-4">
                     {/* Template selector; hidden in edit mode */}
                     {!editing && (
                         <div className="space-y-2">
@@ -561,16 +570,16 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                             </CardContent>
                         </Card>
                     </div>
-                </div>
-                <DialogFooter className="flex-shrink-0">
-                    <Button variant="ghost" onClick={onClose}>
+                </CompactDialogBody>
+                <CompactDialogFooter>
+                    <Button type="button" variant="outline" className="min-h-11 px-4 sm:min-h-9" disabled={busy} onClick={onClose}>
                         取消
                     </Button>
-                    <Button onClick={handleSubmit} disabled={busy}>
+                    <Button type="button" className="min-h-11 px-5 sm:min-h-9" onClick={handleSubmit} disabled={busy}>
                         {editing ? "保存" : "添加"}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

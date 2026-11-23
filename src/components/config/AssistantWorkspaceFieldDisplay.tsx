@@ -4,9 +4,9 @@ import { Button } from "../ui/button";
 import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import {
     Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
     DialogTrigger,
 } from "../ui/dialog";
 import { AssistantWorkspace } from "@/data/Assistant";
@@ -107,12 +107,15 @@ const AssistantWorkspaceFieldDisplay: React.FC<AssistantWorkspaceFieldDisplayPro
                             管理
                         </Button>
                     </DialogTrigger>
-                    <DialogContent className="max-w-lg">
-                        <DialogHeader>
-                            <DialogTitle>助手工作区配置</DialogTitle>
-                        </DialogHeader>
-                        <div className="space-y-4">
-                            <p className="text-sm text-muted-foreground">
+                    <CompactDialogContent className="sm:max-w-lg">
+                        <CompactDialogHeader
+                            icon={<FolderOpen className="h-4 w-4" />}
+                            title="助手工作区配置"
+                            subtitle={workspaces.length > 0 ? `${workspaces.length} 个路径` : undefined}
+                            description="配置助手信任的文件路径，路径下的文件操作将自动放行"
+                        />
+                        <CompactDialogBody className="space-y-4">
+                            <p className="text-xs text-muted-foreground">
                                 配置助手信任的文件路径。在此路径下的文件操作将自动放行，无需每次确认。
                             </p>
 
@@ -128,35 +131,35 @@ const AssistantWorkspaceFieldDisplay: React.FC<AssistantWorkspaceFieldDisplayPro
                                     onClick={handleAddWorkspace}
                                     disabled={!newPath.trim()}
                                 >
-                                    <Plus className="h-4 w-4 mr-1" />
+                                    <Plus className="mr-1 h-4 w-4" />
                                     添加
                                 </Button>
                             </div>
 
                             {/* 现有路径列表 */}
-                            <div className="space-y-2 max-h-64 overflow-y-auto">
+                            <div className="max-h-64 space-y-1.5 overflow-y-auto pr-0.5">
                                 {workspaces.length === 0 ? (
-                                    <div className="text-sm text-muted-foreground text-center py-4">
+                                    <div className="rounded-lg border border-dashed border-border bg-muted/20 py-6 text-center text-sm text-muted-foreground">
                                         暂无信任路径
                                     </div>
                                 ) : (
                                     workspaces.map((workspace) => (
                                         <div
                                             key={workspace.id}
-                                            className="flex items-center justify-between p-2 bg-muted rounded-md"
+                                            className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2"
                                         >
-                                            <span className="text-sm font-mono break-all flex-1 mr-2">
+                                            <span className="flex-1 break-all font-mono text-xs">
                                                 {workspace.path}
                                             </span>
                                             <Button
                                                 variant="ghost"
-                                                size="sm"
+                                                size="icon"
                                                 onClick={() =>
                                                     handleRemoveWorkspace(workspace.id)
                                                 }
-                                                className="text-destructive hover:text-destructive"
+                                                className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
                                             >
-                                                <Trash2 className="h-4 w-4" />
+                                                <Trash2 className="h-3.5 w-3.5" />
                                             </Button>
                                         </div>
                                     ))
@@ -164,10 +167,10 @@ const AssistantWorkspaceFieldDisplay: React.FC<AssistantWorkspaceFieldDisplayPro
                             </div>
 
                             {error && (
-                                <p className="text-sm text-destructive">{error}</p>
+                                <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{error}</p>
                             )}
-                        </div>
-                    </DialogContent>
+                        </CompactDialogBody>
+                    </CompactDialogContent>
                 </Dialog>
             </div>
         </div>

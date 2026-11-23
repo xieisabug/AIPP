@@ -153,19 +153,23 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     const uninstallConfirmation = current && <AlertDialog open={uninstallRequested} onOpenChange={open => {
         if (!busy) setUninstallRequested(open);
     }}>
-        <AlertDialogContent>
-            <AlertDialogHeader>
-                <AlertDialogTitle>卸载「{preview.name}」？</AlertDialogTitle>
-                <AlertDialogDescription>将删除应用文件、技能，以及此应用创建的连接和凭据。复用的已有连接会保留。有本地修改时会中止卸载。</AlertDialogDescription>
+        <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md">
+            <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
+                <AlertDialogTitle className="text-base font-semibold">卸载「{preview.name}」？</AlertDialogTitle>
             </AlertDialogHeader>
-            <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={revokeOnUninstall} disabled={!!busy} onChange={e => setRevokeOnUninstall(e.target.checked)} />
-                同时撤销服务商授权
-            </label>
-            {localError && <p role="alert" className="break-words text-sm text-destructive">{localError}</p>}
-            <AlertDialogFooter>
-                <AlertDialogCancel disabled={!!busy}>取消</AlertDialogCancel>
-                <Button variant="destructive" disabled={!!busy} onClick={() => void run('正在卸载…', async () => {
+            <div className="space-y-3 px-4 py-4 sm:px-5">
+                <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
+                    将删除应用文件、技能，以及此应用创建的连接和凭据。复用的已有连接会保留。有本地修改时会中止卸载。
+                </AlertDialogDescription>
+                <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+                    <input type="checkbox" checked={revokeOnUninstall} disabled={!!busy} onChange={e => setRevokeOnUninstall(e.target.checked)} />
+                    同时撤销服务商授权
+                </label>
+                {localError && <p role="alert" className="break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{localError}</p>}
+            </div>
+            <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
+                <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9" disabled={!!busy}>取消</AlertDialogCancel>
+                <Button variant="destructive" className="min-h-11 px-5 sm:min-h-9" disabled={!!busy} onClick={() => void run('正在卸载…', async () => {
                     await invoke('uninstall_agent_plugin', { key: preview.key, revokeRemote: revokeOnUninstall });
                     if (!embedded) setPreview(undefined);
                     setManaging(false);

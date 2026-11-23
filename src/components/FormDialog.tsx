@@ -1,10 +1,24 @@
 import React from 'react';
-import { X } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { Button } from './ui/button';
-import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
+} from './ui/dialog';
 
 interface FormDialogProps {
     title: string;
+    subtitle?: string;
+    description?: string;
+    submitLabel?: string;
+    cancelLabel?: string;
+    submitDisabled?: boolean;
+    submitting?: boolean;
+    maxWidthClassName?: string;
+    footerLeft?: React.ReactNode;
     onSubmit: () => void;
     onClose: () => void;
     isOpen: boolean;
@@ -12,55 +26,66 @@ interface FormDialogProps {
 }
 
 /**
- * 表单对话框。移动端 / IME 打开时：
+ * 表单对话框。复用 CompactDialog 紧凑顶栏与底栏。
+ * 移动端 / IME 打开时：
  * - 高度受 visualViewport CSS 变量约束，确认/取消留在可见区底部
- * - 压缩标题区内边距
  */
-const FormDialog: React.FC<FormDialogProps> = ({ title, onSubmit, onClose, isOpen, children }) => {
+const FormDialog: React.FC<FormDialogProps> = ({
+    title,
+    subtitle,
+    description,
+    submitLabel = '确认',
+    cancelLabel = '取消',
+    submitDisabled = false,
+    submitting = false,
+    maxWidthClassName,
+    footerLeft,
+    onSubmit,
+    onClose,
+    isOpen,
+    children,
+}) => {
     return (
-        <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-            <DialogContent
-                showCloseButton={false}
-                className="max-w-md gap-0 overflow-hidden p-0 grid grid-rows-[auto_minmax(0,1fr)_auto] !max-h-[min(90dvh,var(--aipp-vv-height,90dvh))] top-[max(1rem,var(--aipp-vv-offset-top,0px))] translate-y-0 data-[state=open]:slide-in-from-top-2 sm:top-[50%] sm:translate-y-[-50%]"
+        <Dialog open={isOpen} onOpenChange={(open) => { if (!open && !submitting) onClose(); }}>
+            <CompactDialogContent
+                className={maxWidthClassName}
                 data-aipp-slot="form-dialog"
             >
-                <DialogHeader className="border-b border-border px-4 py-3 sm:px-6 sm:py-6 shrink-0">
-                    <div className="flex items-center justify-between gap-4">
-                        <DialogTitle className="truncate pr-4 text-lg sm:text-xl">{title}</DialogTitle>
-                        <DialogClose asChild>
-                            <button
-                                type="button"
-                                className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg p-2 transition-colors duration-200 hover:bg-muted"
-                                aria-label="关闭"
-                            >
-                                <X className="h-5 w-5 text-muted-foreground" />
-                            </button>
-                        </DialogClose>
-                    </div>
-                </DialogHeader>
+                <CompactDialogHeader
+                    title={title}
+                    subtitle={subtitle}
+                    description={description ?? subtitle ?? title}
+                    closeDisabled={submitting}
+                />
 
-                <div className="min-h-0 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6 sm:py-6">
+                <CompactDialogBody>
                     {children}
-                </div>
+                </CompactDialogBody>
 
-                <DialogFooter className="sticky bottom-0 z-10 border-t border-border bg-background px-4 py-3 sm:px-6 sm:py-4 sm:justify-end shrink-0 safe-bottom">
+                <CompactDialogFooter className="sticky bottom-0 z-10">
+                    {footerLeft && <div className="mr-auto min-w-0 text-xs text-muted-foreground">{footerLeft}</div>}
                     <Button
+                        type="button"
                         variant="outline"
+                        disabled={submitting}
                         onClick={onClose}
-                        className="min-h-11 px-6"
+                        className="min-h-11 px-4 sm:min-h-9"
                         data-aipp-slot="form-dialog-cancel"
                     >
-                        取消
+                        {cancelLabel}
                     </Button>
                     <Button
+                        type="button"
+                        disabled={submitDisabled || submitting}
                         onClick={onSubmit}
-                        className="min-h-11 px-6 bg-primary hover:bg-primary/90 text-primary-foreground shadow-md hover:shadow-lg transition-all"
+                        className="min-h-11 px-5 sm:min-h-9"
                         data-aipp-slot="form-dialog-confirm"
                     >
-                        确认
+                        {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {submitLabel}
                     </Button>
-                </DialogFooter>
-            </DialogContent>
+                </CompactDialogFooter>
+            </CompactDialogContent>
         </Dialog>
     );
 };

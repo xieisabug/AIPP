@@ -1,10 +1,9 @@
 import { useState, useCallback } from "react";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
     DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -103,18 +102,21 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
                     />
                 </DialogTrigger>
             )}
-            <DialogContent className="max-w-xs">
-                <DialogHeader>
-                    <DialogTitle>导出消息</DialogTitle>
-                    <DialogDescription>选择导出格式</DialogDescription>
-                </DialogHeader>
-                <div className="py-2">
+            <CompactDialogContent className="sm:max-w-sm">
+                <CompactDialogHeader
+                    icon={<Download className="h-4 w-4" />}
+                    title="导出消息"
+                    subtitle="选择导出格式"
+                    description="选择导出格式"
+                    closeDisabled={isExporting}
+                />
+                <CompactDialogBody>
                     <div className="grid grid-cols-4 gap-2">
                         <Button
                             variant="outline"
                             onClick={() => handleExport("markdown")}
                             disabled={isExporting}
-                            className="flex flex-col items-center gap-1 h-auto py-3"
+                            className="flex h-auto flex-col items-center gap-1 py-3"
                         >
                             {exporting === "markdown" ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -128,7 +130,7 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
                             variant="outline"
                             onClick={() => handleExport("word")}
                             disabled={isExporting}
-                            className="flex flex-col items-center gap-1 h-auto py-3"
+                            className="flex h-auto flex-col items-center gap-1 py-3"
                         >
                             {exporting === "word" ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -142,7 +144,7 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
                             variant="outline"
                             onClick={() => handleExport("pdf")}
                             disabled={isExporting}
-                            className="flex flex-col items-center gap-1 h-auto py-3"
+                            className="flex h-auto flex-col items-center gap-1 py-3"
                         >
                             {exporting === "pdf" ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -156,7 +158,7 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
                             variant="outline"
                             onClick={() => handleExport("png")}
                             disabled={isExporting}
-                            className="flex flex-col items-center gap-1 h-auto py-3"
+                            className="flex h-auto flex-col items-center gap-1 py-3"
                         >
                             {exporting === "png" ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -166,8 +168,8 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
                             <span className="text-xs">图片</span>
                         </Button>
                     </div>
-                </div>
-            </DialogContent>
+                </CompactDialogBody>
+            </CompactDialogContent>
         </Dialog>
     );
 };

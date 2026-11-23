@@ -119,6 +119,126 @@ function DialogDescription({ className, ...props }: React.ComponentProps<typeof 
     );
 }
 
+/**
+ * 紧凑型对话框容器：与新增模型提供商 / 新增助手向导一致的视觉框架（无默认内边距，由顶栏、可滚动主体、底栏组成）。
+ */
+function CompactDialogContent({
+    className,
+    children,
+    disableAnimation = false,
+    ...props
+}: Omit<React.ComponentProps<typeof DialogPrimitive.Content>, "children"> & {
+    children?: React.ReactNode;
+    disableAnimation?: boolean;
+}) {
+    return (
+        <DialogContent
+            showCloseButton={false}
+            disableAnimation={disableAnimation}
+            data-aipp-dialog="compact"
+            className={cn(
+                "flex flex-col gap-0 overflow-hidden p-0 sm:max-w-lg !max-h-[min(88dvh,var(--aipp-vv-height,88dvh))] top-[max(1rem,var(--aipp-vv-offset-top,0px))] translate-y-0 data-[state=open]:slide-in-from-top-2 sm:top-[50%] sm:translate-y-[-50%]",
+                className,
+            )}
+            {...props}
+        >
+            {children}
+        </DialogContent>
+    );
+}
+
+function CompactDialogHeader({
+    title,
+    subtitle,
+    description,
+    icon,
+    actions,
+    showCloseButton = true,
+    closeDisabled = false,
+    closeLabel = "关闭",
+    className,
+    children,
+}: {
+    title?: React.ReactNode;
+    subtitle?: React.ReactNode;
+    description?: string;
+    icon?: React.ReactNode;
+    actions?: React.ReactNode;
+    showCloseButton?: boolean;
+    closeDisabled?: boolean;
+    closeLabel?: string;
+    className?: string;
+    children?: React.ReactNode;
+}) {
+    return (
+        <div
+            data-slot="compact-dialog-header"
+            className={cn(
+                "relative flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-2.5 sm:px-5",
+                className,
+            )}
+        >
+            {icon && <span className="flex shrink-0 items-center text-muted-foreground">{icon}</span>}
+            {title !== undefined && (
+                <DialogTitle className="min-w-0 truncate text-base font-semibold">
+                    {title}
+                </DialogTitle>
+            )}
+            {subtitle && (
+                <span className="truncate text-xs text-muted-foreground">{subtitle}</span>
+            )}
+            {children}
+            {description !== undefined && (
+                <DialogDescription className="sr-only">{description}</DialogDescription>
+            )}
+            {(actions || showCloseButton) && (
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                    {actions}
+                    {showCloseButton && (
+                        <DialogClose asChild>
+                            <button
+                                type="button"
+                                aria-label={closeLabel}
+                                disabled={closeDisabled}
+                                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                            >
+                                <XIcon className="h-4 w-4" />
+                            </button>
+                        </DialogClose>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function CompactDialogBody({ className, ...props }: React.ComponentProps<"div">) {
+    return (
+        <div
+            data-slot="compact-dialog-body"
+            className={cn(
+                "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5",
+                className,
+            )}
+            {...props}
+        />
+    );
+}
+
+function CompactDialogFooter({ className, ...props }: React.ComponentProps<"div">) {
+    return (
+        /* 底部内边距 = 顶部 + 安全区；不用 .safe-bottom（未分层 CSS 会把 pb 覆盖成 0） */
+        <div
+            data-slot="compact-dialog-footer"
+            className={cn(
+                "flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5",
+                className,
+            )}
+            {...props}
+        />
+    );
+}
+
 export {
     Dialog,
     DialogClose,
@@ -130,4 +250,8 @@ export {
     DialogPortal,
     DialogTitle,
     DialogTrigger,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+    CompactDialogFooter,
 };

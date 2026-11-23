@@ -9,10 +9,9 @@ import { Badge } from "../ui/badge";
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import {
     Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
 } from "../ui/dialog";
 import {
     ScannedSkill,
@@ -189,50 +188,49 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
 
     return (
         <>
-            <Dialog open={isOpen} onOpenChange={onClose}>
-                <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-                    <DialogHeader>
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <DialogTitle className="flex items-center gap-2">
-                                    <Sparkles className="h-5 w-5" />
-                                    技能配置
-                                </DialogTitle>
-                                <DialogDescription>
-                                    为该助手配置可用的技能 ({enabledSkillsCount}个已启用)
-                                </DialogDescription>
-                            </div>
+            <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+                <CompactDialogContent className="h-[min(720px,88dvh)] sm:max-w-2xl">
+                    <CompactDialogHeader
+                        icon={<Sparkles className="h-4 w-4" />}
+                        title="技能配置"
+                        subtitle={`${enabledSkillsCount} 个已启用`}
+                        description={`为该助手配置可用的技能 (${enabledSkillsCount} 个已启用)`}
+                        actions={
                             <Button
-                                variant="outline"
+                                type="button"
+                                variant="ghost"
                                 size="sm"
+                                className="h-8 gap-1 px-2 text-xs"
                                 onClick={fetchSkillsData}
                                 disabled={isScanning}
                             >
-                                <RefreshCw className={`h-4 w-4 mr-1 ${isScanning ? 'animate-spin' : ''}`} />
+                                <RefreshCw className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`} />
                                 刷新
                             </Button>
-                        </div>
-                    </DialogHeader>
+                        }
+                    />
 
-                    <div className="flex-1 min-h-0 overflow-auto">
+                    <CompactDialogBody className="flex flex-col gap-3 overflow-hidden">
                         {allSkills.length === 0 ? (
-                            <div className="text-center py-8">
-                                <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                                <p className="text-sm text-muted-foreground mb-2">暂无可用的技能</p>
+                            <div className="flex flex-1 flex-col items-center justify-center py-10 text-center">
+                                <Sparkles className="mb-3 h-10 w-10 text-muted-foreground" />
+                                <p className="mb-1 text-sm text-muted-foreground">暂无可用的技能</p>
                                 <p className="text-xs text-muted-foreground">请先在技能配置中扫描或安装技能</p>
                             </div>
                         ) : (
-                            <div className="space-y-4">
+                            <>
                                 {/* 搜索框 */}
-                                <div className="relative">
-                                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                                <div className="relative shrink-0">
+                                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                                     <Input
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
                                         placeholder="搜索技能..."
-                                        className="pl-8 h-8 text-sm"
+                                        className="h-8 pl-8 text-sm"
                                     />
                                 </div>
+
+                                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-0.5">
 
                                 {sourceOrder.map(sourceType => {
                                     const sourceSkills = filteredGroupedSkills.get(sourceType);
@@ -326,10 +324,11 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                                             })}
                                         </div>
                                     ))}
-                            </div>
+                                </div>
+                            </>
                         )}
-                    </div>
-                </DialogContent>
+                    </CompactDialogBody>
+                </CompactDialogContent>
             </Dialog>
 
             {/* 操作 MCP 启用确认对话框 */}

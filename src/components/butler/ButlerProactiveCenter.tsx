@@ -5,7 +5,12 @@ import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+    Dialog,
+    CompactDialogContent,
+    CompactDialogHeader,
+    CompactDialogBody,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -133,30 +138,31 @@ export default function ButlerProactiveCenter({ open, onOpenChange, enabled }: {
     </article>;
 
     return <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl" data-aipp-slot="butler-proactive-center">
-            <DialogHeader className="border-b px-6 py-4">
-                <DialogTitle>主动整理</DialogTitle>
-                <DialogDescription>管家正在跟进的事项，以及每次整理的记录。节律与范围在总管家设置中调整。</DialogDescription>
-            </DialogHeader>
+        <CompactDialogContent className="sm:max-w-2xl" data-aipp-slot="butler-proactive-center">
+            <CompactDialogHeader
+                title="主动整理"
+                subtitle={active.length > 0 ? `${active.length} 项跟进中` : undefined}
+                description="管家正在跟进的事项，以及每次整理的记录。节律与范围在总管家设置中调整。"
+            />
             <Tabs defaultValue="items" className="flex min-h-0 flex-1 flex-col gap-0">
-                <div className="flex items-center justify-between gap-3 px-6 pt-4">
+                <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5 sm:px-5">
                     <TabsList>
                         <TabsTrigger value="items">跟进事项{active.length > 0 ? ` ${active.length}` : ""}</TabsTrigger>
                         <TabsTrigger value="runs">整理手记</TabsTrigger>
                     </TabsList>
                     <Button size="sm" variant="outline" disabled={!enabled || running} onClick={() => void runNow()}
                         title={enabled ? "立即回顾一次已开启范围内的聊天" : "主动整理未开启"}>
-                        {running && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}立即整理一次
+                        {running && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}立即整理一次
                     </Button>
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-                    {loadError && <p role="alert" className="mb-3 text-sm text-destructive">{loadError}</p>}
-                    {!content && !loadError && <p className="text-sm text-muted-foreground">正在读取…</p>}
+                <CompactDialogBody>
+                    {loadError && <p role="alert" className="mb-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{loadError}</p>}
+                    {!content && !loadError && <p className="py-6 text-center text-sm text-muted-foreground">正在读取…</p>}
                     {content && <>
                         <TabsContent value="items" className="mt-0 space-y-4">
                             {active.length > 0
                                 ? <div className={listClassName}>{active.map(renderItem)}</div>
-                                : <p className="rounded-lg border px-4 py-6 text-center text-sm text-muted-foreground">
+                                : <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
                                     暂无跟进中的事项。管家复盘聊天时，会把纪念日和需要跟进的事情记在这里。
                                 </p>}
                             {closed.length > 0 && <details className="group">
@@ -178,7 +184,7 @@ export default function ButlerProactiveCenter({ open, onOpenChange, enabled }: {
                                     </div>
                                     {r.summary && <p className="whitespace-pre-wrap text-muted-foreground">{r.summary}</p>}
                                 </article>)}</div>
-                                : <p className="rounded-lg border px-4 py-6 text-center text-sm text-muted-foreground">暂无整理记录。</p>}
+                                : <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">暂无整理记录。</p>}
                             {content.deliveries.length > 0 && <section className="space-y-2">
                                 <h3 className="text-sm font-medium">近期投递</h3>
                                 <div className={listClassName}>{content.deliveries.map((d, index) => <article key={index} className={rowClassName}>
@@ -195,8 +201,8 @@ export default function ButlerProactiveCenter({ open, onOpenChange, enabled }: {
                             </section>}
                         </TabsContent>
                     </>}
-                </div>
+                </CompactDialogBody>
             </Tabs>
-        </DialogContent>
+        </CompactDialogContent>
     </Dialog>;
 }

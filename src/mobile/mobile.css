@@ -17,6 +17,13 @@
     padding-left: max(1rem, env(safe-area-inset-left));
     padding-right: max(1rem, env(safe-area-inset-right));
 }
+/* Compact dialogs manage their own header/body/footer padding and scrolling. */
+.aipp-mobile-platform [data-slot="dialog-content"][data-aipp-dialog="compact"] {
+    display: flex; flex-direction: column; overflow: hidden;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: 0;
+}
 /* Header actions (e.g. refresh buttons) must not sit under the 44px close X. */
 .aipp-mobile-platform [data-slot="dialog-content"] > [data-slot="dialog-header"] { padding-right: 44px; }
 .aipp-mobile-platform [data-slot="dialog-content"] input[data-slot="input"] { min-height: 44px; }
