@@ -2,6 +2,8 @@ import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActio
 import { resetButlerContactConversation, type ButlerContactResetResult } from "@/services/butlerContactService";
 import ButlerGroupChat from "@/components/butler/ButlerGroupChat";
 import ButlerProactiveSettings from "@/components/butler/ButlerProactiveSettings";
+import ButlerProactiveCenter from "@/components/butler/ButlerProactiveCenter";
+import { useButlerProactiveConfig } from "@/components/butler/useButlerProactiveConfig";
 import ButlerGroupMemberPicker from "@/components/butler/ButlerGroupMemberPicker";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
 import * as butlerGroups from "@/services/butlerGroupService";
@@ -424,6 +426,7 @@ function ButlerExperimentWindow() {
             const { conversation, position } = (event as CustomEvent<{ conversation: number; position?: number }>).detail;
             if (!Number.isSafeInteger(conversation) || conversation <= 0) return;
             setIsSettingsDialogOpen(false);
+            setProactiveCenterOpen(false);
             const group = groups.find(g => g.id === conversation);
             if (group) {
                 selectGroup(group);
@@ -492,6 +495,8 @@ function ButlerExperimentWindow() {
     const [loadingFeishuStatus, setLoadingFeishuStatus] = useState(false);
     const [isStatsDialogOpen, setIsStatsDialogOpen] = useState(false);
     const [isSettingsDialogOpen, setIsSettingsDialogOpen] = useState(false);
+    const [proactiveCenterOpen, setProactiveCenterOpen] = useState(false);
+    const proactive = useButlerProactiveConfig();
     const [loadError, setLoadError] = useState<string | null>(null);
     const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
     const [isMainConversationFeishuBound, setIsMainConversationFeishuBound] =
@@ -1061,6 +1066,7 @@ function ButlerExperimentWindow() {
     }, [applyMainConversationResult]);
 
     const handleOpenSettings = useCallback(() => {
+        void proactive.reload();
         loadFeatureConfig()
             .then((latestConfig) => {
                 butlerSettingsForm.reset(buildExperimentalConfigFormValues(latestConfig));
@@ -1070,7 +1076,7 @@ function ButlerExperimentWindow() {
                 console.error("[ButlerExperimentWindow] Failed to load settings:", error);
                 toast.error("加载总管家设置失败");
             });
-    }, [butlerSettingsForm, loadFeatureConfig]);
+    }, [butlerSettingsForm, loadFeatureConfig, proactive.reload]);
 
     // 总管家设置只覆盖 Butler 相关项；模型、助手等通用配置在 AIPP 主设置窗口里
     const handleOpenAppSettings = useCallback(() => {
@@ -1081,8 +1087,10 @@ function ButlerExperimentWindow() {
     }, []);
 
     const handleSaveButlerSettings = useCallback(async () => {
+        // 主动整理先保存：它有后端校验（时间段、Open ID），不通过时整次保存直接报错
+        await proactive.save();
         await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues());
-    }, [butlerSettingsForm, saveFeatureConfig]);
+    }, [butlerSettingsForm, saveFeatureConfig, proactive.save]);
 
     const toggleExecutionDetails = () => {
         conversationUIRef.current?.captureTranscriptPosition();
@@ -1189,6 +1197,7 @@ function ButlerExperimentWindow() {
                         focused={focused} ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
                         onSearch={() => setSearchOpen(true)} onOpenSettings={handleOpenSettings}
+                        onOpenProactive={proactive.saved?.enabled ? () => setProactiveCenterOpen(true) : undefined}
                         onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}
                         groups={groups} selectedGroup={groupId ?? undefined} onSelectGroup={selectGroup}
                         onCreateGroup={() => setCreateGroupOpen(true)} onDeleteGroup={setDeleteGroupTarget}/>
@@ -1469,11 +1478,23 @@ function ButlerExperimentWindow() {
                                 scope="butler"
                                 saveFeatureConfig={saveFeatureConfig}
                                 onConfigRefresh={handleOnboardingComplete}
+                                butlerSections={
+                                    <ButlerProactiveSettings
+                                        value={proactive.config}
+                                        error={proactive.error}
+                                        onChange={proactive.setConfig}
+                                        onOpenCenter={() => setProactiveCenterOpen(true)}
+                                    />
+                                }
                             />
-                            <ButlerProactiveSettings />
                         </div>
                     </DialogContent>
                 </Dialog>
+                <ButlerProactiveCenter
+                    open={proactiveCenterOpen}
+                    onOpenChange={setProactiveCenterOpen}
+                    enabled={proactive.saved?.enabled === true}
+                />
                 <ButlerOnboardingWizard
                     open={isOnboardingOpen}
                     onOpenChange={setIsOnboardingOpen}

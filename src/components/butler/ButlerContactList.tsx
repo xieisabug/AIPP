@@ -1,5 +1,5 @@
 import AssistantItemContextMenu, { type AssistantItemAction } from "@/components/config/assistant/AssistantItemContextMenu";
-import { Search, Settings, UsersRound } from "lucide-react";
+import { CalendarHeart, Search, Settings, UsersRound } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
 import type { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
@@ -38,6 +38,8 @@ interface Props {
     onSearch: () => void;
     /** 打开总管家设置。入口在联系人列表左上角。 */
     onOpenSettings: () => void;
+    /** 打开主动整理（跟进事项与整理手记）。只在主动整理已开启时传入，不传则不显示入口。 */
+    onOpenProactive?: () => void;
     onAssistantAction: (assistant: AssistantListItem, action: AssistantItemAction) => void;
     /** 群聊与联系人在同一个列表里，选中群聊时 selected 联系人为空。 */
     groups: ButlerGroupSummary[];
@@ -53,7 +55,7 @@ function groupUnread(group: ButlerGroupSummary, selected: boolean) {
     return !selected && !!group.unread;
 }
 
-export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onAssistantAction,
+export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onOpenProactive, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
     const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
@@ -100,8 +102,12 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
     });
     return <>
         <div className="flex h-12 shrink-0 items-center justify-between gap-1.5 px-3">
-            <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="总管家设置" title="总管家设置"
-                onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
+            <div className="flex items-center gap-1.5">
+                <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="总管家设置" title="总管家设置"
+                    onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
+                {onOpenProactive && <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="主动整理" title="主动整理：跟进事项与整理手记"
+                    disabled={!ready} onClick={onOpenProactive} data-aipp-slot="butler-proactive-open"><CalendarHeart/></Button>}
+            </div>
             <div className="flex items-center gap-1.5">
                 <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="搜索管家消息" title="搜索管家消息"
                     disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>

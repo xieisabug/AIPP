@@ -1,5 +1,6 @@
 import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
 import OptionalConfigSection from "@/components/config/OptionalConfigSection";
+import { SettingRowText, SettingsGroup, settingRowClassName, stackedRowClassName } from "@/components/config/SettingsGroup";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UseFormReturn } from "react-hook-form";
 import { Controller } from "react-hook-form";
@@ -39,6 +40,8 @@ interface ExperimentalConfigFormProps {
     saveFeatureConfig?: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
     /** Called after the onboarding wizard saves config so the parent can refresh. */
     onConfigRefresh?: () => void;
+    /** Extra Butler groups (e.g. 主动整理) rendered before 高级配置; saved by the same footer via `onSave`. */
+    butlerSections?: React.ReactNode;
 }
 
 interface MCPSummaryProgressPayload {
@@ -117,40 +120,6 @@ const actionPanelClassName =
     "flex flex-col gap-3 rounded-md border bg-background p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between";
 const statusPanelClassName = "space-y-2 rounded-md border bg-background p-4 shadow-sm";
 
-// ── 总管家设置：扁平设置列表（一组一个边框容器，行之间用分隔线）──
-const settingRowClassName = "flex items-center justify-between gap-4 px-4 py-3";
-const stackedRowClassName = "grid gap-2 px-4 py-3";
-
-const SettingsGroup = ({
-    title,
-    description,
-    action,
-    children,
-}: {
-    title: React.ReactNode;
-    description?: React.ReactNode;
-    action?: React.ReactNode;
-    children: React.ReactNode;
-}) => (
-    <section className="space-y-2">
-        <div className="flex items-end justify-between gap-3">
-            <div className="min-w-0">
-                <h3 className="text-sm font-medium">{title}</h3>
-                {description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}
-            </div>
-            {action}
-        </div>
-        <div className="divide-y rounded-lg border">{children}</div>
-    </section>
-);
-
-const SettingRowText = ({ label, description }: { label: React.ReactNode; description?: React.ReactNode }) => (
-    <div className="min-w-0 space-y-0.5">
-        <div className="text-sm font-medium">{label}</div>
-        {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
-    </div>
-);
-
 const readSummaryEnabledState = (values?: Record<string, unknown>): SummaryEnabledState => ({
     mcp: isEnabledValue(values?.dynamic_mcp_loading_enabled),
     assistant: isEnabledValue(values?.assistant_summary_enabled),
@@ -163,6 +132,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     scope = "all",
     saveFeatureConfig: saveFeatureConfigProp,
     onConfigRefresh,
+    butlerSections,
 }) => {
     const [isSaving, setIsSaving] = useState(false);
     const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
@@ -1335,6 +1305,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                         </div>
                                     )}
                                 </SettingsGroup>
+                                {butlerSections}
                                 <OptionalConfigSection title="高级配置" description="按需调整执行开关和飞书接入。">
                                 <SettingsGroup title="管家能力开关" description="发生异常时可单独关闭新执行，保留记录、结果查看与停止操作。关闭不会撤销已发生的外部操作；重新开启后，未过期的排队工作可以继续。">
                                     {renderToggleRow("butler_task_dispatch_enabled", "新建独立任务", "允许管家派发需要独立上下文的工作。")}
