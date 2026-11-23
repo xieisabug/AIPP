@@ -5,7 +5,7 @@ import { PanelRightClose, ExternalLink, ChevronLeft } from 'lucide-react';
 import ChatSidebarContent from './ChatSidebarContent';
 import { TodoItem, CodeArtifact, ContextItem } from './types';
 import type { LoadedPlugin } from '@/services/PluginRuntime';
-import { WindowControls, useFramelessTitleBar } from '@/components/window/WindowTitleBar';
+import { WINDOW_HEADER_HEIGHT, WindowControls, useFramelessTitleBar } from '@/components/window/WindowTitleBar';
 
 interface ChatSidebarProps {
     todos: TodoItem[];
@@ -159,7 +159,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
             {/* Collapsed state - show toggle tab */}
             {!isExpanded && (
                 <div 
-                    className="absolute inset-0 flex items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors rounded-l-lg border-l border-border"
+                    className="absolute inset-0 flex items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors border-l border-border"
                     onClick={handleToggle}
                     data-aipp-slot="chat-inline-sidebar-collapsed-toggle"
                 >
@@ -176,7 +176,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
 
             {/* Expanded state */}
             {isExpanded && (
-                <div className="h-full flex flex-col bg-background border-l border-border rounded-l-lg overflow-hidden" data-aipp-slot="chat-inline-sidebar-expanded">
+                <div className="h-full flex flex-col bg-background border-l border-border overflow-hidden" data-aipp-slot="chat-inline-sidebar-expanded">
                     {/* Resize handle */}
                     <div
                         className={cn(
@@ -189,7 +189,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                     />
 
                     {/* Header */}
-                    <div className="flex items-center justify-between p-2 border-b border-border"
+                    <div className="flex flex-none items-center justify-between border-b border-border pl-4 pr-3" style={{ height: WINDOW_HEADER_HEIGHT }}
                         data-tauri-drag-region={(showWindowControls && framelessTitleBar) || undefined} data-aipp-slot="chat-inline-sidebar-header">
                         <span className="text-sm font-medium">详情</span>
                         <div className="flex items-center gap-1">

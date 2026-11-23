@@ -15,7 +15,7 @@ import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
-import { FloatingWindowControls, useFramelessTitleBar, useWindowControlsInset, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
+import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, WindowControls, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1161,8 +1161,6 @@ function ButlerExperimentWindow() {
     const contactRail = useContactRailWidth();
     const titleBarLayout = useWindowTitleBarLayout();
     const framelessTitleBar = useFramelessTitleBar();
-    // Windows 窗口控制按钮与主区头部的操作按钮同排，头部右侧留位（头部 px-3）
-    const headerControlsInset = useWindowControlsInset(12);
 
     useAppShortcuts("butler", {
         new: () => {
@@ -1183,6 +1181,102 @@ function ButlerExperimentWindow() {
         toggle_sidebar: handleToggleSidebar,
         open_sidebar_window: handleOpenSidebarWindow,
     });
+
+    // 主会话 / 历史只读视图的头部：交给 ConversationUI 渲染在会话列里，右侧详情栏才能像聊天窗口一样从窗口顶部占满；
+    // showWindowControls：详情栏未展开时 Windows 窗口控制按钮排在头部末尾（展开时在详情栏头部）
+    const renderButlerHeader = ({ showWindowControls }: { showWindowControls: boolean }) => (historyView ? (
+                            <div
+                                className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3"
+                                style={{ height: WINDOW_HEADER_HEIGHT }}
+                                data-tauri-drag-region={framelessTitleBar || undefined}
+                                data-aipp-slot="butler-history-header"
+                            >
+                                <div className="flex min-w-0 items-center">
+                                    <Button type="button" variant="ghost" size="sm" className="gap-1 px-2"
+                                        onClick={() => setHistoryView(null)} data-aipp-slot="butler-history-back">
+                                        <ChevronLeft className="h-4 w-4" />
+                                        返回{contact ? activeAssistant?.name ?? "私聊" : "当前会话"}
+                                    </Button>
+                                </div>
+                                <div className="flex min-w-0 max-w-[26rem] items-center gap-2">
+                                    <History className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                    <span className="truncate text-sm font-medium">{historyView.title}</span>
+                                    <Badge variant="outline" className="shrink-0 text-[10px] font-normal">只读</Badge>
+                                </div>
+                                <div className="flex min-w-0 items-center justify-end gap-1">
+                                    <IconButton
+                                        icon={detailsConversation === activeConversationId
+                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
+                                            : <ScrollText className="h-4 w-4 text-icon" />}
+                                        onClick={toggleExecutionDetails}
+                                        ghost
+                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
+                                    />
+                                    {showWindowControls && <WindowControls className="ml-2" />}
+                                </div>
+                            </div>
+                            ) : (
+                            <div
+                                className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3"
+                                style={{ height: WINDOW_HEADER_HEIGHT }}
+                                data-tauri-drag-region={framelessTitleBar || undefined}
+                                data-aipp-slot="butler-main-header"
+                            >
+                                <div className="flex min-w-0 items-center">
+                                    {showFeishuStatus && <Badge variant={getFeishuStatusVariant(feishuStatus)}>
+                                        {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
+                                    </Badge>}
+                                </div>
+                                <button type="button" className="group flex min-w-0 max-w-[22rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+                                    aria-label="编辑助手"
+                                    data-aipp-slot="butler-main-identity"
+                                    onClick={() => void openProfile()}
+                                    title="编辑资料、形象与记忆">
+                                    <ButlerAvatar id={headerAssistantId} chief={!contact} size={28} figure animated state={headerState} />
+                                    <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
+                                    <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+                                </button>
+                                <div className="flex min-w-0 items-center justify-end gap-1">
+                                    <DeepSeekBalanceBadge
+                                        conversationId={Number(activeConversationId) || null}
+                                        assistantId={contact?.assistantId ?? null}
+                                        className="mr-1"
+                                    />
+                                    <IconButton
+                                        icon={detailsConversation === activeConversationId
+                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
+                                            : <ScrollText className="h-4 w-4 text-icon" />}
+                                        onClick={toggleExecutionDetails}
+                                        ghost
+                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
+                                        dataAippSlot="butler-main-toggle-details"
+                                    />
+                                    <ConversationStatsDialog
+                                        showCacheActivity
+                                        conversationId={activeConversationId}
+                                        externalOpen={isStatsDialogOpen}
+                                        onExternalOpenChange={setIsStatsDialogOpen}
+                                    />
+                                    <IconButton
+                                        icon={
+                                            resettingMainConversation || resettingContactId !== null ? (
+                                                <Loader2 className="h-4 w-4 animate-spin text-icon" />
+                                            ) : (
+                                                <RefreshCw className="h-4 w-4 text-icon" />
+                                            )
+                                        }
+                                        onClick={() => void (contact
+                                            ? handleResetContactConversation(contact.assistantId)
+                                            : handleResetMainConversation())}
+                                        disabled={!mainConversationId || resettingMainConversation || resettingContactId !== null}
+                                        ghost
+                                        title={contact ? "重开新会话（旧私聊归档，可搜索查看）" : "重开新会话"}
+                                        dataAippSlot="butler-main-reset-conversation"
+                                    />
+                                    {showWindowControls && <WindowControls className="ml-2" />}
+                                </div>
+                            </div>
+    ));
 
     return (
         <ButlerAppearanceContext.Provider value={featureConfig.get("butler_appearance") ?? new Map()}>
@@ -1270,8 +1364,8 @@ function ButlerExperimentWindow() {
                         </div>
                     )}
                 </div>
-                {/* Windows 窗口控制按钮：与主区头部（中线 26、右内边距 12）的操作按钮同排 */}
-                <FloatingWindowControls centerY={26} right={12} />
+                {/* Windows 窗口控制按钮：会话与群聊头部里自带；出错或主会话未就绪时没有头部，浮在右上角 */}
+                {(loadError || !mainConversationId) && <FloatingWindowControls centerY={WINDOW_HEADER_HEIGHT / 2} right={12} />}
                 <div className="relative z-20 w-0 flex-none">
                     <div
                         role="separator"
@@ -1327,97 +1421,6 @@ function ButlerExperimentWindow() {
                             onDeleted={() => { setGroupId(null); localStorage.removeItem("butler-last-group"); void loadGroups(); }} />
                     ) : mainConversationId ? (
                         <>
-                            {historyView ? (
-                            <div
-                                className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
-                                style={headerControlsInset}
-                                data-tauri-drag-region={framelessTitleBar || undefined}
-                                data-aipp-slot="butler-history-header"
-                            >
-                                <div className="flex min-w-0 items-center">
-                                    <Button type="button" variant="ghost" size="sm" className="gap-1 px-2"
-                                        onClick={() => setHistoryView(null)} data-aipp-slot="butler-history-back">
-                                        <ChevronLeft className="h-4 w-4" />
-                                        返回{contact ? activeAssistant?.name ?? "私聊" : "当前会话"}
-                                    </Button>
-                                </div>
-                                <div className="flex min-w-0 max-w-[26rem] items-center gap-2">
-                                    <History className="h-4 w-4 shrink-0 text-muted-foreground" />
-                                    <span className="truncate text-sm font-medium">{historyView.title}</span>
-                                    <Badge variant="outline" className="shrink-0 text-[10px] font-normal">只读</Badge>
-                                </div>
-                                <div className="flex min-w-0 items-center justify-end gap-1">
-                                    <IconButton
-                                        icon={detailsConversation === activeConversationId
-                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
-                                            : <ScrollText className="h-4 w-4 text-icon" />}
-                                        onClick={toggleExecutionDetails}
-                                        border
-                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
-                                    />
-                                </div>
-                            </div>
-                            ) : (
-                            <div
-                                className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
-                                style={headerControlsInset}
-                                data-tauri-drag-region={framelessTitleBar || undefined}
-                                data-aipp-slot="butler-main-header"
-                            >
-                                <div className="flex min-w-0 items-center">
-                                    {showFeishuStatus && <Badge variant={getFeishuStatusVariant(feishuStatus)}>
-                                        {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
-                                    </Badge>}
-                                </div>
-                                <button type="button" className="group flex min-w-0 max-w-[22rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
-                                    aria-label="编辑助手"
-                                    data-aipp-slot="butler-main-identity"
-                                    onClick={() => void openProfile()}
-                                    title="编辑资料、形象与记忆">
-                                    <ButlerAvatar id={headerAssistantId} chief={!contact} size={28} figure animated state={headerState} />
-                                    <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
-                                    <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
-                                </button>
-                                <div className="flex min-w-0 items-center justify-end gap-1">
-                                    <DeepSeekBalanceBadge
-                                        conversationId={Number(activeConversationId) || null}
-                                        assistantId={contact?.assistantId ?? null}
-                                        className="mr-1"
-                                    />
-                                    <IconButton
-                                        icon={detailsConversation === activeConversationId
-                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
-                                            : <ScrollText className="h-4 w-4 text-icon" />}
-                                        onClick={toggleExecutionDetails}
-                                        border
-                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
-                                        dataAippSlot="butler-main-toggle-details"
-                                    />
-                                    <ConversationStatsDialog
-                                        showCacheActivity
-                                        conversationId={activeConversationId}
-                                        externalOpen={isStatsDialogOpen}
-                                        onExternalOpenChange={setIsStatsDialogOpen}
-                                    />
-                                    <IconButton
-                                        icon={
-                                            resettingMainConversation || resettingContactId !== null ? (
-                                                <Loader2 className="h-4 w-4 animate-spin text-icon" />
-                                            ) : (
-                                                <RefreshCw className="h-4 w-4 text-icon" />
-                                            )
-                                        }
-                                        onClick={() => void (contact
-                                            ? handleResetContactConversation(contact.assistantId)
-                                            : handleResetMainConversation())}
-                                        disabled={!mainConversationId || resettingMainConversation || resettingContactId !== null}
-                                        border
-                                        title={contact ? "重开新会话（旧私聊归档，可搜索查看）" : "重开新会话"}
-                                        dataAippSlot="butler-main-reset-conversation"
-                                    />
-                                </div>
-                            </div>
-                            )}
                             <div className="min-h-0 flex-1">
                                 <ButlerLiveCardsContext.Provider value={historyView ? {} : { file: managedPreviewFileCallId, question: askUserCallId }}>
                                 <ButlerQuoteContext.Provider value={historyView ? null : quoteState}>
@@ -1427,7 +1430,8 @@ function ButlerExperimentWindow() {
                                     conversationId={activeConversationId}
                                     onChangeConversationId={() => undefined}
                                     pluginList={pluginList}
-                                    hideHeader
+                                    renderHeader={renderButlerHeader}
+                                    showWindowControls
                                     allowRename={false}
                                     allowDelete={false}
                                     inlineInteractionItems={historyView ? undefined : inlineInteractionItems}

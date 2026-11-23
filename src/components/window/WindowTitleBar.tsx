@@ -15,9 +15,12 @@ import { cn } from "@/utils/utils";
  *   `useWindowControlsInset` 留位；
  * - Linux：保留系统标题栏（无边框窗口在部分桌面环境下缩放边缘不可靠），只统一侧边栏布局。
  *
- * 三个窗口顶栏同高 `TITLEBAR_HEIGHT`，按钮中线 26（Rust 侧 `MAC_TITLEBAR_CENTER_Y`）。
+ * 三个窗口的侧栏标题栏行与右侧头部同高（`TITLEBAR_HEIGHT` = `WINDOW_HEADER_HEIGHT`），
+ * 红黄绿按钮 / 窗口控制按钮与头部操作按钮同在中线 34（Rust 侧 `MAC_TITLEBAR_CENTER_Y`）。
  */
-export const TITLEBAR_HEIGHT = 52;
+export const TITLEBAR_HEIGHT = 68;
+/** 右侧会话头部（聊天标题栏、总管家头部、详情栏头部）的统一高度。 */
+export const WINDOW_HEADER_HEIGHT = TITLEBAR_HEIGHT;
 export const MAC_TRAFFIC_LIGHTS_SAFE_LEFT = 92;
 /** 没有红黄绿按钮时，顶栏左侧只留常规内边距。 */
 const TITLEBAR_PADDING_LEFT = 12;

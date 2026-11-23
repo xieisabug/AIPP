@@ -16,10 +16,10 @@ const SCREEN_MARGIN_RATIO: f64 = 0.9;
 #[cfg(target_os = "macos")]
 const MAC_TRAFFIC_LIGHTS_X: f64 = 20.0;
 
-/// 按钮中线：三个主窗口一致，垂直居中于 52pt 高的侧栏顶栏（`MAC_TITLEBAR_HEIGHT`），
-/// 与管家主区头部同高。
+/// 按钮中线：三个主窗口一致，垂直居中于 68pt 高的侧栏标题栏行与右侧头部
+/// （前端 `TITLEBAR_HEIGHT` / `WINDOW_HEADER_HEIGHT`）。
 #[cfg(target_os = "macos")]
-const MAC_TITLEBAR_CENTER_Y: f64 = 26.0;
+const MAC_TITLEBAR_CENTER_Y: f64 = 34.0;
 
 /// macOS 主窗口（聊天 / 管家 / 设置）使用内容延伸到标题栏的 Overlay 样式，
 /// 红黄绿按钮与侧边栏顶栏的操作按钮同排，前端在顶栏左侧为它们留位。

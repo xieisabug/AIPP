@@ -283,6 +283,11 @@ interface ConversationUIProps {
      * 详情栏展开时放在详情栏头部，否则放在会话标题栏末尾。
      */
     showWindowControls?: boolean;
+    /**
+     * 自定义会话头部（总管家）：渲染在会话列顶部、代替默认标题栏，右侧详情栏因此从顶部占满。
+     * `showWindowControls` 为 true 时头部末尾应放 Windows 窗口控制按钮（详情栏展开时为 false）。
+     */
+    renderHeader?: (state: { showWindowControls: boolean }) => ReactNode;
     allowFeishuDebugResend?: boolean;
     windowLabel?: string;
     showExecutionDetails?: boolean;
@@ -343,6 +348,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowDelete = true,
             headerExtraActions,
             showWindowControls = false,
+            renderHeader,
             allowFeishuDebugResend = false,
             windowLabel = "chat_ui",
             showExecutionDetails = false,
@@ -580,6 +586,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // Dialog states for shortcut triggering
         const [statsDialogOpen, setStatsDialogOpen] = useState(false);
         const [exportDialogOpen, setExportDialogOpen] = useState(false);
+
+        // 详情栏展开时窗口控制按钮在详情栏头部，否则在会话头部末尾
+        const headerShowsWindowControls = showWindowControls && !(sidebarExpanded && !isMobile && !hideSidebar && !sidebarWindowOpen && !!conversationId);
 
         const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
             setSidebarExpanded(isExpanded);
@@ -2303,7 +2312,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         )
                                     }
                                     onClick={() => { }}
-                                    border
+                                    ghost
                                     title={`${sessionLabel}控制`}
                                     dataAippSlot="chat-conversation-title-acp"
                                 />
@@ -2509,7 +2518,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 hideTrigger
                             />
                         ) : null}
-                        {!isMobile && !hideHeader && (
+                        {renderHeader ? renderHeader({ showWindowControls: headerShowsWindowControls }) : !isMobile && !hideHeader && (
                             <ConversationHeader
                                 conversationId={conversationId}
                                 conversation={conversation}
@@ -2522,7 +2531,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 allowRename={allowRename}
                                 allowDelete={allowDelete}
                                 extraActions={acpHeaderActions}
-                                showWindowControls={showWindowControls && !(sidebarExpanded && !hideSidebar && !sidebarWindowOpen)}
+                                showWindowControls={headerShowsWindowControls}
                             />
                         )}
 

@@ -97,7 +97,7 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     };
 
     const logo = (
-        <div className="flex items-center gap-2 bg-secondary" data-aipp-slot="chat-info-logo">
+        <div className={cn("flex items-center gap-2", !titleBarLayout && "bg-secondary")} data-aipp-slot="chat-info-logo">
             <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
         </div>
     );
@@ -135,7 +135,8 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
         // 桌面统一布局：第一行是标题栏行（macOS 左侧为红黄绿按钮）+ 搜索与新对话，
         // 第二行左侧 Logo、右侧工具按钮；两行空白处都可拖动窗口。
         return (
-            <div className="flex shrink-0 flex-col border-border bg-secondary" data-aipp-slot="chat-info-bar">
+            // 背景沿用侧边栏的纯色，不再单独加深（与总管家侧栏一致）
+            <div className="flex shrink-0 flex-col" data-aipp-slot="chat-info-bar">
                 <WindowTitleBar data-aipp-slot="chat-info-titlebar">{titleBarActions}</WindowTitleBar>
                 <div className="flex items-center justify-between gap-2 pb-3 pl-5 pr-2" data-tauri-drag-region data-aipp-slot="chat-info-brand">
                     {logo}

@@ -75,7 +75,7 @@ const ConversationTitle: React.FC<{
 
     return (
         <>
-            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title-bar">
+            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background z-20" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title-bar">
                 <div className="flex-1 overflow-hidden" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title">
                     <div
                         className={`text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon ${allowRename ? "cursor-pointer" : ""}`}
@@ -95,10 +95,10 @@ const ConversationTitle: React.FC<{
                     <ConversationStatsDialog conversationId={conversation?.id.toString() || ""} externalOpen={statsOpen} onExternalOpenChange={onStatsOpenChange} />
                     <ConversationExportDialog conversationId={conversation?.id.toString() || ""} externalOpen={exportOpen} onExternalOpenChange={onExportOpenChange} />
                     {allowRename ? (
-                        <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} border dataAippSlot="chat-conversation-title-edit" />
+                        <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} ghost title="重命名" dataAippSlot="chat-conversation-title-edit" />
                     ) : null}
                     {allowDelete ? (
-                        <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border dataAippSlot="chat-conversation-title-delete" />
+                        <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} ghost title="删除对话" dataAippSlot="chat-conversation-title-delete" />
                     ) : null}
                     {/* Windows 窗口控制按钮：贴近窗口右上角（吃掉一半右内边距） */}
                     {showWindowControls && <WindowControls className="-mr-3 ml-2" />}

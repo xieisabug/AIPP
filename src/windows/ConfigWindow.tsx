@@ -429,10 +429,10 @@ function ConfigWindow() {
 
                 {/* 内容区域 */}
                 <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
-                    {/* Windows：内容区顶部与菜单标题栏行同高的拖拽条，右侧放窗口控制按钮（中线 26） */}
+                    {/* Windows：内容区顶部与菜单标题栏行同高的拖拽条，右侧放窗口控制按钮 */}
                     {customWindowControls && (
                         <div className="shrink-0" style={{ height: TITLEBAR_HEIGHT }} data-tauri-drag-region data-aipp-slot="config-content-titlebar">
-                            <FloatingWindowControls centerY={26} right={12} />
+                            <FloatingWindowControls centerY={TITLEBAR_HEIGHT / 2} right={12} />
                         </div>
                     )}
                     {/* 配置组件内容 */}

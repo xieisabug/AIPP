@@ -148,7 +148,8 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                     <IconButton
                         icon={<Download size={16} className="text-icon" />}
                         onClick={() => {}}
-                        border
+                        ghost
+                        title="导出对话"
                     />
                 </DialogTrigger>
             ) : null}

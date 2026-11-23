@@ -7,6 +7,7 @@ import ChatUIInfomation from "../components/ChatUIInfomation";
 import {
     MAC_TRAFFIC_LIGHTS_SAFE_LEFT,
     FloatingWindowControls,
+    WINDOW_HEADER_HEIGHT,
     useFramelessTitleBar,
     useMacOverlayTitleBar,
     useWindowControlsInset,
@@ -1020,7 +1021,8 @@ function ChatUIWindow() {
     return (
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
-                <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2" data-aipp-slot="chat-sidebar">
+                {/* 与总管家窗口统一：侧栏与主区平铺、纯色背景，以分隔线区分，右侧头部与详情栏从窗口顶部占满 */}
+                <div className="flex-none w-[280px] flex flex-col border-r border-border bg-muted/30 overflow-hidden" data-aipp-slot="chat-sidebar">
                     {titleBarLayout ? (
                         <ChatUIInfomation titleBarActions={sidebarToolbar} />
                     ) : (
@@ -1035,7 +1037,7 @@ function ChatUIWindow() {
                     />
                 </div>
 
-                <div className="flex-1 bg-background overflow-auto rounded-xl m-2 ml-0 shadow-lg" data-aipp-slot="chat-main-content">
+                <div className="flex-1 min-w-0 bg-background overflow-auto" data-aipp-slot="chat-main-content">
                     <ConversationUI
                         ref={conversationUIRef}
                         pluginList={pluginList}
@@ -1048,8 +1050,8 @@ function ChatUIWindow() {
                     />
                 </div>
                 {/* Windows 窗口控制按钮：有会话时排进会话标题栏或展开的详情栏头部（见 ConversationUI.showWindowControls），
-                    未选会话时没有头部，浮在卡片右上角（卡片外边距 8 + 中线 22、右内边距 8） */}
-                {!selectedConversation && <FloatingWindowControls centerY={8 + 22} right={8 + 8} />}
+                    未选会话时没有头部，浮在右上角、与头部同一中线 */}
+                {!selectedConversation && <FloatingWindowControls centerY={WINDOW_HEADER_HEIGHT / 2} right={12} />}
 
                 <ConversationSearchDialog
                     open={searchOpen}

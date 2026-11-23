@@ -25,7 +25,7 @@ import ButlerGroupTranscript from "./ButlerGroupTranscript";
 import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
-import { useFramelessTitleBar, useWindowControlsInset } from "@/components/window/WindowTitleBar";
+import { WINDOW_HEADER_HEIGHT, WindowControls, useFramelessTitleBar } from "@/components/window/WindowTitleBar";
 import { groupReadKey, mentionTargets, mergeMessages } from "./butlerGroupModel";
 
 interface Props {
@@ -50,9 +50,8 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const [sending, setSending] = useState(false);
     const [stopping, setStopping] = useState(false);
     const [panelOpen, setPanelOpen] = useState(false);
-    // 无系统标题栏时头部空白处可拖动窗口；Windows 窗口控制按钮与头部同排，右侧留位（头部 px-3）
+    // 无系统标题栏时头部空白处可拖动窗口；群聊头部贴着窗口右上角，Windows 窗口控制按钮排在末尾
     const framelessTitleBar = useFramelessTitleBar();
-    const headerControlsInset = useWindowControlsInset(12);
     const [inviteOpen, setInviteOpen] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [nameDraft, setNameDraft] = useState("");
@@ -245,7 +244,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         : typing || `${members.length} 位成员`;
 
     return <div className="flex h-full min-h-0 flex-col" data-aipp-slot="butler-group-chat">
-        <div className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2" style={headerControlsInset}
+        <div className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3" style={{ height: WINDOW_HEADER_HEIGHT }}
             data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="butler-group-header">
             <div />
             <button type="button" onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }}
@@ -259,8 +258,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             </button>
             <div className="flex items-center justify-end gap-1">
                 <ConversationStatsDialog groupId={groupId} />
-                <IconButton icon={<Users className="h-4 w-4 text-icon" />} border title="群成员"
+                <IconButton icon={<Users className="h-4 w-4 text-icon" />} ghost title="群成员"
                     onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }} />
+                <WindowControls className="ml-2" />
             </div>
         </div>
 

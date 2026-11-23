@@ -191,7 +191,7 @@ export function ConversationStatsDialog({
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
-                <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border title={title} />
+                <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} ghost title={title} />
             </DialogTrigger>
             <CompactDialogContent className="sm:max-w-2xl">
                 <CompactDialogHeader
