@@ -349,7 +349,7 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
     let config_map = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
     let detail = LLMDatabase::new(app)
         .map_err(|e| e.to_string())?
-        .get_llm_model_detail(provider_id, model_code)
+        .get_model_for_request(provider_id, model_code)
         .map_err(|e| format!("辅助模型不可用: {e}"))?;
     let proxy = get_network_proxy_from_config(&config_map);
     let configs = crate::api::copilot_token_manager::prepare_provider_configs(

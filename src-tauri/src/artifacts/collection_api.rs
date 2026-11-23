@@ -447,7 +447,7 @@ pub async fn generate_artifact_metadata(
 
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| format!("数据库连接失败: {}", e))?;
         let model_detail = llm_db
-            .get_llm_model_detail(&provider_id, &model_code)
+            .get_model_for_request(&provider_id, &model_code)
             .map_err(|e| format!("模型详情获取失败: {}", e))?;
 
         let network_proxy = get_network_proxy_from_config(&config_feature_map);

@@ -212,7 +212,7 @@ pub async fn artifact_ai_ask(
     let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     let model_detail = llm_db
-        .get_llm_model_detail(&model.provider_id, &model.model_code)
+        .get_model_for_request(&model.provider_id, &model.model_code)
         .map_err(|e| format!("Failed to get model detail: {}", e))?;
 
     // 获取网络配置
@@ -291,7 +291,7 @@ pub async fn artifact_model_ask(
     let (model_code, provider_id) = parse_model_id(&request.model_id)?;
     let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let model_detail = llm_db
-        .get_llm_model_detail(&provider_id, &model_code)
+        .get_model_for_request(&provider_id, &model_code)
         .map_err(|e| format!("Failed to get model detail: {}", e))?;
 
     let config_feature_map = feature_config_state.config_feature_map.lock().await;

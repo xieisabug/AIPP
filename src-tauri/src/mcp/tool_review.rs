@@ -1089,14 +1089,18 @@ async fn review_with_definition(
             );
         }
     };
-    let model_detail = match llm_db.get_llm_model_detail(&provider_id, &model_code) {
+    let model_detail = match llm_db.get_model_for_request(&provider_id, &model_code) {
         Ok(detail) => detail,
         Err(error) => {
             return error_outcome(
                 &model_code,
                 Some(provider_id),
                 started.elapsed().as_millis() as i64,
-                missing_model_reason(&model_code, provider_id, &error.to_string()),
+                match error {
+                    crate::db::llm_db::ModelRequestError::Lookup(source) =>
+                        missing_model_reason(&model_code, provider_id, &source.to_string()),
+                    disabled => disabled.to_string(),
+                },
             );
         }
     };

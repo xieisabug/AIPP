@@ -421,7 +421,7 @@ async fn query_model(app: &AppHandle, group_id: i64, chat_prompt: (String, Strin
     let lookup = code.clone();
     let detail = tokio::task::spawn_blocking(move || {
         crate::db::llm_db::LLMDatabase::new(&app_db).map_err(|e| e.to_string())?
-            .get_llm_model_detail(&provider, &lookup).map_err(|e| e.to_string())
+            .get_model_for_request(&provider, &lookup).map_err(|e| e.to_string())
     }).await.map_err(|e| format!("读取{source}配置的任务失败：{e}"))?
         .map_err(|e| format!("{source}不可用（provider={provider}, model={code}）：{e}；请在管家设置中检查模型"))?;
     let proxy = super::ai::config::get_network_proxy_from_config(&config);

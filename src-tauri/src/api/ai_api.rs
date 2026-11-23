@@ -30,7 +30,7 @@ use crate::db::conversation_db::{AttachmentType, Repository};
 use crate::db::conversation_db::{
     ConversationDatabase, Message, MessageAttachment, QueuedConversationMessage,
 };
-use crate::db::llm_db::LLMDatabase;
+use crate::db::llm_db::{LLMDatabase, ModelRequestError};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
@@ -184,7 +184,7 @@ fn resolve_ask_model_detail(
     if let Some(override_model_id) = override_model_id {
         info!(override_model_id, "using override model id");
         let (model_code, provider_id) = parse_override_model_id(override_model_id)?;
-        return llm_db.get_llm_model_detail(&provider_id, &model_code).map_err(|error| {
+        return llm_db.get_model_for_request(&provider_id, &model_code).map_err(|error| {
             describe_model_lookup_failure(provider_id, &model_code, true, &error)
         });
     }
@@ -197,7 +197,7 @@ fn resolve_ask_model_detail(
         return Err(NO_MODEL_CONFIGURED_MESSAGE.to_string());
     }
     llm_db
-        .get_llm_model_detail(&provider_id, &model_code)
+        .get_model_for_request(&provider_id, &model_code)
         .map_err(|error| describe_model_lookup_failure(provider_id, &model_code, false, &error))
 }
 
@@ -224,11 +224,12 @@ fn describe_model_lookup_failure(
     provider_id: i64,
     model_code: &str,
     is_override: bool,
-    error: &rusqlite::Error,
+    error: &ModelRequestError,
 ) -> String {
     let subject = if is_override { "所选模型" } else { "当前助手配置的模型" };
     match error {
-        rusqlite::Error::QueryReturnedNoRows => format!(
+        ModelRequestError::Disabled { .. } => error.to_string(),
+        ModelRequestError::Lookup(rusqlite::Error::QueryReturnedNoRows) => format!(
             "{subject}「{model_code}」（提供商 ID {provider_id}）不存在或已被删除，请在「个人助手」中为该助手重新选择模型后重试。"
         ),
         other => format!("读取{subject}「{model_code}」（提供商 ID {provider_id}）失败：{other}"),
@@ -319,39 +320,8 @@ async fn fit_chat_context(
 }
 
 #[cfg(test)]
-mod ask_model_resolution_tests {
-    use super::{
-        describe_model_lookup_failure, is_unconfigured_assistant_model, parse_override_model_id,
-    };
-
-    #[test]
-    fn placeholder_assistant_model_counts_as_unconfigured() {
-        assert!(is_unconfigured_assistant_model(0, ""));
-        assert!(is_unconfigured_assistant_model(3, "  "));
-        assert!(is_unconfigured_assistant_model(0, "gpt-4o"));
-        assert!(!is_unconfigured_assistant_model(3, "gpt-4o"));
-    }
-
-    #[test]
-    fn override_model_id_is_parsed_without_fallback() {
-        assert_eq!(parse_override_model_id("gpt-4o%%7"), Ok(("gpt-4o".to_string(), 7)));
-        assert!(parse_override_model_id("gpt-4o").is_err());
-        assert!(parse_override_model_id("gpt-4o%%x").is_err());
-        assert!(parse_override_model_id("%%7").is_err());
-    }
-
-    #[test]
-    fn missing_model_message_names_the_model() {
-        let text = describe_model_lookup_failure(
-            7,
-            "gpt-4o",
-            false,
-            &rusqlite::Error::QueryReturnedNoRows,
-        );
-        assert!(text.contains("gpt-4o"));
-        assert!(text.contains("不存在或已被删除"));
-    }
-}
+#[path = "ai_api/ask_model_resolution_tests.rs"]
+mod ask_model_resolution_tests;
 
 fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
     if context.trim().is_empty() {
@@ -2536,8 +2506,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let provider_id = &assistant_detail.model[0].provider_id;
     let model_code = &assistant_detail.model[0].model_code;
     let model_detail = llm_db
-        .get_llm_model_detail(provider_id, model_code)
-        .context("Failed to get LLM model detail")?;
+        .get_model_for_request(provider_id, model_code)
+        .map_err(|e| AppError::ProviderError(e.to_string()))?;
 
     let web_enabled = deepseek_web::enabled(&model_detail);
     let mut mcp_info = mcp_info;
@@ -2948,8 +2918,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let provider_id = &assistant_detail.model[0].provider_id;
     let model_code = &assistant_detail.model[0].model_code;
     let model_detail = llm_db
-        .get_llm_model_detail(provider_id, model_code)
-        .context("Failed to get LLM model detail")?;
+        .get_model_for_request(provider_id, model_code)
+        .map_err(|e| AppError::ProviderError(e.to_string()))?;
 
     let web_enabled = deepseek_web::enabled(&model_detail);
     let mut mcp_info = mcp_info;
@@ -3500,8 +3470,8 @@ pub async fn regenerate_ai(
     let provider_id = &assistant_detail.model[0].provider_id;
     let model_code = &assistant_detail.model[0].model_code;
     let model_detail = llm_db
-        .get_llm_model_detail(provider_id, model_code)
-        .context("Failed to get LLM model detail")?;
+        .get_model_for_request(provider_id, model_code)
+        .map_err(|e| AppError::ProviderError(e.to_string()))?;
 
     let web_enabled = deepseek_web::enabled(&model_detail);
     let mut mcp_info = mcp_info;
@@ -4191,16 +4161,20 @@ async fn initialize_conversation(
         if native_queue::STEER_TARGET.try_with(|target| target.is_some()).unwrap_or(false) {
             let (handle, turn) = native_queue::STEER_TARGET.with(|target| {
                 let target = target.as_ref().expect("steer target checked above");
-                let binding = target.session.binding.as_ref();
+                let binding = target.session.binding.as_ref().ok_or_else(|| AppError::ProviderError(
+                    format!("插队目标缺少提供商绑定 [conversation={conversation_id}, turn={}]", target.turn)
+                ))?;
                 let current = crate::api::ai::agent_driver::lifecycle::session_binding(app_handle, conversation_id)?;
                 let selected_provider = match request.override_model_id.as_deref() {
                     Some(model) => parse_agent_model_override(model).map(|(_, provider)| provider),
                     None => crate::api::assistant_api::resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs),
                 };
-                if binding.is_none() || binding != current.as_ref() || binding.map(|b| b.provider_id) != selected_provider
+                if Some(binding) != current.as_ref() || Some(binding.provider_id) != selected_provider
                     || assistant_detail.assistant.assistant_type != Some(4) || target.assistant_id != assistant_detail.assistant.id {
                     return Err(AppError::ProviderError(format!("插队目标已改变 [conversation={conversation_id}, turn={}]", target.turn)));
                 }
+                LLMDatabase::new(app_handle)?.get_provider_for_request(binding.provider_id)
+                    .map_err(|e| AppError::ProviderError(e.to_string()))?;
                 Ok((target.session.handle.clone(), target.turn.clone()))
             })?;
             crate::api::ai::agent_driver::validate_text_attachments(handle.metadata(), conversation_id, &message_attachment_list)?;

@@ -649,8 +649,8 @@ async fn execute_run_inner(
     let llm_db = LLMDatabase::new(app_handle).map_err(|e| RunError::Failed(e.to_string()))?;
     let model_info = &assistant_detail.model[0];
     let model_detail = llm_db
-        .get_llm_model_detail(&model_info.provider_id, &model_info.model_code)
-        .map_err(|e| RunError::Preflight(format!("执行助手配置的模型不存在（{} / provider {}）：{e}", model_info.model_code, model_info.provider_id)))?;
+        .get_model_for_request(&model_info.provider_id, &model_info.model_code)
+        .map_err(|e| RunError::Preflight(format!("执行助手配置的模型不可用（{} / provider {}）：{e}", model_info.model_code, model_info.provider_id)))?;
 
     // ── 2. 提示词 ─────────────────────────────────────────────────────
     let template_engine = build_template_engine(app_handle).map_err(|e| RunError::Failed(e.to_string()))?;

@@ -423,7 +423,7 @@ async fn generate_assistant_summary(
     let profile = collect_assistant_profile(app_handle, assistant).await?;
     let llm_db = LLMDatabase::new(app_handle)?;
     let model_detail = llm_db
-        .get_llm_model_detail(&model_selection.provider_id, &model_selection.model_code)
+        .get_model_for_request(&model_selection.provider_id, &model_selection.model_code)
         .map_err(|e| AppError::DatabaseError(format!("获取助手总结模型失败: {}", e)))?;
 
     let network_proxy = get_network_proxy_from_config(config_map);

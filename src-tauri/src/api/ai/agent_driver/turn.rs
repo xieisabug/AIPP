@@ -10,7 +10,7 @@ use crate::api::ai::types::AiResponse;
 use crate::api::ai_api::parse_agent_model_override;
 use crate::api::assistant_api::{AssistantDetail, resolve_acp_provider_id};
 use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment, Repository};
-use crate::db::llm_db::{LLMDatabase, LLMProviderConfig};
+use crate::db::llm_db::{LLMDatabase, LLMProviderConfig, ModelRequestError};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
@@ -48,6 +48,18 @@ pub(super) fn load_agent_instance(
     Ok((instance, model_override.map(|(model, _)| model.to_string())))
 }
 
+fn read_turn_provider(
+    db: &LLMDatabase, id: i64, assistant_id: i64,
+) -> Result<(String, Vec<LLMProviderConfig>), AppError> {
+    let provider = db.get_provider_for_request(id).map_err(|error| match error {
+        ModelRequestError::Lookup(rusqlite::Error::QueryReturnedNoRows) => AppError::ProviderError(format!(
+            "Agent 助手 {assistant_id} 引用的提供商 ID {id} 不存在，请在助手配置中重新选择提供商"
+        )),
+        error => AppError::ProviderError(error.to_string()),
+    })?;
+    Ok((provider.api_type, db.get_llm_provider_config(id)?))
+}
+
 /// initialize_conversation has already expanded text attachments into the last
 /// runtime user message. Text-only transports must receive that exact prompt;
 /// structured transports receive raw text plus attachments once, not twice.
@@ -83,14 +95,10 @@ pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Windo
         if cfg!(mobile) {
             return Err(AppError::InternalError(crate::api::system_api::mobile_unsupported_error("本地 CLI Agent（Codex/Claude/ACP）")));
         }
-        let (instance, model_override) = load_agent_instance(registry(), request.assistant, request.override_model_id.as_deref(), |provider_id| {
-            let database = LLMDatabase::new(&app_handle)?;
-            let provider = database.get_llm_provider(provider_id).map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => AppError::ProviderError(format!("Agent 助手 {} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商", request.assistant.assistant.id)),
-                error => AppError::from(error),
-            })?;
-            Ok((provider.api_type, database.get_llm_provider_config(provider_id)?))
-        })?;
+        let (instance, model_override) = load_agent_instance(
+            registry(), request.assistant, request.override_model_id.as_deref(),
+            |id| read_turn_provider(&LLMDatabase::new(&app_handle)?, id, request.assistant.assistant.id),
+        )?;
         metadata = registry().driver(&instance.driver_id)?.metadata();
         provider_id = Some(instance.provider_id);
         preparation_stage = super::failure::AgentFailureStage::Mcp;

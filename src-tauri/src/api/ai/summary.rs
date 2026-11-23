@@ -270,9 +270,9 @@ pub async fn generate_conversation_summary(
         }
     };
 
-    let model_detail = llm_db.get_llm_model_detail(&provider_id, &model_code).map_err(|e| {
+    let model_detail = llm_db.get_model_for_request(&provider_id, &model_code).map_err(|e| {
         AppError::DatabaseError(format!(
-            "配置的对话总结模型不存在 (model_code={}, provider_id={})，请检查设置: {}",
+            "配置的对话总结模型不可用 (model_code={}, provider_id={})，请检查设置: {}",
             model_code, provider_id, e
         ))
     })?;

@@ -81,6 +81,23 @@ pub struct LLMProvider {
     pub is_enabled: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ModelRequestError {
+    #[error(transparent)]
+    Lookup(#[from] rusqlite::Error),
+    #[error("模型提供商「{name}」（ID {id}）已停用，请在「设置 → 模型提供商」中重新启用，或选择其他已启用的提供商。")]
+    Disabled { id: i64, name: String },
+}
+
+impl LLMProvider {
+    pub fn ensure_enabled(&self) -> Result<(), ModelRequestError> {
+        if !self.is_enabled {
+            return Err(ModelRequestError::Disabled { id: self.id, name: self.name.clone() });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LLMProviderConfig {
     pub id: i64,
@@ -533,11 +550,28 @@ impl LLMDatabase {
     pub fn get_llm_model_detail(
         &self,
         provider_id: &i64,
-        model_code: &String,
+        model_code: &str,
     ) -> rusqlite::Result<ModelDetail> {
+        self.model_detail_for_provider(self.get_llm_provider(*provider_id)?, model_code)
+    }
+
+    pub fn get_provider_for_request(&self, id: i64) -> Result<LLMProvider, ModelRequestError> {
+        let provider = self.get_llm_provider(id)?;
+        provider.ensure_enabled()?;
+        Ok(provider)
+    }
+
+    /// An assistant's saved model binding survives disabling its provider.
+    pub fn get_model_for_request(&self, provider_id: &i64, code: &str) -> Result<ModelDetail, ModelRequestError> {
+        let provider = self.get_provider_for_request(*provider_id)?;
+        Ok(self.model_detail_for_provider(provider, code)?)
+    }
+
+    fn model_detail_for_provider(&self, provider: LLMProvider, model_code: &str) -> rusqlite::Result<ModelDetail> {
+        let provider_id = provider.id;
         let mut stmt = self.conn.prepare("SELECT id, name, llm_provider_id, code, description, vision_support, audio_support, video_support FROM llm_model WHERE llm_provider_id = ? AND code = ?")?;
         let model = stmt
-            .query_map([&provider_id.to_string(), model_code], |row| {
+            .query_map(params![provider_id, model_code], |row| {
                 Ok(LLMModel {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -558,8 +592,6 @@ impl LLMDatabase {
             None => return Err(rusqlite::Error::QueryReturnedNoRows),
         };
 
-        let provider_id = model.llm_provider_id;
-        let provider = self.get_llm_provider(provider_id)?;
         model.request_mode = self.effective_model_mode(&provider.api_type, provider_id, &model.code)?;
         let configs = self.get_llm_provider_config(provider_id)?;
 

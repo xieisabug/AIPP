@@ -1,10 +1,12 @@
 import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "../../__tests__/mocks/tauri";
 import LLMProviderConfig from "./LLMProviderConfig";
 
 const platformState = vi.hoisted(() => ({ value: "windows" }));
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
 vi.mock("@/hooks/use-platform", () => ({
     usePlatform: () => platformState.value,
@@ -13,7 +15,11 @@ vi.mock("@/hooks/use-platform", () => ({
 
 // 详情表单与本测试无关，避免其加载配置的副作用
 vi.mock("./LLMProviderConfigForm", () => ({
-    default: ({ name }: { name: string }) => <div data-testid="provider-form">{name}</div>,
+    default: ({ name, enabled, index, onToggleEnabled }: {
+        name: string; enabled: boolean; index: number; onToggleEnabled: (index: number) => void;
+    }) => <div data-testid="provider-form">{name}
+        <button role="switch" aria-label="启用提供商" aria-checked={enabled} onClick={() => onToggleEnabled(index)} />
+    </div>,
 }));
 
 const openai = { id: 1, name: "OpenAI", api_type: "openai_api", description: "", is_official: true, is_enabled: true };
@@ -37,6 +43,26 @@ describe("LLMProviderConfig new provider wizard", () => {
         clearAllMockHandlers();
         invoke.mockClear();
         platformState.value = "windows";
+    });
+
+    it("should display the saved provider state when toggled", async () => {
+        mockBackend([openai]);
+        render(<LLMProviderConfig />);
+        const toggle = await screen.findByRole("switch", { name: "启用提供商" });
+        fireEvent.click(toggle);
+        await waitFor(() => expect(toggle).not.toBeChecked());
+        fireEvent.click(toggle);
+        await waitFor(() => expect(toggle).toBeChecked());
+    });
+
+    it("should keep the saved state and explain the error when disabling fails", async () => {
+        mockBackend([openai]);
+        mockInvokeHandler("update_llm_provider", () => { throw new Error("写入失败"); });
+        render(<LLMProviderConfig />);
+        const toggle = await screen.findByRole("switch", { name: "启用提供商" });
+        fireEvent.click(toggle);
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("写入失败")));
+        expect(toggle).toBeChecked();
     });
 
     it("should open the type grid from the add button", async () => {

@@ -46,7 +46,7 @@ pub(super) async fn chat_simple(
     let (code, provider) = resolve_llm_selection(app, selection).await?;
     let cfg = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
     let detail = LLMDatabase::new(app)?
-        .get_llm_model_detail(&provider, &code)
+        .get_model_for_request(&provider, &code)
         .with_context(|| format!("读取模型 {code} / {provider}"))?;
     let proxy = ai::config::get_network_proxy_from_config(&cfg);
     let configs = crate::api::copilot_token_manager::prepare_provider_configs(
@@ -158,7 +158,7 @@ async fn execute_llm_loop(
     let (code, provider_id) = resolve_llm_selection(app, &cfg.deep_model).await?;
     let feature_config_map = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
     let model_detail = LLMDatabase::new(app)?
-        .get_llm_model_detail(&provider_id, &code)
+        .get_model_for_request(&provider_id, &code)
         .with_context(|| format!("读取整理模型 {code} / {provider_id}"))?;
 
     let mut mcp_info = collect_mcp_info_for_assistant(app, chief, None, None)

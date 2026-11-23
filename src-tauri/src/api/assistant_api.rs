@@ -1077,7 +1077,7 @@ pub async fn ensure_acp_session_connected(
     let provider_id = resolve_acp_provider_id(&assistant.model, &assistant.model_configs)
         .ok_or_else(|| "Agent 助手尚未配置模型提供商".to_string())?;
     let database = LLMDatabase::new(&app_handle).map_err(|error| error.to_string())?;
-    let provider = database.get_llm_provider(provider_id).map_err(|error| format!("Agent provider {provider_id} lookup failed: {error}"))?;
+    let provider = database.get_provider_for_request(provider_id).map_err(|error| format!("Agent provider {provider_id} lookup failed: {error}"))?;
     let configs = database.get_llm_provider_config(provider_id).map_err(|error| error.to_string())?;
     let instance = registry::registry().resolve_provider(provider_id, &provider.api_type, configs).map_err(|error| error.to_string())?;
     let driver = registry::registry().driver(&instance.driver_id).map_err(|error| error.to_string())?;

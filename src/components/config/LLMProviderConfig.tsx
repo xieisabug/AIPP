@@ -43,25 +43,6 @@ const LLMProviderConfig: React.FC = () => {
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
-    const handleToggle = useCallback((index: number) => {
-        const newProviders = [...LLMProviders];
-        newProviders[index].is_enabled = !newProviders[index].is_enabled;
-        setLLMProviders(newProviders);
-
-        invoke('update_llm_provider', {
-            id: LLMProviders[index].id,
-            name: LLMProviders[index].name,
-            apiType: LLMProviders[index].api_type,
-            description: LLMProviders[index].description,
-            isEnabled: newProviders[index].is_enabled
-        });
-
-        // 如果是当前选中的提供商，更新选中状态
-        if (selectedProvider && selectedProvider.id === LLMProviders[index].id) {
-            setSelectedProvider(newProviders[index]);
-        }
-    }, [LLMProviders, selectedProvider]);
-
     const getLLMProviderList = useCallback((isCurrent: () => boolean = () => true) => {
         return invoke<Array<LLMProvider>>('get_llm_providers')
             .then((providers) => {
@@ -77,11 +58,27 @@ const LLMProviderConfig: React.FC = () => {
             });
     }, []);
 
-    useDataRefresh({
+    const refreshProviders = useDataRefresh({
         events: ["llm_provider_changed"],
         initial: true,
         refresh: async (isCurrent) => { await getLLMProviderList(isCurrent); },
     });
+
+    const handleToggle = useCallback(async (index: number) => {
+        const provider = LLMProviders[index];
+        try {
+            await invoke('update_llm_provider', {
+                id: provider.id,
+                name: provider.name,
+                apiType: provider.api_type,
+                description: provider.description,
+                isEnabled: !provider.is_enabled,
+            });
+            refreshProviders();
+        } catch (error) {
+            toast.error(`更新提供商「${provider.name}」的启用状态失败：${error}`);
+        }
+    }, [LLMProviders, refreshProviders]);
 
     const [newProviderDialogOpen, setNewProviderDialogOpen] = useState(false);
     // 本地 CLI Agent 类型仅桌面可新建；已有记录仍按完整类型表显示名称

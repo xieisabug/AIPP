@@ -19,6 +19,22 @@ fn attachment(kind: AttachmentType) -> MessageAttachment {
 }
 
 #[test]
+fn test_provider_switch_controls_native_agent_turns() {
+    let db = LLMDatabase { conn: rusqlite::Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    let id = db.add_llm_provider("本地 Codex", "codex_app_server", "", false, false).unwrap();
+    let mut assistant = assistant();
+    assistant.model[0].provider_id = id;
+    let registry = registry();
+    let resolve = |model: Option<&str>| load_agent_instance(&registry, &assistant, model,
+        |id| read_turn_provider(&db, id, assistant.assistant.id));
+    assert!(resolve(None).unwrap_err().to_string().contains("本地 Codex"));
+    assert!(resolve(Some(&format!("selected%%{id}"))).unwrap_err().to_string().contains("已停用"));
+    db.update_llm_provider(id, "本地 Codex", "codex_app_server", "", true).unwrap();
+    assert_eq!(resolve(None).unwrap().0.provider_id, id);
+}
+
+#[test]
 fn test_turn_selection_invalid_override_never_reads_provider_or_defaults() {
     let registry = registry(); let assistant = assistant();
     for override_id in ["wrong", "model%%0", "model%%-2", "%%3"] {

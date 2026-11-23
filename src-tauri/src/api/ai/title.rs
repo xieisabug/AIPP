@@ -315,6 +315,8 @@ pub async fn generate_title(
         }
     };
 
+    model_detail.provider.ensure_enabled().map_err(|e| AppError::ProviderError(e.to_string()))?;
+
     // 从配置中获取网络代理和超时设置
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
     let request_timeout = get_request_timeout_from_config(&config_feature_map);
