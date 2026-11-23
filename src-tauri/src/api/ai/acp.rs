@@ -3474,7 +3474,7 @@ impl AcpTauriClient {
         let failure = AgentFailure::new(identity, stage, error_message)
             .with_process_diagnostics(self.diagnostics.diagnostics(None, None));
         if let Err(error) = emit_normalized_failure_to_sink(&self.app_handle,
-            &ChatWindowsEventSink(&self.app_handle), failure, "ACP") {
+            &ChatWindowsEventSink(&self.app_handle), failure, "ACP", None) {
             error!(conversation_id = self.conversation_id, error = %error, "ACP failure publication incomplete");
         }
         if let Some(activity_manager) = self.app_handle.try_state::<ConversationActivityManager>() {

@@ -49,7 +49,7 @@ fn test_agent_failure_persists_diagnostics_before_one_terminal_for_all_drivers()
         let row = repo.create(&row).unwrap();
         let sink = RecordingSink { repo: &repo, message_id: row.id, require_persisted: true, events: RefCell::new(Vec::new()) };
         let failure = failure(kind.api_type(), row.id, "run-1");
-        assert_eq!(persist_and_publish_failure(&repo, &sink, &failure, "Agent").unwrap(), FailurePublication::Published);
+        assert_eq!(persist_and_publish_failure(&repo, &sink, &failure, "Agent", None).unwrap(), FailurePublication::Published);
         let message = repo.read(row.id).unwrap().unwrap();
         assert_eq!(message.content, failure.content("Agent"));
         assert_eq!(message.message_type, "error");
@@ -77,23 +77,47 @@ fn test_agent_failure_persists_diagnostics_before_one_terminal_for_all_drivers()
 }
 
 #[test]
+fn test_agent_failure_pi_retry_exhaustion_persists_activities_and_publishes_final_cause() {
+    use super::super::{native_agents::NativeDriver, registry::AgentDriver};
+    let repo = MessageRepository::new(database_fixture::create_test_db());
+    let row = repo.create(&response_message(42, NativeDriver("pi").metadata())).unwrap();
+    let sink = RecordingSink { repo: &repo, message_id: row.id, require_persisted: true, events: RefCell::new(Vec::new()) };
+    let cause = "Connection error.: other side closed (UND_ERR_SOCKET)";
+    let failure = AgentFailure::new(AgentEventIdentity::new("pi", 42).with_run("run-1").with_response_message(row.id),
+        AgentFailureStage::NativeSession, cause);
+    let command = json!({"kind":"command", "status":"success", "output":"query completed"});
+    let published = persist_and_publish_failure(&repo, &sink, &failure, "Pi", Some(&[&command])).unwrap();
+    assert_eq!(published, FailurePublication::Published);
+    let saved = repo.read(row.id).unwrap().unwrap();
+    assert_eq!(saved.message_type, "error");
+    assert_eq!(saved.content.lines().next(), Some("Pi 运行失败：Connection error.: other side closed (UND_ERR_SOCKET)"));
+    let metadata: Value = serde_json::from_str(saved.metadata_json.as_ref().unwrap()).unwrap();
+    assert_eq!(metadata["agent_activities"], json!([command]));
+    assert_eq!(metadata["agent_failure"]["cause"], cause);
+    let events = sink.events.borrow();
+    assert_eq!(events[0].1["data"]["message_type"], "error");
+    assert_eq!(events[0].1["data"]["content"], saved.content);
+    assert_eq!(events[2].1["data"]["error"], cause);
+}
+
+#[test]
 fn test_agent_failure_duplicate_and_late_old_run_cannot_overwrite_terminal_message() {
     let repo = MessageRepository::new(database_fixture::create_test_db());
     let old = repo.create(&response_message(42, AgentSessionKind::Codex)).unwrap();
     let sink = RecordingSink { repo: &repo, message_id: old.id, require_persisted: false, events: RefCell::new(Vec::new()) };
     let original = failure("codex_app_server", old.id, "old-run");
-    assert_eq!(persist_and_publish_failure(&repo, &sink, &original, "Codex").unwrap(), FailurePublication::Published);
+    assert_eq!(persist_and_publish_failure(&repo, &sink, &original, "Codex", None).unwrap(), FailurePublication::Published);
     let first_content = repo.read(old.id).unwrap().unwrap().content;
     let mut late = original.clone();
     late.cause = "late duplicate process teardown diagnostic".into();
-    assert_eq!(persist_and_publish_failure(&repo, &sink, &late, "Codex").unwrap(), FailurePublication::AlreadyFinishedOrMissing);
+    assert_eq!(persist_and_publish_failure(&repo, &sink, &late, "Codex", None).unwrap(), FailurePublication::AlreadyFinishedOrMissing);
     assert_eq!(repo.read(old.id).unwrap().unwrap().content, first_content);
     assert_eq!(sink.events.borrow().len(), 4);
     // A new run and its distinct response in the same conversation are not
     // suppressed by the previous message's terminal marker.
     let new = repo.create(&response_message(42, AgentSessionKind::Codex)).unwrap();
     let next = failure("codex_app_server", new.id, "new-run");
-    assert_eq!(persist_and_publish_failure(&repo, &sink, &next, "Codex").unwrap(), FailurePublication::Published);
+    assert_eq!(persist_and_publish_failure(&repo, &sink, &next, "Codex", None).unwrap(), FailurePublication::Published);
     assert_eq!(sink.events.borrow().len(), 8);
     assert!(repo.read(new.id).unwrap().unwrap().content.contains("new-run"));
 }
@@ -107,7 +131,7 @@ fn test_agent_failure_does_not_replace_success_or_cross_conversation_messages() 
     let other = repo.create(&response_message(43, AgentSessionKind::Claude)).unwrap();
     let sink = RecordingSink { repo: &repo, message_id: success.id, require_persisted: false, events: RefCell::new(Vec::new()) };
     for message_id in [success.id, other.id, 999_999] {
-        assert_eq!(persist_and_publish_failure(&repo, &sink, &failure("claude_sdk", message_id, "late-run"), "Claude Code").unwrap(),
+        assert_eq!(persist_and_publish_failure(&repo, &sink, &failure("claude_sdk", message_id, "late-run"), "Claude Code", None).unwrap(),
             FailurePublication::AlreadyFinishedOrMissing);
     }
     assert!(sink.events.borrow().is_empty());
@@ -124,7 +148,7 @@ fn test_agent_failure_database_write_error_is_published_without_hiding_original_
     let row = repo.create(&response_message(42, AgentSessionKind::Acp)).unwrap();
     let sink = RecordingSink { repo: &repo, message_id: row.id, require_persisted: false, events: RefCell::new(Vec::new()) };
     let original = failure("acp", row.id, "run-1");
-    let error = persist_and_publish_failure(&repo, &sink, &original, "ACP").unwrap_err();
+    let error = persist_and_publish_failure(&repo, &sink, &original, "ACP", None).unwrap_err();
     assert!(error.contains("injected persistence failure"));
     assert!(repo.read(row.id).unwrap().unwrap().finish_time.is_none());
     let events = sink.events.borrow();
@@ -141,7 +165,7 @@ fn test_agent_failure_records_missing_diagnostics_and_preserves_malformed_metada
     let row = repo.create(&row).unwrap();
     let sink = RecordingSink { repo: &repo, message_id: row.id, require_persisted: true, events: RefCell::new(Vec::new()) };
     let failure = AgentFailure::new(AgentEventIdentity::new("acp", 42).with_response_message(row.id), AgentFailureStage::Initialize, " ");
-    persist_and_publish_failure(&repo, &sink, &failure, "ACP").unwrap();
+    persist_and_publish_failure(&repo, &sink, &failure, "ACP", None).unwrap();
     let message = repo.read(row.id).unwrap().unwrap();
     assert!(message.content.contains("underlying cause was not provided"));
     assert!(message.content.contains("diagnostics_unavailable"));
@@ -162,7 +186,7 @@ fn test_agent_failure_registered_extension_retains_custom_driver_and_model() {
     let row = repo.create(&response_message(42, metadata)).unwrap();
     let sink = RecordingSink { repo: &repo, message_id: row.id, require_persisted: true, events: RefCell::new(Vec::new()) };
     let failure = failure(metadata.id, row.id, "extension-run");
-    persist_and_publish_failure(&repo, &sink, &failure, metadata.display_name).unwrap();
+    persist_and_publish_failure(&repo, &sink, &failure, metadata.display_name, None).unwrap();
     let saved = repo.read(row.id).unwrap().unwrap();
     assert_eq!(saved.llm_model_name.as_deref(), Some("custom-model"));
     assert!(saved.content.starts_with("Custom Agent 运行失败"));

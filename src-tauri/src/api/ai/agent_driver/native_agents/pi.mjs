@@ -55,11 +55,16 @@ export async function openPi(config, emit, dependencies = {}) {
   const child = (dependencies.launch || launch)(config.command || 'pi', ['--mode', 'rpc', '--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url))],
     { cwd: config.cwd, env: { ...process.env, AIPP_PI_APPROVAL: approval, AIPP_PI_CONTEXT_FILE: contextFile, ...(config.mcp ? { AIPP_PI_MCP: JSON.stringify(config.mcp) } : {}) } });
   let sequence = 0, turn = null, failure, session, closing = false;
+  let awaitingSettlement = false, modelError, finalText;
   const pending = new Map();
   const questions = new Map();
   const tools = new Map();
   let thinkingId, thinkingSequence = 0;
   const send = data => child.stdin.write(`${JSON.stringify(data)}\n`);
+  const finishTurn = (cancelled = false) => {
+    emit({ type: 'done', turn, cancelled, error: failure || (cancelled ? undefined : modelError), final_text: finalText });
+    turn = null; awaitingSettlement = false; questions.clear(); tools.clear(); thinkingId = undefined;
+  };
   const fail = error => {
     for (const { reject } of pending.values()) reject(error);
     pending.clear();
@@ -117,7 +122,10 @@ export async function openPi(config, emit, dependencies = {}) {
       tools.set(frame.toolCallId, activity);
       emit({ ...base, ...activity });
     }
-    if (frame.type === 'message_end' && frame.message?.stopReason === 'error') failure = frame.message.errorMessage || 'Pi model error has no errorMessage';
+    if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      modelError = frame.message.stopReason === 'error' ? frame.message.errorMessage || 'Pi model error has no errorMessage' : undefined;
+    }
+    if (frame.type === 'auto_retry_end' && !frame.success && frame.finalError) modelError = frame.finalError;
     if (frame.type === 'extension_ui_request' && frame.method === 'confirm') {
       emit({ type: 'permission', turn, id: frame.id, title: frame.title, input: frame.message,
         options: [{ id: 'allow', name: '本次允许', kind: 'allow_once' }, { id: 'deny', name: '拒绝', kind: 'reject_once' }] });
@@ -133,12 +141,17 @@ export async function openPi(config, emit, dependencies = {}) {
     }
     if (frame.type === 'agent_end') {
       const last = Array.isArray(frame.messages) ? frame.messages.findLast(message => message.role === 'assistant') : undefined;
-      let finalText;
+      if (last?.stopReason === 'error') modelError = last.errorMessage || modelError || 'Pi model error has no errorMessage';
+      else if (last) modelError = undefined;
+      finalText = undefined;
       if (last?.stopReason === 'toolUse') finalText = '';
       else if (typeof last?.content === 'string') finalText = last.content;
       else if (Array.isArray(last?.content)) finalText = last.content.filter(block => block.type === 'text').map(block => block.text).join('');
-      emit({ ...base, type: 'done', error: failure, final_text: finalText });
-      turn = null; failure = undefined; questions.clear(); tools.clear(); thinkingId = undefined;
+      // Retry-aware Pi closes each attempt with agent_end, then the whole prompt with agent_settled.
+      if (typeof frame.willRetry === 'boolean') awaitingSettlement = true;
+      else finishTurn();
+    } else if (frame.type === 'agent_settled' && awaitingSettlement) {
+      finishTurn(frame.aborted === true);
     }
   }, fail);
   try {
@@ -159,13 +172,12 @@ export async function openPi(config, emit, dependencies = {}) {
       session,
       async prompt(text, id) {
         if (turn) throw new Error('Pi already has an active turn');
-        turn = id; failure = undefined; tools.clear(); thinkingId = undefined; thinkingSequence = 0;
+        turn = id; failure = undefined; modelError = undefined; finalText = undefined;
+        tools.clear(); thinkingId = undefined; thinkingSequence = 0;
         const receipt = await request({ type: 'prompt', message: text });
         if (turn === id && receipt?.disposition === 'handled') {
           const state = await request({ type: 'get_state' });
-          if (turn === id && state.isStreaming === false) {
-            emit({ type: 'done', turn }); turn = null; questions.clear();
-          }
+          if (turn === id && !awaitingSettlement && state.isStreaming === false) finishTurn();
         }
       },
       async steer(expectedTurn, text) {

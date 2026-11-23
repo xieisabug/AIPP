@@ -2,8 +2,8 @@
 //! is private to these drivers; all application routing uses the shared facade.
 use super::registry::{AgentDriver, AgentDriverMetadata, AgentInstanceConfig, AgentSessionLookup, AgentSessionHost, PreparedAgentSession, AgentConfigField, AgentConfigValueType};
 use super::session::{AgentSessionCapabilities, AgentSessionControl, AgentSessionHandle, AgentPromptContext};
-use super::events::{AgentEventIdentity, emit_to_window};
-use super::failure::{AgentDiagnosticBuffer, AgentFailure, AgentFailureStage, emit_normalized_failure_to_window};
+use super::events::{AgentEventIdentity, WindowEventSink, emit_to_window};
+use super::failure::{AgentDiagnosticBuffer, AgentFailure, AgentFailureStage, emit_normalized_failure_to_sink};
 use super::capabilities::{AgentCapabilities, AgentCapabilityDeclaration};
 use super::AgentTurnRequest;
 use crate::api::ai::events::ConversationEvent;
@@ -516,19 +516,18 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                             turn.questions.push(queue_question(&app, &identity, turn.id, &frame, tx.clone())?);
                         }
                         Some("done") => {
-                            let failure = frame["error"].as_str();
+                            if let Some(detail) = frame["error"].as_str() { return Err(detail.into()); }
                             let cancelled = frame["cancelled"] == true || cancel_deadline.is_some();
                             for activity in turn.activities.values_mut() {
-                                if settle_activity(activity, cancelled, failure) {
+                                if settle_activity(activity, cancelled, None) {
                                     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"agent_activity".into(), data:activity.clone() });
                                 }
                             }
-                            let final_text = if cancelled || failure.is_some() { Some("") } else { frame["final_text"].as_str() };
+                            let final_text = if cancelled { Some("") } else { frame["final_text"].as_str() };
                             if turn.text.is_empty() {
                                 if let Some(text) = final_text { turn.text.push_str(text); }
                             }
                             persist_success(&app, turn, final_text)?;
-                            if let Some(detail) = failure { return Err(detail.into()); }
                             publish_text(&identity, turn, true);
                             let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"stream_complete".into(), data:json!({"conversation_id":cid,"response_message_id":turn.id,"has_response":!turn.text.is_empty()}) });
                             if !cancelled {
@@ -568,10 +567,12 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"agent_activity".into(), data:activity.clone() });
                 }
             }
-            let _ = persist_success(&app, &turn, Some(""));
             let failure = AgentFailure::new(identity.clone().with_response_message(turn.id), AgentFailureStage::NativeSession, detail)
                 .with_process_diagnostics(diagnostics.diagnostics(process.as_mut().and_then(|p|p.try_wait().ok().flatten()).map(|s|s.to_string()), None));
-            let _ = emit_normalized_failure_to_window(&app, &turn.window, failure, driver.metadata().display_name);
+            let activities = ordered_activities(&turn.activities);
+            if let Err(error) = emit_normalized_failure_to_sink(&app, &WindowEventSink(&turn.window), failure, driver.metadata().display_name, Some(&activities)) {
+                tracing::error!(conversation_id = cid, %run, %error, "Native agent failure publication incomplete");
+            }
             if let Some(manager) = app.try_state::<crate::state::activity_state::ConversationActivityManager>() { manager.clear_agent_focus(&app, &identity, false).await; }
         }
     }

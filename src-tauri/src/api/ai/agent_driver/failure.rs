@@ -127,7 +127,7 @@ impl AgentFailure {
             if let Some(value) = value { context.push(format!("{key}={value}")); }
         }
         if let Some(message_id) = self.identity.response_message_id { context.push(format!("message_id={message_id}")); }
-        let mut content = format!("{provider} 运行失败 [{}]：{}", context.join(", "), self.cause);
+        let mut content = format!("{provider} 运行失败：{}\n[{}]", self.cause, context.join(", "));
         for (key, value) in [
             ("stderr", self.process.stderr.as_deref()), ("exit_status", self.process.exit_status.as_deref()),
             ("protocol_error", self.process.protocol_error.as_deref()),
@@ -165,11 +165,12 @@ fn publish_failure_events(sink: &impl AgentEventSink, failure: &AgentFailure, pr
 
 pub(crate) fn persist_and_publish_failure(
     repo: &MessageRepository, sink: &impl AgentEventSink, failure: &AgentFailure, provider: &str,
+    activities: Option<&[&serde_json::Value]>,
 ) -> Result<FailurePublication, String> {
     let message_id = failure.identity.response_message_id.ok_or("Agent failure persistence requires response_message_id")?;
     let details = serde_json::to_string(failure).map_err(|error| error.to_string())?;
     let persisted = repo.finish_agent_failure(
-        failure.identity.conversation_id, message_id, &failure.content(provider), &details,
+        failure.identity.conversation_id, message_id, &failure.content(provider), &details, activities,
     );
     match persisted {
         Ok(false) => Ok(FailurePublication::AlreadyFinishedOrMissing),
@@ -197,16 +198,17 @@ pub(crate) fn emit_failure_to_window(
 pub(crate) fn emit_normalized_failure_to_window(
     app_handle: &tauri::AppHandle, window: &tauri::Window, failure: AgentFailure, provider: &str,
 ) -> Result<FailurePublication, String> {
-    emit_normalized_failure_to_sink(app_handle, &WindowEventSink(window), failure, provider)
+    emit_normalized_failure_to_sink(app_handle, &WindowEventSink(window), failure, provider, None)
 }
 
 pub(crate) fn emit_normalized_failure_to_sink(
     app_handle: &tauri::AppHandle, sink: &impl AgentEventSink, mut failure: AgentFailure, provider: &str,
+    activities: Option<&[&serde_json::Value]>,
 ) -> Result<FailurePublication, String> {
     let repo = ConversationDatabase::new(app_handle).map_err(|error| error.to_string())
         .and_then(|db| db.message_repo().map_err(|error| error.to_string()));
     match repo {
-        Ok(repo) => persist_and_publish_failure(&repo, sink, &failure, provider),
+        Ok(repo) => persist_and_publish_failure(&repo, sink, &failure, provider, activities),
         Err(error) => {
             failure.persistence_error = Some(error.to_string());
             let publication = publish_failure_events(sink, &failure, provider);
@@ -218,7 +220,7 @@ pub(crate) fn emit_normalized_failure_to_sink(
 // Retained for callers testing the existing compatibility wire contract.
 pub(super) fn persist_failure_message(repo: &MessageRepository, message_id: i64, content: &str) -> rusqlite::Result<()> {
     if let Some(message) = repo.read(message_id)? {
-        repo.finish_agent_failure(message.conversation_id, message_id, content, "{}")?;
+        repo.finish_agent_failure(message.conversation_id, message_id, content, "{}", None)?;
     }
     Ok(())
 }

@@ -1175,6 +1175,7 @@ impl MessageRepository {
     /// The existing message row is the terminal authority, not a second run map.
     pub(crate) fn finish_agent_failure(
         &self, conversation_id: i64, message_id: i64, content: &str, failure_json: &str,
+        activities: Option<&[&serde_json::Value]>,
     ) -> Result<bool> {
         self.with_serialized_write(|conn| {
             let previous: Option<Option<String>> = conn.query_row(
@@ -1190,6 +1191,9 @@ impl MessageRepository {
             };
             metadata["agent_failure"] = serde_json::from_str(failure_json)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            if let Some(activities) = activities {
+                metadata["agent_activities"] = serde_json::json!(activities);
+            }
             let changed = conn.execute(
                 "UPDATE message SET message_type = 'error', content = ?1, finish_time = ?2, metadata_json = ?3
                  WHERE id = ?4 AND conversation_id = ?5 AND finish_time IS NULL",

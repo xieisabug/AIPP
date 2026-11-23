@@ -109,6 +109,56 @@ test('should forward Pi text and approval while accepting abort before the user 
   assert.equal(events.some(e => e.type === 'fatal'), false);
 });
 
+test('should retain the original turn through Pi retries and deliver just the recovered answer', async () => {
+  const fixture = piFixture(), events = [];
+  const runtime = await openPi({ cwd: process.cwd() }, event => events.push(event), fixture);
+  try {
+    await runtime.prompt('task', 'original');
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const failed = { role: 'assistant', stopReason: 'error', errorMessage: 'other side closed (UND_ERR_SOCKET)' };
+      fixture.emit({ type: 'message_end', message: failed });
+      fixture.emit({ type: 'agent_end', messages: [failed], willRetry: true });
+      fixture.emit({ type: 'auto_retry_start', attempt });
+      assert.equal(events.some(e => e.type === 'done'), false);
+      await assert.rejects(runtime.prompt('next', 'other'), /active turn/);
+    }
+    const answer = { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '恢复后的答复' }] };
+    fixture.emit({ type: 'message_end', message: answer });
+    fixture.emit({ type: 'auto_retry_end', success: true, attempt: 2 });
+    fixture.emit({ type: 'agent_end', messages: [answer], willRetry: false });
+    fixture.emit({ type: 'agent_settled', aborted: false });
+    const terminals = events.filter(e => e.type === 'done');
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0].turn, 'original');
+    assert.equal(terminals[0].final_text, '恢复后的答复');
+    assert.equal(terminals[0].error, undefined);
+    assert.equal(fixture.commands.filter(command => command.type === 'prompt').length, 1);
+  } finally { await runtime.close(); }
+});
+
+test('should report the last Pi retry failure and release a turn cancelled during backoff', async () => {
+  const fixture = piFixture(), events = [];
+  const runtime = await openPi({ cwd: process.cwd() }, event => events.push(event), fixture);
+  try {
+    const first = { role: 'assistant', stopReason: 'error', errorMessage: 'initial connection failure' };
+    await runtime.prompt('first task', 'failed-turn');
+    fixture.emit({ type: 'agent_end', messages: [first], willRetry: true });
+    const finalError = 'other side closed (UND_ERR_SOCKET)';
+    fixture.emit({ type: 'agent_end', messages: [{ ...first, errorMessage: finalError }], willRetry: false });
+    fixture.emit({ type: 'auto_retry_end', success: false, finalError });
+    fixture.emit({ type: 'agent_settled', aborted: false });
+    await runtime.prompt('second task', 'cancelled-turn');
+    fixture.emit({ type: 'agent_end', messages: [first], willRetry: true });
+    await runtime.cancel();
+    fixture.emit({ type: 'auto_retry_end', success: false, finalError: 'Retry cancelled' });
+    fixture.emit({ type: 'agent_settled', aborted: true });
+    const terminals = events.filter(e => e.type === 'done');
+    assert.deepEqual(terminals.map(e => [e.turn, e.error, e.cancelled]), [
+      ['failed-turn', finalError, false], ['cancelled-turn', undefined, true],
+    ]);
+  } finally { await runtime.close(); }
+});
+
 test('should pass the assistant approval scope to the Pi extension and reject unknown scopes', async () => {
   for (const [configured, expected] of [[undefined, 'all'], ['read_only', 'read_only'], ['none', 'none']]) {
     const fixture = piFixture();
