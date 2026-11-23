@@ -29,10 +29,7 @@ import { openScheduleTask } from "@/lib/scheduleTaskFocus";
 import type { ScheduledTask } from "@/components/schedule/scheduleTypes";
 import {
     Check,
-    ChevronDown,
     ChevronLeft,
-    ChevronRight,
-    Clock,
     ExternalLink,
     History,
     Loader2,
@@ -109,7 +106,7 @@ import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import { pluginRuntime } from "@/services/PluginRuntime";
 
-type ButlerScheduledTask = Pick<ScheduledTask, "id" | "name" | "enabled" | "scheduleText" | "assistantName" | "upcomingText" | "needsAttention" | "butlerMode">;
+type ButlerScheduledTask = Pick<ScheduledTask, "id" | "needsAttention" | "butlerMode">;
 
 function sortTasks(tasks: ButlerTaskListItem[]): ButlerTaskListItem[] {
     return [...tasks].sort((left, right) => {
@@ -502,7 +499,6 @@ function ButlerExperimentWindow() {
     const [isMainConversationFeishuBound, setIsMainConversationFeishuBound] =
         useState(false);
     const [scheduledTasks, setScheduledTasks] = useState<ButlerScheduledTask[]>([]);
-    const [isScheduledTasksExpanded, setIsScheduledTasksExpanded] = useState(false);
     const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
     const onboardingAutoTriggeredRef = useRef(false);
     const butlerSettingsForm = useForm<ExperimentalConfigFormState>({
@@ -858,6 +854,16 @@ function ButlerExperimentWindow() {
             console.error("[ButlerExperimentWindow] Failed to load scheduled tasks:", error);
         }
     }, [mainConversationId]);
+
+    // 定时任务入口与聊天窗口一致：侧栏底部按钮打开定时任务窗口；有管家任务需要处理时直接定位到它
+    const scheduleAttentionTask = scheduledTasks.find((task) => task.needsAttention);
+    const openButlerSchedule = useCallback(() => {
+        const open = scheduleAttentionTask ? openScheduleTask(scheduleAttentionTask.id) : invoke("open_schedule_window");
+        void Promise.resolve(open).catch((error) => {
+            console.error("[ButlerExperimentWindow] Failed to open schedule window:", error);
+            toast.error("打开定时任务失败");
+        });
+    }, [scheduleAttentionTask]);
 
     useEffect(() => {
         void loadMainConversation({ showLoading: true });
@@ -1299,68 +1305,12 @@ function ButlerExperimentWindow() {
                         onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}
                         groups={groups} selectedGroup={groupId ?? undefined} onSelectGroup={selectGroup}
                         onCreateGroup={() => setCreateGroupOpen(true)} onDeleteGroup={setDeleteGroupTarget}/>
-                    {scheduledTasks.length > 0 && (
-                        <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
-                            <button
-                                type="button"
-                                className="flex w-full items-center gap-2 px-4 py-2.5 text-xs font-medium text-muted-foreground hover:bg-muted/40 transition-colors"
-                                onClick={() => setIsScheduledTasksExpanded(prev => !prev)}
-                            >
-                                {isScheduledTasksExpanded ? (
-                                    <ChevronDown className="h-3.5 w-3.5" />
-                                ) : (
-                                    <ChevronRight className="h-3.5 w-3.5" />
-                                )}
-                                <Clock className="h-3.5 w-3.5" />
-                                定时任务
-                                <Badge variant="secondary" className="ml-auto text-[10px] px-1.5 py-0">
-                                    {scheduledTasks.length}
-                                </Badge>
-                            </button>
-                            {isScheduledTasksExpanded && (
-                                <div className="px-3 pb-3 space-y-1.5 max-h-[200px] overflow-y-auto">
-                                    {scheduledTasks.map((st) => (
-                                        <button
-                                            type="button"
-                                            key={st.id}
-                                            className="block w-full rounded-lg border border-border/50 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring"
-                                            title="在定时任务窗口中查看"
-                                            data-aipp-slot="butler-scheduled-task-item"
-                                            onClick={() => {
-                                                openScheduleTask(st.id).catch((error) => {
-                                                    console.error("[ButlerExperimentWindow] Failed to open scheduled task:", error);
-                                                    toast.error("打开定时任务失败");
-                                                });
-                                            }}
-                                        >
-                                            <div className="flex items-center justify-between gap-2">
-                                                <span className="font-medium truncate">{st.name}</span>
-                                                <Badge
-                                                    variant={st.needsAttention ? "destructive" : st.enabled ? "default" : "secondary"}
-                                                    className="text-[10px] px-1.5 py-0"
-                                                >
-                                                    {st.needsAttention ? "需要处理" : st.enabled ? "已启用" : "已暂停"}
-                                                </Badge>
-                                            </div>
-                                            <div className="mt-1 text-muted-foreground truncate">
-                                                {st.scheduleText} · {st.assistantName}
-                                            </div>
-                                            {st.enabled && st.upcomingText[0] && (
-                                                <div className="mt-1 text-[11px] text-muted-foreground">
-                                                    下次：{st.upcomingText[0]}
-                                                </div>
-                                            )}
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
                     {titleBarLayout && (
                         // 桌面统一布局：侧栏标题栏行放列表操作，设置、更新与主动整理入口收在侧栏底部
                         <div className="flex shrink-0 items-center gap-0.5 border-t border-border px-2 py-1.5" data-aipp-slot="butler-rail-footer">
                             <ButlerAppActions ready={!!mainConversationId} onOpenSettings={handleOpenSettings}
-                                onOpenProactive={proactive.saved?.enabled ? () => setProactiveCenterOpen(true) : undefined}/>
+                                onOpenProactive={proactive.saved?.enabled ? () => setProactiveCenterOpen(true) : undefined}
+                                onOpenSchedule={openButlerSchedule} scheduleAttention={scheduleAttentionTask !== undefined}/>
                         </div>
                     )}
                 </div>

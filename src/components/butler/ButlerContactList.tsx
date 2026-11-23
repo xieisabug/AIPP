@@ -1,9 +1,10 @@
 import AssistantItemContextMenu, { type AssistantItemAction } from "@/components/config/assistant/AssistantItemContextMenu";
-import { CalendarHeart, Search, Settings, UsersRound } from "lucide-react";
+import { CalendarClock, CalendarHeart, Search, Settings, UsersRound } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
 import type { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/utils/utils";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
 import AddAssistantDialog from "@/components/config/AddAssistantDialog";
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
@@ -67,11 +68,16 @@ function railIconButtonProps(titleBarLayout: boolean) {
         : { variant: "outline" as const, className: "size-8 rounded-full" };
 }
 
-/** 总管家设置、更新提示与主动整理入口：桌面统一布局下由窗口放在侧栏底部，移动端在联系人列表左上角。 */
-export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive }: {
+/**
+ * 总管家设置、更新提示、主动整理与定时任务入口：桌面统一布局下由窗口放在侧栏底部，移动端在联系人列表左上角。
+ * 定时任务与聊天窗口一样是打开定时任务窗口的按钮；有任务需要处理时按钮上带红点。
+ */
+export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive, onOpenSchedule, scheduleAttention = false }: {
     ready: boolean;
     onOpenSettings: () => void;
     onOpenProactive?: () => void;
+    onOpenSchedule?: () => void;
+    scheduleAttention?: boolean;
 }) {
     const titleBarLayout = useWindowTitleBarLayout();
     const iconButton = railIconButtonProps(titleBarLayout);
@@ -81,6 +87,12 @@ export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive }: {
         <AppUpdateNotice rounded={!titleBarLayout} />
         {onOpenProactive && <Button size="icon" {...iconButton} aria-label="主动整理" title="主动整理：跟进事项与整理手记"
             disabled={!ready} onClick={onOpenProactive} data-aipp-slot="butler-proactive-open"><CalendarHeart/></Button>}
+        {onOpenSchedule && <Button size="icon" {...iconButton} className={cn(iconButton.className, "relative")}
+            aria-label={scheduleAttention ? "定时任务（有任务需要处理）" : "定时任务"} title={scheduleAttention ? "定时任务：有任务需要处理" : "定时任务"}
+            onClick={onOpenSchedule} data-aipp-slot="butler-open-schedule">
+            <CalendarClock/>
+            {scheduleAttention && <span className="absolute right-1 top-1 size-2 rounded-full bg-destructive" data-aipp-slot="butler-open-schedule-attention"/>}
+        </Button>}
     </>;
 }
 

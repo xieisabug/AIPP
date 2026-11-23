@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import ButlerContactList from "./ButlerContactList";
+import ButlerContactList, { ButlerAppActions } from "./ButlerContactList";
 import { __resetPlatformCacheForTests } from "@/hooks/use-platform";
 
 import { mockInvokeHandler } from "@/__tests__/mocks/tauri";
@@ -44,6 +44,19 @@ describe("ButlerContactList", () => {
         expect(titleBar).toContainElement(screen.getByRole("button", { name: "添加助手" }));
         expect(screen.queryByRole("button", { name: "总管家设置" })).toBeNull();
     });
+    it("should open the schedule window from a footer button and flag tasks that need attention", async () => {
+        mockInvokeHandler("get_platform", () => "windows");
+        const onOpenSchedule = vi.fn();
+        const { rerender } = render(<ButlerAppActions ready onOpenSettings={() => {}} onOpenSchedule={onOpenSchedule} />);
+        fireEvent.click(await screen.findByRole("button", { name: "定时任务" }));
+        expect(onOpenSchedule).toHaveBeenCalledOnce();
+        expect(document.querySelector('[data-aipp-slot="butler-open-schedule-attention"]')).toBeNull();
+
+        rerender(<ButlerAppActions ready onOpenSettings={() => {}} onOpenSchedule={onOpenSchedule} scheduleAttention />);
+        expect(screen.getByRole("button", { name: "定时任务（有任务需要处理）" })).toBeInTheDocument();
+        expect(document.querySelector('[data-aipp-slot="butler-open-schedule-attention"]')).toBeTruthy();
+    });
+
     it("should open settings and show a downloading update beside it in the contact list", async () => {
         const onOpenSettings = vi.fn();
         mockInvokeHandler("get_app_update_status", () => ({ revision: 1, version: "2.0", phase: "downloading" }));
