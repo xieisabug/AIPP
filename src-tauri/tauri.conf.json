@@ -67,7 +67,8 @@
             },
             "assetProtocol": {
                 "scope": [
-                    "**"
+                    "**",
+                    "$APPDATA/plugin/**"
                 ],
                 "enable": true
             }

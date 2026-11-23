@@ -5,7 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
-import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { isMobileAppPlatform, usePlatform } from "@/hooks/use-platform";
+import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import {
     CheckCircle2,
     ChevronDown,
@@ -52,7 +53,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { ConfigPageLayout, ConfigPageLoading, ListItemButton, SidebarList, type SelectOption } from "../common";
+import { ConfigPageLayout, ConfigPageLoading, ListItemButton, SidebarList } from "../common";
 import { pluginRuntime } from "../../services/PluginRuntime";
 import PluginViewHost from "../plugin/PluginViewHost";
 import type { LoadedPlugin } from "../../services/PluginRuntime";
@@ -65,6 +66,7 @@ interface PluginCenterConfigProps {
 }
 
 interface PluginRegistryItem {
+    entryAccessError?: string | null;
     mobileUnavailableReason?: string | null;
     pluginId: number;
     name: string;
@@ -300,7 +302,8 @@ function parsePluginSourceInput(input: string): {
 }
 
 const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) => {
-    const isMobilePlatform = useIsMobilePlatform();
+    const platform = usePlatform();
+    const isMobilePlatform = isMobileAppPlatform(platform);
     const [plugins, setPlugins] = useState<PluginRegistryItem[]>([]);
     const [runtimePlugins, setRuntimePlugins] = useState<LoadedPlugin[]>(pluginList);
     const [runtimeRefreshing, setRuntimeRefreshing] = useState(false);
@@ -309,6 +312,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [loading, setLoading] = useState(false);
     // 首次读取插件列表完成前不渲染列表与「插件商店」占位
     const [pluginsLoaded, setPluginsLoaded] = useState(false);
+    const [scanError, setScanError] = useState("");
     const [configs, setConfigs] = useState<PluginConfigItem[]>([]);
     const [configLoading, setConfigLoading] = useState(false);
     const [newConfigKey, setNewConfigKey] = useState("");
@@ -344,7 +348,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     }, [selectedPluginId]);
 
     const loadedPluginByCode = useMemo(() => {
-        const map = new Map<string, any>();
+        const map = new Map<string, LoadedPlugin>();
         runtimePlugins.forEach((plugin) => {
             map.set(plugin.code, plugin);
         });
@@ -361,7 +365,6 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             return items;
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to refresh runtime plugins:", error);
-            setRuntimePlugins([]);
             throw error;
         } finally {
             setRuntimeRefreshing(false);
@@ -394,9 +397,10 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 return items.length > 0 ? items[0].pluginId : null;
             });
             await syncRuntimePlugins(true);
+            setScanError("");
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to load plugins:", error);
-            toast.error(`加载插件列表失败: ${String(error)}`);
+            setScanError(String(error));
         } finally {
             setLoading(false);
             setPluginsLoaded(true);
@@ -651,7 +655,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to load plugin detail:", error);
             setPluginDetail(null);
-            toast.error("加载插件详情失败");
+            toast.error(`加载插件详情失败：${String(error)}`);
         } finally {
             setPluginDetailLoading(false);
         }
@@ -702,21 +706,28 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         );
     }, [plugins, searchQuery]);
 
-    const selectOptions = useMemo<SelectOption[]>(
+    const selectOptions = useMemo(
         () =>
-            filteredPlugins.map((plugin) => ({
-                id: String(plugin.pluginId),
-                label: plugin.isInstalled ? plugin.name : `${plugin.name}（目录缺失）`,
-                icon: !plugin.isInstalled
-                    ? <PowerOff className="h-4 w-4 text-destructive" />
-                    : plugin.isActive
-                        ? <Power className="h-4 w-4 text-emerald-500" />
-                        : <PowerOff className="h-4 w-4 text-muted-foreground" />,
-            })),
-        [filteredPlugins]
+            filteredPlugins.map((plugin) => {
+                const failed = plugin.isActive && (plugin.entryAccessError || loadedPluginByCode.get(plugin.code)?.loadError);
+                const problem = failed ? "加载失败" : !plugin.isInstalled ? "目录缺失" : null;
+                return {
+                    id: String(plugin.pluginId),
+                    label: problem ? `${plugin.name}（${problem}）` : plugin.name,
+                    problem,
+                    icon: problem
+                        ? <XCircle className="h-4 w-4 text-destructive" />
+                        : plugin.isActive
+                            ? <Power className="h-4 w-4 text-emerald-500" />
+                            : <PowerOff className="h-4 w-4 text-muted-foreground" />,
+                };
+            }),
+        [filteredPlugins, loadedPluginByCode]
     );
 
     const currentLoadedPlugin = selectedPlugin ? loadedPluginByCode.get(selectedPlugin.code) : null;
+    const loadError = selectedPlugin?.isActive && (selectedPlugin.entryAccessError || currentLoadedPlugin?.loadError);
+    const fileAccessDenied = selectedPlugin?.entryAccessError || currentLoadedPlugin?.fileAccessDenied;
     const pluginCenterViews = useMemo(
         () =>
             (selectedPlugin?.contributions?.views ?? []).filter(
@@ -770,7 +781,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         if (!currentLoadedPlugin.instance) {
             return "插件加载失败（实例为空），请检查插件脚本导出。";
         }
-        if (typeof currentLoadedPlugin.instance?.renderView !== "function") {
+        if (!("renderView" in currentLoadedPlugin.instance) || typeof currentLoadedPlugin.instance.renderView !== "function") {
             return "插件已加载，但未实现 renderView()。";
         }
         return null;
@@ -1176,29 +1187,49 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             searchPlaceholder="搜索插件..."
             addButton={pluginActionDropdown}
         >
-            {filteredPlugins.map((plugin) => (
+            {selectOptions.map((option) => (
                 <ListItemButton
-                    key={plugin.pluginId}
-                    isSelected={selectedPluginId === plugin.pluginId}
-                    onClick={() => setSelectedPluginId(plugin.pluginId)}
+                    key={option.id}
+                    isSelected={String(selectedPluginId) === option.id}
+                    onClick={() => setSelectedPluginId(Number(option.id))}
                 >
-                    <div className="flex items-center w-full">
-                        <div className="flex-1 truncate">
-                            <div
-                                className={`truncate ${!plugin.isInstalled ? "text-destructive" : ""}`}
-                            >
-                                {plugin.isInstalled
-                                    ? plugin.name
-                                    : `${plugin.name}（目录缺失）`}
-                            </div>
-                        </div>
+                    <div className={`truncate ${option.problem ? "text-destructive" : ""}`}>
+                        {option.label}
                     </div>
                 </ListItemButton>
             ))}
         </SidebarList>
     );
 
-    const content = !selectedPlugin ? (
+    const renderLoadError = (detail: string, denied: boolean, title: string) => (
+        <Alert variant="destructive" className="mb-4 min-w-0 border-destructive/40">
+            <XCircle />
+            <AlertTitle>{denied ? "系统拒绝读取插件文件" : title}</AlertTitle>
+            <AlertDescription className="min-w-0">
+                {denied && (
+                    <>
+                        <p>{platform === "macos"
+                            ? "在访达中选中下方路径对应的项目，打开「显示简介 → 共享与权限」，确认当前用户可以读取。如果之前拒绝过 AIPP 访问该位置，可在「系统设置 → 隐私与安全 → 文件和文件夹」打开对应开关，然后重试。"
+                            : platform === "windows"
+                                ? "打开下方路径对应文件或文件夹的「属性 → 安全」，确认当前用户有读取权限，然后重试。"
+                                : "请检查下方路径对应文件及其所在目录的读取权限，然后重试。"}</p>
+                        {!isMobilePlatform && <Button size="sm" variant="outline" onClick={handleOpenPluginFolder}>打开插件文件夹</Button>}
+                    </>
+                )}
+                <details className="max-w-full min-w-0" open={denied ? true : undefined}>
+                    <summary className="cursor-pointer">错误详情</summary>
+                    <p className="mt-1 whitespace-pre-wrap break-all">{detail}</p>
+                </details>
+            </AlertDescription>
+        </Alert>
+    );
+
+    const content = scanError ? (
+        <div>
+            {renderLoadError(scanError, scanError.startsWith("PLUGIN_FILE_PERMISSION_DENIED:"), "加载插件列表失败")}
+            <Button variant="outline" size="sm" onClick={loadPlugins} disabled={loading}>重新扫描插件</Button>
+        </div>
+    ) : !selectedPlugin ? (
         <Card className="shadow-none">
             <CardHeader>
                 <CardTitle className="text-lg">插件商店</CardTitle>
@@ -1232,8 +1263,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             <p role="status" className="mt-2 text-sm text-muted-foreground">此设备不可运行：{selectedPlugin.mobileUnavailableReason}。配置仍保留。</p>
                         )}
                         <div className="mt-2 flex flex-wrap gap-2">
-                            <Badge variant={selectedPlugin.isActive ? "default" : "secondary"}>
-                                {selectedPlugin.isActive ? "已启用" : "已禁用"}
+                            <Badge variant={loadError ? "destructive" : selectedPlugin.isActive ? "default" : "secondary"}>
+                                {loadError ? "加载失败" : selectedPlugin.isActive ? "已启用" : "已禁用"}
                             </Badge>
                             {!selectedPlugin.isInstalled && (
                                 <Badge variant="destructive">目录缺失</Badge>
@@ -1288,6 +1319,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 </div>
             </CardHeader>
             <CardContent>
+                {loadError && renderLoadError(loadError, !!fileAccessDenied, "插件加载失败")}
                 <Tabs value={activePluginDetailTab} onValueChange={setActivePluginDetailTab} className="w-full">
                     <TabsList>
                         <TabsTrigger value="plugin-ui">界面</TabsTrigger>
@@ -1296,7 +1328,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                         <TabsTrigger value="hooks">Hook 调试</TabsTrigger>
                     </TabsList>
                     <TabsContent value="plugin-ui" className="mt-4 space-y-3">
-                        {canRenderPluginViews ? (
+                        {loadError ? null : canRenderPluginViews ? (
                             <PluginViewHost
                                 pluginList={selectedPluginViewHostItems}
                                 location={PLUGIN_CENTER_VIEW_LOCATION}
@@ -1311,23 +1343,29 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                         )}
                         {selectedPlugin.isInstalled &&
                             selectedPlugin.isActive &&
-                            hasPluginCenterViews && (
+                            (hasPluginCenterViews || loadError) && (
                                 <Button
                                     variant="outline"
                                     size="sm"
                                     className="mt-3"
                                     onClick={async () => {
                                         try {
-                                            await syncRuntimePlugins(true);
-                                            toast.success("插件运行时已刷新");
-                                        } catch {
-                                            toast.error("刷新插件运行时失败");
+                                            if (selectedPlugin.entryAccessError) {
+                                                await loadPlugins();
+                                                return;
+                                            }
+                                            const items = await syncRuntimePlugins(true);
+                                            if (items.some((item) => item.code === selectedPlugin.code && item.instance)) {
+                                                toast.success("插件运行时已刷新");
+                                            }
+                                        } catch (error) {
+                                            toast.error(`刷新插件运行时失败：${String(error)}`);
                                         }
                                     }}
-                                    disabled={runtimeRefreshing}
+                                    disabled={runtimeRefreshing || loading}
                                 >
                                     <RefreshCcw className={`h-4 w-4 ${runtimeRefreshing ? "animate-spin" : ""}`} />
-                                    <span className="ml-2">刷新插件运行时</span>
+                                    <span className="ml-2">{loadError ? "重试加载" : "刷新插件运行时"}</span>
                                 </Button>
                              )}
                      </TabsContent>

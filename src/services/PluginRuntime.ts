@@ -368,7 +368,10 @@ export interface LoadedPlugin {
     contributions?: PluginContributions;
     instance: AippPlugin | AippAssistantTypePlugin | null;
     loadError?: string;
+    fileAccessDenied?: boolean;
 }
+
+class PluginFilePermissionError extends Error {}
 
 class PluginRuntime {
     private plugins: LoadedPlugin[] = [];
@@ -436,6 +439,7 @@ class PluginRuntime {
                     contributions: plugin.contributions,
                     instance: null,
                     loadError: `plugin_id=${plugin.pluginId}; plugin=${plugin.code}; stage=load: ${error instanceof Error ? error.message : String(error)}`,
+                    fileAccessDenied: error instanceof PluginFilePermissionError,
                 });
             }
         }
@@ -470,23 +474,21 @@ class PluginRuntime {
             const cacheBustKey = forceReload
                 ? `${plugin.code}-${plugin.version}-${Date.now()}`
                 : `${plugin.code}-${plugin.version}`;
-            await invoke("verify_plugin_entry_checksum", { code: plugin.code });
+            try {
+                await invoke("verify_plugin_entry_checksum", { code: plugin.code, entry });
+            } catch (error) {
+                if (typeof error === "string" && error.startsWith("PLUGIN_FILE_PERMISSION_DENIED:")) {
+                    throw new PluginFilePermissionError(error);
+                }
+                throw error;
+            }
             await this.injectScript(pluginScriptPath, cacheBustKey);
             this.loadedScripts.add(pluginScriptPath);
         }
 
         const PluginCtor = this.findPluginConstructor(plugin);
         if (!PluginCtor) {
-            console.warn(`[PluginRuntime] No constructor found for plugin '${plugin.code}'`);
-            return {
-                pluginId: plugin.pluginId,
-                name: plugin.name,
-                version: plugin.version,
-                code: plugin.code,
-                pluginType: plugin.pluginType,
-                contributions: plugin.contributions,
-                instance: null,
-            };
+            throw new Error(`入口 ${entry} 未导出插件构造函数（${plugin.code}）。`);
         }
 
         try {
@@ -502,16 +504,7 @@ class PluginRuntime {
                 instance,
             };
         } catch (error) {
-            console.error(`[PluginRuntime] Failed to instantiate plugin '${plugin.code}':`, error);
-            return {
-                pluginId: plugin.pluginId,
-                name: plugin.name,
-                version: plugin.version,
-                code: plugin.code,
-                pluginType: plugin.pluginType,
-                contributions: plugin.contributions,
-                instance: null,
-            };
+            throw new Error(`插件初始化失败：${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
@@ -1411,6 +1404,10 @@ class PluginRuntime {
     private injectScript(pluginScriptPath: string, cacheBustKey?: string): Promise<void> {
         return new Promise((resolve, reject) => {
             const script = document.createElement("script");
+            // Tauri replaces the bootstrap nonce for each packaged page. Grant it only
+            // to the manifest entry checked above, keeping other asset URLs out of script-src.
+            const bootstrap = document.querySelector<HTMLScriptElement>("script#aipp-bootstrap");
+            if (bootstrap?.nonce) script.nonce = bootstrap.nonce;
             const src = convertFileSrc(pluginScriptPath);
             const withCacheBust = cacheBustKey
                 ? `${src}${src.includes("?") ? "&" : "?"}v=${encodeURIComponent(cacheBustKey)}`
@@ -1418,8 +1415,10 @@ class PluginRuntime {
             script.src = withCacheBust;
             script.dataset.pluginScriptPath = pluginScriptPath;
             script.onload = () => resolve();
-            script.onerror = () =>
-                reject(new Error(`[PluginRuntime] Failed to load plugin script: ${withCacheBust}`));
+            script.onerror = () => {
+                script.remove();
+                reject(new Error(`WebView 未能加载插件脚本，加载事件未提供底层原因。URL: ${withCacheBust}`));
+            };
             document.body.appendChild(script);
         });
     }

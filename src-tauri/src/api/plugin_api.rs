@@ -62,6 +62,8 @@ const IGNORED_PLUGIN_DISCOVERY_SEGMENTS: &[&str] = &[
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginListItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_access_error: Option<String>,
     #[serde(default)]
     pub mobile_unavailable_reason: Option<String>,
     pub plugin_id: i64,
@@ -801,25 +803,45 @@ pub(crate) fn emit_plugin_registry_changed(app_handle: &tauri::AppHandle, reason
     }
 }
 
+fn plugin_file_error(path: &Path, error: std::io::Error) -> String {
+    let kind = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        "PLUGIN_FILE_PERMISSION_DENIED"
+    } else {
+        "PLUGIN_FILE_ERROR"
+    };
+    format!("{kind}: {}: {error}", path.display())
+}
+
 pub(crate) fn get_plugin_root_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let plugin_root = app_data_dir.join("plugin");
-    fs::create_dir_all(&plugin_root).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&plugin_root).map_err(|e| plugin_file_error(&plugin_root, e))?;
     Ok(plugin_root)
 }
 
 fn plugin_entry_exists(app_handle: &tauri::AppHandle, code: &str) -> bool {
-    match get_plugin_root_path(app_handle) {
-        Ok(root) => {
-            let plugin_dir = root.join(code);
-            let manifest = read_plugin_manifest(&plugin_dir.join("plugin.json"));
-            let runtime = manifest
-                .as_ref()
-                .map(resolve_runtime_manifest)
-                .unwrap_or_default();
-            plugin_dir.join(runtime.entry).is_file()
+    get_plugin_root_path(app_handle)
+        .is_ok_and(|root| probe_plugin_entry(&root.join(code)).unwrap_or(false))
+}
+
+// Manually installed legacy plugins may only have dist/main.js.
+fn probe_plugin_entry(plugin_dir: &Path) -> Result<bool, String> {
+    let manifest_path = plugin_dir.join("plugin.json");
+    let manifest = match fs::read(&manifest_path) {
+        Ok(bytes) => serde_json::from_slice::<PluginManifest>(&bytes).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(format!("{}: {e}", manifest_path.display()));
         }
-        Err(_) => false,
+        Err(_) => None,
+    };
+    let runtime = manifest.as_ref().map(resolve_runtime_manifest).unwrap_or_default();
+    let entry = plugin_dir.join(runtime.entry);
+    match fs::metadata(&entry) {
+        Ok(info) => Ok(info.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(format!("{}: {e}", entry.display()))
+        }
+        Err(_) => Ok(false),
     }
 }
 
@@ -2037,7 +2059,7 @@ fn calculate_file_sha256(path: &Path) -> Result<String, String> {
 fn discover_plugins(app_handle: &tauri::AppHandle) -> Result<Vec<DiscoveredPlugin>, String> {
     let plugin_root = get_plugin_root_path(app_handle)?;
     let mut discovered = Vec::new();
-    let entries = fs::read_dir(&plugin_root).map_err(|e| e.to_string())?;
+    let entries = fs::read_dir(&plugin_root).map_err(|e| plugin_file_error(&plugin_root, e))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -2439,7 +2461,10 @@ fn plugin_to_item(
     let plugin_type = get_plugin_types(db, plugin.plugin_id)?;
     let code = plugin.folder_name.clone();
     let manifest = resolve_plugin_manifest_for_code(app_handle, &code);
+    let entry = probe_plugin_entry(&get_plugin_root_path(app_handle)?.join(&code));
     Ok(PluginListItem {
+        is_installed: entry.as_ref().copied().unwrap_or(true),
+        entry_access_error: entry.err(),
         mobile_unavailable_reason: manifest.as_ref().and_then(crate::plugin::mobile::compatibility_issue),
         plugin_id: plugin.plugin_id,
         name: plugin.name,
@@ -2452,7 +2477,6 @@ fn plugin_to_item(
         runtime: manifest.as_ref().map(|item| item.runtime.clone()),
         contributions: manifest.map(|item| item.contributions).unwrap_or_default(),
         is_active: status.map(|value| value.is_active).unwrap_or(true),
-        is_installed: plugin_entry_exists(app_handle, &code),
     })
 }
 
@@ -2724,7 +2748,9 @@ pub async fn get_plugin_detail(
 pub async fn verify_plugin_entry_checksum(
     app_handle: tauri::AppHandle,
     code: String,
+    entry: Option<String>,
 ) -> Result<(), String> {
+    validate_target_dir_name(&code)?;
     let manifest = resolve_plugin_manifest_for_code(&app_handle, &code)
         .ok_or_else(|| format!("Plugin manifest not found or invalid: {}", code))?;
     if cfg!(mobile) {
@@ -2733,6 +2759,23 @@ pub async fn verify_plugin_entry_checksum(
         }
     }
     let entry_path = manifest.plugin_dir.join(&manifest.runtime.entry);
+    if let Some(entry) = entry {
+        if entry != manifest.runtime.entry || manifest.runtime.runtime_type != "js" {
+            return Err(format!("插件入口已更改，请重新扫描插件：{code}/{entry}"));
+        }
+        validate_relative_source_path(&entry)?;
+        let root = get_plugin_root_path(&app_handle)?;
+        let root = root.canonicalize().map_err(|e| plugin_file_error(&root, e))?;
+        let dir = manifest.plugin_dir.canonicalize().map_err(|e| plugin_file_error(&manifest.plugin_dir, e))?;
+        let file = entry_path.canonicalize().map_err(|e| plugin_file_error(&entry_path, e))?;
+        if dir.parent() != Some(root.as_path()) || !file.starts_with(&dir) {
+            return Err(format!("插件脚本超出安装目录：{}", entry_path.display()));
+        }
+        fs::File::open(&file).map_err(|e| plugin_file_error(&entry_path, e))?;
+        if !app_handle.asset_protocol_scope().is_allowed(&entry_path) {
+            return Err(format!("AIPP 的本地资源访问策略阻止了插件入口：{}", entry_path.display()));
+        }
+    }
     verify_runtime_entry_checksum(&entry_path, manifest.runtime.checksum.as_deref())
 }
 
@@ -2757,7 +2800,7 @@ pub async fn get_enabled_plugins(
     let plugins = list_plugins(app_handle.clone()).await?;
     Ok(plugins
         .into_iter()
-        .filter(|plugin| plugin.is_active && plugin_entry_exists(&app_handle, &plugin.code)
+        .filter(|plugin| plugin.is_active && plugin.is_installed && plugin.entry_access_error.is_none()
             && (!cfg!(mobile) || plugin.mobile_unavailable_reason.is_none()))
         .collect())
 }
