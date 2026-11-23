@@ -24,7 +24,20 @@
             "icons/icon.ico"
         ],
         "resources": [
-            "artifacts/templates/**/*",
+            "artifacts/templates/*/src/**/*",
+            "artifacts/templates/*/package.json",
+            "artifacts/templates/*/pnpm-lock.yaml",
+            "artifacts/templates/*/index.html",
+            "artifacts/templates/*/README.md",
+            "artifacts/templates/*/tsconfig*.json",
+            "artifacts/templates/*/vite.config.ts",
+            "artifacts/templates/*/*.d.ts",
+            "artifacts/templates/react/.gitignore",
+            "artifacts/templates/react/bun.lock",
+            "artifacts/templates/react/bunfig.toml",
+            "artifacts/templates/react/components.json",
+            "artifacts/templates/react/styles/**/*",
+            "artifacts/templates/vue/public/**/*",
             "assets/syntaxes.bin",
             "assets/themes.bin"
         ]
