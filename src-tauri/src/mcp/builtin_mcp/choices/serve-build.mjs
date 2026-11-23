@@ -1,6 +1,8 @@
 // Only serves entries in the immutable snapshot. No directory access or build code runs here.
 const [snapshotPath, token] = process.argv.slice(2);
 const files = await Bun.file(snapshotPath).json();
+// 页面末尾追加测高脚本，让卡片里的预览框按内容伸缩；本服务的 CSP 已允许内联脚本。
+const frameHeight = Buffer.from("<script>" + (await Bun.file("frame-height.js").text()) + "</script>");
 const mime = {
     html: "text/html",
     js: "text/javascript",
@@ -58,7 +60,9 @@ const server = Bun.serve({
                 origin +
                 "; form-action 'none'",
         };
-        return new Response(request.method === "HEAD" ? null : Buffer.from(files[path], "base64"), { headers });
+        if (request.method === "HEAD") return new Response(null, { headers });
+        const body = Buffer.from(files[path], "base64");
+        return new Response(headers["Content-Type"] === "text/html" ? Buffer.concat([body, frameHeight]) : body, { headers });
     },
 });
 console.log(server.port);

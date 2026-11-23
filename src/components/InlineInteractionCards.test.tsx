@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { expect, it, vi } from "vitest";
 import { PreviewFileCard, type PreviewFileRequest } from "./InlineInteractionCards";
 import { MessageTurnContext } from "./conversation/messageTurnContext";
+import { clearMockHandler, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
 vi.mock("@/components/UnifiedMarkdown", () => ({ default: () => null }));
 
@@ -73,9 +74,10 @@ it("should render the WebView relay image when the user allows a pending URL", a
             }],
         },
     };
-    vi.mocked(invoke).mockResolvedValueOnce({
+    // 按命令名应答：弹窗打开时还会读取网络代理配置。
+    mockInvokeHandler("authorize_preview_external_resources", () => ({
         previewFile: { request_id: "preview", files: [{ ...file, url: "aipp-preview://localhost/token" }] },
-    });
+    }));
     vi.mocked(convertFileSrc).mockImplementationOnce((token, protocol) => `http://${protocol}.localhost/${token}`);
 
     render(<PreviewFileCard request={request} isOpen onOpenChange={vi.fn()} />);
@@ -84,4 +86,5 @@ it("should render the WebView relay image when the user allows a pending URL", a
     fireEvent.click(screen.getByRole("button", { name: "加载外部资源" }));
     fireEvent.click(screen.getByRole("button", { name: "允许本次加载" }));
     await waitFor(() => expect(image).toHaveAttribute("src", "http://aipp-preview.localhost/token"));
+    clearMockHandler("authorize_preview_external_resources");
 });

@@ -234,6 +234,7 @@ pub(super) async fn open_snapshot(
 async fn start_server(exe: &Path, data: &str) -> Result<Server> {
     let dir = tempfile::tempdir()?;
     fs::write(dir.path().join("serve.mjs"), include_str!("serve-build.mjs"))?;
+    fs::write(dir.path().join("frame-height.js"), super::document::FRAME_HEIGHT_SCRIPT)?;
     fs::write(dir.path().join("snapshot.json"), data)?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let mut child = command(exe)

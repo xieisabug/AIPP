@@ -15,8 +15,13 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { getErrorMessage } from "@/utils/error";
 import {
+    describePreviewResourceOrigin,
     getActionablePreviewResources,
+    getBlockedPreviewResources,
     getDefaultSelectedPreviewResourceIds,
+    previewResourceHost,
+    previewResourceTypeLabel,
+    PreviewExternalResource,
     PreviewExternalResourcesPayload,
     PreviewResourceAuthorizationResult,
 } from "@/utils/previewExternalResources";
@@ -42,19 +47,15 @@ const riskLabel = {
     high: "高风险",
 };
 
-const statusLabel = {
-    allowed: "已允许",
-    pending: "待授权",
-    blocked: "已拦截",
-    failed: "加载失败",
-};
+type FeatureConfigRow = { feature_code: string; key: string; value: string };
 
-function getHostname(rawUrl: string) {
-    try {
-        return new URL(rawUrl).hostname;
-    } catch {
-        return "本地或未知来源";
-    }
+/** 是否配置了网络代理（设置 → 网络配置）；读取失败时返回 null，不阻止用户尝试。 */
+async function readProxyConfigured(): Promise<boolean | null> {
+    const rows = await invoke<FeatureConfigRow[]>("get_all_feature_config");
+    if (!Array.isArray(rows)) return null;
+    return rows.some(
+        (row) => row.feature_code === "network_config" && row.key === "network_proxy" && row.value.trim() !== ""
+    );
 }
 
 function getResultExternalResources<TCode, TFile>(
@@ -67,6 +68,19 @@ function getResultExternalResources<TCode, TFile>(
         | { externalResources?: PreviewExternalResourcesPayload | null }
         | undefined;
     return previewCode?.externalResources ?? previewFile?.externalResources ?? null;
+}
+
+/** 完整地址；原写法不同（例如样式表里的相对路径）时放在悬浮提示里。 */
+function ResourceUrl({ resource }: { resource: PreviewExternalResource }) {
+    const differs = resource.originalUrl !== resource.normalizedUrl;
+    return (
+        <div
+            className="whitespace-pre-wrap break-all rounded border border-border bg-muted/40 px-2 py-1 font-mono text-xs text-foreground"
+            title={differs ? `原写法：${resource.originalUrl}` : undefined}
+        >
+            {resource.normalizedUrl || resource.originalUrl}
+        </div>
+    );
 }
 
 export default function PreviewExternalResourcesDialog<TCode, TFile>({
@@ -84,6 +98,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [localResources, setLocalResources] = useState<PreviewExternalResourcesPayload | null>(null);
+    const [proxyConfigured, setProxyConfigured] = useState<boolean | null>(null);
 
     useEffect(() => {
         if (!open) {
@@ -95,19 +110,29 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
         setSelectedIds(getDefaultSelectedPreviewResourceIds(externalResources));
     }, [externalResources, open]);
 
+    useEffect(() => {
+        if (!open) return;
+        let active = true;
+        readProxyConfigured()
+            .then((configured) => {
+                if (active) setProxyConfigured(configured);
+            })
+            .catch(() => {
+                if (active) setProxyConfigured(null);
+            });
+        return () => {
+            active = false;
+        };
+    }, [open]);
+
     const effectiveResources = localResources ?? externalResources ?? null;
     const resources = getActionablePreviewResources(effectiveResources);
+    const blocked = getBlockedPreviewResources(effectiveResources);
     const visibleError = error ?? scanError;
-    const selectableIds = useMemo(
-        () =>
-            new Set(
-                resources
-                    .map((resource) => resource.id)
-            ),
-        [resources]
-    );
+    const selectableIds = useMemo(() => new Set(resources.map((resource) => resource.id)), [resources]);
     const selectedResourceIds = Array.from(selectedIds).filter((id) => selectableIds.has(id));
     const selectedCount = selectedResourceIds.length;
+    const authorizeDisabled = selectedCount === 0 || isSubmitting || !canAuthorize;
 
     const submit = async (addToWhitelist: boolean, useProxy = false) => {
         if (!effectiveResources || selectedCount === 0) {
@@ -119,14 +144,14 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
             const result = onAuthorizeSelected
                 ? await onAuthorizeSelected(selectedResourceIds, { addToWhitelist, useProxy })
                 : await invoke<PreviewResourceAuthorizationResult<TCode, TFile>>(
-                    "authorize_preview_external_resources",
-                    {
-                        requestId: effectiveResources.requestId,
-                        request_id: effectiveResources.requestId,
-                        resourceIds: selectedResourceIds,
-                        resource_ids: selectedResourceIds,
-                        addToWhitelist,
-                        add_to_whitelist: addToWhitelist,
+                      "authorize_preview_external_resources",
+                      {
+                          requestId: effectiveResources.requestId,
+                          request_id: effectiveResources.requestId,
+                          resourceIds: selectedResourceIds,
+                          resource_ids: selectedResourceIds,
+                          addToWhitelist,
+                          add_to_whitelist: addToWhitelist,
                           useProxy,
                           use_proxy: useProxy,
                       }
@@ -139,7 +164,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                 setSelectedIds(getDefaultSelectedPreviewResourceIds(nextExternalResources));
                 setError(
                     nextResources.some((resource) => resource.status === "failed")
-                        ? "部分资源加载失败，请检查代理或网络后重试。"
+                        ? "部分资源加载失败，原因见各项说明。"
                         : null
                 );
                 return;
@@ -162,7 +187,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                         外部资源授权
                     </DialogTitle>
                     <DialogDescription>
-                        预览中的外部资源已被拦截。只允许所选资源通过本地 preview relay 加载。
+                        预览引用了下列外部资源，默认不加载。勾选的资源由本机下载后提供给预览；允许样式表时，会一并加载它引用的字体和图片。
                     </DialogDescription>
                 </DialogHeader>
 
@@ -176,7 +201,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <div className="rounded-md border border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
                         正在检测外部资源...
                     </div>
-                ) : resources.length === 0 ? (
+                ) : resources.length === 0 && blocked.length === 0 ? (
                     <div className="rounded-md border border-border bg-muted/30 px-3 py-6 text-center text-sm text-muted-foreground">
                         当前预览没有待处理的外部资源。
                     </div>
@@ -184,7 +209,6 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <ScrollArea className="max-h-[56vh] pr-3">
                         <div className="space-y-3">
                             {resources.map((resource) => {
-                                const selectable = selectableIds.has(resource.id);
                                 const checked = selectedIds.has(resource.id);
                                 return (
                                     <label
@@ -194,7 +218,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                                         <Checkbox
                                             className="mt-1"
                                             checked={checked}
-                                            disabled={!selectable || isSubmitting}
+                                            disabled={isSubmitting}
                                             onCheckedChange={(value) => {
                                                 setSelectedIds((current) => {
                                                     const next = new Set(current);
@@ -209,7 +233,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                                         />
                                         <div className="min-w-0 flex-1 space-y-2">
                                             <div className="flex flex-wrap items-center gap-2">
-                                                <Badge variant="outline">{resource.type}</Badge>
+                                                <Badge variant="outline">{previewResourceTypeLabel(resource.type)}</Badge>
                                                 <Badge
                                                     variant={resource.risk === "high" ? "destructive" : "secondary"}
                                                     className="gap-1"
@@ -219,18 +243,16 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                                                     )}
                                                     {riskLabel[resource.risk]}
                                                 </Badge>
-                                                <Badge variant="outline">
-                                                    {statusLabel[resource.status]}
-                                                </Badge>
+                                                {resource.status === "failed" && (
+                                                    <Badge variant="outline">加载失败</Badge>
+                                                )}
                                                 <span className="text-xs text-muted-foreground">
-                                                    {getHostname(resource.normalizedUrl)}
+                                                    {previewResourceHost(resource.normalizedUrl)}
                                                 </span>
                                             </div>
+                                            <ResourceUrl resource={resource} />
                                             <div className="text-xs text-muted-foreground">
-                                                {resource.source} · {resource.occurrence}
-                                            </div>
-                                            <div className="whitespace-pre-wrap break-all rounded border border-border bg-muted/40 px-2 py-1 text-xs font-mono text-foreground">
-                                                {resource.originalUrl}
+                                                {describePreviewResourceOrigin(resource)}
                                             </div>
                                             {resource.reason && (
                                                 <div className="text-xs text-destructive">
@@ -241,11 +263,35 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                                     </label>
                                 );
                             })}
+                            {blocked.length > 0 && (
+                                <section className="space-y-2" aria-label="无法加载的地址">
+                                    <div className="text-xs text-muted-foreground">
+                                        以下地址无法解析（相对路径缺少基准地址），不能授权加载：
+                                    </div>
+                                    {blocked.map((resource) => (
+                                        <div
+                                            key={resource.id}
+                                            className="space-y-1 rounded-md border border-dashed border-border p-3"
+                                        >
+                                            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                                <Badge variant="outline">{previewResourceTypeLabel(resource.type)}</Badge>
+                                                {describePreviewResourceOrigin(resource)}
+                                            </div>
+                                            <ResourceUrl resource={resource} />
+                                        </div>
+                                    ))}
+                                </section>
+                            )}
                         </div>
                     </ScrollArea>
                 )}
 
-                <DialogFooter>
+                <DialogFooter className="items-center">
+                    {proxyConfigured === false && resources.length > 0 && (
+                        <span className="mr-auto text-xs text-muted-foreground">
+                            未配置网络代理（设置 → 网络配置）
+                        </span>
+                    )}
                     {onRetryScan && resources.length === 0 && (
                         <Button
                             type="button"
@@ -267,7 +313,7 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <Button
                         type="button"
                         variant="outline"
-                        disabled={selectedCount === 0 || isSubmitting || !canAuthorize}
+                        disabled={authorizeDisabled}
                         onClick={() => void submit(true)}
                     >
                         加入白名单并加载
@@ -275,14 +321,14 @@ export default function PreviewExternalResourcesDialog<TCode, TFile>({
                     <Button
                         type="button"
                         variant="outline"
-                        disabled={selectedCount === 0 || isSubmitting || !canAuthorize}
+                        disabled={authorizeDisabled || proxyConfigured === false}
                         onClick={() => void submit(false, true)}
                     >
                         使用代理加载所选资源
                     </Button>
                     <Button
                         type="button"
-                        disabled={selectedCount === 0 || isSubmitting || !canAuthorize}
+                        disabled={authorizeDisabled}
                         onClick={() => void submit(false)}
                     >
                         允许本次加载

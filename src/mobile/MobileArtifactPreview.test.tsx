@@ -61,7 +61,9 @@ it("should preview a published Markdown project and browse its snapshot on mobil
     const preview = { language: "html", code, conversationId: 32 };
     const { rerender } = render(<MobileArtifactPreview preview={preview} />);
     const frame = await screen.findByTitle("Book");
-    expect(frame).toHaveAttribute("sandbox", "");
+    // 只放行带 nonce 的测高脚本，不给 allow-same-origin。
+    expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+    expect(frame.getAttribute("srcdoc")).toMatch(/script-src 'nonce-[0-9a-f]{32}'/);
     expect(frame.getAttribute("srcdoc")).toContain('src="data:image/png;base64,AA=="');
     fireEvent.click(screen.getByRole("radio", { name: "工程源码" }));
     expect(screen.getByRole("combobox")).toHaveValue("docs/index.md");

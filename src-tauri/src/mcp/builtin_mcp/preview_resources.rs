@@ -101,6 +101,9 @@ pub struct PreviewExternalResourceInfo {
     pub risk: PreviewResourceRisk,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// 引用它的外部样式表地址（样式表里的 url()/@import）；直接写在预览内容里的为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +288,10 @@ struct RewriteContext<'a> {
     user_allowed_urls: &'a HashSet<String>,
     force_proxy: bool,
     resources: &'a mut Vec<PreviewExternalResourceInfo>,
+    /// 正在展开的已放行样式表，防止 @import 循环。
+    css_stack: Vec<String>,
+    /// 正在展开的样式表的放行方式：它引用的字体、图片和子样式表随之放行。
+    inherited_allow: Option<PreviewResourceAllowedBy>,
 }
 
 pub fn resource_id(kind: PreviewResourceType, original_url: &str) -> String {
@@ -405,11 +412,18 @@ fn placeholder_for(kind: PreviewResourceType) -> &'static str {
     }
 }
 
+/// mime_guess 把 woff/otf/eot 归为 application/*，按扩展名先认字体。
+const FONT_EXTENSIONS: [&str; 5] = ["woff", "woff2", "ttf", "otf", "eot"];
+
 fn detect_type_from_url(url: &str, fallback: PreviewResourceType) -> PreviewResourceType {
     let path = reqwest::Url::parse(url)
         .ok()
         .map(|url| url.path().to_string())
-        .unwrap_or_else(|| url.to_string());
+        .unwrap_or_else(|| url.split(|c| c == '?' || c == '#').next().unwrap_or(url).to_string());
+    let extension = Path::new(&path).extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase);
+    if extension.is_some_and(|ext| FONT_EXTENSIONS.contains(&ext.as_str())) {
+        return PreviewResourceType::Font;
+    }
     let guessed = mime_guess::from_path(path).first_or_octet_stream();
     match guessed.type_().as_str() {
         "image" => PreviewResourceType::Image,
@@ -460,6 +474,7 @@ fn push_resource(
         allowed_by,
         risk: resource_type.risk(),
         reason,
+        via: None,
     });
     id
 }
@@ -475,7 +490,21 @@ fn validate_content_type(kind: PreviewResourceType, content_type: Option<&str>) 
         PreviewResourceType::Script => {
             essence.contains("javascript") || matches!(essence, "text/ecmascript" | "application/ecmascript")
         }
-        PreviewResourceType::Font => essence.starts_with("font/") || essence == "application/font-woff" || essence == "application/octet-stream",
+        PreviewResourceType::Font => {
+            essence.starts_with("font/")
+                || matches!(
+                    essence,
+                    "application/font-woff"
+                        | "application/x-font-woff"
+                        | "application/font-sfnt"
+                        | "application/x-font-ttf"
+                        | "application/x-font-otf"
+                        | "application/x-font-opentype"
+                        | "application/vnd.ms-fontobject"
+                        | "application/octet-stream"
+                        | "binary/octet-stream"
+                )
+        }
         PreviewResourceType::Pdf => essence == "application/pdf",
         PreviewResourceType::Html => essence == "text/html",
         PreviewResourceType::Text => essence.starts_with("text/") || essence == "application/json",
@@ -640,7 +669,7 @@ async fn download_or_read_resource(
         if ctx.force_proxy {
             let proxy_url = get_preview_network_proxy(ctx.app_handle)
                 .await
-                .ok_or_else(|| "network_proxy is not configured".to_string())?;
+                .ok_or_else(|| "未配置网络代理（设置 → 网络配置），无法通过代理加载".to_string())?;
             let proxy_client = build_http_client(timeout_secs, Some(&proxy_url)).await?;
             let fetched = fetch_remote_resource_bytes(&proxy_client, normalized_url, kind, max_bytes)
                 .await
@@ -715,11 +744,18 @@ async fn allowed_resource_url(
     occurrence: &str,
     allowed_by: PreviewResourceAllowedBy,
 ) -> String {
+    if kind == PreviewResourceType::Css && ctx.css_stack.iter().any(|url| url == normalized_url) {
+        // @import 循环：外层正在展开同一份样式表，浏览器本来也会忽略循环导入。
+        return placeholder_for(kind).to_string();
+    }
     match download_or_read_resource(ctx, normalized_url, kind).await {
         Ok((mut path, mut content_type)) => {
             if kind == PreviewResourceType::Css {
                 match fs::read_to_string(&path) {
                     Ok(css) => {
+                        let before = ctx.resources.len();
+                        let parent_allow = ctx.inherited_allow.replace(allowed_by);
+                        ctx.css_stack.push(normalized_url.to_string());
                         let processed = Box::pin(rewrite_css_resources(
                             ctx,
                             &css,
@@ -727,8 +763,14 @@ async fn allowed_resource_url(
                             "css secondary",
                         ))
                         .await;
+                        ctx.css_stack.pop();
+                        ctx.inherited_allow = parent_allow;
+                        for item in ctx.resources[before..].iter_mut() {
+                            item.via.get_or_insert_with(|| normalized_url.to_string());
+                        }
                         match processed {
                             Ok(processed_css) => {
+                                let processed_css = relay_urls_relative(&processed_css);
                                 let ext = ext_for_content(kind, Some("text/css"), normalized_url);
                                 path = match cache_dir(ctx.app_handle) {
                                     Ok(dir) => dir.join(format!("{}-processed.{}", resource_id(kind, normalized_url), ext)),
@@ -887,6 +929,10 @@ async fn rewrite_resource_url(
         )
         .await;
     }
+    if let Some(allowed_by) = ctx.inherited_allow.filter(|_| inherits_stylesheet_allow(kind)) {
+        return allowed_resource_url(ctx, original_url, &normalized_url, kind, occurrence, allowed_by)
+            .await;
+    }
     let status = if is_remote_url(&normalized_url) || resolve_local_file_path(&normalized_url).is_some() || PathBuf::from(&normalized_url).is_absolute() {
         PreviewResourceStatus::Pending
     } else {
@@ -904,6 +950,37 @@ async fn rewrite_resource_url(
         (status == PreviewResourceStatus::Blocked).then(|| "Unsupported preview resource URL".to_string()),
     );
     placeholder_for(kind).to_string()
+}
+
+/// 已放行样式表能引用的只有字体、图片、音视频和子样式表；脚本等仍需单独授权。
+fn inherits_stylesheet_allow(kind: PreviewResourceType) -> bool {
+    matches!(
+        kind,
+        PreviewResourceType::Font
+            | PreviewResourceType::Image
+            | PreviewResourceType::Media
+            | PreviewResourceType::Css
+    )
+}
+
+/// 缓存的样式表经中转地址加载；把其中的中转链接改为相对地址，由浏览器按样式表自身地址补全。
+/// Windows/Android 的预览框只认 http(s)://aipp-preview.localhost/，写死 aipp-preview:// 会被 CSP 拦下。
+fn relay_urls_relative(css: &str) -> String {
+    css.replace(&format!("{}://localhost/", PREVIEW_FILE_RELAY_SCHEME), "./")
+}
+
+/// url() 是否写在 @font-face 规则里：其中无扩展名的地址按字体处理。
+/// 只向前看到最近的 `{` 和它的规则头，大样式表里逐个 url() 判断也不会退化成平方复杂度。
+fn inside_font_face(css: &str, position: usize) -> bool {
+    let before = &css[..position];
+    let Some(open) = before.rfind('{') else {
+        return false;
+    };
+    if before[open..].contains('}') {
+        return false;
+    }
+    let header_start = before[..open].rfind(|c| matches!(c, '{' | '}' | ';')).map_or(0, |i| i + 1);
+    before[header_start..open].trim().eq_ignore_ascii_case("@font-face")
 }
 
 async fn rewrite_css_resources(
@@ -926,14 +1003,14 @@ async fn rewrite_css_resources(
                 .as_str()
                 .trim()
                 .to_string();
-            Some((
-                captures.get(0)?.as_str().to_string(),
-                raw_url,
-            ))
+            let full = captures.get(0)?;
+            Some((full.as_str().to_string(), raw_url, inside_font_face(css, full.start())))
         })
         .collect::<Vec<_>>();
-    for (full, raw_url) in matches {
-        let fallback = detect_type_from_url(&raw_url, PreviewResourceType::Image);
+    for (full, raw_url, in_font_face) in matches {
+        let default_type =
+            if in_font_face { PreviewResourceType::Font } else { PreviewResourceType::Image };
+        let fallback = detect_type_from_url(&raw_url, default_type);
         let rewritten = rewrite_resource_url(ctx, &raw_url, fallback, occurrence, base_url).await;
         output = output.replace(&full, &format!("url(\"{}\")", rewritten));
     }
@@ -1251,6 +1328,8 @@ async fn build_context<'a>(
         user_allowed_urls,
         force_proxy,
         resources,
+        css_stack: Vec::new(),
+        inherited_allow: None,
     })
 }
 
@@ -1588,6 +1667,7 @@ fn selected_resource_infos(
                 allowed_by: None,
                 risk: kind.risk(),
                 reason: None,
+                via: None,
             })
         })
         .collect()
@@ -1825,10 +1905,11 @@ pub async fn save_preview_external_resource_policy(
 #[cfg(test)]
 mod tests {
     use super::{
-        css_import_regex, css_url_regex, html_resource_attr_regex, html_style_attr_regex,
-        placeholder_for, preview_network_proxy_from_config_map, resource_id, whitelist_allows,
-        PreviewExternalResourcePolicy, PreviewResourceDomainRule, PreviewResourceLimits,
-        PreviewResourceType,
+        css_import_regex, css_url_regex, detect_type_from_url, html_resource_attr_regex,
+        html_style_attr_regex, inherits_stylesheet_allow, inside_font_face, placeholder_for,
+        preview_network_proxy_from_config_map, relay_urls_relative, resource_id,
+        validate_content_type, whitelist_allows, PreviewExternalResourcePolicy,
+        PreviewResourceDomainRule, PreviewResourceLimits, PreviewResourceType,
     };
     use crate::db::system_db::FeatureConfig;
     use std::collections::HashMap;
@@ -2105,5 +2186,58 @@ mod tests {
             preview_network_proxy_from_config_map(&config_map),
             Some("http://127.0.0.1:7890".to_string())
         );
+    }
+
+    #[test]
+    fn test_detect_type_treats_every_web_font_extension_as_font() {
+        for url in [
+            "https://cdn.jsdelivr.net/npm/x/files/a-400-normal.woff",
+            "https://cdn.jsdelivr.net/npm/x/files/a-400-normal.woff2",
+            "https://example.com/a.otf?v=2",
+            "https://example.com/a.EOT#iefix",
+            "./files/a.ttf?v=1",
+        ] {
+            assert_eq!(detect_type_from_url(url, PreviewResourceType::Image), PreviewResourceType::Font, "{url}");
+        }
+        assert_eq!(
+            detect_type_from_url("https://example.com/a.png", PreviewResourceType::Font),
+            PreviewResourceType::Image
+        );
+    }
+
+    #[test]
+    fn test_font_content_type_accepts_legacy_font_mime_types() {
+        for mime in ["font/woff", "application/font-woff", "application/vnd.ms-fontobject", "application/font-sfnt", "application/x-font-ttf"] {
+            assert!(validate_content_type(PreviewResourceType::Font, Some(mime)).is_ok(), "{mime}");
+        }
+        assert!(validate_content_type(PreviewResourceType::Font, Some("text/html")).is_err());
+        assert!(validate_content_type(PreviewResourceType::Image, Some("font/woff")).is_err());
+    }
+
+    #[test]
+    fn test_relay_urls_in_cached_css_become_relative() {
+        let id = "a".repeat(64);
+        let css = format!("@font-face{{src:url(\"aipp-preview://localhost/{id}\") format(\"woff2\")}}");
+        assert_eq!(relay_urls_relative(&css), format!("@font-face{{src:url(\"./{id}\") format(\"woff2\")}}"));
+    }
+
+    #[test]
+    fn test_inside_font_face_only_matches_the_enclosing_rule() {
+        let css = "@font-face { font-family: A; src: url(a) } .hero { background: url(b) } @media (x) { @FONT-FACE { src: url(c) } }";
+        let at = |needle: &str| css.find(needle).unwrap();
+        assert!(inside_font_face(css, at("url(a)")));
+        assert!(!inside_font_face(css, at("url(b)")));
+        assert!(inside_font_face(css, at("url(c)")));
+        assert!(!inside_font_face("url(top)", 0));
+    }
+
+    #[test]
+    fn test_allowed_stylesheet_passes_on_only_non_script_resources() {
+        for kind in [PreviewResourceType::Font, PreviewResourceType::Image, PreviewResourceType::Media, PreviewResourceType::Css] {
+            assert!(inherits_stylesheet_allow(kind), "{kind:?}");
+        }
+        for kind in [PreviewResourceType::Script, PreviewResourceType::Html, PreviewResourceType::Pdf, PreviewResourceType::Unknown] {
+            assert!(!inherits_stylesheet_allow(kind), "{kind:?}");
+        }
     }
 }

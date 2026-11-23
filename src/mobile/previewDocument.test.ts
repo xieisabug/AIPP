@@ -20,5 +20,16 @@ describe("staticPreviewDocument", () => {
         expect(template.content.querySelector("svg circle")?.getAttribute("r")).toBe("4");
         expect(template.content.querySelector("iframe, link")).toBeNull();
     });
-});
 
+    it("should allow only the nonce-tagged host script when a host script is given", () => {
+        const html = staticPreviewDocument('<p>hi</p><script>alert(1)</script>', "report()");
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const csp = doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content") ?? "";
+        const scripts = doc.querySelectorAll("script");
+        expect(scripts).toHaveLength(1);
+        expect(scripts[0].textContent).toBe("report()");
+        const scriptSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("script-src"));
+        expect(scriptSrc).toBe(`script-src 'nonce-${scripts[0].getAttribute("nonce")}'`);
+        expect(staticPreviewDocument("<p>hi</p>")).not.toContain("script-src");
+    });
+});

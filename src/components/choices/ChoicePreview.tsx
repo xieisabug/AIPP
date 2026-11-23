@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { staticPreviewDocument } from "@/mobile/previewDocument";
+import { randomNonce, staticPreviewDocument } from "@/mobile/previewDocument";
 import { acquireChoiceBuild, type BuildView } from "./choiceBuildViews";
 import { projectHtml, projectImage } from "./projectHtml";
 import mermaidUrl from "mermaid/dist/mermaid.min.js?url";
@@ -8,15 +8,60 @@ import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
 import type { PreviewCodeRequestEvent } from "@/utils/previewCode";
 import { hasActionablePreviewResources } from "@/utils/previewExternalResources";
 import type { Candidate, ChoiceCard } from "@/utils/presentChoices";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import runtimeUrl from "./projectRuntime.ts?worker&url";
-import { Code, Eye } from "lucide-react";
+import { Code, Eye, Loader2 } from "lucide-react";
 import { cn } from "@/utils/utils";
 import { ChoiceSegmented, type SegmentOption } from "./ChoiceControls";
+import { FitFrame, FRAME_HEIGHT_SCRIPT } from "./FitFrame";
+
+const PREVIEW_FRAME_HEIGHT = "h-[min(75vh,max(24rem,70vh))]";
+
+function PreviewLoading({ label, className }: { label: string; className?: string }) {
+    return (
+        <div
+            role="status"
+            aria-live="polite"
+            aria-label={label}
+            className={cn(
+                "relative flex w-full flex-col overflow-hidden rounded-md border bg-muted/20 p-5",
+                PREVIEW_FRAME_HEIGHT,
+                className
+            )}
+        >
+            <div aria-hidden="true" className="flex flex-1 flex-col gap-4 opacity-60">
+                <div className="flex items-center justify-between gap-4">
+                    <Skeleton className="h-6 w-1/3 max-w-56" />
+                    <div className="flex items-center gap-2">
+                        <Skeleton className="h-6 w-14" />
+                        <Skeleton className="h-6 w-14" />
+                    </div>
+                </div>
+                <Skeleton className="h-36 w-full rounded-lg" />
+                <div className="space-y-2.5">
+                    <Skeleton className="h-4 w-5/6" />
+                    <Skeleton className="h-4 w-2/3" />
+                    <Skeleton className="h-4 w-3/4" />
+                </div>
+                <div className="mt-auto grid grid-cols-2 gap-3 pt-2">
+                    <Skeleton className="h-24 w-full rounded-lg" />
+                    <Skeleton className="h-24 w-full rounded-lg" />
+                </div>
+            </div>
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="inline-flex items-center gap-2 rounded-full border bg-background/90 px-4 py-2 text-sm text-muted-foreground shadow-sm backdrop-blur-xs">
+                    <Loader2 className="size-4 animate-spin" />
+                    <span>{label}</span>
+                </div>
+            </div>
+        </div>
+    );
+}
 
 const PROJECT_VIEWS: SegmentOption<"preview" | "source">[] = [
     { value: "preview", label: "预览", icon: <Eye /> },
@@ -73,7 +118,7 @@ export function SavedChoicePreview({ reference }: { reference: ChoiceRef }) {
     ) : candidate ? (
         <ChoicePreview candidate={candidate} reference={reference} />
     ) : (
-        <p>正在读取快照…</p>
+        <PreviewLoading label="正在读取快照…" />
     );
 }
 export function CollectedChoicePreview({ collectionId }: { collectionId: number }) {
@@ -89,11 +134,12 @@ export function CollectedChoicePreview({ collectionId }: { collectionId: number 
         return () => { active = false; };
     }, [collectionId]);
     if (error) return <p role="alert">{error}</p>;
-    if (!snapshot) return <p>正在读取收藏快照…</p>;
+    if (!snapshot) return <PreviewLoading label="正在读取收藏快照…" />;
     return <ChoicePreview candidate={snapshot.candidate} reference={{ collectionId }} projectFiles={snapshot.files ?? undefined} />;
 }
 function PreparedFrame({ ready, scripts }: { ready: PreviewCodeRequestEvent; scripts: boolean }) {
     const [src, setSrc] = useState(""),
+        [frameReady, setFrameReady] = useState(false),
         [error, setError] = useState("");
     useEffect(() => {
         let active = true,
@@ -104,6 +150,7 @@ function PreparedFrame({ ready, scripts }: { ready: PreviewCodeRequestEvent; scr
             convertFileSrc(id, "aipp-preview")
         );
         setSrc("");
+        setFrameReady(false);
         setError("");
         void invoke<string>("create_choice_document", { html: code, allowed, scripts })
             .then((id) => {
@@ -120,24 +167,31 @@ function PreparedFrame({ ready, scripts }: { ready: PreviewCodeRequestEvent; scr
             if (token) close(token);
         };
     }, [ready, scripts]);
-    return error ? (
-        <p role="alert">{error}</p>
-    ) : src ? (
-        <iframe
-            title={ready.title}
-            className="h-80 w-full border-0 bg-white"
-            sandbox={scripts ? "allow-scripts" : ""}
-            referrerPolicy="no-referrer"
-            src={src}
-        />
-    ) : null;
+    if (error) return <p role="alert">{error}</p>;
+    if (!src) return <PreviewLoading label="正在准备预览…" />;
+    return (
+        <div className="relative w-full">
+            {/* 文档 CSP（document.rs）决定哪些脚本可运行：不允许脚本的候选只运行测高脚本。 */}
+            <FitFrame
+                title={ready.title}
+                className={cn(PREVIEW_FRAME_HEIGHT, "bg-white", !frameReady && "opacity-0")}
+                sandbox="allow-scripts"
+                referrerPolicy="no-referrer"
+                src={src}
+                onLoad={() => setFrameReady(true)}
+                onHeightChange={() => setFrameReady(true)}
+            />
+            {!frameReady && <PreviewLoading label="正在准备预览…" className="absolute inset-0 h-full" />}
+        </div>
+    );
 }
 function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; reference: PreviewRef; files?: Files }) {
     const mobile = useIsMobilePlatform();
     const code = useMemo(() => {
         if (candidate.type !== "markdown") return candidate.content || " ";
         const entry = candidate.entry_file;
-        return renderToStaticMarkup(
+        // 补齐 doctype：怪异模式下 <html> 撑满视口，预览框只能变高不能变矮。
+        return "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>" + renderToStaticMarkup(
             <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 skipHtml
@@ -148,9 +202,9 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
             >
                 {candidate.content}
             </ReactMarkdown>
-        );
+        ) + "</body></html>";
     }, [candidate.content, candidate.type, candidate.entry_file, files]);
-    const mobileDocument = useMemo(() => mobile ? staticPreviewDocument(code) : "", [mobile, code]);
+    const mobileDocument = useMemo(() => mobile ? staticPreviewDocument(code, FRAME_HEIGHT_SCRIPT) : "", [mobile, code]);
     const [ready, setReady] = useState<PreviewCodeRequestEvent>();
     const [error, setError] = useState("");
     const [auth, setAuth] = useState(false);
@@ -173,10 +227,11 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
             active = false;
         };
     }, [code, candidate.title, reference.conversationId, mobile]);
-    if (mobile) return <iframe title={candidate.title} sandbox="" referrerPolicy="no-referrer"
-        className="h-80 w-full border-0 bg-white" srcDoc={mobileDocument} />;
+    // 静态文档只放行带 nonce 的测高脚本；不加 allow-same-origin，内容仍是独立源。
+    if (mobile) return <FitFrame title={candidate.title} sandbox="allow-scripts" referrerPolicy="no-referrer"
+        className={cn(PREVIEW_FRAME_HEIGHT, "bg-white")} srcDoc={mobileDocument} />;
     if (error) return <p role="alert">{error}</p>;
-    if (!ready) return <p>正在准备预览…</p>;
+    if (!ready) return <PreviewLoading label="正在准备预览…" />;
     return (
         <>
             {hasActionablePreviewResources(ready.externalResources) && (
@@ -259,7 +314,7 @@ function ProjectRuntimeFrame({ title, doc, files, entry }: { title: string; doc:
     }, [entry, files]);
     return <>
         {error && <p role="alert">{error}</p>}
-        <iframe ref={frame} title={title} className="h-96 w-full border-0 bg-white"
+        <FitFrame frameRef={frame} title={title} className={cn(PREVIEW_FRAME_HEIGHT, "bg-white")}
             sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={doc} />
     </>;
 }
@@ -275,6 +330,7 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
     const [buildError, setBuildError] = useState("");
     const [output, setOutput] = useState("dist");
     const [generation, setGeneration] = useState(0);
+    const [nonce] = useState(randomNonce);
     useEffect(() => {
         if (mobile) return;
         let active = true;
@@ -315,12 +371,12 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
         }
     }, [files, candidate.entry_file]);
     if (error) return <p role="alert">{error}</p>;
-    if (!files) return <p>正在读取工程…</p>;
+    if (!files) return <PreviewLoading label="正在读取工程…" />;
     const url = new URL(runtimeUrl, window.location.href).href;
     const diagram = /\.(?:mmd|mermaid)$/i.test(candidate.entry_file || "")
         ? new URL(mermaidUrl, window.location.href).href
         : "";
-    const doc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${url} ${diagram} 'unsafe-eval'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"><div id="root"></div><pre id="error" role="alert"></pre>${diagram ? `<script src="${diagram}"></script>` : ""}<script src="${url}"></script>`;
+    const doc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${url} ${diagram} 'nonce-${nonce}' 'unsafe-eval'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"><div id="root"></div><pre id="error" role="alert"></pre>${diagram ? `<script src="${diagram}"></script>` : ""}<script src="${url}"></script><script nonce="${nonce}">${FRAME_HEIGHT_SCRIPT}</script>`;
     return (
         <>
             <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -381,12 +437,12 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
                     {files[file] !== undefined ? source(files, file) : ""}
                 </pre>
             ) : buildView ? (
-                <iframe
+                <FitFrame
                     title={candidate.title}
                     sandbox="allow-scripts"
                     referrerPolicy="no-referrer"
                     src={buildView.url}
-                    className="h-96 w-full border-0 bg-white"
+                    className={cn(PREVIEW_FRAME_HEIGHT, "bg-white")}
                 />
             ) : html !== undefined ? (
                 <MarkupPreview candidate={{ ...candidate, type: "html", content: html }} reference={reference} files={files} />
@@ -432,7 +488,7 @@ export function ChoicePreview({ candidate, reference, projectFiles }: { candidat
     if (candidate.type === "image")
         return (
             <img
-                className="max-h-96 max-w-full object-contain"
+                className="max-h-[75vh] max-w-full object-contain"
                 alt={candidate.title}
                 src={candidate.content?.startsWith("data:image/") ? candidate.content : undefined}
             />
