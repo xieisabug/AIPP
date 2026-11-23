@@ -2,83 +2,74 @@
   "schemaVersion": 1,
   "id": "cat",
   "label": "小猫",
-  "description": "带尖耳朵、额头猫纹与胡须的圆润小猫形象，支持双色自定义",
-  "artworkScale": 1.05,
+  "description": "把尾巴圈在身前的奶油橘猫，脸部与花斑可分别换色",
+  "artworkScale": 1.08,
   "faceColorSlot": "primary",
   "defaultColors": {
-    "primary": "#FFF4D6",
-    "secondary": "#E08A4F"
+    "primary": "#FFEDD5",
+    "secondary": "#E99B67"
   },
   "parts": [
     {
       "type": "path",
-      "d": "M90 218 L72 78 Q70 50 98 62 L192 118 Q255 100 318 118 L412 62 Q440 50 438 78 L420 218 C452 262 460 326 430 380 C396 440 330 466 255 466 C180 466 114 440 80 380 C50 326 58 262 90 218 Z",
-      "fill": "secondary",
-      "stroke": "secondary",
-      "strokeWidth": 6,
-      "strokeLinejoin": "round"
+      "d": "M39 267 C43 228 58 204 72 185 C72 149 73 104 87 74 C93 61 102 59 115 66 C140 79 161 98 182 116 C219 106 252 107 280 114 C300 91 329 67 348 59 C362 53 369 60 374 75 C383 105 385 140 385 164 C420 177 454 208 468 251 C490 321 456 389 401 418 C353 444 286 448 221 443 C130 439 61 420 39 363 C27 333 29 296 39 267 Z",
+      "fill": "primary",
+      "whiteEdge": true
     },
     {
       "type": "path",
-      "d": "M108 168 L96 92 L162 130 Z",
-      "fill": "#FFB7C5"
+      "d": "M72 185 C72 149 73 104 87 74 C93 61 102 59 115 66 C140 79 161 98 182 116 C193 113 205 111 218 110 C214 136 202 155 181 165 C159 175 139 171 124 182 C106 196 92 205 59 206 Q65 194 72 185 Z",
+      "fill": "secondary"
     },
     {
       "type": "path",
-      "d": "M402 168 L414 92 L348 130 Z",
-      "fill": "#FFB7C5"
-    },
-    {
-      "type": "ellipse",
-      "cx": 255,
-      "cy": 296,
-      "rx": 148,
-      "ry": 124,
-      "fill": "primary"
+      "d": "M94 146 Q94 118 99 94 Q101 86 108 91 Q126 104 142 125 Q115 129 94 146 Z M312 120 Q331 97 348 86 Q355 82 357 91 Q362 113 362 142 Q340 127 312 120 Z",
+      "fill": "#EBA7A1"
     },
     {
       "type": "path",
-      "d": "M234 112 L242 156 M255 108 L255 162 M276 112 L268 156",
+      "d": "M385 164 C420 177 454 208 468 251 C490 321 456 389 401 418 C353 444 286 448 221 443 C190 441 174 432 175 414 C176 393 198 381 224 383 C280 388 331 383 359 356 C391 326 400 288 398 247 C397 214 393 185 385 164 Z",
+      "fill": "secondary"
+    },
+    {
+      "type": "path",
+      "d": "M211 298 C210 310 201 313 194 307 M211 298 C212 310 221 313 228 307",
       "fill": "none",
-      "stroke": "#8C4D27",
-      "strokeWidth": 10,
-      "strokeLinecap": "round",
-      "opacity": 0.48
-    },
-    {
-      "type": "path",
-      "d": "M241 300 Q255 290 269 300 Q255 316 241 300 Z",
-      "fill": "#FF8FA3"
-    },
-    {
-      "type": "path",
-      "d": "M255 314 L255 324 Q244 334 233 324 M255 324 Q266 334 277 324",
-      "fill": "none",
-      "stroke": "#624735",
+      "stroke": "#BA7565",
       "strokeWidth": 5,
-      "strokeLinecap": "round",
-      "opacity": 0.55
+      "strokeLinecap": "round"
     },
     {
       "type": "path",
-      "d": "M88 286 L142 296 M82 320 L138 320 M422 286 L368 296 M428 320 L372 320",
+      "d": "M188 391 C197 385 211 382 224 383 C239 384 251 385 264 385 C274 397 278 416 274 429 C269 409 254 394 239 385 Q229 384 221 384 C229 392 233 403 231 414 C220 399 205 391 188 391 Z",
+      "fill": "primary",
+      "opacity": 0.58
+    },
+    {
+      "type": "path",
+      "d": "M195 289 C195 284 202 282 211 282 C220 282 227 284 227 289 C227 295 216 302 211 302 C206 302 195 295 195 289 Z",
+      "fill": "#BA7565"
+    },
+    {
+      "type": "path",
+      "d": "M70 272 Q84 271 98 276 M72 294 Q85 289 98 289 M324 276 Q338 271 352 272 M324 289 Q337 289 350 294",
       "fill": "none",
-      "stroke": "#624735",
-      "strokeWidth": 7,
+      "stroke": "#B97D67",
+      "strokeWidth": 6,
       "strokeLinecap": "round",
-      "opacity": 0.45
+      "opacity": 0.72
     }
   ],
   "anchors": {
-    "face": { "x": 255, "y": 250, "scale": 1.12 },
-    "crown": { "x": 255, "y": 108, "scale": 0.92 },
-    "headphones": { "x": 255, "y": 98, "scale": 0.92, "scaleY": 0.88 },
-    "clip": { "x": 150, "y": 124, "scale": 0.92, "rotation": -22 },
-    "propDock": { "x": 408, "y": 356, "scale": 0.8, "rotation": -24 }
+    "face": { "x": 211, "y": 246, "scale": 1.15 },
+    "crown": { "x": 220, "y": 113, "scale": 0.91 },
+    "headphones": { "x": 219, "y": 108, "scale": 0.89, "scaleY": 0.85 },
+    "clip": { "x": 131, "y": 142, "scale": 0.83, "rotation": -21 },
+    "propDock": { "x": 406, "y": 360, "scale": 0.8, "rotation": -24 }
   },
   "colorLabels": {
     "primary": "脸部",
-    "secondary": "毛色"
+    "secondary": "花斑与尾巴"
   },
   "capabilities": ["eyes", "headwear"]
 }

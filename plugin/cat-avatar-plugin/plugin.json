@@ -2,7 +2,7 @@
   "id": "cat-avatar-plugin",
   "code": "cat-avatar-plugin",
   "name": "小猫形象插件",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "纯声明式助手形象与配饰示例插件：包含萌系小猫形象，以及小鱼干发卡与星星眼镜配饰。",
   "author": "AIPP",
   "minAippVersion": "0.5.0",
