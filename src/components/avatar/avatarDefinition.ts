@@ -73,7 +73,7 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
         headphones: { x: 255, y: 28, scale: 0.99 },
         face: { x: 255, y: 228, scale: 1.25 }, crown: { x: 255, y: 43, scale: 0.95 }, clip: { x: 146, y: 72, scale: 1, rotation: -32 },
         propDock: { x: 415, y: 355, scale: 0.85, rotation: -28 },
-        colorLabels: { primary: "脸部", secondary: "外圈" }, capabilities: ["eyes", "headwear"],
+        colorLabels: { primary: "内圈", secondary: "外圈" }, capabilities: ["eyes", "headwear"],
     },
 };
 

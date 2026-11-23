@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, X } from "lucide-react";
+import { Check, Plus, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { accessoriesOf, accessoryDefinitions, avatarDefinitions, type AccessoryId, type AvatarAction } from "@/components/avatar/avatarDefinition";
 import { accessoryPreviewViewBox, BaseballCapArtwork, CrownArtwork, HeadphonesArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "@/components/avatar/AvatarAccessories";
@@ -22,6 +22,12 @@ const darkColors = [
 ];
 
 const accessorySlots = [["eyes", "脸部"], ["head", "头部"]] as const;
+
+/** 勾选标记的颜色：按色块的感知亮度在深色与白色间取，任意自定义颜色上都看得清。 */
+function markColor(hex: string) {
+    const [r, g, b] = [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16));
+    return 0.299 * r + 0.587 * g + 0.114 * b > 160 ? "#111A2D" : "#FFFFFF";
+}
 
 function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
     const artwork = {
@@ -65,18 +71,33 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
     }, [showcase.id, delay, reducedMotion]);
     const update = (patch: (previous: ButlerAppearance) => ButlerAppearance) => onAppearanceChange(patch(appearance));
 
-    const palette = (side: "primary" | "secondary", title: string, colors: string[][]) => <fieldset className="space-y-2.5">
-        <legend className="mb-2.5 text-sm font-medium">{title}</legend>
-        <div className="flex flex-wrap gap-2">
-            {colors.map(([label, color]) => <button key={color} type="button" title={label}
-                aria-label={`${title}：${label}`} aria-pressed={appearance.colors[side] === color}
-                onClick={() => update(previous => ({ ...previous, colors: { ...previous.colors, [side]: color } }))}
-                className="flex size-11 items-center justify-center rounded-full border border-black/15 outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring aria-pressed:ring-2 aria-pressed:ring-foreground aria-pressed:ring-offset-2 aria-pressed:ring-offset-background"
-                style={{ backgroundColor: color, color: side === "primary" ? "#111A2D" : "#FFFFFF" }}>
-                {appearance.colors[side] === color && <Check className="size-4" />}
-            </button>)}
-        </div>
-    </fieldset>;
+    const palette = (side: "primary" | "secondary", title: string, colors: string[][]) => {
+        const current = appearance.colors[side];
+        const setColor = (color: string) => update(previous => ({ ...previous, colors: { ...previous.colors, [side]: color } }));
+        // 预设之外的颜色都算自定义；系统取色器返回小写，统一转大写后与预设比较。
+        const custom = !colors.some(([, color]) => color === current.toUpperCase());
+        return <fieldset className="space-y-2.5">
+            <legend className="mb-2.5 text-sm font-medium">{title}</legend>
+            <div className="flex flex-wrap gap-2">
+                {colors.map(([label, color]) => <button key={color} type="button" title={label}
+                    aria-label={`${title}：${label}`} aria-pressed={current.toUpperCase() === color}
+                    onClick={() => setColor(color)}
+                    className="flex size-11 items-center justify-center rounded-full border border-black/15 outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring aria-pressed:ring-2 aria-pressed:ring-foreground aria-pressed:ring-offset-2 aria-pressed:ring-offset-background"
+                    style={{ backgroundColor: color, color: markColor(color) }}>
+                    {current.toUpperCase() === color && <Check className="size-4" />}
+                </button>)}
+                <label title="自定义颜色" data-custom={custom || undefined}
+                    className="relative flex size-11 cursor-pointer items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-muted-foreground outline-offset-4 has-focus-visible:outline-2 has-focus-visible:outline-ring data-custom:border-solid data-custom:border-black/15 data-custom:ring-2 data-custom:ring-foreground data-custom:ring-offset-2 data-custom:ring-offset-background"
+                    style={custom ? { backgroundColor: current, color: markColor(current) } : undefined}>
+                    {custom ? <Check className="size-4" /> : <Plus className="size-4" />}
+                    {/* 透明的原生取色器盖满色块：点击即打开系统取色面板，面板也锚定在色块位置。 */}
+                    <input type="color" aria-label={`${title}：自定义颜色`} value={current.toLowerCase()}
+                        onChange={event => setColor(event.target.value.toUpperCase())}
+                        className="absolute inset-0 size-full cursor-pointer rounded-full opacity-0" />
+                </label>
+            </div>
+        </fieldset>;
+    };
 
     return <div className="min-h-0 flex-1 overflow-y-auto sm:grid sm:grid-cols-[220px_minmax(0,1fr)] sm:grid-rows-[minmax(0,1fr)] sm:gap-6 sm:overflow-hidden"
         data-aipp-slot="assistant-profile-editor">
@@ -106,8 +127,8 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                         </button>)}
                     </div>
                 </fieldset>
-                {definition.colorLabels.primary && palette("primary", `${definition.colorLabels.primary} · 亮色`, lightColors)}
-                {palette("secondary", `${definition.colorLabels.secondary} · 深色`, darkColors)}
+                {definition.colorLabels.primary && palette("primary", definition.colorLabels.primary, lightColors)}
+                {palette("secondary", definition.colorLabels.secondary, darkColors)}
                 {accessorySlots.map(([slot, label]) => <fieldset key={slot} className="space-y-2.5">
                     <legend className="mb-2.5 text-sm font-medium">{label}</legend>
                     <div className="flex flex-wrap gap-2">

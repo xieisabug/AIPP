@@ -146,8 +146,8 @@ describe("Butler profile editor", () => {
         const onClose = vi.fn();
         render(<ButlerProfileDialog name="总管家" onSave={onSave} onClose={onClose} />);
         fireEvent.change(screen.getByLabelText("名称"), { target: { value: " 小管家 " } });
-        fireEvent.click(screen.getByRole("button", { name: "左侧 · 亮色：薄荷绿" }));
-        fireEvent.click(screen.getByRole("button", { name: "右侧 · 深色：海军蓝" }));
+        fireEvent.click(screen.getByRole("button", { name: "左侧：薄荷绿" }));
+        fireEvent.click(screen.getByRole("button", { name: "右侧：海军蓝" }));
         expect(onSave).not.toHaveBeenCalled();
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
@@ -155,6 +155,26 @@ describe("Butler profile editor", () => {
             version: 2, shape: "aipp", colors: { primary: "#CEF3DF", secondary: "#193B68" },
             accessories: { eyes: null, head: null }, motion: true,
         });
+    });
+
+    it("should accept any custom color and label palettes by area only", async () => {
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
+        expect(screen.getByText("左侧", { selector: "legend" })).toBeInTheDocument();
+        expect(screen.getByText("右侧", { selector: "legend" })).toBeInTheDocument();
+        expect(screen.queryByText(/亮色|深色/)).toBeNull();
+        fireEvent.change(screen.getByLabelText("左侧：自定义颜色"), { target: { value: "#12ab34" } });
+        fireEvent.change(screen.getByLabelText("右侧：自定义颜色"), { target: { value: "#f0e0d0" } });
+        // 自定义颜色不落在预设上时，所有预设都不显示选中，由自定义色块标记当前色。
+        expect(screen.queryAllByRole("button", { pressed: true, name: /^(左侧|右侧)：/ })).toHaveLength(0);
+        expect(screen.getByLabelText("左侧：自定义颜色").closest("label")).toHaveAttribute("data-custom");
+        fireEvent.click(screen.getByRole("button", { name: "右侧：纯黑" }));
+        expect(screen.getByLabelText("右侧：自定义颜色").closest("label")).not.toHaveAttribute("data-custom");
+        fireEvent.change(screen.getByLabelText("右侧：自定义颜色"), { target: { value: "#f0e0d0" } });
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", expect.objectContaining({
+            colors: { primary: "#12AB34", secondary: "#F0E0D0" },
+        })));
     });
 
     it("should discard edits when cancelled and reject blank names", () => {
@@ -184,12 +204,12 @@ describe("Butler profile editor", () => {
         click("脸部：腮红");
         click("头部：小花");
         click("像素仔");
-        expect(screen.queryByRole("button", { name: /亮色：/ })).toBeNull();
-        expect(screen.getByRole("button", { name: "身体 · 深色：纯黑" })).toHaveAttribute("aria-pressed", "true");
-        click("身体 · 深色：陶橘");
+        expect(screen.getAllByLabelText(/：自定义颜色$/)).toHaveLength(1);
+        expect(screen.getByRole("button", { name: "身体：纯黑" })).toHaveAttribute("aria-pressed", "true");
+        click("身体：陶橘");
         for (const [shape, area] of [["圆团", "外圈"], ["AIPP", "右侧"], ["像素仔", "身体"]]) {
             click(shape);
-            expect(screen.getByRole("button", { name: `${area} · 深色：陶橘` })).toHaveAttribute("aria-pressed", "true");
+            expect(screen.getByRole("button", { name: `${area}：陶橘` })).toHaveAttribute("aria-pressed", "true");
         }
         click("恢复黑色");
         expect(document.querySelectorAll('[data-aipp-slot="assistant-profile-preview"] path[fill="#FFFFFF"][stroke="#000000"]')).toHaveLength(2);
@@ -206,7 +226,7 @@ describe("Butler profile editor", () => {
         fireEvent.click(screen.getByRole("button", { name: "脸部：圆框眼镜" }));
         fireEvent.click(screen.getByRole("button", { name: `头部：${label}` }));
         fireEvent.click(screen.getByRole("button", { name: "圆团" }));
-        fireEvent.click(screen.getByRole("button", { name: "脸部 · 亮色：蜜桃" }));
+        fireEvent.click(screen.getByRole("button", { name: "内圈：蜜桃" }));
         fireEvent.click(screen.getByRole("button", { name: "恢复黑白配色" }));
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
