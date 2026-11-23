@@ -37,6 +37,17 @@ fn with_macos_overlay_titlebar<'a, R: tauri::Runtime, M: Manager<R>>(
         .traffic_light_position(LogicalPosition::new(MAC_TRAFFIC_LIGHTS_X, MAC_TITLEBAR_CENTER_Y + 2.5))
 }
 
+/// Windows 主窗口（聊天 / 管家 / 设置）去掉系统标题栏，与 macOS 的 Overlay 布局保持一致：
+/// 最小化 / 最大化 / 关闭由前端 `src/components/window/WindowTitleBar.tsx` 的 `WindowControls`
+/// 画在窗口右上角，顶部空白处通过 `data-tauri-drag-region` 拖动窗口。
+/// 保留系统阴影（Windows 11 上同时保留圆角与边缘缩放）。
+#[cfg(target_os = "windows")]
+fn with_windows_custom_titlebar<'a, R: tauri::Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    builder.decorations(false).shadow(true)
+}
+
 /// 将隐藏的目标窗口重新定位到来源窗口所在的显示器上（居中）。
 /// 仅当目标窗口不可见时才会执行重定位，避免干扰用户手动放置的窗口。
 #[cfg(desktop)]
@@ -332,6 +343,9 @@ fn create_config_window_with_visibility(app: &AppHandle, visible: bool) {
         #[cfg(target_os = "macos")]
         let window_builder = with_macos_overlay_titlebar(window_builder);
 
+        #[cfg(target_os = "windows")]
+        let window_builder = with_windows_custom_titlebar(window_builder);
+
         match window_builder.build() {
             Ok(window) => {
                 info!(visible=%visible, "Config window built");
@@ -431,6 +445,9 @@ fn create_chat_ui_window_with_visibility(app: &AppHandle, visible: bool) {
         #[cfg(target_os = "macos")]
         let window_builder = with_macos_overlay_titlebar(window_builder);
 
+        #[cfg(target_os = "windows")]
+        let window_builder = with_windows_custom_titlebar(window_builder);
+
         match window_builder.build() {
             Ok(window) => {
                 info!(visible=%visible, "Chat UI window built");
@@ -499,6 +516,9 @@ fn create_butler_experiment_window_with_visibility(app: &AppHandle, visible: boo
 
         #[cfg(target_os = "macos")]
         let window_builder = with_macos_overlay_titlebar(window_builder);
+
+        #[cfg(target_os = "windows")]
+        let window_builder = with_windows_custom_titlebar(window_builder);
 
         match window_builder.build() {
             Ok(window) => {

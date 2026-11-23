@@ -50,18 +50,27 @@ describe("ChatUIInfomation platform gating", () => {
         expect(slot("chat-info-open-config")).not.toHaveAttribute("data-tauri-drag-region");
     });
 
-    it("should place search and new conversation beside the traffic lights on macOS only", () => {
+    it("should use the same two rows on Windows without the traffic-light gap", () => {
+        render(<ChatUIInfomation titleBarActions={<button>新对话</button>} />);
+        const titleBar = slot("chat-info-titlebar")!;
+        expect(titleBar.style.paddingLeft).toBe("12px");
+        expect(titleBar).toContainElement(screen.getByRole("button", { name: "新对话" }));
+        expect(slot("chat-info-brand")).toContainElement(slot("chat-info-open-schedule"));
+    });
+
+    it("should place search and new conversation in the title-bar row on desktop only", () => {
         platformState.platform = "macos";
         const { rerender } = render(<ChatUIInfomation titleBarActions={<button>新对话</button>} />);
         expect(slot("chat-info-titlebar")).toContainElement(screen.getByRole("button", { name: "新对话" }));
 
-        platformState.platform = "windows";
+        platformState.platform = "android";
+        platformState.mobile = true;
         rerender(<ChatUIInfomation titleBarActions={<button>新对话</button>} />);
         expect(screen.queryByRole("button", { name: "新对话" })).toBeNull();
     });
 
-    it("should keep logo and tools in one row off macOS", () => {
-        render(<ChatUIInfomation />);
+    it("should keep logo and tools in one row in the narrow drawer", () => {
+        render(<ChatUIInfomation isMobile />);
         const bar = slot("chat-info-bar")!;
         expect(slot("chat-info-titlebar")).toBeNull();
         expect(bar).not.toHaveAttribute("data-tauri-drag-region");

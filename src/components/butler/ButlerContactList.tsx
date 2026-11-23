@@ -13,7 +13,7 @@ import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview } from "./butlerGroupModel";
 import { AppUpdateNotice } from "@/components/AppUpdateNotice";
-import { MacTitleBar, useMacOverlayTitleBar } from "@/components/window/MacTitleBar";
+import { WindowTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 
 /** 待审批和头像未读标记分别展示。 */
 function ApprovalDot() {
@@ -58,27 +58,27 @@ function groupUnread(group: ButlerGroupSummary, selected: boolean) {
 }
 
 /**
- * 侧栏图标按钮样式：桌面沿用描边圆钮；macOS 与红黄绿按钮同排时用无边框图标，
- * 像系统标题栏工具按钮一样轻，且 3 个按钮在最窄侧栏（200px）也不压到红黄绿按钮。
+ * 侧栏图标按钮样式：移动端沿用描边圆钮；桌面统一布局下按钮在标题栏行里，用无边框图标，
+ * 像系统标题栏工具按钮一样轻，且 3 个按钮在最窄侧栏（200px）也不压到 macOS 红黄绿按钮。
  */
-function railIconButtonProps(macOverlayTitleBar: boolean) {
-    return macOverlayTitleBar
+function railIconButtonProps(titleBarLayout: boolean) {
+    return titleBarLayout
         ? { variant: "ghost" as const, className: "size-8 rounded-full text-muted-foreground hover:text-foreground" }
         : { variant: "outline" as const, className: "size-8 rounded-full" };
 }
 
-/** 总管家设置、更新提示与主动整理入口：桌面在联系人列表左上角，macOS 放在侧栏底部。 */
+/** 总管家设置、更新提示与主动整理入口：桌面统一布局下由窗口放在侧栏底部，移动端在联系人列表左上角。 */
 export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive }: {
     ready: boolean;
     onOpenSettings: () => void;
     onOpenProactive?: () => void;
 }) {
-    const macOverlayTitleBar = useMacOverlayTitleBar();
-    const iconButton = railIconButtonProps(macOverlayTitleBar);
+    const titleBarLayout = useWindowTitleBarLayout();
+    const iconButton = railIconButtonProps(titleBarLayout);
     return <>
         <Button size="icon" {...iconButton} aria-label="总管家设置" title="总管家设置"
             onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
-        <AppUpdateNotice rounded={!macOverlayTitleBar} />
+        <AppUpdateNotice rounded={!titleBarLayout} />
         {onOpenProactive && <Button size="icon" {...iconButton} aria-label="主动整理" title="主动整理：跟进事项与整理手记"
             disabled={!ready} onClick={onOpenProactive} data-aipp-slot="butler-proactive-open"><CalendarHeart/></Button>}
     </>;
@@ -86,7 +86,7 @@ export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive }: {
 
 export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onOpenProactive, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
-    const macOverlayTitleBar = useMacOverlayTitleBar();
+    const titleBarLayout = useWindowTitleBarLayout();
     const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
     const pendingApprovals = usePendingApprovalConversations();
@@ -130,7 +130,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
                 : state(assistant.id) === "alerting" ? <UnreadDot/> : null}
         </button></AssistantItemContextMenu> };
     });
-    const iconButton = railIconButtonProps(macOverlayTitleBar);
+    const iconButton = railIconButtonProps(titleBarLayout);
     const listActions = <>
         <Button size="icon" {...iconButton} aria-label="搜索管家消息" title="搜索管家消息"
             disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
@@ -140,9 +140,9 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
             triggerButtonProps={{...iconButton,size:"icon",title:"添加助手","aria-label":"添加助手"}}/>
     </>;
     return <>
-        {macOverlayTitleBar
-            // macOS：左上角归红黄绿按钮，列表操作与之同排；设置类入口由窗口放到侧栏底部（ButlerAppActions）
-            ? <MacTitleBar data-aipp-slot="butler-rail-titlebar">{listActions}</MacTitleBar>
+        {titleBarLayout
+            // 桌面统一布局：列表操作放在标题栏行（macOS 与红黄绿按钮同排）；设置类入口由窗口放到侧栏底部（ButlerAppActions）
+            ? <WindowTitleBar data-aipp-slot="butler-rail-titlebar">{listActions}</WindowTitleBar>
             : <div className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-1.5 px-3 py-1">
                 <div className="flex items-center gap-1.5">
                     <ButlerAppActions ready={ready} onOpenSettings={onOpenSettings} onOpenProactive={onOpenProactive}/>

@@ -25,6 +25,7 @@ import ButlerGroupTranscript from "./ButlerGroupTranscript";
 import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
+import { useFramelessTitleBar, useWindowControlsInset } from "@/components/window/WindowTitleBar";
 import { groupReadKey, mentionTargets, mergeMessages } from "./butlerGroupModel";
 
 interface Props {
@@ -49,6 +50,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const [sending, setSending] = useState(false);
     const [stopping, setStopping] = useState(false);
     const [panelOpen, setPanelOpen] = useState(false);
+    // 无系统标题栏时头部空白处可拖动窗口；Windows 窗口控制按钮与头部同排，右侧留位（头部 px-3）
+    const framelessTitleBar = useFramelessTitleBar();
+    const headerControlsInset = useWindowControlsInset(12);
     const [inviteOpen, setInviteOpen] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [nameDraft, setNameDraft] = useState("");
@@ -241,7 +245,8 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         : typing || `${members.length} 位成员`;
 
     return <div className="flex h-full min-h-0 flex-col" data-aipp-slot="butler-group-chat">
-        <div className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2" data-aipp-slot="butler-group-header">
+        <div className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2" style={headerControlsInset}
+            data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="butler-group-header">
             <div />
             <button type="button" onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }}
                 className="flex min-w-0 max-w-[26rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"

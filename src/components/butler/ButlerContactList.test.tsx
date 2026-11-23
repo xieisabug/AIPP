@@ -8,12 +8,13 @@ import { mockInvokeHandler } from "@/__tests__/mocks/tauri";
 describe("ButlerContactList", () => {
     beforeEach(() => {
         __resetPlatformCacheForTests();
-        mockInvokeHandler("get_platform", () => "windows");
+        // 平台未确认时保持单行顶栏（设置在左上角）；桌面统一布局见下方用例
+        mockInvokeHandler("get_platform", () => "unknown");
         mockInvokeHandler("get_butler_contact_order", () => []);
     });
 
-    it("should put list actions beside the macOS traffic lights and leave settings to the rail footer", async () => {
-        mockInvokeHandler("get_platform", () => "macos");
+    it.each(["macos", "windows", "linux"])("should put list actions in the %s title-bar row and leave settings to the rail footer", async (platform) => {
+        mockInvokeHandler("get_platform", () => platform);
         render(<ButlerContactList
             chief="总管家"
             contacts={[]}

@@ -15,7 +15,7 @@ import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
-import { useMacOverlayTitleBar } from "@/components/window/MacTitleBar";
+import { FloatingWindowControls, useFramelessTitleBar, useWindowControlsInset, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1159,7 +1159,10 @@ function ButlerExperimentWindow() {
     const headerAssistantId = contact?.assistantId ?? 0;
     const headerState = contactActivity.visuals.get(headerAssistantId)?.state ?? "idle";
     const contactRail = useContactRailWidth();
-    const macOverlayTitleBar = useMacOverlayTitleBar();
+    const titleBarLayout = useWindowTitleBarLayout();
+    const framelessTitleBar = useFramelessTitleBar();
+    // Windows 窗口控制按钮与主区头部的操作按钮同排，头部右侧留位（头部 px-3）
+    const headerControlsInset = useWindowControlsInset(12);
 
     useAppShortcuts("butler", {
         new: () => {
@@ -1259,14 +1262,16 @@ function ButlerExperimentWindow() {
                             )}
                         </div>
                     )}
-                    {macOverlayTitleBar && (
-                        // macOS 左上角归红黄绿按钮，设置、更新与主动整理入口收在侧栏底部
+                    {titleBarLayout && (
+                        // 桌面统一布局：侧栏标题栏行放列表操作，设置、更新与主动整理入口收在侧栏底部
                         <div className="flex shrink-0 items-center gap-0.5 border-t border-border px-2 py-1.5" data-aipp-slot="butler-rail-footer">
                             <ButlerAppActions ready={!!mainConversationId} onOpenSettings={handleOpenSettings}
                                 onOpenProactive={proactive.saved?.enabled ? () => setProactiveCenterOpen(true) : undefined}/>
                         </div>
                     )}
                 </div>
+                {/* Windows 窗口控制按钮：与主区头部（中线 26、右内边距 12）的操作按钮同排 */}
+                <FloatingWindowControls centerY={26} right={12} />
                 <div className="relative z-20 w-0 flex-none">
                     <div
                         role="separator"
@@ -1325,6 +1330,8 @@ function ButlerExperimentWindow() {
                             {historyView ? (
                             <div
                                 className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
+                                style={headerControlsInset}
+                                data-tauri-drag-region={framelessTitleBar || undefined}
                                 data-aipp-slot="butler-history-header"
                             >
                                 <div className="flex min-w-0 items-center">
@@ -1353,7 +1360,8 @@ function ButlerExperimentWindow() {
                             ) : (
                             <div
                                 className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
-                                data-tauri-drag-region={macOverlayTitleBar || undefined}
+                                style={headerControlsInset}
+                                data-tauri-drag-region={framelessTitleBar || undefined}
                                 data-aipp-slot="butler-main-header"
                             >
                                 <div className="flex min-w-0 items-center">

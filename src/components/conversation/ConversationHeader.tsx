@@ -14,6 +14,8 @@ export interface ConversationHeaderProps {
     allowRename?: boolean;
     allowDelete?: boolean;
     extraActions?: React.ReactNode;
+    /** 在标题栏末尾显示 Windows 窗口控制按钮（见 ConversationUI.showWindowControls）。 */
+    showWindowControls?: boolean;
 }
 
 const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({
@@ -28,6 +30,7 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({
     allowRename = true,
     allowDelete = true,
     extraActions,
+    showWindowControls,
 }) => {
     if (!conversationId) {
         return null;
@@ -45,6 +48,7 @@ const ConversationHeader: React.FC<ConversationHeaderProps> = memo(({
             allowRename={allowRename}
             allowDelete={allowDelete}
             extraActions={extraActions}
+            showWindowControls={showWindowControls}
         />
     );
 });

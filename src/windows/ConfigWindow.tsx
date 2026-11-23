@@ -15,7 +15,16 @@ import { Bot, KeyRound, ListChecks, Puzzle, Server, Settings, Sparkles } from "l
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
-import { MacTitleBar } from "../components/window/MacTitleBar";
+import {
+    MAC_TRAFFIC_LIGHTS_SAFE_LEFT,
+    TITLEBAR_HEIGHT,
+    FloatingWindowControls,
+    WindowTitleBar,
+    useCustomWindowControls,
+    useFramelessTitleBar,
+    useMacOverlayTitleBar,
+    useWindowControlsInset,
+} from "../components/window/WindowTitleBar";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
@@ -57,6 +66,12 @@ function ConfigWindow() {
     // 移动平台一律移动壳；桌面窄屏仅布局
     const isMobile = isMobilePlatform || isNarrow;
     const platform = usePlatform();
+    // 无系统标题栏（macOS / Windows）：菜单栏顶部留出标题栏行；Windows 另画窗口控制按钮
+    const framelessTitleBar = useFramelessTitleBar();
+    const macOverlayTitleBar = useMacOverlayTitleBar();
+    const customWindowControls = useCustomWindowControls();
+    // 窄屏顶部栏（px-4）右侧为 Windows 窗口控制按钮留位
+    const narrowHeaderInset = useWindowControlsInset(16);
     const skillsAvailable = useFeatureAvailableOnPlatform("skills_manager");
     const pluginsAvailable = true; // Manager remains available; each plugin is capability-checked.
     const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -299,6 +314,7 @@ function ConfigWindow() {
             <div className="flex flex-col h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
                 <div
                     className={`flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
+                    style={{ ...narrowHeaderInset, ...(macOverlayTitleBar ? { paddingLeft: MAC_TRAFFIC_LIGHTS_SAFE_LEFT } : undefined) }}
                     data-tauri-drag-region
                     data-aipp-slot="config-mobile-header"
                 >
@@ -366,6 +382,8 @@ function ConfigWindow() {
                         </>
                     )}
                 </div>
+                {/* 桌面窗口拉窄后：窗口控制按钮与顶部栏同排（顶部栏中线约 30） */}
+                <FloatingWindowControls centerY={30} right={16} />
 
                 <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-card" data-aipp-slot="config-content">
                     <Suspense fallback={configPageFallback}>
@@ -400,17 +418,23 @@ function ConfigWindow() {
             >
                 {/* 侧边栏 */}
                 <div
-                    className={`aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 ${platform === "macos" ? "pt-0 pb-6" : "py-6"} overflow-y-auto`}
+                    className={`aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 ${framelessTitleBar ? "pt-0 pb-6" : "py-6"} overflow-y-auto`}
                     data-theme-slot="settings-menu-container"
                     data-aipp-slot="config-menu"
                 >
-                    {/* macOS Overlay 标题栏：红黄绿按钮占位 + 拖拽，高度与管家顶栏一致 */}
-                    <MacTitleBar className="-mx-3 md:-mx-4" data-aipp-slot="config-titlebar" />
+                    {/* 标题栏行：拖拽区（macOS 左侧为红黄绿按钮），高度与管家顶栏一致 */}
+                    {framelessTitleBar && <WindowTitleBar className="-mx-3 md:-mx-4" data-aipp-slot="config-titlebar" />}
                     {renderMenuItems((id) => requestConfigLeave(() => goToSection(id)))}
                 </div>
 
                 {/* 内容区域 */}
                 <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
+                    {/* Windows：内容区顶部与菜单标题栏行同高的拖拽条，右侧放窗口控制按钮（中线 26） */}
+                    {customWindowControls && (
+                        <div className="shrink-0" style={{ height: TITLEBAR_HEIGHT }} data-tauri-drag-region data-aipp-slot="config-content-titlebar">
+                            <FloatingWindowControls centerY={26} right={12} />
+                        </div>
+                    )}
                     {/* 配置组件内容 */}
                     <Suspense fallback={configPageFallback}>
                         <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />

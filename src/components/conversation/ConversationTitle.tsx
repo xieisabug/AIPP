@@ -9,7 +9,7 @@ import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
 import ConversationExportDialog from "./ConversationExportDialog";
 import DeepSeekBalanceBadge from "./DeepSeekBalanceBadge";
-import { useMacOverlayTitleBar } from "../window/MacTitleBar";
+import { WindowControls, useFramelessTitleBar } from "../window/WindowTitleBar";
 
 const ConversationTitle: React.FC<{
     conversation: Conversation | undefined;
@@ -22,6 +22,8 @@ const ConversationTitle: React.FC<{
     allowRename?: boolean;
     allowDelete?: boolean;
     extraActions?: React.ReactNode;
+    /** 标题栏贴着窗口右上角时，在末尾显示 Windows 窗口控制按钮（其他平台不渲染）。 */
+    showWindowControls?: boolean;
 }> = React.memo(({
     conversation,
     onEdit,
@@ -33,12 +35,13 @@ const ConversationTitle: React.FC<{
     allowRename = true,
     allowDelete = true,
     extraActions,
+    showWindowControls = false,
 }) => {
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] = useState<boolean>(false);
     const { deleteConversation } = useConversationManager();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
-    // macOS Overlay 标题栏下没有原生标题栏，标题栏空白处承担窗口拖动
-    const macOverlayTitleBar = useMacOverlayTitleBar();
+    // 没有系统标题栏（macOS / Windows）时，标题栏空白处承担窗口拖动
+    const framelessTitleBar = useFramelessTitleBar();
 
     // 判断是否需要脱敏
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -72,8 +75,8 @@ const ConversationTitle: React.FC<{
 
     return (
         <>
-            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-tauri-drag-region={macOverlayTitleBar || undefined} data-aipp-slot="chat-conversation-title-bar">
-                <div className="flex-1 overflow-hidden" data-tauri-drag-region={macOverlayTitleBar || undefined} data-aipp-slot="chat-conversation-title">
+            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background rounded-t-xl z-20" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title-bar">
+                <div className="flex-1 overflow-hidden" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title">
                     <div
                         className={`text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon ${allowRename ? "cursor-pointer" : ""}`}
                         onClick={allowRename ? onEdit : undefined}
@@ -97,6 +100,8 @@ const ConversationTitle: React.FC<{
                     {allowDelete ? (
                         <IconButton icon={<Trash2 size={16} className="text-icon" />} onClick={openDeleteDialog} border dataAippSlot="chat-conversation-title-delete" />
                     ) : null}
+                    {/* Windows 窗口控制按钮：贴近窗口右上角（吃掉一半右内边距） */}
+                    {showWindowControls && <WindowControls className="-mr-3 ml-2" />}
                 </div>
             </div>
 

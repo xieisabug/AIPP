@@ -5,6 +5,7 @@ import { PanelRightClose, ExternalLink, ChevronLeft } from 'lucide-react';
 import ChatSidebarContent from './ChatSidebarContent';
 import { TodoItem, CodeArtifact, ContextItem } from './types';
 import type { LoadedPlugin } from '@/services/PluginRuntime';
+import { WindowControls, useFramelessTitleBar } from '@/components/window/WindowTitleBar';
 
 interface ChatSidebarProps {
     todos: TodoItem[];
@@ -22,6 +23,8 @@ interface ChatSidebarProps {
     onExpandChange?: (isExpanded: boolean, width: number) => void;
     /** 固定在详情最顶上的面板（如 Agent 工作区），不参与下方分区的高度分配 */
     topPanel?: React.ReactNode;
+    /** 详情栏贴着窗口右上角（聊天窗口）：展开时头部末尾显示 Windows 窗口控制按钮，空白处可拖动窗口。 */
+    showWindowControls?: boolean;
 }
 
 export const DEFAULT_SIDEBAR_WIDTH = 320;
@@ -44,8 +47,10 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     onPreviewFileClick,
     onExpandChange,
     topPanel,
+    showWindowControls = false,
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
+    const framelessTitleBar = useFramelessTitleBar();
     const [hasAutoExpanded, setHasAutoExpanded] = useState(false);
     const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
     const [isResizing, setIsResizing] = useState(false);
@@ -184,7 +189,8 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                     />
 
                     {/* Header */}
-                    <div className="flex items-center justify-between p-2 border-b border-border" data-aipp-slot="chat-inline-sidebar-header">
+                    <div className="flex items-center justify-between p-2 border-b border-border"
+                        data-tauri-drag-region={(showWindowControls && framelessTitleBar) || undefined} data-aipp-slot="chat-inline-sidebar-header">
                         <span className="text-sm font-medium">详情</span>
                         <div className="flex items-center gap-1">
                             <Button
@@ -207,6 +213,8 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                             >
                                 <PanelRightClose className="h-4 w-4" />
                             </Button>
+                            {/* 详情栏展开时窗口控制按钮从会话标题栏移到这里，与上面两个按钮同排 */}
+                            {showWindowControls && <WindowControls className="ml-2" />}
                         </div>
                     </div>
 

@@ -4,7 +4,14 @@ import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
-import { useMacOverlayTitleBar } from "../components/window/MacTitleBar";
+import {
+    MAC_TRAFFIC_LIGHTS_SAFE_LEFT,
+    FloatingWindowControls,
+    useFramelessTitleBar,
+    useMacOverlayTitleBar,
+    useWindowControlsInset,
+    useWindowTitleBarLayout,
+} from "../components/window/WindowTitleBar";
 import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, {
     ConversationUIRef,
@@ -195,8 +202,12 @@ function ChatUIWindow() {
     // 防泄露模式配置
     const { getConfigValue } = useFeatureConfig();
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
-    // macOS：搜索与新对话嵌进红黄绿按钮所在的标题栏行，不单独占行
+    // 桌面：搜索与新对话嵌进侧栏标题栏行（macOS 与红黄绿按钮同排），不单独占行
+    const titleBarLayout = useWindowTitleBarLayout();
+    const framelessTitleBar = useFramelessTitleBar();
     const macOverlayTitleBar = useMacOverlayTitleBar();
+    // 窄屏布局的顶部栏：右侧为 Windows 窗口控制按钮留位（顶部栏 px-2）
+    const narrowHeaderInset = useWindowControlsInset(8);
     // 侧栏「搜索 / 新对话」悬停提示里的当前快捷键（用户可在设置里改）
     const shortcutHint = (actionId: string) => formatShortcutDisplay(getConfigValue(
         "shortcuts",
@@ -889,6 +900,8 @@ function ChatUIWindow() {
                     {/* 移动端顶部栏 */}
                     <div
                         className={`flex-none flex items-center justify-between px-2 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
+                        style={{ ...narrowHeaderInset, ...(macOverlayTitleBar ? { paddingLeft: MAC_TRAFFIC_LIGHTS_SAFE_LEFT } : undefined) }}
+                        data-tauri-drag-region={framelessTitleBar || undefined}
                         data-aipp-slot="chat-mobile-header"
                     >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
@@ -950,6 +963,8 @@ function ChatUIWindow() {
                             </Button>
                         </div>
                     </div>
+                    {/* 桌面窗口拉窄后同样是无边框窗口，窗口控制按钮与顶部栏同排（顶部栏中线 34） */}
+                    <FloatingWindowControls centerY={34} right={8} />
 
                     {/* 主内容区域 */}
                     <div className="flex-1 min-h-0 overflow-hidden" data-aipp-slot="chat-main-content">
@@ -995,7 +1010,7 @@ function ChatUIWindow() {
     // 桌面端布局
     const sidebarToolbar = (
         <ChatUIToolbar
-            layout={macOverlayTitleBar ? "inline" : "row"}
+            layout={titleBarLayout ? "inline" : "row"}
             onNewConversation={handleNewConversation}
             onSearch={() => setSearchOpen(true)}
             newConversationShortcut={shortcutHint("chat.new")}
@@ -1006,7 +1021,7 @@ function ChatUIWindow() {
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                 <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2" data-aipp-slot="chat-sidebar">
-                    {macOverlayTitleBar ? (
+                    {titleBarLayout ? (
                         <ChatUIInfomation titleBarActions={sidebarToolbar} />
                     ) : (
                         <>
@@ -1029,8 +1044,12 @@ function ChatUIWindow() {
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
                         onPreviewFileContextClick={handlePreviewFileContextSelection}
+                        showWindowControls
                     />
                 </div>
+                {/* Windows 窗口控制按钮：有会话时排进会话标题栏或展开的详情栏头部（见 ConversationUI.showWindowControls），
+                    未选会话时没有头部，浮在卡片右上角（卡片外边距 8 + 中线 22、右内边距 8） */}
+                {!selectedConversation && <FloatingWindowControls centerY={8 + 22} right={8 + 8} />}
 
                 <ConversationSearchDialog
                     open={searchOpen}

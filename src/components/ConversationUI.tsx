@@ -278,6 +278,11 @@ interface ConversationUIProps {
     allowRename?: boolean;
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
+    /**
+     * 该会话视图贴着窗口右上角（聊天窗口）：Windows 窗口控制按钮排进右上角的头部——
+     * 详情栏展开时放在详情栏头部，否则放在会话标题栏末尾。
+     */
+    showWindowControls?: boolean;
     allowFeishuDebugResend?: boolean;
     windowLabel?: string;
     showExecutionDetails?: boolean;
@@ -337,6 +342,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowRename = true,
             allowDelete = true,
             headerExtraActions,
+            showWindowControls = false,
             allowFeishuDebugResend = false,
             windowLabel = "chat_ui",
             showExecutionDetails = false,
@@ -564,7 +570,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         });
 
         // Sidebar expansion state and width
-        const [, setSidebarExpanded] = useState(false);
+        const [sidebarExpanded, setSidebarExpanded] = useState(false);
         const [sidebarWidth, setSidebarWidth] = useState(0);
         const [sidebarToggleRequestVersion, setSidebarToggleRequestVersion] = useState(0);
 
@@ -2516,6 +2522,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 allowRename={allowRename}
                                 allowDelete={allowDelete}
                                 extraActions={acpHeaderActions}
+                                showWindowControls={showWindowControls && !(sidebarExpanded && !hideSidebar && !sidebarWindowOpen)}
                             />
                         )}
 
@@ -2658,6 +2665,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code, artifactRunBinding(artifact))}
                             onPreviewFileClick={handlePreviewFileContextClick}
                             topPanel={renderAgentWorkspacePanel(false)}
+                            showWindowControls={showWindowControls}
                         />
                     )}
 

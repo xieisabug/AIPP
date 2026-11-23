@@ -9,7 +9,7 @@ import { memo, type ReactNode } from "react";
 import { navigateMobile } from "../mobile/navigation";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
-import { MacTitleBar, useMacOverlayTitleBar } from "./window/MacTitleBar";
+import { WindowTitleBar, useWindowTitleBarLayout } from "./window/WindowTitleBar";
 import { cn } from "../utils/utils";
 
 interface ChatUIInfomationProps {
@@ -23,7 +23,7 @@ interface ChatUIInfomationProps {
      * 未传时回退到 useIsMobilePlatform()，避免仅靠宽度误开多窗口。
      */
     preferInAppNavigation?: boolean;
-    /** macOS Overlay 标题栏下与红黄绿按钮同排的主操作（搜索、新对话）；其他平台不渲染，由窗口单独放置。 */
+    /** 桌面标题栏行里的主操作（搜索、新对话）：macOS 与红黄绿按钮同排；移动端不渲染，由窗口单独放置。 */
     titleBarActions?: ReactNode;
 }
 
@@ -31,14 +31,16 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     showArtifacts = true,
     showSchedule = true,
     onNavigate,
+    isMobile = false,
     titleBarActions,
 }: ChatUIInfomationProps) {
     const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
     const isMobilePlatform = useIsMobilePlatform();
     const multiWindowAvailable = useFeatureAvailableOnPlatform("desktop_multi_window");
-    // macOS Overlay 标题栏下工具按钮与 Logo 同排，改用与 Logo 等高的紧凑图标按钮
-    const macOverlayTitleBar = useMacOverlayTitleBar();
-    const actionButtonProps = macOverlayTitleBar ? { size: "icon" as const, className: "size-8" } : {};
+    // 桌面统一布局下工具按钮与 Logo 同排，改用与 Logo 等高的紧凑图标按钮
+    // 窄屏抽屉里仍用单行布局（搜索与新对话由抽屉单独成行）
+    const titleBarLayout = useWindowTitleBarLayout() && !isMobile;
+    const actionButtonProps = titleBarLayout ? { size: "icon" as const, className: "size-8" } : {};
     // 导航取决于运行平台，桌面窄窗口仍使用桌面窗口。
     const useInAppNav = isMobilePlatform;
 
@@ -100,7 +102,7 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
         </div>
     );
     const actions = (
-        <div className={cn("flex flex-wrap items-center justify-end", macOverlayTitleBar ? "gap-0.5" : "gap-1")} data-aipp-slot="chat-info-actions">
+        <div className={cn("flex flex-wrap items-center justify-end", titleBarLayout ? "gap-0.5" : "gap-1")} data-aipp-slot="chat-info-actions">
             {/* 防泄露模式眼睛图标按钮 */}
             {antiLeakageEnabled && (
                 <Button
@@ -129,12 +131,12 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
         </div>
     );
 
-    if (macOverlayTitleBar) {
-        // macOS Overlay 标题栏：第一行是红黄绿按钮 + 搜索与新对话（与管家、设置窗口同高同位），
+    if (titleBarLayout) {
+        // 桌面统一布局：第一行是标题栏行（macOS 左侧为红黄绿按钮）+ 搜索与新对话，
         // 第二行左侧 Logo、右侧工具按钮；两行空白处都可拖动窗口。
         return (
             <div className="flex shrink-0 flex-col border-border bg-secondary" data-aipp-slot="chat-info-bar">
-                <MacTitleBar data-aipp-slot="chat-info-titlebar">{titleBarActions}</MacTitleBar>
+                <WindowTitleBar data-aipp-slot="chat-info-titlebar">{titleBarActions}</WindowTitleBar>
                 <div className="flex items-center justify-between gap-2 pb-3 pl-5 pr-2" data-tauri-drag-region data-aipp-slot="chat-info-brand">
                     {logo}
                     {actions}
