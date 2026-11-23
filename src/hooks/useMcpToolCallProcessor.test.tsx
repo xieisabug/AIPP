@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { useMcpToolCallProcessor } from "@/hooks/useMcpToolCallProcessor";
-import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
+import { clearAllMockHandlers, convertFileSrc, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
 vi.mock("@/contexts/AntiLeakageContext", () => ({
     useAntiLeakage: () => ({
@@ -96,6 +96,39 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         }));
         render(<ProcessorHarness markdown={marker("11") + marker("12")} mcpToolCallStates={states} inlineInteractionItems={items} />);
         expect(screen.getAllByTestId("file-result").map(node => node.textContent)).toEqual(["11","12"]);
+    });
+
+    it("should keep grid frames when an XML choice call closes and receives its first call ID", async () => {
+        const request = {
+            title: "Grid", layout: "grid", selection_mode: "single",
+            candidates: ["A", "B"].map(id => ({ id, title: id, type: "html", content: `<p>${id}</p>` })),
+        };
+        const parameters = JSON.stringify(request);
+        const xml = `<mcp_tool_call><server_name>ui_interaction</server_name><tool_name>present_choices</tool_name><parameters>${parameters}`;
+        const marker = (call_id: number) => "<!-- MCP_TOOL_CALL:" + JSON.stringify({
+            tool_name: "present_choices", server_name: "ui_interaction", call_id, parameters,
+        }) + " -->";
+        const prepare = vi.fn(args => args?.request);
+        mockInvokeHandler("prepare_preview_code_request_for_ui", prepare);
+        mockInvokeHandler("get_present_choices", args => ({ request_id: String(args?.callId), request }));
+        mockInvokeHandler("create_choice_document", () => "frame");
+        mockInvokeHandler("close_choice_document", () => {});
+        for (let i = 0; i < 4; i++) convertFileSrc.mockReturnValueOnce("about:blank");
+
+        const view = render(<ProcessorHarness markdown={xml} />);
+        const first = await screen.findByTitle("A");
+        const second = await screen.findByTitle("B");
+        view.rerender(<ProcessorHarness markdown={xml + "</parameters></mcp_tool_call>"} />);
+        view.rerender(<ProcessorHarness markdown={marker(31)} />);
+        await screen.findByRole("radio", { name: "选择 A" });
+        expect(screen.getByTitle("A")).toBe(first);
+        expect(screen.getByTitle("B")).toBe(second);
+        expect(prepare).toHaveBeenCalledTimes(2);
+
+        // 索引和正文相同，也不能把已登记调用的预览带给另一条调用。
+        view.rerender(<ProcessorHarness markdown={marker(32)} />);
+        await waitFor(() => expect(prepare).toHaveBeenCalledTimes(4));
+        expect(await screen.findByTitle("A")).not.toBe(first);
     });
 
     it("keeps identical tool parameters separated by call_id", async () => {

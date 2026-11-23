@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { randomNonce, staticPreviewDocument } from "@/mobile/previewDocument";
 import { acquireChoiceBuild, type BuildView } from "./choiceBuildViews";
 import { projectHtml, projectImage } from "./projectHtml";
@@ -137,7 +137,7 @@ export function CollectedChoicePreview({ collectionId }: { collectionId: number 
     if (!snapshot) return <PreviewLoading label="正在读取收藏快照…" />;
     return <ChoicePreview candidate={snapshot.candidate} reference={{ collectionId }} projectFiles={snapshot.files ?? undefined} />;
 }
-function PreparedFrame({ ready, scripts }: { ready: PreviewCodeRequestEvent; scripts: boolean }) {
+function PreparedFrame({ ready, scripts, title }: { ready: PreviewCodeRequestEvent; scripts: boolean; title: string }) {
     const [src, setSrc] = useState(""),
         [frameReady, setFrameReady] = useState(false),
         [error, setError] = useState("");
@@ -173,7 +173,7 @@ function PreparedFrame({ ready, scripts }: { ready: PreviewCodeRequestEvent; scr
         <div className="relative w-full">
             {/* 文档 CSP（document.rs）决定哪些脚本可运行：不允许脚本的候选只运行测高脚本。 */}
             <FitFrame
-                title={ready.title}
+                title={title}
                 className={cn(PREVIEW_FRAME_HEIGHT, "bg-white", !frameReady && "opacity-0")}
                 sandbox="allow-scripts"
                 referrerPolicy="no-referrer"
@@ -208,6 +208,7 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
     const [ready, setReady] = useState<PreviewCodeRequestEvent>();
     const [error, setError] = useState("");
     const [auth, setAuth] = useState(false);
+    const getTitle = useEffectEvent(() => candidate.title);
     useEffect(() => {
         let active = true;
         setReady(undefined);
@@ -215,7 +216,7 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
         if (mobile) return;
         invoke<PreviewCodeRequestEvent>("prepare_preview_code_request_for_ui", {
             conversationId: reference.conversationId,
-            request: { title: candidate.title, renderer: "html", code: code || " " },
+            request: { title: getTitle(), renderer: "html", code: code || " " },
         })
             .then((r) => {
                 if (active) setReady(r);
@@ -226,7 +227,7 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
         return () => {
             active = false;
         };
-    }, [code, candidate.title, reference.conversationId, mobile]);
+    }, [code, reference.conversationId, mobile]);
     // 静态文档只放行带 nonce 的测高脚本；不加 allow-same-origin，内容仍是独立源。
     if (mobile) return <FitFrame title={candidate.title} sandbox="allow-scripts" referrerPolicy="no-referrer"
         className={cn(PREVIEW_FRAME_HEIGHT, "bg-white")} srcDoc={mobileDocument} />;
@@ -247,7 +248,7 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
                     if (r.previewCode) setReady(r.previewCode);
                 }}
             />
-            <PreparedFrame ready={ready} scripts={candidate.type !== "markdown"} />
+            <PreparedFrame ready={ready} scripts={candidate.type !== "markdown"} title={candidate.title} />
         </>
     );
 }
@@ -494,6 +495,6 @@ export function ChoicePreview({ candidate, reference, projectFiles }: { candidat
             />
         );
     if (candidate.type === "html" || candidate.type === "markdown")
-        return <MarkupPreview candidate={candidate} reference={reference} />;
+        return <MarkupPreview key={candidate.content} candidate={candidate} reference={reference} />;
     return <pre className="max-h-96 overflow-auto whitespace-pre-wrap">{candidate.content}</pre>;
 }

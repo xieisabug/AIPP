@@ -53,9 +53,24 @@ const VIEWPORTS: SegmentOption<"desktop" | "phone">[] = [
     { value: "phone", label: "手机宽度", icon: <Smartphone /> },
 ];
 
-export default function InlineChoicesCard(props: McpToolComponentProps & { requestId?: string }) {
+type ChoicesCardProps = McpToolComponentProps & { requestId?: string };
+
+export default function InlineChoicesCard(props: ChoicesCardProps) {
     const cid = props.conversationId ?? props.currentToolCall?.conversation_id;
     const callId = props.callId ?? props.currentToolCall?.call_id;
+    // 首次登记只补上编号；同一位置换成另一条调用时，整张卡及其中的预览都要重置。
+    const [binding, setBinding] = useState({ callId, generation: 0 });
+    if (callId !== binding.callId) {
+        const generation = binding.callId === undefined ? binding.generation : binding.generation + 1;
+        setBinding({ callId, generation });
+    }
+    const key = JSON.stringify([cid, props.requestId, props.llmCallId, binding.generation]);
+    return <ChoicesCard key={key} {...props} conversationId={cid} callId={callId} />;
+}
+
+function ChoicesCard(props: ChoicesCardProps) {
+    const cid = props.conversationId;
+    const callId = props.callId;
     const [record, setRecord] = useState<ChoiceCard | null>(null);
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
@@ -76,13 +91,6 @@ export default function InlineChoicesCard(props: McpToolComponentProps & { reque
     useEffect(() => {
         let live = true,
             revision = 0;
-        setRecord(null);
-        setError("");
-        setSelected([]);
-        setFeedback("");
-        setExpanded(false);
-        setActive(0);
-        setOther(1);
         if (!cid || (!callId && !props.requestId)) return;
         const refresh = async () => {
             const ticket = ++revision;
@@ -244,9 +252,11 @@ export default function InlineChoicesCard(props: McpToolComponentProps & { reque
             );
         const ref = { conversationId: cid!, requestId: record?.request_id ?? "", candidateId: c.id };
         const picked = chosen.includes(c.id);
+        // 正式快照稍后才分配 request_id；流式阶段和快照使用同一工具调用下的候选身份。
+        const candidateKey = JSON.stringify([c.id, c.type]);
         return (
             <article
-                key={i}
+                key={candidateKey}
                 className={cn("min-w-0 space-y-2 rounded-md border p-3", picked && "border-foreground/40")}
             >
                 <div className="flex min-w-0 items-center gap-2">
@@ -274,7 +284,7 @@ export default function InlineChoicesCard(props: McpToolComponentProps & { reque
                 <div className={phone ? "mx-auto max-w-[390px]" : "w-full"}>
                     {record ||
                     (i < (partial.completedCount ?? 0) && c.content != null && c.type !== "artifact") ? (
-                        <ChoicePreview key={ref.requestId + c.id} candidate={c} reference={ref} />
+                        <ChoicePreview candidate={c} reference={ref} />
                     ) : c.type === "markdown" ? (
                         <ReactMarkdown
                             skipHtml

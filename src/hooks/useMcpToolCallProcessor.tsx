@@ -459,6 +459,10 @@ function getMcpToolCallKey(
     if (data.llm_call_id) {
         return `mcp-call-${data.llm_call_id}`;
     }
+    // XML 比选在流式、标签闭合、数据库登记三个阶段都占用同一条消息的同一个工具位置。
+    if (data.tool_name === "present_choices" && messageId !== undefined) {
+        return `choices-${messageId}-${index}`;
+    }
     if (data.call_id) {
         return `mcp-call-${data.call_id}`;
     }

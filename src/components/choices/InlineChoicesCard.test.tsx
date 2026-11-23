@@ -1,20 +1,70 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { it, expect, vi, beforeEach } from "vitest";
 import InlineChoicesCard from "./InlineChoicesCard";
-import type { ChoiceCard, ChoiceDecision } from "@/utils/presentChoices";
+import type { ChoiceCard, ChoiceDecision, ChoiceRequest } from "@/utils/presentChoices";
 const { invoke, writeText } = vi.hoisted(() => ({ invoke: vi.fn(), writeText: vi.fn(async () => {}) }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke, convertFileSrc: (id: string) => "about:blank#" + id }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("./ChoicePreview", () => ({
-    ChoicePreview: ({ candidate }: { candidate: { content: string } }) => <p>{candidate.content}</p>,
-    previewReference: vi.fn(),
-}));
 vi.mock("@/hooks/use-platform", () => ({ useIsMobilePlatform: () => false }));
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => false }));
 beforeEach(() => {
     invoke.mockReset();
     writeText.mockClear();
+});
+
+it.each([
+    { scenario: "all three candidates keep their content", changeLast: false },
+    { scenario: "one candidate changes while its preparation is pending", changeLast: true },
+])("should reuse unchanged grid previews when $scenario", async ({ changeLast }) => {
+    const request: ChoiceRequest = {
+        title: "选择界面", selection_mode: "single", layout: "grid", allow_feedback: false,
+        candidates: ["A", "B", "C"].map(id => ({ id, title: id, type: "html", content: `<p>${id}</p>` })),
+    };
+    let register!: (card: ChoiceCard) => void;
+    const started: string[] = [];
+    const pending = new Map<string, () => void>();
+    const documents: string[] = [];
+    invoke.mockImplementation((name, args) => {
+        if (name === "get_present_choices") return new Promise(resolve => { register = resolve; });
+        if (name === "prepare_preview_code_request_for_ui") {
+            const { code } = args.request;
+            started.push(code);
+            return new Promise(resolve => pending.set(code, () => resolve(args.request)));
+        }
+        if (name === "create_choice_document") {
+            documents.push(args.html);
+            return Promise.resolve(String(documents.length));
+        }
+        return Promise.resolve();
+    });
+
+    const props = { conversationId: 7, llmCallId: "call-grid", parameters: JSON.stringify(request) };
+    const card = render(<InlineChoicesCard {...props} isStreaming />);
+    const original = request.candidates.map(c => c.content!);
+    expect(started).toEqual(original);
+    // A、C 尚未返回时，B 可以先显示。
+    await act(async () => pending.get(original[1])!());
+    const frame = screen.getByTitle("B");
+    fireEvent.load(frame);
+    expect(documents).toEqual([original[1]]);
+
+    card.rerender(<InlineChoicesCard {...props} callId={12} />);
+    await waitFor(() => expect(register).toBeTypeOf("function"));
+    const snapshot = structuredClone(request);
+    snapshot.candidates[1].title = "方案 B";
+    if (changeLast) snapshot.candidates[2].content = "<p>C revised</p>";
+    await act(async () => register({ request_id: "req-grid", recovered: false, request: snapshot }));
+    expect(screen.getByRole("radio", { name: "选择 方案 B" })).toBeInTheDocument();
+    expect(screen.getByTitle("方案 B")).toBe(frame);
+    expect(frame.className).not.toContain("opacity-0");
+    const finalCode = snapshot.candidates[2].content!;
+    expect(started).toEqual(changeLast ? [...original, finalCode] : original);
+
+    await act(async () => { for (const finish of pending.values()) finish(); });
+    expect(documents.sort()).toEqual([original[0], original[1], finalCode].sort());
+    expect(screen.getByTitle("A")).toBeInTheDocument();
+    expect(screen.getByTitle("C")).toBeInTheDocument();
 });
 it("should submit only the chosen stable ID and feedback when two versions have the same title", async () => {
     const record: ChoiceCard = {

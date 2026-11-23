@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -316,15 +317,15 @@ fn html_style_attr_regex() -> Regex {
         .expect("valid preview HTML style attribute regex")
 }
 
-fn css_url_regex() -> Regex {
+static CSS_URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)url\(\s*(?:"([^"]*)"|'([^']*)'|([^'")\s][^)]*?))\s*\)"#)
         .expect("valid preview CSS url regex")
-}
+});
 
-fn css_import_regex() -> Regex {
+static CSS_IMPORT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)@import\s+(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^\s"'()]+))\s*\)?"#)
         .expect("valid preview CSS import regex")
-}
+});
 
 fn normalize_url(raw_url: &str, base_url: Option<&str>) -> Option<String> {
     let trimmed = raw_url.trim().trim_matches(|c| matches!(c, '"' | '\''));
@@ -989,11 +990,9 @@ async fn rewrite_css_resources(
     base_url: Option<&str>,
     occurrence: &str,
 ) -> Result<String, String> {
-    let url_regex = css_url_regex();
-    let import_regex = css_import_regex();
     let mut output = css.to_string();
 
-    let matches = url_regex
+    let matches = CSS_URL_REGEX
         .captures_iter(css)
         .filter_map(|captures| {
             let raw_url = captures
@@ -1015,7 +1014,7 @@ async fn rewrite_css_resources(
         output = output.replace(&full, &format!("url(\"{}\")", rewritten));
     }
 
-    let import_matches = import_regex
+    let import_matches = CSS_IMPORT_REGEX
         .captures_iter(css)
         .filter_map(|captures| {
             let raw_url = captures
@@ -1905,7 +1904,7 @@ pub async fn save_preview_external_resource_policy(
 #[cfg(test)]
 mod tests {
     use super::{
-        css_import_regex, css_url_regex, detect_type_from_url, html_resource_attr_regex,
+        CSS_IMPORT_REGEX, CSS_URL_REGEX, detect_type_from_url, html_resource_attr_regex,
         html_style_attr_regex, inherits_stylesheet_allow, inside_font_face, placeholder_for,
         preview_network_proxy_from_config_map, relay_urls_relative, resource_id,
         validate_content_type, whitelist_allows, PreviewExternalResourcePolicy,
@@ -2041,13 +2040,12 @@ mod tests {
 
     #[test]
     fn test_css_url_regex_supports_single_double_and_unquoted_urls() {
-        let url_regex = css_url_regex();
         let css = r#"
             .a { background: url("https://example.com/a.png"); }
             .b { background: url('https://example.com/b.png'); }
             .c { background: url(https://example.com/c.png); }
         "#;
-        let values = url_regex
+        let values = CSS_URL_REGEX
             .captures_iter(css)
             .filter_map(|captures| {
                 captures
@@ -2070,13 +2068,12 @@ mod tests {
 
     #[test]
     fn test_css_import_regex_supports_single_and_double_quotes() {
-        let import_regex = css_import_regex();
         let css = r#"
             @import "https://example.com/a.css";
             @import url('https://example.com/b.css');
             @import url(https://example.com/c.css);
         "#;
-        let values = import_regex
+        let values = CSS_IMPORT_REGEX
             .captures_iter(css)
             .filter_map(|captures| {
                 captures
