@@ -560,10 +560,11 @@ fn handle_track(
                 )?;
             }
             delivery::schedule(&tx, Local::now(), cfg)?;
+            let (_, waking_items) = topics::waking_jobs(&tx, cfg, Some(item_id))?;
             tx.commit()?;
             crate::sync::schedule_sync_after_local_change(app);
             let _ = app.emit("butler_proactive_changed", ());
-            Ok(json!({ "item_id": item_id, "revision": 1, "created": true, "kind": kind, "title": final_title }))
+            Ok(json!({ "item_id": item_id, "revision": 1, "created": true, "kind": kind, "title": final_title, "waking_items": waking_items }))
         }
         "update" => {
             let id = args["id"].as_i64().context("update 缺少 id")?;
@@ -641,10 +642,15 @@ fn handle_track(
                     [id],
                 )?;
             }
+            let waking_items = if timing_changed {
+                topics::waking_jobs(&tx, cfg, Some(id))?.1
+            } else {
+                vec![]
+            };
             tx.commit()?;
             crate::sync::schedule_sync_after_local_change(app);
             let _ = app.emit("butler_proactive_changed", ());
-            Ok(json!({ "item_id": id, "revision": cur_rev + 1, "updated": true }))
+            Ok(json!({ "item_id": id, "revision": cur_rev + 1, "updated": true, "waking_items": waking_items }))
         }
         "dismiss" => {
             let id = args["id"].as_i64().context("dismiss 缺少 id")?;

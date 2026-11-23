@@ -32,9 +32,27 @@ export function useButlerProactiveConfig() {
 
     const save = useCallback(async () => {
         const { config: next, saved: previous } = latest.current;
-        if (!next || JSON.stringify(next) === JSON.stringify(previous)) return;
-        await invoke<void>("save_butler_proactive_config", { settings: next });
-        setSaved(next);
+        if (!next || (!previous?.release_pending && JSON.stringify(next) === JSON.stringify(previous))) return;
+        const { release_pending, ...settings } = next;
+        try {
+            await invoke<void>("save_butler_proactive_config", { settings });
+        } catch (cause) {
+            // The local stop can succeed before the remote handover fails.
+            if (!next.enabled) {
+                const current = await invoke<ProactiveConfig>("get_butler_proactive_config").catch(() => undefined);
+                if (current?.release_pending) {
+                    setSaved(current);
+                    setConfig(draft => draft && ({ ...draft, release_pending: true }));
+                }
+            }
+            throw cause;
+        }
+        if (release_pending) {
+            setSaved({ ...settings, release_pending: false });
+            setConfig(draft => draft && ({ ...draft, release_pending: false }));
+        } else {
+            setSaved(next);
+        }
     }, []);
 
     return { config, setConfig, saved, error, reload, save };

@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+// Serialize the enabled check and ownership change with proposal acceptance.
+static OWNER_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -94,7 +97,10 @@ impl Config {
     }
 }
 fn config(app: &AppHandle) -> Result<Config> {
-    let config = SystemDatabase::new(app)?
+    stored_config(&SystemDatabase::new(app)?)
+}
+fn stored_config(db: &SystemDatabase) -> Result<Config> {
+    let config = db
         .get_feature_config("butler_proactive", "settings")?
         .map(|c| serde_json::from_str(&c.value))
         .transpose()?
@@ -148,12 +154,28 @@ pub fn tick(app: AppHandle) {
     });
 }
 #[tauri::command]
-pub async fn get_butler_proactive_config(app: AppHandle) -> Result<Config, String> {
-    config(&app).map_err(error)
+pub async fn get_butler_proactive_config(app: AppHandle) -> Result<ConfigView, String> {
+    let db = SystemDatabase::new(&app).map_err(|e| e.to_string())?;
+    config_view(&db).map_err(error)
+}
+
+#[derive(Serialize)]
+pub struct ConfigView {
+    #[serde(flatten)]
+    settings: Config,
+    release_pending: bool,
+}
+fn config_view(db: &SystemDatabase) -> Result<ConfigView> {
+    let tx = db.conn.unchecked_transaction()?;
+    let settings = stored_config(db)?;
+    let release_pending = !settings.enabled && !db.get_config(crate::sync::PROACTIVE_OWNER_KEY)?.is_empty();
+    tx.commit()?;
+    Ok(ConfigView { settings, release_pending })
 }
 #[tauri::command]
 pub async fn save_butler_proactive_config(app: AppHandle, settings: Config) -> Result<(), String> {
     let _lock = runner::RUN.lock().await;
+    let _owner = OWNER_CHANGE.lock().await;
     settings.validate().map_err(error)?;
     if settings.enabled {
         crate::sync::proactive_owner(&app, true).await?;
@@ -163,7 +185,8 @@ pub async fn save_butler_proactive_config(app: AppHandle, settings: Config) -> R
             VALUES('butler_proactive','settings',?1,'string') ON CONFLICT(feature_code,key) DO UPDATE SET value=excluded.value",
             [serde_json::to_string(&settings)?])?; Ok(()) })().map_err(error)?;
     if !settings.enabled {
-        crate::sync::proactive_owner(&app, false).await?;
+        crate::sync::proactive_owner(&app, false).await
+            .map_err(|e| format!("本机已停止主动整理，执行权交接未完成。{e}"))?;
     }
     Ok(())
 }
@@ -239,6 +262,21 @@ pub struct ItemTiming {
     lead: u32,
 }
 
+fn acknowledge_delivery(tx: &rusqlite::Transaction<'_>, item: i64, delivery: i64, yearly: bool) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let stage: String = tx.query_row(
+        "UPDATE butler_proactive_delivery_queue SET status='acknowledged'
+         WHERE id=?1 AND item_id=?2 AND status='delivered'
+         AND EXISTS(SELECT 1 FROM butler_proactive_item WHERE id=?2 AND status='active') RETURNING stage",
+        params![delivery, item], |row| row.get(0),
+    ).optional()?.context("这次提醒已处理")?;
+    if !yearly && stage == "due" {
+        tx.execute("UPDATE butler_proactive_item SET status='done',revision=revision+1 WHERE id=?1", [item])?;
+        tx.execute("UPDATE butler_proactive_delivery_queue SET status='cancelled' WHERE item_id=?1 AND status='queued'", [item])?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn update_butler_proactive_item(
     app: AppHandle,
@@ -261,10 +299,9 @@ pub async fn update_butler_proactive_item(
                     WHERE a.uuid=butler_proactive_item.uuid AND a.status IN ('pending','sent'))",params![id,prompt.trim()])?;
                 ensure!(changed==1,"已派发或等待派发的建议无法编辑");
             },
-            "dismiss"|"done" if action=="dismiss" || !yearly => {
-                let state=if action=="dismiss" {"dismissed"} else {"done"};
+            "dismiss" => {
                 tx.execute("DELETE FROM butler_proactive_acceptance WHERE uuid=(SELECT uuid FROM butler_proactive_item WHERE id=?1) AND message_id IS NULL",[id])?;
-                tx.execute("UPDATE butler_proactive_item SET status=?2,revision=revision+1 WHERE id=?1",params![id,state])?;
+                tx.execute("UPDATE butler_proactive_item SET status='dismissed',revision=revision+1 WHERE id=?1",[id])?;
                 tx.execute("UPDATE butler_proactive_delivery_queue SET status='cancelled' WHERE item_id=?1 AND status='queued'",[id])?;
             },
             "rename"=>{let title=title.context("缺少事项标题")?;
@@ -282,11 +319,11 @@ pub async fn update_butler_proactive_item(
                     if changed>0 {topics::reset_schedule(&tx,id)?;}
                 }
             },
-            "done"|"snooze"=>{
+            "done"=>acknowledge_delivery(&tx,id,delivery_id.context("请在本次提醒上操作")?,yearly)?,
+            "snooze"=>{
                 let delivery=delivery_id.context("请在本次提醒上操作")?;
-                let count=if action=="snooze" {tx.execute("UPDATE butler_proactive_delivery_queue SET status='queued',deliver_after=?3
-                    WHERE id=?1 AND item_id=?2 AND status='delivered'",params![delivery,id,(Local::now()+chrono::Duration::days(1)).timestamp()])?}
-                else {tx.execute("UPDATE butler_proactive_delivery_queue SET status='acknowledged' WHERE id=?1 AND item_id=?2 AND status='delivered'",params![delivery,id])?};
+                let count=tx.execute("UPDATE butler_proactive_delivery_queue SET status='queued',deliver_after=?3
+                    WHERE id=?1 AND item_id=?2 AND status='delivered'",params![delivery,id,(Local::now()+chrono::Duration::days(1)).timestamp()])?;
                 ensure!(count==1,"这次提醒已处理");
             },
             _=>anyhow::bail!("未知的事项操作")

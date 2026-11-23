@@ -31,11 +31,11 @@ fn test_proactive_wake_without_delta_and_quiet_result_survives_next_tick() {
     delivery::schedule(&db, Local::now(), &cfg).unwrap();
     assert!(delta::read(&db, &cfg, true).unwrap().is_empty());
     assert!(pending(&db, &cfg).unwrap());
-    let (queue_ids, jobs) = waking_jobs(&db, &cfg).unwrap();
-    assert_eq!(queue_ids.len(), 1);
+    let (stages, jobs) = waking_jobs(&db, &cfg, None).unwrap();
+    assert_eq!(stages.len(), 1);
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["title"], "成都行程");
-    finalize_woken(&db, &queue_ids).unwrap();
+    finalize_woken(&db, &stages).unwrap();
     delivery::schedule(&db, Local::now(), &cfg).unwrap();
     assert!(!pending(&db, &cfg).unwrap());
     assert_eq!(
@@ -44,6 +44,36 @@ fn test_proactive_wake_without_delta_and_quiet_result_survives_next_tick() {
             .unwrap(),
         "quiet"
     );
+}
+
+#[test]
+fn test_proactive_reschedule_during_wake_preserves_replacement_stage() {
+    let db = db();
+    let id = trip(&db);
+    let cfg = Config::default();
+    let now = Local::now();
+    delivery::schedule(&db, now, &cfg).unwrap();
+    let (original, _) = waking_jobs(&db, &cfg, None).unwrap();
+    let original_id: i64 = db.query_row("SELECT id FROM butler_proactive_delivery_queue", [], |r| r.get(0)).unwrap();
+    let new_date = (now.date_naive() + Duration::days(1)).to_string();
+    // First change the date, then change just the lead time (the occurrence key stays the same).
+    let mut snapshot = original;
+    for lead in [2, 3] {
+        db.execute("UPDATE butler_proactive_item SET event_date=?2,lead_days=?3,next_check_at=?4,revision=revision+1 WHERE id=?1",
+            params![id, new_date, lead, now.date_naive().to_string()]).unwrap();
+        reset_schedule(&db, id).unwrap();
+        delivery::schedule(&db, now, &cfg).unwrap();
+        finalize_woken(&db, &snapshot).unwrap();
+        let (replacement, jobs) = waking_jobs(&db, &cfg, Some(id)).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["occurrence"], new_date);
+        assert_eq!(jobs[0]["stage"], "prepare");
+        assert_ne!(replacement, snapshot);
+        assert_eq!(db.query_row("SELECT id FROM butler_proactive_delivery_queue", [], |r| r.get::<_, i64>(0)).unwrap(), original_id);
+        snapshot = replacement;
+    }
+    finalize_woken(&db, &snapshot).unwrap();
+    assert!(!pending(&db, &cfg).unwrap());
 }
 
 #[test]

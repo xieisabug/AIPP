@@ -195,7 +195,10 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
         }
         return Ok(String::new());
     }
-    crate::sync::proactive_owner(app, true).await.map_err(anyhow::Error::msg)?;
+    {
+        let _owner = super::OWNER_CHANGE.lock().await;
+        crate::sync::proactive_owner(app, true).await.map_err(anyhow::Error::msg)?;
+    }
     let mut conn = connection(app)?;
     let cfg = super::effective_config(&conn, stored.clone())?;
     conn.execute(
@@ -277,8 +280,8 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
 
     let (memories, tracked, existing_schedules, recent_notes) =
         collect_context_snapshot(&conn, &cfg, chief, &rows)?;
-    let (waking_queue_ids, waking_items) = if deep {
-        topics::waking_jobs(&conn, &cfg)?
+    let (waking_stages, waking_items) = if deep {
+        topics::waking_jobs(&conn, &cfg, None)?
     } else {
         (Vec::new(), Vec::new())
     };
@@ -340,7 +343,7 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
         ensure!(config(app)? == stored, "整理期间设置已改变，本批次保留待重新扫描");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         delta::advance(&tx, &rows, deep)?;
-        topics::finalize_woken(&tx, &waking_queue_ids)?;
+        topics::finalize_woken(&tx, &waking_stages)?;
         let recorded_summary: String = tx
             .query_row("SELECT summary FROM butler_proactive_run WHERE id=?1", [&run_id], |r| r.get(0))
             .unwrap_or_default();
@@ -363,7 +366,7 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
         };
         let status = if kind == "digest" && delta::pending(&tx, &cfg, true)?.0 > 0 {
             "partial"
-        } else if output.tool_calls_total == 0 && waking_queue_ids.is_empty() {
+        } else if output.tool_calls_total == 0 && waking_stages.is_empty() {
             "quiet"
         } else {
             "acted"

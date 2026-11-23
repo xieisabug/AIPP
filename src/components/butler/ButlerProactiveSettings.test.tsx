@@ -95,6 +95,35 @@ describe("ButlerProactiveSettings", () => {
 });
 
 describe("useButlerProactiveConfig", () => {
+    it("should retry a pending handover on save after reloading disabled settings", async () => {
+        const pending = { ...base, enabled: false, release_pending: true };
+        let handoverFailed = false;
+        let saves = 0;
+        invoke.mockImplementation(async (cmd: string) => {
+            if (cmd === "get_butler_proactive_config") return handoverFailed ? pending : base;
+            if (cmd === "save_butler_proactive_config" && ++saves === 1) {
+                handoverFailed = true;
+                throw new Error("同步失败");
+            }
+        });
+        const first = renderHook(useButlerProactiveConfig);
+        await waitFor(() => expect(first.result.current.config).toEqual(base));
+        act(() => first.result.current.setConfig({ ...base, enabled: false }));
+        await act(async () => { await expect(first.result.current.save()).rejects.toThrow("同步失败"); });
+        expect(first.result.current.saved).toEqual(pending);
+        first.unmount();
+
+        const { result } = renderHook(useButlerProactiveConfig);
+        await waitFor(() => expect(result.current.config).toEqual(pending));
+        render(<ButlerProactiveSettings value={result.current.config} onChange={vi.fn()} onOpenCenter={vi.fn()} />);
+        expect(screen.getByText(/执行权仍待释放/)).toBeInTheDocument();
+        await act(() => result.current.save());
+        expect(invoke).toHaveBeenLastCalledWith("save_butler_proactive_config", { settings: { ...base, enabled: false } });
+        expect(result.current.saved?.release_pending).toBe(false);
+        await act(() => result.current.save());
+        expect(saves).toBe(2);
+    });
+
     it("should skip saving when the config is unchanged", async () => {
         const { result } = renderHook(() => useButlerProactiveConfig());
         await waitFor(() => expect(result.current.config).toEqual(base));

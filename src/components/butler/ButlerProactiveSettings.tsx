@@ -113,7 +113,9 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
                 <CalendarHeart className="h-4 w-4 mr-1.5" />跟进事项与整理手记
             </Button> : null}
         >
-            <Row label="启用主动整理" description="默认关闭。使用同步服务时，一个账户只由一台设备负责整理；换设备前先在原设备关闭。">
+            <Row label="启用主动整理" description={value.release_pending
+                ? "本机已停止整理，跨设备执行权仍待释放。同步完成后点击「保存配置」重试。"
+                : "默认关闭。使用同步服务时，一个账户只由一台设备负责整理；换设备前先在原设备关闭。"}>
                 <Switch aria-label="启用主动整理" checked={enabled} onCheckedChange={v => set("enabled", v)} />
             </Row>
             {enabled && <>

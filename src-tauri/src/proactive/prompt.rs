@@ -36,7 +36,7 @@ pub(crate) fn system_prompt(cfg: &Config, trigger_kind: &str) -> String {
 3. **记忆作用域**：使用 proactive_memory 写入长期偏好/事实/决定时，私聊默认助手私有，群聊只属本群；只有用户原话明确要求跨助手共享时才设 global=true。绝不保存密码、令牌、密钥等敏感信息。\n\
 4. **避免重复**：参考现有跟进事项（tracked_items）、已有定时任务（existing_schedules）与近期整理手记（recent_notes），不要重复提醒用户已经忽略、已完成或已安排定时任务的事项；若对话显示原事项改期或取消，请用 proactive_track 更新或关闭。\n\
 5. **安全审核与建议卡片**：你在后台调用常规工具（含文件写入、命令或外部应用）会自动经过 AIPP 安全审核门禁；若某操作未获审核放行或属于需用户拍板的重要改动，不要反复重试，请改用 proactive_propose 生成建议卡片交由用户确认。\n\
-6. **主动提醒策略**：{notify_rule}\n\
+6. **主动提醒策略**：{notify_rule} proactive_track 创建或改期后返回的 waking_items 也属于本轮，请立即按各项的新日期、阶段和引文完成复核。\n\
 7. **收尾手记**：结束前请调用一次 proactive_note，用一两句话概括本轮整理做了什么、或为何决定静默，供界面「整理手记」展示并作为下一次整理的参考。{custom_block}"
     )
 }

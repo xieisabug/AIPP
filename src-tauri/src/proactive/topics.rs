@@ -151,12 +151,13 @@ pub(super) fn reset_schedule(db: &Connection, item: i64) -> Result<()> {
 
 fn wake_query() -> String {
     format!(
-        "SELECT q.id,i.id,i.revision,i.title,q.occurrence,q.stage,i.detail,i.tracking_summary
+        "SELECT q.occurrence_key,i.id,i.revision,i.title,q.occurrence,q.stage,i.detail,i.tracking_summary
         FROM butler_proactive_delivery_queue q JOIN butler_proactive_item i ON i.id=q.item_id
         JOIN conversation c ON c.id=i.source_conversation_id
         WHERE q.status='queued' AND q.delivered_at IS NULL AND q.researched=0 AND i.status='active'
         AND (q.stage='prepare' OR (i.kind='prep_topic' AND (i.event_date IS NOT NULL OR i.tracking_summary!='')))
         AND q.occurrence>=?4 AND (q.stage!='prepare' OR q.occurrence>?4) AND {SCOPE}
+        AND (?5 IS NULL OR i.id=?5)
         AND NOT EXISTS(SELECT 1 FROM butler_proactive_wake_retry b WHERE b.queue_id=q.id AND b.retry_at>unixepoch())
         ORDER BY q.occurrence,q.id LIMIT 6"
     )
@@ -169,7 +170,7 @@ pub(super) fn pending(db: &Connection, cfg: &Config) -> Result<bool> {
             cfg.private_chats,
             cfg.normal_chats,
             cfg.groups,
-            Local::now().date_naive().to_string()
+            Local::now().date_naive().to_string(), Option::<i64>::None
         ],
         |r| r.get(0),
     )?)
@@ -190,14 +191,13 @@ pub(super) fn review_before_delivery(db: &Connection, cfg: &Config) -> Result<bo
 }
 
 /// 收集本次需要唤醒复核/预研的事项及其已关联原话，交给 Proactive Agent 自主处理。
-/// 返回 `(queue_ids, waking_items_json)`。
-pub(super) fn waking_jobs(db: &Connection, cfg: &Config) -> Result<(Vec<i64>, Vec<Value>)> {
+pub(super) fn waking_jobs(db: &Connection, cfg: &Config, item: Option<i64>) -> Result<(Vec<(String, i64)>, Vec<Value>)> {
     let today = Local::now().date_naive().to_string();
     let mut stmt = db.prepare(&wake_query())?;
     let rows = stmt
-        .query_map(params![cfg.private_chats, cfg.normal_chats, cfg.groups, today], |r| {
+        .query_map(params![cfg.private_chats, cfg.normal_chats, cfg.groups, today, item], |r| {
             Ok((
-                r.get::<_, i64>(0)?,
+                r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
@@ -208,11 +208,11 @@ pub(super) fn waking_jobs(db: &Connection, cfg: &Config) -> Result<(Vec<i64>, Ve
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut queue_ids = Vec::with_capacity(rows.len());
+    let mut stages = Vec::with_capacity(rows.len());
     let mut items = Vec::with_capacity(rows.len());
-    for (queue_id, item_id, revision, title, occurrence, stage, detail, tracking) in rows {
+    for (key, item_id, revision, title, occurrence, stage, detail, tracking) in rows {
         let linked = sources(db, cfg, item_id)?;
-        queue_ids.push(queue_id);
+        stages.push((key, revision));
         items.push(json!({
             "item_id": item_id,
             "revision": revision,
@@ -224,16 +224,17 @@ pub(super) fn waking_jobs(db: &Connection, cfg: &Config) -> Result<(Vec<i64>, Ve
             "linked_sources": linked,
         }));
     }
-    Ok((queue_ids, items))
+    Ok((stages, items))
 }
 
 /// 本轮 Agent 跑完后，把已交付给 Agent 审查但 Agent 未触发 `proactive_notify` 的唤醒行标为已审查并静默，避免重复唤醒。
-pub(super) fn finalize_woken(db: &Connection, queue_ids: &[i64]) -> Result<()> {
-    for queue_id in queue_ids {
+pub(super) fn finalize_woken(db: &Connection, stages: &[(String, i64)]) -> Result<()> {
+    for (key, revision) in stages {
         db.execute(
             "UPDATE butler_proactive_delivery_queue SET researched=1,status='quiet'
-             WHERE id=?1 AND researched=0 AND status='queued' AND delivered_at IS NULL",
-            [queue_id],
+             WHERE occurrence_key=?1 AND researched=0 AND status='queued' AND delivered_at IS NULL
+             AND EXISTS(SELECT 1 FROM butler_proactive_item i WHERE i.id=item_id AND i.revision=?2 AND i.status='active')",
+            params![key, revision],
         )?;
     }
     Ok(())

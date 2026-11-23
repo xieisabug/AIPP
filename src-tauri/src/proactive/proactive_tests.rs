@@ -40,6 +40,22 @@ fn test_proactive_config_migrates_legacy_fields_and_ignores_removed_keys() {
 }
 
 #[test]
+fn test_proactive_disabled_config_reports_unreleased_owner_after_reload() {
+    let db = SystemDatabase { conn: Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    assert!(!config_view(&db).unwrap().release_pending);
+    db.conn.execute("INSERT INTO feature_config(feature_code,key,value,data_type)
+        VALUES('butler_proactive','settings','{\"enabled\":false}','string')", []).unwrap();
+    for owner in ["previous-grant", "releasing", ""] {
+        db.conn.execute("INSERT INTO system_config(key,value) VALUES(?1,?2)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![crate::sync::PROACTIVE_OWNER_KEY, owner]).unwrap();
+        let view = config_view(&db).unwrap();
+        assert!(!view.settings.enabled);
+        assert_eq!(view.release_pending, !owner.is_empty());
+    }
+}
+
+#[test]
 fn test_proactive_prompt_injects_custom_instructions_and_quiet_mode() {
     let cfg = Config {
         allow_notifications: false,
@@ -73,6 +89,32 @@ pub(super) fn db() -> Connection {
     memories::schema(&db).unwrap();
     db.execute_batch(include_str!("schema.sql")).unwrap();
     db
+}
+
+#[test]
+fn test_proactive_acknowledgment_preserves_due_stage_and_annual_item() {
+    for yearly in [false, true] {
+        let mut db = db();
+        let tx = db.transaction().unwrap();
+        tx.execute("INSERT INTO butler_proactive_item(id,uuid,kind,title,source_conversation_id,event_date,yearly,lead_days,next_check_at,updated_at)
+            VALUES(1,'trip','milestone','行程',10,?1,?2,2,'2026-11-23',0)",
+            params![if yearly { "11-25" } else { "2026-11-25" }, yearly]).unwrap();
+        use chrono::TimeZone;
+        let start = Local.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).earliest().unwrap();
+        for (offset, stage) in [(0, "prepare"), (2, "due")] {
+            delivery::schedule(&tx, start + chrono::Duration::days(offset), &Config::default()).unwrap();
+            let delivery: i64 = tx.query_row(
+                "UPDATE butler_proactive_delivery_queue SET status='delivered' WHERE stage=?1 RETURNING id",
+                [stage], |r| r.get(0),
+            ).unwrap();
+            acknowledge_delivery(&tx, 1, delivery, yearly).unwrap();
+            assert!(acknowledge_delivery(&tx, 1, delivery, yearly).is_err());
+            let status: String = tx.query_row("SELECT status FROM butler_proactive_item WHERE id=1", [], |r| r.get(0)).unwrap();
+            assert_eq!(status, if yearly || stage == "prepare" { "active" } else { "done" });
+        }
+        assert_eq!(tx.query_row("SELECT count(*) FROM butler_proactive_delivery_queue WHERE status='acknowledged'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        tx.commit().unwrap();
+    }
 }
 
 #[test]

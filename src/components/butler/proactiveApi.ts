@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface ProactiveConfig {
+    release_pending?: boolean;
     enabled: boolean; private_chats: boolean; groups: boolean; normal_chats: boolean;
     allow_notifications: boolean; custom_instructions: string; pulse_hours: number; daily_limit: number;
     quiet_start: string; quiet_end: string; release: string; digest: string; small_model: string; deep_model: string;

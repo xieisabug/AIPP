@@ -222,9 +222,10 @@ async fn accept(
     if !confirmation_matches((confirmed,revision,displayed),(assistant,rev,&instruction)) {
         return Ok(preview);
     }
-    ensure!(super::config(app)?.enabled, "请在负责主动整理的设备上确认建议");
-    crate::sync::proactive_owner(app, true).await.map_err(anyhow::Error::msg)?;
     {
+        let _owner = super::OWNER_CHANGE.lock().await;
+        ensure!(super::config(app)?.enabled, "请在负责主动整理的设备上确认建议");
+        crate::sync::proactive_owner(app, true).await.map_err(anyhow::Error::msg)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_proactive_item WHERE id=?1 AND revision=?2 AND status='active' AND action_prompt=?3)",
         params![id,rev,instruction],|r|r.get(0))?;

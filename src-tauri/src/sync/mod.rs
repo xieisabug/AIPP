@@ -5548,19 +5548,24 @@ fn open_sync_db(app_handle: &AppHandle) -> Result<Connection, String> {
     Ok(conn)
 }
 
+pub(crate) const PROACTIVE_OWNER_KEY: &str = "butler_proactive_owner";
+
 /// Account ownership is durable. Only the current owner can release it; disconnecting
 /// a device never causes another machine to take over an offline scheduler.
 pub(crate) async fn proactive_owner(app: &AppHandle, enable: bool) -> Result<(), String> {
+    let local = SystemDatabase::new(app).map_err(|e| e.to_string())?;
+    let cached = local.get_config(PROACTIVE_OWNER_KEY).map_err(|e| e.to_string())?;
+    if !enable && cached.is_empty() { return Ok(()); }
     let settings = load_settings(app)?;
-    if settings.mode == SyncMode::Local { return Ok(()); }
+    if settings.mode == SyncMode::Local {
+        return if enable { Ok(()) } else { Err("请重新连接原同步服务，再保存配置以释放执行权".into()) };
+    }
     ensure_sync_db(app)?;
     let device = ensure_device_id(&open_sync_db(app)?)?;
     let token = settings.token.ok_or("请先连接同步服务")?;
     use sha2::Digest;
     let signature = format!("{:x}",sha2::Sha256::digest(format!("{}\n{device}\n{token}",settings.server_url).as_bytes()));
-    let local=SystemDatabase::new(app).map_err(|e|e.to_string())?;
-    let cached=local.get_config("butler_proactive_owner").map_err(|e|e.to_string())?;
-    if (enable && cached==signature) || (!enable && cached.is_empty()) {return Ok(())}
+    if enable && cached == signature { return Ok(()); }
     if !enable {
         // Persist a release intent before the network call. A crash can never reuse the old grant.
         local.conn.execute("UPDATE system_config SET value='releasing' WHERE key='butler_proactive_owner'",[]).map_err(|e|e.to_string())?;
