@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "@tauri-apps/api/event";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "../../__tests__/mocks/tauri";
 import NewProviderWizard from "./NewProviderWizard";
 import { PROVIDER_API_TYPES, newProviderNameError, suggestProviderName } from "./providerApiTypes";
@@ -14,6 +15,7 @@ function model(code: string, extra: Record<string, unknown> = {}) {
 }
 
 interface SetupOptions {
+    proxy?: string;
     existing?: Array<{ id: string; name: string; api_type?: string }>;
     previewError?: string;
     /** check_acp_library：已安装的命令 → 版本 */
@@ -49,6 +51,9 @@ function nativeEnvironment(driver: string, installed: boolean) {
 }
 
 function setup(options: SetupOptions = {}) {
+    mockInvokeHandler("get_all_feature_config", () => options.proxy
+        ? [{ feature_code: "network_config", key: "network_proxy", value: options.proxy }]
+        : []);
     mockInvokeHandler("get_platform", () => "windows");
     mockInvokeHandler("check_acp_library", (args) => {
         const command = String(args?.cliCommand);
@@ -157,7 +162,7 @@ describe("NewProviderWizard", () => {
     });
 
     it("should save the connection, fetch models and enable the provider on finish", async () => {
-        const { onCreated, onClose } = setup();
+        const { onCreated, onClose } = setup({ proxy: "http://localhost:7890" });
         fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
         fireEvent.change(await screen.findByLabelText("提供商名称"), { target: { value: "  我的 DeepSeek  " } });
         fireEvent.change(screen.getByLabelText("API Key"), { target: { value: " sk-test " } });
@@ -289,7 +294,12 @@ describe("NewProviderWizard", () => {
         expect(screen.queryByLabelText("接口地址")).not.toBeInTheDocument();
         expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
         fireEvent.click(screen.getByText("高级配置"));
-        fireEvent.click(screen.getByRole("switch", { name: "使用网络代理进行请求" }));
+        const toggle = screen.getByRole("switch", { name: "使用网络代理进行请求" });
+        expect(toggle).toBeDisabled();
+        mockInvokeHandler("get_all_feature_config", () => [{ feature_code: "network_config", key: "network_proxy", value: "http://localhost:7890" }]);
+        await act(async () => { await emit("feature_config_changed"); });
+        await waitFor(() => expect(toggle).toBeEnabled());
+        fireEvent.click(toggle);
         await act(async () => {
             fireEvent.click(screen.getByRole("button", { name: "完成" }));
         });
@@ -300,6 +310,16 @@ describe("NewProviderWizard", () => {
         expect(invoke).toHaveBeenCalledWith("update_llm_provider", {
             id: DRAFT_ID, name: "Codex", apiType: "codex_app_server", description: "", isEnabled: true,
         });
+    });
+
+    it("should link from the wizard to network settings when no global proxy is configured", async () => {
+        const { onClose } = setup();
+        fireEvent.click(screen.getByRole("button", { name: /OpenAI API/ }));
+        fireEvent.click(await screen.findByText("高级配置"));
+        expect(screen.getByRole("switch", { name: "使用网络代理进行请求" })).toBeDisabled();
+        fireEvent.click(await screen.findByRole("button", { name: "退出向导并配置代理" }));
+        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+        expect(emit).toHaveBeenCalledWith("config-navigate-to", { menu: "feature-assistant-config", subNav: "network_config" });
     });
 
     it("should mark installed local agents and types that already have providers", async () => {

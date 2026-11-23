@@ -132,9 +132,7 @@ describe("FeatureAssistantConfig network config", () => {
         ]);
         mockInvokeHandler("list_syntect_themes", () => []);
         mockInvokeHandler("get_enabled_plugins", () => []);
-        render(<FeatureAssistantConfig />);
-        const user = userEvent.setup();
-        await user.click(await screen.findByRole("button", { name: /网络配置/ }));
+        render(<FeatureAssistantConfig subNav="network_config" />);
         const input = await screen.findByPlaceholderText("http://127.0.0.1:7890");
         await waitFor(() => expect(input).toHaveValue("http://initial"));
         fireEvent.change(input, { target: { value: "http://unsaved" } });

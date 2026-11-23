@@ -6,7 +6,7 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } fr
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { PasswordInput } from "../ui/password-input";
-import { Switch } from "../ui/switch";
+import { ProviderProxySwitch, useProviderProxyConfigured } from "./ProviderProxySwitch";
 import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 import VaultRefField from "./vault/VaultRefField";
@@ -97,6 +97,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     const [endpoint, setEndpoint] = useState("");
     const [apiKey, setApiKey] = useState("");
     const [proxyEnabled, setProxyEnabled] = useState(false);
+    const proxyConfigured = useProviderProxyConfigured();
     const [advancedOpen, setAdvancedOpen] = useState(false);
     const [busy, setBusy] = useState(false);
     const [fetchState, setFetchState] = useState<FetchState>({ status: "idle" });
@@ -256,14 +257,14 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             invoke("update_llm_provider_config", { llmProviderId: id, name: key, value });
         // 接口地址先于 API Key 写入：保险箱引用按当前地址确认去向
         if (type.kind === "http" && !type.noEndpoint) await write("endpoint", endpoint.trim());
-        await write("proxy_enabled", proxyEnabled ? "true" : "false");
+        await write("proxy_enabled", proxyConfigured && proxyEnabled ? "true" : "false");
         if (type.kind === "http") await write("api_key", apiKey.trim());
         for (const key of LOCAL_SETTING_KEYS[type.value] ?? []) {
             const value = localValues[key]?.trim();
             if (value) await write(key, value);
         }
         return id;
-    }, [endpoint, apiKey, proxyEnabled, localValues]);
+    }, [endpoint, apiKey, proxyConfigured, proxyEnabled, localValues]);
 
     const enableProvider = useCallback(async (id: number, type: ProviderApiTypeOption, trimmedName: string, close = true) => {
         await invoke("update_llm_provider", { id, name: trimmedName, apiType: type.value, description: "", isEnabled: true });
@@ -570,14 +571,16 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                                 </button>
                             </CollapsibleTrigger>
                             <CollapsibleContent className="mt-2">
-                                <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-2.5">
-                                    <div className="flex min-w-0 flex-col">
-                                        <label htmlFor="new-provider-proxy" className="text-sm font-medium text-foreground">使用网络代理进行请求</label>
-                                        <span className="text-xs text-muted-foreground">
-                                            {apiType.kind === "local" ? "使用全局网络代理启动此 Agent" : "使用全局网络代理配置请求模型与获取模型列表"}
-                                        </span>
-                                    </div>
-                                    <Switch id="new-provider-proxy" checked={proxyEnabled} onCheckedChange={setProxyEnabled} />
+                                <div className="rounded-lg border border-border px-3 py-2.5">
+                                    <ProviderProxySwitch
+                                        id="new-provider-proxy"
+                                        description={apiType.kind === "local" ? "使用全局网络代理启动此 Agent" : "使用全局网络代理配置请求模型与获取模型列表"}
+                                        configured={proxyConfigured}
+                                        checked={proxyEnabled}
+                                        onCheckedChange={setProxyEnabled}
+                                        busy={busy}
+                                        onLeaveWizard={onClose}
+                                    />
                                 </div>
                             </CollapsibleContent>
                         </Collapsible>

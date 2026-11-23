@@ -10,6 +10,7 @@ import { useNativeAgentProviderFields } from "./native-agent/NativeAgentFields";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { Switch } from "../ui/switch";
+import { ProviderProxySwitch, useProviderProxyConfigured } from "./ProviderProxySwitch";
 import { Button } from "../ui/button";
 import {
     Collapsible,
@@ -76,6 +77,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     onRename,
 }) => {
     const [tags, setTags] = useState<ModelTagItem[]>([]);
+    const proxyConfigured = useProviderProxyConfigured();
     const [isModelListExpanded, setIsModelListExpanded] =
         useState<boolean>(false);
     const [isAdvancedConfigExpanded, setIsAdvancedConfigExpanded] =
@@ -379,35 +381,22 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 </CollapsibleTrigger>
                 <CollapsibleContent className="mt-2">
                     <div className="p-3 border border-border rounded-lg bg-muted">
-                        <div className="flex items-center justify-between gap-4">
-                            <div className="flex flex-col">
-                                <label htmlFor={`provider-proxy-${id}`} className="text-sm font-medium text-foreground">
-                                    使用网络代理进行请求
-                                </label>
-                                <span className="text-xs text-muted-foreground">
-                                    {description}
-                                </span>
-                            </div>
-                            <Switch
-                                id={`provider-proxy-${id}`}
-                                checked={proxyEnabled === "true"}
-                                onCheckedChange={(checked) => {
-                                    form.setValue(
-                                        "proxy_enabled",
-                                        checked ? "true" : "false",
-                                    );
-                                    updateField(
-                                        "proxy_enabled",
-                                        checked ? "true" : "false",
-                                    );
-                                }}
-                            />
-                        </div>
+                        <ProviderProxySwitch
+                            id={`provider-proxy-${id}`}
+                            description={description}
+                            configured={proxyConfigured}
+                            checked={proxyEnabled === "true"}
+                            onCheckedChange={(checked) => {
+                                const value = checked ? "true" : "false";
+                                form.setValue("proxy_enabled", value);
+                                updateField("proxy_enabled", value);
+                            }}
+                        />
                     </div>
                 </CollapsibleContent>
             </Collapsible>
         ),
-        [form, id, isAdvancedConfigExpanded, proxyEnabled, updateField],
+        [form, id, isAdvancedConfigExpanded, proxyConfigured, proxyEnabled, updateField],
     );
 
     // Pi / Cursor / OpenCode / Kiro / Antigravity：自动检测运行环境与版本

@@ -1,8 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "@tauri-apps/api/event";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), refresh: null as null | ((current: () => boolean) => Promise<void>), error: vi.fn() }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), refresh: null as null | ((current: () => boolean) => Promise<void>), error: vi.fn(), proxy: "" }));
+vi.mock("@/hooks/feature/useFeatureConfig", () => ({
+    useFeatureConfig: () => ({ getConfigValue: () => mocks.proxy, loading: false }),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("sonner", () => ({ toast: { error: mocks.error, success: vi.fn() } }));
 vi.mock("@/hooks/useDataRefresh", () => ({ useDataRefresh: (options: { refresh: typeof mocks.refresh }) => { mocks.refresh = options.refresh; } }));
@@ -40,6 +44,7 @@ describe("LLM provider field autosave", () => {
     });
     it.each(["pi", "cursor", "opencode", "kiro", "antigravity", "codex_app_server", "claude_sdk"])(
         "should persist the proxy switch when editing a %s provider", async apiType => {
+            mocks.proxy = "http://127.0.0.1:7890";
             render(<LLMProviderConfigForm id="1" index={0} apiType={apiType} name="Agent" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
             await refresh();
             fireEvent.click(screen.getByRole("button", { name: "高级配置" }));
@@ -52,6 +57,21 @@ describe("LLM provider field autosave", () => {
     function mount() {
         render(<LLMProviderConfigForm id="1" index={0} apiType="openai_api" name="test" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
     }
+    it("should disable a previously enabled switch and link to network settings when the global proxy is blank", async () => {
+        mocks.proxy = "   ";
+        mocks.invoke.mockImplementation(async (command: string) =>
+            command === "get_llm_provider_config" ? [{ name: "proxy_enabled", value: "true" }] : []);
+        mount();
+        await refresh();
+        fireEvent.click(screen.getByRole("button", { name: "高级配置" }));
+        const toggle = screen.getByRole("switch", { name: "使用网络代理进行请求" });
+        expect(toggle).toBeDisabled();
+        expect(toggle).not.toBeChecked();
+        fireEvent.click(toggle);
+        fireEvent.click(screen.getByRole("button", { name: "前往配置代理" }));
+        expect(emit).toHaveBeenCalledWith("config-navigate-to", { menu: "feature-assistant-config", subNav: "network_config" });
+        expect(mocks.invoke).not.toHaveBeenCalledWith("update_llm_provider_config", expect.anything());
+    });
     it("should show loading instead of an empty form when provider config has not loaded", async () => {
         mount();
         expect(screen.getByText("加载中...")).toBeInTheDocument();
