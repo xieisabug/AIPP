@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, startTransition } fr
 import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { afterSendMotion } from "@/components/conversation/sendMotion";
 import {
     StreamEvent,
     ConversationEvent,
@@ -194,6 +195,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 使用 ref 存储最新的回调函数，避免依赖项变化
     const callbacksRef = useRef(options);
+    /** Events deferred past a send motion run with the latest handler, for the conversation still listened to. */
+    const handleConversationEventRef = useRef<(event: any) => void>(() => {});
+    const listeningConversationRef = useRef<number | null>(null);
 
     // 使用 ref 存储最新的 functionMap，避免频繁变化
     const functionMapRef = useRef<Map<number, any>>(new Map());
@@ -1128,6 +1132,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             updateStreamingMessagesState,
         ],
     );
+    handleConversationEventRef.current = handleConversationEvent;
 
     // 设置和清理事件监听
     useEffect(() => {
@@ -1218,10 +1223,18 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         hasUnsubscribedRef.current = false;
         console.log(`[ACP DEBUG] Listening to event: ${eventName}`);
         let subscriptionActive = true;
+        listeningConversationRef.current = conversationIdNum;
         unsubscribeRef.current = listen(
             eventName,
             (event) => {
-                if (subscriptionActive) handleConversationEvent(event);
+                if (!subscriptionActive) return;
+                // A send motion is running for a few hundred ms. Replay events in order once it
+                // ends, so the resulting re-render does not drop frames of the motion.
+                afterSendMotion(() => {
+                    if (listeningConversationRef.current === conversationIdNum) {
+                        handleConversationEventRef.current(event);
+                    }
+                });
             },
         );
 
@@ -1232,6 +1245,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
         return () => {
             subscriptionActive = false;
+            if (listeningConversationRef.current === conversationIdNum) listeningConversationRef.current = null;
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
                 console.log("[ACP DEBUG] Unsubscribing from events");
                 const p = unsubscribeRef.current;

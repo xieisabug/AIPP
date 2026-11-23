@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startSendScrollSequence } from './sendScrollSequence';
+import { isSendMotionRunning } from './sendMotion';
 
 function setup(butlerBubbleMotion = false) {
     const container = document.createElement('div');
@@ -48,6 +49,12 @@ describe('send entry then native scroll',()=>{
     it('skips both timed phases for reduced motion',()=>{
         vi.stubGlobal('matchMedia',()=>({matches:true}));const {container,complete}=setup();
         vi.advanceTimersByTime(16);expect(container.scrollTop).toBe(592);expect(complete).toHaveBeenCalledOnce();
+    });
+    it('holds deferred conversation work for the whole motion, however it ends',()=>{
+        const finished=setup();expect(isSendMotionRunning()).toBe(true);
+        vi.advanceTimersByTime(740);expect(finished.complete).toHaveBeenCalledOnce();expect(isSendMotionRunning()).toBe(false);
+        const interrupted=setup();interrupted.container.dispatchEvent(new Event('wheel'));expect(isSendMotionRunning()).toBe(false);
+        const cancelled=setup();cancelled.stop();expect(isSendMotionRunning()).toBe(false);
     });
 });
 

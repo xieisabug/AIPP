@@ -11,6 +11,7 @@ import {
     clearAllMockHandlers,
     mockInvokeHandler,
 } from "@/__tests__/mocks/tauri";
+import { holdForSendMotion } from "@/components/conversation/sendMotion";
 
 const flushEffects = async () => {
     await act(async () => {
@@ -1359,3 +1360,61 @@ describe("useConversationEvents streaming completion handoff (LeaderAI #149)", (
     });
 });
 
+
+describe("useConversationEvents send motion gate", () => {
+    afterEach(() => {
+        clearAllMockHandlers();
+        vi.clearAllMocks();
+    });
+
+    const mockSyncState = (conversationId: number) => {
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () => createShineState(conversationId, 1, { target_type: "none" }));
+        mockInvokeHandler("get_conversation_runtime_state", () => createRuntimeState(conversationId, 1, "idle"));
+    };
+
+    it("should replay events that arrive during the send motion in order once it ends", async () => {
+        const conversationId = 841;
+        mockSyncState(conversationId);
+        const delivered: string[] = [];
+        renderHook(() => useConversationEvents({
+            conversationId,
+            onMessageAdd: (data) => delivered.push(`add:${data.message_id}`),
+            onMessageUpdate: (event) => delivered.push(`update:${event.message_id}`),
+        }));
+        await flushEffects();
+
+        const release = holdForSendMotion();
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, { type: "message_add", data: { message_id: 55, message_type: "user" } });
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update", data: { message_id: 55, message_type: "user", content: "同一条", is_done: true },
+            });
+        });
+        await flushEffects();
+        expect(delivered).toEqual([]);
+
+        release();
+        await flushEffects();
+        expect(delivered).toEqual(["add:55", "update:55"]);
+    });
+
+    it("should drop deferred events of a conversation that is no longer shown", async () => {
+        mockSyncState(842);
+        const onMessageAdd = vi.fn();
+        const { rerender } = renderHook(({ conversationId }) => useConversationEvents({ conversationId, onMessageAdd }), {
+            initialProps: { conversationId: 842 },
+        });
+        await flushEffects();
+
+        const release = holdForSendMotion();
+        await act(async () => {
+            await emit("conversation_event_842", { type: "message_add", data: { message_id: 56, message_type: "user" } });
+        });
+        rerender({ conversationId: 843 });
+        await flushEffects();
+        release();
+        await flushEffects();
+        expect(onMessageAdd).not.toHaveBeenCalled();
+    });
+});

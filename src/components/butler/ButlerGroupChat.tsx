@@ -8,6 +8,7 @@ import InputArea from "@/components/conversation/InputArea";
 import type { MentionCandidate } from "@/components/conversation/AssistantCompletionList";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { afterSendMotion } from "@/components/conversation/sendMotion";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
     AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -90,7 +91,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         const subscription = groups.onButlerGroupChanged(changed => {
             if (changed !== groupId) return;
             clearTimeout(timer);
-            timer = setTimeout(() => void refresh(), 80);
+            timer = setTimeout(() => afterSendMotion(() => void refresh()), 80);
         });
         const sync = listen("conversation_data_changed", () => {
             clearTimeout(timer);
@@ -159,11 +160,13 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         try {
             const message = await groups.postButlerGroupMessage(groupId, requestKey, body, replyTo);
             pendingPost.current = null;
-            setLocalPost(undefined);
             setQuote(current => current === quote ? null : current);
-            // 用同一 request_key 将正式序号交给已经上屏的气泡。
-            setDetail(previous => previous ? { ...previous, routing: true, messages: mergeMessages(previous.messages, [message]) } : previous);
-            void refresh();
+            // 用同一 request_key 将正式序号交给已经上屏的气泡；等发送动画结束再换，避免整表重渲染掉帧。
+            afterSendMotion(() => {
+                setLocalPost(current => current?.request_key === requestKey ? undefined : current);
+                setDetail(previous => previous ? { ...previous, routing: true, messages: mergeMessages(previous.messages, [message]) } : previous);
+                void refresh();
+            });
         } catch (error) {
             setLocalPost(current => current && { ...current, sendStatus: "failed", sendError: String(error) });
             setDraft(current => current || body);

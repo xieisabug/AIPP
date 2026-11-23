@@ -695,7 +695,7 @@ const MessageItem = React.memo<MessageItemProps>(
                 data-message-type={message.message_type}
                 data-send-key={composerKey(message)}
             >
-                {message.sendStatus === "sending" && <span role="status" className="self-center text-xs text-muted-foreground">发送中…</span>}
+                {message.sendStatus === "sending" && <span role="status" className="self-center text-xs text-muted-foreground aipp-send-status-delayed">发送中…</span>}
                 {message.sendStatus === "failed" && <details className="max-w-[36%] self-center text-xs text-destructive">
                     <summary>发送失败</summary>
                     <p className="whitespace-pre-wrap break-words">{message.sendError}</p>

@@ -1,4 +1,5 @@
 import { composerKey, upsertPersistedRow, type ComposerReceipt } from "@/utils/composerMessage";
+import { afterSendMotion } from "./conversation/sendMotion";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { useMobileResume } from "@/hooks/useMobileResume";
 import MobileRecoveryNotice from "./conversation/MobileRecoveryNotice";
@@ -666,15 +667,29 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         const finishComposerMessage = useCallback((key: string, { conversationId: id, messageId, error }: ComposerReceipt) => {
-            const wasAccepted = submitting.current.get(key)?.accepted ?? false;
-            submitting.current.delete(key);
-            if (error && wasAccepted) return true;
-            setComposerRows(previous => previous.map(row => row.clientRequestId === key
-                ? { ...row, conversation_id: id, sendStatus: error ? "failed" : row.sendStatus, sendError: error } : row));
-            if (!wasAccepted && !error && messageId && currentView.current === String(id)) {
-                handleMessageAdd({ message_id: messageId, message_type: "user" }, true);
+            const request = submitting.current.get(key);
+            const wasAccepted = request?.accepted ?? false;
+            if (error && wasAccepted) {
+                submitting.current.delete(key);
+                return true;
             }
-            return wasAccepted;
+            // Touch the row only when the receipt changes it: a no-op copy re-renders the
+            // whole conversation while the send motion is still playing.
+            setComposerRows(previous => previous.some(row => row.clientRequestId === key && (error || row.conversation_id !== id))
+                ? previous.map(row => row.clientRequestId === key
+                    ? { ...row, conversation_id: id, sendStatus: error ? "failed" : row.sendStatus, sendError: error } : row)
+                : previous);
+            if (wasAccepted || error || !messageId) {
+                submitting.current.delete(key);
+                return wasAccepted;
+            }
+            // message_add precedes this receipt but can still be waiting for the send motion to end.
+            afterSendMotion(() => {
+                submitting.current.delete(key);
+                if (request?.accepted || currentView.current !== String(id)) return;
+                handleMessageAdd({ message_id: messageId, message_type: "user" }, true);
+            });
+            return false;
         }, [handleMessageAdd]);
 
         const handleGroupMerge = useCallback((groupMergeData: GroupMergeEvent) => {
@@ -720,6 +735,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 return [...withoutCurrent, queued].sort((left, right) => left.id - right.id);
             });
         }, []);
+        // The enqueue receipt swaps the sending row for its queued row; keep that out of the send motion.
+        const acceptQueuedReceipt = useCallback((queued: QueuedConversationMessage) => {
+            afterSendMotion(() => upsertQueuedMessage(queued));
+        }, [upsertQueuedMessage]);
 
         const handleQueuedMessageRemove = useCallback(
             (payload: { id: number; conversation_id: number }) => {
@@ -1370,7 +1389,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             quote: butlerQuote?.quote ?? null,
             clearQuote: clearButlerQuote,
             viewConversationId: conversationId,
-            onQueuedAccepted: upsertQueuedMessage,
+            onQueuedAccepted: acceptQueuedReceipt,
             onComposerMessage: beginComposerMessage,
             onComposerResult: finishComposerMessage,
             quietRuntimeErrors: resultOnly,

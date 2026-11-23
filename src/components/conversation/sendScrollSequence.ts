@@ -1,6 +1,7 @@
 import { sendRowSelector } from "@/utils/composerMessage";
 import { BUTLER_BUBBLE_ENTRY_MS, playButlerSentBubble } from './butlerBubbleAnimation';
 import type { SendLayout } from './SendLayoutSnapshot';
+import { holdForSendMotion } from './sendMotion';
 import { playSentBubbleAnimation, SENT_BUBBLE_ANIMATION_MS } from './sentBubbleAnimation';
 
 export const SEND_SCROLL_DURATION_MS = 260;
@@ -19,6 +20,8 @@ export function startSendScrollSequence({ container, content, previousLayout, me
     onScrollStateChange?: (container: HTMLDivElement) => void;
 }): () => void {
     const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    // Defer conversation re-renders (e.g. confirming the optimistic bubble) until the motion ends.
+    const releaseMotion = holdForSendMotion();
     const previousBehavior = container.style.scrollBehavior;
     container.style.scrollBehavior = 'auto';
     // Keep the pre-send scrollbar geometry during entry, then grow the reserved
@@ -127,6 +130,7 @@ export function startSendScrollSequence({ container, content, previousLayout, me
         container.removeEventListener('touchstart', release);
         container.removeEventListener('pointerdown', release);
         container.removeEventListener('keydown', key);
+        releaseMotion();
     };
     const release = () => { if (!stopped) { cleanup(); onUserRelease(); } };
     const key = (event: KeyboardEvent) => {

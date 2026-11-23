@@ -93,6 +93,16 @@ body {
     margin-bottom: 20px;
 }
 
+/* 「发送中」只在确认确实变慢时淡入：正常发送的确认落在入场动画之后，不应在气泡旁闪一下。 */
+@keyframes aipp-send-status-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.aipp-send-status-delayed {
+    animation: aipp-send-status-in 160ms ease-out 1s both;
+}
+
 @keyframes fadeInOut {
 
     0%,
