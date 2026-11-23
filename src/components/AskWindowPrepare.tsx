@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import { Badge } from "./ui/badge";
-import { Button } from "./ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible";
 import { ChevronDown } from "lucide-react";
 
@@ -8,24 +7,11 @@ interface AskWindowPrepareProps {
     selectedText: string;
     /** 实际移动平台标志，不使用桌面窗口的窄屏状态。 */
     isMobile?: boolean;
-    /** 无模型提供商/未完成首次配置时展示引导入口 */
-    showSetupGuides?: boolean;
-    /** 当前缺什么配置；不传时使用通用文案 */
-    setupMessage?: string;
-    /** 哪个入口作为主按钮 */
-    setupPrimary?: "providers" | "assistant";
-    onConfigureProviders?: () => void;
-    onChooseAssistant?: () => void;
 }
 
 const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
     selectedText,
     isMobile = false,
-    showSetupGuides = false,
-    setupMessage,
-    setupPrimary = "providers",
-    onConfigureProviders,
-    onChooseAssistant,
 }) => {
     const [currentDate, setCurrentDate] = useState(
         new Date().toLocaleDateString(),
@@ -114,38 +100,6 @@ const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
                     ? "输入内容后点击发送，开始与助手交流"
                     : "输入文本后回车，与快捷对话助手进行交流"}
             </p>
-
-            {showSetupGuides ? (
-                <div className="mt-4 flex flex-col items-center gap-2" data-aipp-slot="ask-prepare-setup-guides">
-                    <p className="text-muted-foreground" data-aipp-slot="ask-prepare-setup-message">
-                        {setupMessage ?? "首次使用请先完成配置"}
-                    </p>
-                    <div className="flex flex-wrap justify-center gap-2">
-                        {onConfigureProviders ? (
-                            <Button
-                                type="button"
-                                size="sm"
-                                variant={setupPrimary === "providers" ? "default" : "outline"}
-                                className="min-h-11"
-                                onClick={onConfigureProviders}
-                            >
-                                配置模型提供商
-                            </Button>
-                        ) : null}
-                        {onChooseAssistant ? (
-                            <Button
-                                type="button"
-                                size="sm"
-                                variant={setupPrimary === "assistant" ? "default" : "outline"}
-                                className="min-h-11"
-                                onClick={onChooseAssistant}
-                            >
-                                {setupPrimary === "assistant" ? "配置助手" : "选择助手"}
-                            </Button>
-                        ) : null}
-                    </div>
-                </div>
-            ) : null}
 
             {isMobile ? (
                 <Collapsible open={helpOpen} onOpenChange={setHelpOpen} className="mt-4 text-left">

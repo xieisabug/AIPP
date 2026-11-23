@@ -14,7 +14,10 @@ export type SetupGuideKind =
 
 export interface SetupGuide {
     kind: SetupGuideKind;
-    message: string;
+    /** 一句话说明缺什么（短，单行放得下） */
+    title: string;
+    /** 怎么修；和 title 分开排版，避免长句在窄卡片里从词中间断行 */
+    detail: string;
     /** 主操作：去配置提供商，还是去配置助手 */
     primary: "providers" | "assistant";
 }
@@ -35,16 +38,16 @@ export interface SetupGuideInput {
 export function resolveSetupGuide(input: SetupGuideInput): SetupGuide | null {
     const { providers, models, assistantCount, assistantModel } = input;
     if (providers.length === 0) {
-        return { kind: "no_provider", message: "还没有模型提供商，请先添加并填写密钥", primary: "providers" };
+        return { kind: "no_provider", title: "还没有模型提供商", detail: "请先添加提供商并填写密钥", primary: "providers" };
     }
     if (!providers.some((provider) => provider.is_enabled !== false)) {
-        return { kind: "providers_disabled", message: "模型提供商都已停用，请启用至少一个", primary: "providers" };
+        return { kind: "providers_disabled", title: "模型提供商都已停用", detail: "请至少启用一个提供商", primary: "providers" };
     }
     if (models.length === 0) {
-        return { kind: "no_models", message: "已启用的提供商下还没有模型，请先获取或添加模型", primary: "providers" };
+        return { kind: "no_models", title: "已启用的提供商下还没有模型", detail: "请先获取或添加模型", primary: "providers" };
     }
     if (assistantCount === 0) {
-        return { kind: "no_assistant", message: "还没有可用的助手，请先创建助手", primary: "assistant" };
+        return { kind: "no_assistant", title: "还没有可用的助手", detail: "请先创建一个助手", primary: "assistant" };
     }
     if (assistantModel !== undefined) {
         const usable = assistantModel != null && models.some(
@@ -53,7 +56,8 @@ export function resolveSetupGuide(input: SetupGuideInput): SetupGuide | null {
         if (!usable) {
             return {
                 kind: "assistant_model_invalid",
-                message: "当前助手的模型不可用（已删除或提供商已停用），请为助手重新选择模型",
+                title: "当前助手的模型不可用",
+                detail: "模型已删除或提供商已停用，请重新选择模型",
                 primary: "assistant",
             };
         }

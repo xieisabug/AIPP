@@ -1,13 +1,14 @@
 import AskWindowPrepare from "./AskWindowPrepare";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { Button } from "./ui/button";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { navigateMobileConfig } from "@/mobile/navigation";
-import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck } from "lucide-react";
+import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck, CircleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { getErrorMessage } from "@/utils/error";
@@ -74,6 +75,51 @@ function AgentCompactSelect({ value, options, placeholder, icon, disabled, onCha
                 })}
             </PopoverContent>
         </Popover>
+    );
+}
+
+interface SetupGuideNoticeProps {
+    guide: SetupGuide;
+    /** 移动平台保留 44px 触控高度，桌面用常规小按钮 */
+    touchFriendly: boolean;
+    onConfigureProviders: () => void;
+    onConfigureAssistant: () => void;
+}
+
+/** 配置不完整时紧贴助手选择器显示的提示卡：说明原因 + 修复入口。 */
+function SetupGuideNotice({ guide, touchFriendly, onConfigureProviders, onConfigureAssistant }: SetupGuideNoticeProps) {
+    const buttonClassName = touchFriendly ? "min-h-11" : undefined;
+    const primary = guide.primary === "providers"
+        ? { label: "配置模型提供商", onClick: onConfigureProviders }
+        : { label: guide.kind === "no_assistant" ? "创建助手" : "配置助手", onClick: onConfigureAssistant };
+    // 助手模型失效也可能是所属提供商被停用，重新启用提供商同样能修好，所以多给一个次要入口；
+    // 其余情况只有一个修复方向，不放无关按钮。
+    const showProviderShortcut = guide.kind === "assistant_model_invalid";
+
+    return (
+        <div
+            role="status"
+            className="mt-3 flex w-88 max-w-full flex-col gap-3 rounded-lg border bg-background/80 p-3 text-left"
+            data-aipp-slot="chat-new-conversation-setup-guide"
+        >
+            <div className="flex items-start gap-2">
+                <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                <div className="min-w-0 space-y-0.5">
+                    <p className="text-sm leading-5 font-medium text-foreground">{guide.title}</p>
+                    <p className="text-xs leading-5 text-muted-foreground">{guide.detail}</p>
+                </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+                {showProviderShortcut ? (
+                    <Button type="button" size="sm" variant="outline" className={buttonClassName} onClick={onConfigureProviders}>
+                        配置模型提供商
+                    </Button>
+                ) : null}
+                <Button type="button" size="sm" className={buttonClassName} onClick={primary.onClick}>
+                    {primary.label}
+                </Button>
+            </div>
+        </div>
     );
 }
 
@@ -217,22 +263,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
         >
 
             <div className="text-sm text-gray-500 text-center mb-4" data-aipp-slot="chat-new-conversation-hint" {...dragProps}>
-                <AskWindowPrepare
-                    selectedText={selectedText}
-                    isMobile={isMobilePlatform}
-                    showSetupGuides={setupGuide != null}
-                    setupMessage={setupGuide?.message}
-                    setupPrimary={setupGuide?.primary}
-                    onConfigureProviders={() => { void openConfigMenu("llm-provider-config"); }}
-                    onChooseAssistant={() => {
-                        if (setupGuide != null) {
-                            void openConfigMenu("assistant-config");
-                            return;
-                        }
-                        // 已有助手时聚焦下方选择器：滚动到选择器
-                        document.querySelector<HTMLElement>('[data-aipp-slot="chat-new-conversation-assistant-select"]')?.focus();
-                    }}
-                />
+                <AskWindowPrepare selectedText={selectedText} isMobile={isMobilePlatform} />
                 <p className="mt-4" {...dragProps}>
                     {isMobilePlatform
                         ? "请选择一个对话，或者在下方选择助手后点击发送开始新聊天"
@@ -243,7 +274,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                 value={selectedAssistant.toString()}
                 onValueChange={(value) => setSelectedAssistant(Number(value))}
             >
-                <SelectTrigger className="mt-4 w-88" data-aipp-slot="chat-new-conversation-assistant-select">
+                <SelectTrigger className="mt-4 w-88 max-w-full" data-aipp-slot="chat-new-conversation-assistant-select">
                     <SelectValue placeholder="选择一个助手" />
                 </SelectTrigger>
                 <SelectContent>
@@ -262,13 +293,21 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                     })}
                 </SelectContent>
             </Select>
+            {setupGuide ? (
+                <SetupGuideNotice
+                    guide={setupGuide}
+                    touchFriendly={isMobilePlatform}
+                    onConfigureProviders={() => { void openConfigMenu("llm-provider-config"); }}
+                    onConfigureAssistant={() => { void openConfigMenu("assistant-config"); }}
+                />
+            ) : null}
             {isMobilePlatform && isAgentAssistant ? (
-                <p className="mt-3 w-88 text-xs text-amber-600 dark:text-amber-400" data-aipp-slot="chat-new-conversation-mobile-agent-warning">
+                <p className="mt-3 w-88 max-w-full text-xs text-amber-600 dark:text-amber-400" data-aipp-slot="chat-new-conversation-mobile-agent-warning">
                     当前助手依赖本机 CLI（Codex / Claude Code / ACP），移动端不可执行。请改选普通 API 助手，不会自动换模型或通道。
                 </p>
             ) : null}
             {isAgentAssistant && !isMobilePlatform ? (
-                <div className="mt-3 flex w-88 flex-col gap-1">
+                <div className="mt-3 flex w-88 max-w-full flex-col gap-1">
                     <div className="flex items-center gap-2">
                         <AgentCompactSelect
                             value={selectedModel}

@@ -148,7 +148,7 @@ describe("NewChatComponent setup guide (#155)", () => {
         renderWith({ provider_id: 1, model_code: "m1" });
         await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_models_for_select"));
         await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_assistant", { assistantId: 1 }));
-        expect(document.querySelector('[data-aipp-slot="ask-prepare-setup-guides"]')).toBeNull();
+        expect(document.querySelector('[data-aipp-slot="chat-new-conversation-setup-guide"]')).toBeNull();
         expect(screen.getByText("输入内容后点击发送，开始与助手交流")).toBeInTheDocument();
     });
 
@@ -163,5 +163,58 @@ describe("NewChatComponent setup guide (#155)", () => {
             unsubscribe();
             navigateMobile("chat_ui");
         }
+    });
+});
+
+describe("NewChatComponent setup guide placement on desktop", () => {
+    beforeEach(() => {
+        invokeMock.mockReset();
+        layout.isNarrow = false;
+        layout.isMobilePlatform = false;
+    });
+
+    const renderDesktop = (providers: Array<{ id: number; is_enabled: boolean }>, assistantModel: { provider_id: number; model_code: string }) => {
+        invokeMock.mockImplementation((command: string) => {
+            if (command === "get_llm_providers") return Promise.resolve(providers);
+            if (command === "get_models_for_select") return Promise.resolve(providers.length ? [{ code: "m1", llm_provider_id: 1 }] : []);
+            if (command === "get_assistant") {
+                return Promise.resolve({ assistant: { assistant_type: 0 }, model: [assistantModel], model_configs: [] });
+            }
+            return Promise.resolve(null);
+        });
+        render(
+            <NewChatComponent
+                selectedText=""
+                selectedAssistant={1}
+                setSelectedAssistant={vi.fn()}
+                assistants={[{ id: 1, name: "快速使用助手", assistant_type: 0 }]}
+                selectedModel=""
+                selectedEffort=""
+                selectedApprovalPolicy=""
+                selectedSandbox=""
+                onAgentConfigChange={vi.fn()}
+            />,
+        );
+    };
+
+    it("attaches the notice below the assistant selector instead of inside the usage hints", async () => {
+        renderDesktop([{ id: 1, is_enabled: true }], { provider_id: 9, model_code: "deleted" });
+        const notice = (await screen.findByText(/当前助手的模型不可用/)).closest('[data-aipp-slot="chat-new-conversation-setup-guide"]');
+        expect(notice).not.toBeNull();
+        const hints = document.querySelector('[data-aipp-slot="chat-new-conversation-hint"]');
+        const select = document.querySelector('[data-aipp-slot="chat-new-conversation-assistant-select"]');
+        expect(hints?.contains(notice)).toBe(false);
+        expect(select!.compareDocumentPosition(notice!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        // 桌面不使用移动端的 44px 触控高度
+        const assistantButton = screen.getByRole("button", { name: "配置助手" });
+        expect(assistantButton.className).not.toContain("min-h-11");
+        expect(screen.getByRole("button", { name: "配置模型提供商" })).toBeInTheDocument();
+    });
+
+    it("offers only the provider entry when no provider exists", async () => {
+        renderDesktop([], { provider_id: 1, model_code: "m1" });
+        expect(await screen.findByText(/还没有模型提供商/)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "配置模型提供商" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: /助手/ })).not.toBeInTheDocument();
     });
 });

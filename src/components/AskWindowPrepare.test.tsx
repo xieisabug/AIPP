@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import AskWindowPrepare from "./AskWindowPrepare";
 
 describe("AskWindowPrepare first-use guidance", () => {
@@ -22,23 +22,5 @@ describe("AskWindowPrepare first-use guidance", () => {
         expect(screen.getByText("选中的文字")).toBeVisible();
         expect(screen.getByText("输入文本后回车，与快捷对话助手进行交流")).toBeVisible();
         expect(screen.queryByText(/桌面端也可按回车发送/)).not.toBeInTheDocument();
-    });
-
-    it("shows setup entry points when unconfigured", () => {
-        const onProviders = vi.fn();
-        const onAssistant = vi.fn();
-        render(
-            <AskWindowPrepare
-                selectedText=""
-                isMobile
-                showSetupGuides
-                onConfigureProviders={onProviders}
-                onChooseAssistant={onAssistant}
-            />,
-        );
-        fireEvent.click(screen.getByRole("button", { name: "配置模型提供商" }));
-        fireEvent.click(screen.getByRole("button", { name: "选择助手" }));
-        expect(onProviders).toHaveBeenCalledOnce();
-        expect(onAssistant).toHaveBeenCalledOnce();
     });
 });
