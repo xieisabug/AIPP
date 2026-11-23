@@ -1,23 +1,61 @@
-import { Button } from "./ui/button";
+import { Plus, Search } from "lucide-react";
 import { memo } from "react";
+import { Button } from "./ui/button";
+import { cn } from "../utils/utils";
 
 interface ChatUIToolbarProps {
     onNewConversation: () => void;
     onSearch: () => void;
+    /**
+     * - `row`：独立一行，两个按钮并排（桌面非 macOS、移动端侧栏）；
+     * - `inline`：紧凑按钮，嵌在 macOS 侧栏标题栏（红黄绿按钮同排）右侧，不单独占行。
+     */
+    layout?: "row" | "inline";
+    /** 快捷键显示文本（如「⌘ N」），放在悬停提示里；不传则只显示名称（移动端没有键盘快捷键）。 */
+    newConversationShortcut?: string;
+    searchShortcut?: string;
 }
 
-const ChatUIToolbar = memo(function ChatUIToolbar({ onNewConversation, onSearch }: ChatUIToolbarProps) {
+const withShortcut = (label: string, shortcut?: string) => (shortcut ? `${label}（${shortcut}）` : label);
+
+/** 侧栏主操作：搜索、新对话。 */
+const ChatUIToolbar = memo(function ChatUIToolbar({
+    onNewConversation,
+    onSearch,
+    layout = "row",
+    newConversationShortcut,
+    searchShortcut,
+}: ChatUIToolbarProps) {
+    const inline = layout === "inline";
     return (
-        <div className="flex flex-none h-20 items-center justify-center pt-3 bg-background rounded-t-xl" data-aipp-slot="chat-toolbar">
-            <Button className="w-24 select-none" onClick={onSearch} data-aipp-slot="chat-toolbar-search">
-                搜索
+        <div
+            className={cn(
+                "flex flex-none items-center",
+                inline ? "ml-auto gap-1.5" : "gap-2 bg-background px-3 pb-2 pt-3 rounded-t-xl",
+            )}
+            data-aipp-slot="chat-toolbar"
+        >
+            <Button
+                variant="outline"
+                size={inline ? "icon" : "default"}
+                className={cn("select-none", inline ? "size-8 rounded-full" : "h-9 flex-1 gap-2 font-normal")}
+                aria-label="搜索"
+                title={withShortcut("搜索", searchShortcut)}
+                onClick={onSearch}
+                data-aipp-slot="chat-toolbar-search"
+            >
+                <Search />
+                {!inline && <span>搜索</span>}
             </Button>
             <Button
-                className="w-24 ml-4 select-none"
+                variant="outline"
+                className={cn("select-none gap-1.5 font-normal", inline ? "h-8 rounded-full px-3" : "h-9 flex-1 gap-2")}
+                title={withShortcut("新对话", newConversationShortcut)}
                 onClick={onNewConversation}
                 data-aipp-slot="chat-toolbar-new-conversation"
             >
-                新对话
+                <Plus />
+                <span>新对话</span>
             </Button>
         </div>
     );

@@ -9,7 +9,7 @@ import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
 import ConversationExportDialog from "./ConversationExportDialog";
 import DeepSeekBalanceBadge from "./DeepSeekBalanceBadge";
-import { useMacOverlayTitleBar } from "../window/MacTitleBarInset";
+import { useMacOverlayTitleBar } from "../window/MacTitleBar";
 
 const ConversationTitle: React.FC<{
     conversation: Conversation | undefined;

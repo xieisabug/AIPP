@@ -11,10 +11,22 @@ use crate::api::system_api::mobile_unsupported_error;
 #[cfg(desktop)]
 const SCREEN_MARGIN_RATIO: f64 = 0.9;
 
+/// macOS 红黄绿按钮距窗口左缘的距离（pt），与前端
+/// `src/components/window/MacTitleBar.tsx` 的 `MAC_TRAFFIC_LIGHTS_SAFE_LEFT` 配合。
+#[cfg(target_os = "macos")]
+const MAC_TRAFFIC_LIGHTS_X: f64 = 20.0;
+
+/// 按钮中线：三个主窗口一致，垂直居中于 52pt 高的侧栏顶栏（`MAC_TITLEBAR_HEIGHT`），
+/// 与管家主区头部同高。
+#[cfg(target_os = "macos")]
+const MAC_TITLEBAR_CENTER_Y: f64 = 26.0;
+
 /// macOS 主窗口（聊天 / 管家 / 设置）使用内容延伸到标题栏的 Overlay 样式，
-/// 红黄绿按钮悬浮在侧边栏顶部。前端在侧边栏顶部预留同高的拖拽条
-/// （`src/components/window/MacTitleBarInset.tsx` 的 `MAC_TITLEBAR_INSET_HEIGHT`），
-/// 两边的数值需保持一致：按钮高约 14pt，y=11 时垂直居中于 36pt 的条内。
+/// 红黄绿按钮与侧边栏顶栏的操作按钮同排，前端在顶栏左侧为它们留位。
+///
+/// `traffic_light_position` 的 y 不是按钮顶边：wry 把标题栏容器高度设为「按钮高 + y」，
+/// 按钮在容器内的偏移保持系统默认。实测（macOS 26，y=11）按钮中线约在 y − 2.5 处，
+/// 因此这里按期望的中线反推 y。
 #[cfg(target_os = "macos")]
 fn with_macos_overlay_titlebar<'a, R: tauri::Runtime, M: Manager<R>>(
     builder: WebviewWindowBuilder<'a, R, M>,
@@ -22,7 +34,7 @@ fn with_macos_overlay_titlebar<'a, R: tauri::Runtime, M: Manager<R>>(
     builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(LogicalPosition::new(16.0, 11.0))
+        .traffic_light_position(LogicalPosition::new(MAC_TRAFFIC_LIGHTS_X, MAC_TITLEBAR_CENTER_Y + 2.5))
 }
 
 /// 将隐藏的目标窗口重新定位到来源窗口所在的显示器上（居中）。

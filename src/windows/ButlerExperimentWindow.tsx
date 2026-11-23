@@ -12,10 +12,10 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
-import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
+import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
-import { MacTitleBarInset, useMacOverlayTitleBar } from "@/components/window/MacTitleBarInset";
+import { useMacOverlayTitleBar } from "@/components/window/MacTitleBar";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1194,7 +1194,6 @@ function ButlerExperimentWindow() {
                     style={{ width: contactRail.width }}
                     data-aipp-slot="butler-task-rail"
                 >
-                    <MacTitleBarInset />
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
                         focused={focused} ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
@@ -1258,6 +1257,13 @@ function ButlerExperimentWindow() {
                                     ))}
                                 </div>
                             )}
+                        </div>
+                    )}
+                    {macOverlayTitleBar && (
+                        // macOS 左上角归红黄绿按钮，设置、更新与主动整理入口收在侧栏底部
+                        <div className="flex shrink-0 items-center gap-0.5 border-t border-border px-2 py-1.5" data-aipp-slot="butler-rail-footer">
+                            <ButlerAppActions ready={!!mainConversationId} onOpenSettings={handleOpenSettings}
+                                onOpenProactive={proactive.saved?.enabled ? () => setProactiveCenterOpen(true) : undefined}/>
                         </div>
                     )}
                 </div>

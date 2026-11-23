@@ -1,11 +1,48 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ButlerContactList from "./ButlerContactList";
+import { __resetPlatformCacheForTests } from "@/hooks/use-platform";
 
 import { mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
 describe("ButlerContactList", () => {
-    beforeEach(() => { mockInvokeHandler("get_butler_contact_order", () => []); });
+    beforeEach(() => {
+        __resetPlatformCacheForTests();
+        mockInvokeHandler("get_platform", () => "windows");
+        mockInvokeHandler("get_butler_contact_order", () => []);
+    });
+
+    it("should put list actions beside the macOS traffic lights and leave settings to the rail footer", async () => {
+        mockInvokeHandler("get_platform", () => "macos");
+        render(<ButlerContactList
+            chief="总管家"
+            contacts={[]}
+            ready
+            previews={[]}
+            plugins={[]}
+            error=""
+            onRefresh={() => {}}
+            onSelect={() => {}}
+            onSearch={() => {}}
+            onOpenSettings={() => {}}
+            onAssistantAction={() => {}}
+            groups={[]}
+            onSelectGroup={() => {}}
+            onCreateGroup={() => {}}
+            onDeleteGroup={() => {}}
+            activity={{ visuals: new Map(), approvals: new Set(), error: "", acknowledge: undefined }}
+        />);
+
+        const titleBar = await waitFor(() => {
+            const el = document.querySelector('[data-aipp-slot="butler-rail-titlebar"]');
+            expect(el).toBeTruthy();
+            return el as HTMLElement;
+        });
+        expect(titleBar).toHaveAttribute("data-tauri-drag-region");
+        expect(titleBar).toContainElement(screen.getByRole("button", { name: "搜索管家消息" }));
+        expect(titleBar).toContainElement(screen.getByRole("button", { name: "添加助手" }));
+        expect(screen.queryByRole("button", { name: "总管家设置" })).toBeNull();
+    });
     it("should open settings and show a downloading update beside it in the contact list", async () => {
         const onOpenSettings = vi.fn();
         mockInvokeHandler("get_app_update_status", () => ({ revision: 1, version: "2.0", phase: "downloading" }));

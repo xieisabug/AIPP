@@ -4,7 +4,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
-import { MacTitleBarInset } from "../components/window/MacTitleBarInset";
+import { useMacOverlayTitleBar } from "../components/window/MacTitleBar";
 import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, {
     ConversationUIRef,
@@ -35,7 +35,8 @@ import { useVaultInputRequests } from "../hooks/useVaultInputRequests";
 import { vaultInlineItems } from "../components/conversation/VaultUseCard";
 import { vaultInputInlineItems } from "../components/conversation/VaultInputCard";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
-import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import { formatShortcutDisplay, useAppShortcuts } from "../hooks/useAppShortcuts";
+import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "../data/Shortcuts";
 import useConversationManager from "../hooks/useConversationManager";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
@@ -194,6 +195,14 @@ function ChatUIWindow() {
     // 防泄露模式配置
     const { getConfigValue } = useFeatureConfig();
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
+    // macOS：搜索与新对话嵌进红黄绿按钮所在的标题栏行，不单独占行
+    const macOverlayTitleBar = useMacOverlayTitleBar();
+    // 侧栏「搜索 / 新对话」悬停提示里的当前快捷键（用户可在设置里改）
+    const shortcutHint = (actionId: string) => formatShortcutDisplay(getConfigValue(
+        "shortcuts",
+        APP_SHORTCUT_KEY_PREFIX + actionId,
+        SHORTCUT_ACTIONS.find((action) => action.id === actionId)?.defaultShortcut ?? "",
+    ));
 
     // 检测移动端
     const isNarrow = useIsMobile();
@@ -984,16 +993,27 @@ function ChatUIWindow() {
     }
 
     // 桌面端布局
+    const sidebarToolbar = (
+        <ChatUIToolbar
+            layout={macOverlayTitleBar ? "inline" : "row"}
+            onNewConversation={handleNewConversation}
+            onSearch={() => setSearchOpen(true)}
+            newConversationShortcut={shortcutHint("chat.new")}
+            searchShortcut={shortcutHint("chat.search")}
+        />
+    );
     return (
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                 <div className="flex-none w-[280px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2" data-aipp-slot="chat-sidebar">
-                    <MacTitleBarInset className="bg-secondary" />
-                    <ChatUIInfomation />
-                    <ChatUIToolbar
-                        onNewConversation={handleNewConversation}
-                        onSearch={() => setSearchOpen(true)}
-                    />
+                    {macOverlayTitleBar ? (
+                        <ChatUIInfomation titleBarActions={sidebarToolbar} />
+                    ) : (
+                        <>
+                            <ChatUIInfomation />
+                            {sidebarToolbar}
+                        </>
+                    )}
                     <ConversationList
                         conversationId={selectedConversation}
                         onSelectConversation={handleSelectConversation}

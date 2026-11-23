@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import ChatUIInfomation from "./ChatUIInfomation";
 
-const platformState = vi.hoisted(() => ({ mobile: false }));
+const platformState = vi.hoisted(() => ({ mobile: false, platform: "windows" as string }));
 vi.mock("../hooks/use-platform", () => ({
     useIsMobilePlatform: () => platformState.mobile,
+    usePlatform: () => platformState.platform,
 }));
 vi.mock("../lib/mobileUnsupported", () => ({
     useFeatureAvailableOnPlatform: () => !platformState.mobile,
@@ -20,6 +21,7 @@ const slot = (name: string) => document.querySelector(`[data-aipp-slot="${name}"
 describe("ChatUIInfomation platform gating", () => {
     beforeEach(() => {
         platformState.mobile = false;
+        platformState.platform = "windows";
         vi.mocked(invoke).mockClear();
     });
 
@@ -31,6 +33,40 @@ describe("ChatUIInfomation platform gating", () => {
             fireEvent.click(slot("chat-info-open-config")!);
         });
         expect(vi.mocked(invoke)).toHaveBeenCalledWith("open_config_window");
+    });
+
+    it("should put tools beside the logo below the macOS traffic-light row", () => {
+        platformState.platform = "macos";
+        render(<ChatUIInfomation />);
+        const titleBar = slot("chat-info-titlebar")!;
+        expect(titleBar).toHaveAttribute("data-tauri-drag-region");
+        expect(titleBar.style.paddingLeft).toBe("92px");
+        const brand = slot("chat-info-brand")!;
+        expect(brand).toHaveAttribute("data-tauri-drag-region");
+        expect(brand).toContainElement(screen.getByTestId("logo"));
+        expect(brand).toContainElement(slot("chat-info-open-config"));
+        expect(brand).toContainElement(slot("chat-info-open-artifacts"));
+        expect(brand).toContainElement(slot("chat-info-open-schedule"));
+        expect(slot("chat-info-open-config")).not.toHaveAttribute("data-tauri-drag-region");
+    });
+
+    it("should place search and new conversation beside the traffic lights on macOS only", () => {
+        platformState.platform = "macos";
+        const { rerender } = render(<ChatUIInfomation titleBarActions={<button>新对话</button>} />);
+        expect(slot("chat-info-titlebar")).toContainElement(screen.getByRole("button", { name: "新对话" }));
+
+        platformState.platform = "windows";
+        rerender(<ChatUIInfomation titleBarActions={<button>新对话</button>} />);
+        expect(screen.queryByRole("button", { name: "新对话" })).toBeNull();
+    });
+
+    it("should keep logo and tools in one row off macOS", () => {
+        render(<ChatUIInfomation />);
+        const bar = slot("chat-info-bar")!;
+        expect(slot("chat-info-titlebar")).toBeNull();
+        expect(bar).not.toHaveAttribute("data-tauri-drag-region");
+        expect(bar).toContainElement(screen.getByTestId("logo"));
+        expect(bar).toContainElement(slot("chat-info-open-config"));
     });
 
     it("desktop narrow screen still opens a separate config window", async () => {

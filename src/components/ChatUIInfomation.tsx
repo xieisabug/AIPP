@@ -5,11 +5,11 @@ import { AppUpdateNotice } from "./AppUpdateNotice";
 import { useLogoState } from "../hooks/useLogoState";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { Button } from "./ui/button";
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { navigateMobile } from "../mobile/navigation";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
-import { useMacOverlayTitleBar } from "./window/MacTitleBarInset";
+import { MacTitleBar, useMacOverlayTitleBar } from "./window/MacTitleBar";
 import { cn } from "../utils/utils";
 
 interface ChatUIInfomationProps {
@@ -23,18 +23,22 @@ interface ChatUIInfomationProps {
      * 未传时回退到 useIsMobilePlatform()，避免仅靠宽度误开多窗口。
      */
     preferInAppNavigation?: boolean;
+    /** macOS Overlay 标题栏下与红黄绿按钮同排的主操作（搜索、新对话）；其他平台不渲染，由窗口单独放置。 */
+    titleBarActions?: ReactNode;
 }
 
 const ChatUIInfomation = memo(function ChatUIInfomation({
     showArtifacts = true,
     showSchedule = true,
     onNavigate,
+    titleBarActions,
 }: ChatUIInfomationProps) {
     const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
     const isMobilePlatform = useIsMobilePlatform();
     const multiWindowAvailable = useFeatureAvailableOnPlatform("desktop_multi_window");
-    // macOS Overlay 标题栏：上方已有红黄绿按钮拖拽条，收紧顶部留白并让信息栏空白处也可拖动窗口
+    // macOS Overlay 标题栏下工具按钮与 Logo 同排，改用与 Logo 等高的紧凑图标按钮
     const macOverlayTitleBar = useMacOverlayTitleBar();
+    const actionButtonProps = macOverlayTitleBar ? { size: "icon" as const, className: "size-8" } : {};
     // 导航取决于运行平台，桌面窄窗口仍使用桌面窗口。
     const useInAppNav = isMobilePlatform;
 
@@ -90,42 +94,59 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
         }
     };
 
-    return (
-        <div
-            className={cn("flex justify-between px-5 border-border bg-secondary", macOverlayTitleBar ? "pt-1 pb-4" : "py-4")}
-            data-tauri-drag-region={macOverlayTitleBar || undefined}
-            data-aipp-slot="chat-info-bar"
-        >
-            <div className="flex items-center gap-2 bg-secondary" data-aipp-slot="chat-info-logo">
-                <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
-            </div>
-            <div className="flex flex-wrap items-center justify-end gap-1" data-aipp-slot="chat-info-actions">
-                {/* 防泄露模式眼睛图标按钮 */}
-                {antiLeakageEnabled && (
-                    <Button
-                        onClick={toggleReveal}
-                        variant={"ghost"}
-                        title={isRevealed ? "隐藏原文" : "显示原文"}
-                        data-aipp-slot="chat-info-toggle-anti-leakage"
-                    >
-                        {isRevealed ? <EyeOff /> : <Eye />}
-                    </Button>
-                )}
-                <Button onClick={openConfig} variant={"ghost"} data-aipp-slot="chat-info-open-config">
-                    <Settings />
+    const logo = (
+        <div className="flex items-center gap-2 bg-secondary" data-aipp-slot="chat-info-logo">
+            <AnimatedLogo state={logoState} size={32} onClick={showNormal} />
+        </div>
+    );
+    const actions = (
+        <div className={cn("flex flex-wrap items-center justify-end", macOverlayTitleBar ? "gap-0.5" : "gap-1")} data-aipp-slot="chat-info-actions">
+            {/* 防泄露模式眼睛图标按钮 */}
+            {antiLeakageEnabled && (
+                <Button
+                    onClick={toggleReveal}
+                    variant={"ghost"}
+                    title={isRevealed ? "隐藏原文" : "显示原文"}
+                    {...actionButtonProps} data-aipp-slot="chat-info-toggle-anti-leakage"
+                >
+                    {isRevealed ? <EyeOff /> : <Eye />}
                 </Button>
-                <AppUpdateNotice />
-                {canShowArtifacts && (
-                    <Button onClick={openArtifactsCollections} variant={"ghost"} data-aipp-slot="chat-info-open-artifacts">
-                        <PackageOpen />
-                    </Button>
-                )}
-                {canShowSchedule && (
-                    <Button onClick={openScheduleWindow} variant={"ghost"} data-aipp-slot="chat-info-open-schedule">
-                        <CalendarClock />
-                    </Button>
-                )}
+            )}
+            <Button onClick={openConfig} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-config">
+                <Settings />
+            </Button>
+            <AppUpdateNotice />
+            {canShowArtifacts && (
+                <Button onClick={openArtifactsCollections} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-artifacts">
+                    <PackageOpen />
+                </Button>
+            )}
+            {canShowSchedule && (
+                <Button onClick={openScheduleWindow} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-schedule">
+                    <CalendarClock />
+                </Button>
+            )}
+        </div>
+    );
+
+    if (macOverlayTitleBar) {
+        // macOS Overlay 标题栏：第一行是红黄绿按钮 + 搜索与新对话（与管家、设置窗口同高同位），
+        // 第二行左侧 Logo、右侧工具按钮；两行空白处都可拖动窗口。
+        return (
+            <div className="flex shrink-0 flex-col border-border bg-secondary" data-aipp-slot="chat-info-bar">
+                <MacTitleBar data-aipp-slot="chat-info-titlebar">{titleBarActions}</MacTitleBar>
+                <div className="flex items-center justify-between gap-2 pb-3 pl-5 pr-2" data-tauri-drag-region data-aipp-slot="chat-info-brand">
+                    {logo}
+                    {actions}
+                </div>
             </div>
+        );
+    }
+
+    return (
+        <div className="flex justify-between py-4 px-5 border-border bg-secondary" data-aipp-slot="chat-info-bar">
+            {logo}
+            {actions}
         </div>
     );
 });

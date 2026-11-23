@@ -13,6 +13,7 @@ import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview } from "./butlerGroupModel";
 import { AppUpdateNotice } from "@/components/AppUpdateNotice";
+import { MacTitleBar, useMacOverlayTitleBar } from "@/components/window/MacTitleBar";
 
 /** 待审批和头像未读标记分别展示。 */
 function ApprovalDot() {
@@ -37,7 +38,7 @@ interface Props {
     onSelect: (assistant?: AssistantListItem) => void;
     /** 打开管家消息搜索（与 ChatUI 搜索一致，范围限定为管家模式产生的消息） */
     onSearch: () => void;
-    /** 打开总管家设置。入口在联系人列表左上角。 */
+    /** 打开总管家设置。入口在联系人列表左上角（macOS 由窗口放到侧栏底部）。 */
     onOpenSettings: () => void;
     /** 打开主动整理（跟进事项与整理手记）。只在主动整理已开启时传入，不传则不显示入口。 */
     onOpenProactive?: () => void;
@@ -56,8 +57,36 @@ function groupUnread(group: ButlerGroupSummary, selected: boolean) {
     return !selected && !!group.unread;
 }
 
+/**
+ * 侧栏图标按钮样式：桌面沿用描边圆钮；macOS 与红黄绿按钮同排时用无边框图标，
+ * 像系统标题栏工具按钮一样轻，且 3 个按钮在最窄侧栏（200px）也不压到红黄绿按钮。
+ */
+function railIconButtonProps(macOverlayTitleBar: boolean) {
+    return macOverlayTitleBar
+        ? { variant: "ghost" as const, className: "size-8 rounded-full text-muted-foreground hover:text-foreground" }
+        : { variant: "outline" as const, className: "size-8 rounded-full" };
+}
+
+/** 总管家设置、更新提示与主动整理入口：桌面在联系人列表左上角，macOS 放在侧栏底部。 */
+export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive }: {
+    ready: boolean;
+    onOpenSettings: () => void;
+    onOpenProactive?: () => void;
+}) {
+    const macOverlayTitleBar = useMacOverlayTitleBar();
+    const iconButton = railIconButtonProps(macOverlayTitleBar);
+    return <>
+        <Button size="icon" {...iconButton} aria-label="总管家设置" title="总管家设置"
+            onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
+        <AppUpdateNotice rounded={!macOverlayTitleBar} />
+        {onOpenProactive && <Button size="icon" {...iconButton} aria-label="主动整理" title="主动整理：跟进事项与整理手记"
+            disabled={!ready} onClick={onOpenProactive} data-aipp-slot="butler-proactive-open"><CalendarHeart/></Button>}
+    </>;
+}
+
 export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onOpenProactive, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
+    const macOverlayTitleBar = useMacOverlayTitleBar();
     const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
     const pendingApprovals = usePendingApprovalConversations();
@@ -101,24 +130,25 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
                 : state(assistant.id) === "alerting" ? <UnreadDot/> : null}
         </button></AssistantItemContextMenu> };
     });
+    const iconButton = railIconButtonProps(macOverlayTitleBar);
+    const listActions = <>
+        <Button size="icon" {...iconButton} aria-label="搜索管家消息" title="搜索管家消息"
+            disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
+        <Button size="icon" {...iconButton} aria-label="发起群聊" title="发起群聊"
+            disabled={!ready} onClick={onCreateGroup} data-aipp-slot="butler-create-group"><UsersRound/></Button>
+        <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh} pluginList={plugins}
+            triggerButtonProps={{...iconButton,size:"icon",title:"添加助手","aria-label":"添加助手"}}/>
+    </>;
     return <>
-        <div className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-1.5 px-3 py-1">
-            <div className="flex items-center gap-1.5">
-                <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="总管家设置" title="总管家设置"
-                    onClick={onOpenSettings} data-aipp-slot="butler-main-open-settings"><Settings/></Button>
-                <AppUpdateNotice rounded />
-                {onOpenProactive && <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="主动整理" title="主动整理：跟进事项与整理手记"
-                    disabled={!ready} onClick={onOpenProactive} data-aipp-slot="butler-proactive-open"><CalendarHeart/></Button>}
-            </div>
-            <div className="flex items-center gap-1.5">
-                <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="搜索管家消息" title="搜索管家消息"
-                    disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
-                <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="发起群聊" title="发起群聊"
-                    disabled={!ready} onClick={onCreateGroup} data-aipp-slot="butler-create-group"><UsersRound/></Button>
-                <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh} pluginList={plugins}
-                    triggerButtonProps={{variant:"outline",size:"icon",className:"size-8 rounded-full",title:"添加助手","aria-label":"添加助手"}}/>
-            </div>
-        </div>
+        {macOverlayTitleBar
+            // macOS：左上角归红黄绿按钮，列表操作与之同排；设置类入口由窗口放到侧栏底部（ButlerAppActions）
+            ? <MacTitleBar data-aipp-slot="butler-rail-titlebar">{listActions}</MacTitleBar>
+            : <div className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-1.5 px-3 py-1">
+                <div className="flex items-center gap-1.5">
+                    <ButlerAppActions ready={ready} onOpenSettings={onOpenSettings} onOpenProactive={onOpenProactive}/>
+                </div>
+                <div className="flex items-center gap-1.5">{listActions}</div>
+            </div>}
         <div className="mb-4 flex shrink-0 justify-center">
             <button onClick={() => { acknowledge?.(0); onSelect(); }} aria-pressed={selected === undefined && selectedGroup === undefined}
                 className="flex max-w-full flex-col items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-medium hover:bg-muted aria-pressed:bg-muted">
