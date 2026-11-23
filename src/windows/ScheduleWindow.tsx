@@ -27,6 +27,7 @@ import type {
     ScheduledTaskRunEvent,
 } from "@/components/schedule/scheduleTypes";
 import { Calendar, Clock, HelpCircle, Plus, RefreshCw } from "lucide-react";
+import { WindowTopBar } from "@/components/window/WindowTitleBar";
 
 const GROUP_ORDER: TaskGroup[] = ["attention", "active", "paused", "finished"];
 const LOG_LIMIT = 500;
@@ -367,6 +368,9 @@ export default function ScheduleWindow() {
     return (
         <div className="flex h-screen items-center justify-center bg-background" data-aipp-window="schedule" data-aipp-slot="window-root">
             <div className="flex h-screen w-full flex-col overflow-hidden bg-card shadow-none" data-aipp-slot="schedule-main-panel">
+                {/* 桌面统一标题栏：与聊天 / 管家窗口头部同高，承担拖动与窗口按钮 */}
+                <WindowTopBar title="定时任务" icon={<Clock />} data-aipp-slot="schedule-titlebar" />
+                <div className="min-h-0 flex-1">
                 <ConfigPageLayout
                     sidebar={sidebar}
                     content={content}
@@ -390,6 +394,7 @@ export default function ScheduleWindow() {
                     }
                     showEmptyState={!isLoading && tasks.length === 0}
                 />
+                </div>
             </div>
 
             <ScheduleTaskEditor

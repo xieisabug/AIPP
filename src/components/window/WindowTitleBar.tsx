@@ -5,7 +5,7 @@ import { usePlatform } from "@/hooks/use-platform";
 import { cn } from "@/utils/utils";
 
 /**
- * 桌面主窗口（聊天 / 管家 / 设置）的标题栏布局，三个桌面平台尽量长得一样：
+ * 桌面窗口（聊天 / 管家 / 设置，以及定时任务 / Artifacts 合集等次级窗口）的标题栏布局，三个桌面平台尽量长得一样：
  *
  * - macOS：Overlay 标题栏（`src-tauri/src/window.rs` 的 `with_macos_overlay_titlebar`），
  *   红黄绿按钮悬浮在侧边栏第一行左侧，顶栏内容从 `MAC_TRAFFIC_LIGHTS_SAFE_LEFT` 开始；
@@ -148,6 +148,41 @@ export function WindowControls({ className }: { className?: string }) {
                 onClick={() => void appWindow().close()} data-aipp-slot="window-controls-close">
                 <X className="size-4" strokeWidth={1.5} />
             </button>
+        </div>
+    );
+}
+
+interface WindowTopBarProps {
+    title: string;
+    icon?: ReactNode;
+    /** 标题右侧、窗口控制按钮之前的操作按钮。 */
+    children?: ReactNode;
+    "data-aipp-slot"?: string;
+}
+
+/**
+ * 次级窗口（定时任务、Artifacts 合集）没有侧边栏，用一条横跨窗口的顶栏承担标题栏：
+ * 与主窗口头部同高（`WINDOW_HEADER_HEIGHT`），macOS 左侧让出红黄绿按钮，Windows 右侧排窗口控制按钮，
+ * 空白处与标题可拖动窗口。Linux 保留系统标题栏，这里只作为页面标题行；非桌面平台不渲染。
+ */
+export function WindowTopBar({ title, icon, children, "data-aipp-slot": slot = "window-top-bar" }: WindowTopBarProps) {
+    const enabled = useWindowTitleBarLayout();
+    const mac = useMacOverlayTitleBar();
+    const frameless = useFramelessTitleBar();
+    if (!enabled) return null;
+    const drag = frameless || undefined;
+    return (
+        <div
+            data-tauri-drag-region={drag}
+            data-aipp-slot={slot}
+            className="flex shrink-0 select-none items-center gap-2 border-b border-border pr-3"
+            style={{ height: WINDOW_HEADER_HEIGHT, paddingLeft: mac ? MAC_TRAFFIC_LIGHTS_SAFE_LEFT : 20 }}
+        >
+            {icon && <span className="flex shrink-0 text-muted-foreground [&>svg]:size-4" data-tauri-drag-region={drag}>{icon}</span>}
+            <span className="min-w-0 truncate text-sm font-medium" data-tauri-drag-region={drag} data-aipp-slot={`${slot}-title`}>{title}</span>
+            <div className="min-w-0 flex-1 self-stretch" data-tauri-drag-region={drag} />
+            {children}
+            <WindowControls className="ml-2" />
         </div>
     );
 }

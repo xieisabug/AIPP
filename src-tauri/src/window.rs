@@ -37,7 +37,7 @@ fn with_macos_overlay_titlebar<'a, R: tauri::Runtime, M: Manager<R>>(
         .traffic_light_position(LogicalPosition::new(MAC_TRAFFIC_LIGHTS_X, MAC_TITLEBAR_CENTER_Y + 2.5))
 }
 
-/// Windows 主窗口（聊天 / 管家 / 设置）去掉系统标题栏，与 macOS 的 Overlay 布局保持一致：
+/// Windows 主窗口（聊天 / 管家 / 设置）与定时任务、Artifacts 合集窗口去掉系统标题栏，与 macOS 的 Overlay 布局保持一致：
 /// 最小化 / 最大化 / 关闭由前端 `src/components/window/WindowTitleBar.tsx` 的 `WindowControls`
 /// 画在窗口右上角，顶部空白处通过 `data-tauri-drag-region` 拖动窗口。
 /// 保留系统阴影（Windows 11 上同时保留圆角与边缘缩放）。
@@ -1002,6 +1002,12 @@ fn create_artifact_collections_window(app_handle: &AppHandle) {
             builder.center()
         };
 
+        // 与主窗口统一的标题栏：前端 `WindowTopBar` 承担标题、拖动与窗口按钮
+        #[cfg(target_os = "macos")]
+        let builder = with_macos_overlay_titlebar(builder);
+        #[cfg(target_os = "windows")]
+        let builder = with_windows_custom_titlebar(builder);
+
         match builder.build() {
             Ok(_window) => {
                 info!("Artifact collections window created successfully");
@@ -1161,6 +1167,12 @@ fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool)
         } else {
             builder = builder.center();
         }
+
+        // 与主窗口统一的标题栏：前端 `WindowTopBar` 承担标题、拖动与窗口按钮
+        #[cfg(target_os = "macos")]
+        let builder = with_macos_overlay_titlebar(builder);
+        #[cfg(target_os = "windows")]
+        let builder = with_windows_custom_titlebar(builder);
 
         match builder.build() {
             Ok(window) => {

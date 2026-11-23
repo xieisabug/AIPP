@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FloatingWindowControls, WindowControls, WindowTitleBar } from "./WindowTitleBar";
+import { FloatingWindowControls, WindowControls, WindowTitleBar, WindowTopBar } from "./WindowTitleBar";
 
 const platformState = vi.hoisted(() => ({ platform: "windows" as string }));
 vi.mock("@/hooks/use-platform", () => ({ usePlatform: () => platformState.platform }));
@@ -82,5 +82,29 @@ describe("WindowTitleBar", () => {
         platformState.platform = "android";
         render(<WindowTitleBar data-aipp-slot="bar" />);
         expect(document.querySelector('[data-aipp-slot="bar"]')).toBeNull();
+    });
+});
+
+describe("WindowTopBar", () => {
+    it.each([
+        ["macos", "92px", true, false],
+        ["windows", "20px", true, true],
+        ["linux", "20px", false, false],
+    ])("should lay out the secondary-window title bar on %s", (platform, paddingLeft, draggable, controls) => {
+        platformState.platform = platform;
+        render(<WindowTopBar title="定时任务" data-aipp-slot="top"><button>刷新</button></WindowTopBar>);
+        const bar = document.querySelector('[data-aipp-slot="top"]') as HTMLElement;
+        expect(bar.style.paddingLeft).toBe(paddingLeft);
+        expect(bar.style.height).toBe("68px");
+        expect(bar.hasAttribute("data-tauri-drag-region")).toBe(draggable);
+        expect(screen.getByText("定时任务")).toBeInTheDocument();
+        expect(bar).toContainElement(screen.getByRole("button", { name: "刷新" }));
+        expect(!!screen.queryByRole("button", { name: "关闭" })).toBe(controls);
+    });
+
+    it("should not render on mobile", () => {
+        platformState.platform = "android";
+        render(<WindowTopBar title="定时任务" data-aipp-slot="top" />);
+        expect(document.querySelector('[data-aipp-slot="top"]')).toBeNull();
     });
 });

@@ -159,7 +159,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
             {/* Collapsed state - show toggle tab */}
             {!isExpanded && (
                 <div 
-                    className="absolute inset-0 flex items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors border-l border-border"
+                    className="absolute inset-0 flex items-center justify-center cursor-pointer hover:bg-muted/50 transition-colors rounded-l-lg border-l border-border"
                     onClick={handleToggle}
                     data-aipp-slot="chat-inline-sidebar-collapsed-toggle"
                 >
@@ -176,7 +176,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
 
             {/* Expanded state */}
             {isExpanded && (
-                <div className="h-full flex flex-col bg-background border-l border-border overflow-hidden" data-aipp-slot="chat-inline-sidebar-expanded">
+                <div className="h-full flex flex-col bg-background border-l border-border rounded-l-lg overflow-hidden" data-aipp-slot="chat-inline-sidebar-expanded">
                     {/* Resize handle */}
                     <div
                         className={cn(
