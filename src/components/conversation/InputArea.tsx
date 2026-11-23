@@ -1451,7 +1451,9 @@ const InputArea = React.memo(
                     data-aipp-slot="chat-input-area"
                     data-attachment-count={attachmentCount}
                 >
-                    {permissionConversationIds && <ComposerPermissionSlot conversationIds={permissionConversationIds} placement={placement} />}
+                    {permissionConversationIds ? (
+                        <ComposerPermissionSlot conversationIds={permissionConversationIds} placement={placement} />
+                    ) : null}
                     {isMobile && hasAttachments ? (
                         <div
                             className="input-area-attachment-tray"

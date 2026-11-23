@@ -21,6 +21,7 @@ function InputAreaHarness({
     onPlanModeToggle,
     isMobile = false,
     placement = "bottom",
+    permissionConversationIds,
     onSend = () => {},
     fileInfoList = null,
     onDeleteFile = () => {},
@@ -38,6 +39,7 @@ function InputAreaHarness({
     onPlanModeToggle?: () => void;
     isMobile?: boolean;
     placement?: "top" | "bottom";
+    permissionConversationIds?: number | readonly number[];
     onSend?: () => void;
     fileInfoList?: import("../../data/Conversation").FileInfo[] | null;
     onDeleteFile?: (id: number) => void;
@@ -58,6 +60,7 @@ function InputAreaHarness({
             busySendBehavior={busySendBehavior}
             aiIsResponsing={aiIsResponsing}
             placement={placement}
+            permissionConversationIds={permissionConversationIds}
             isMobile={isMobile}
             planMode={planMode}
             planModeSwitching={planModeSwitching}
@@ -87,6 +90,13 @@ describe("InputArea slash completion", () => {
                 tags: ["react", "frontend"],
             },
         ]);
+    });
+
+    it.each(["top", "bottom"] as const)("should hide the zero when the %s composer has no conversation yet", async (placement) => {
+        await act(async () => {
+            render(<InputAreaHarness placement={placement} permissionConversationIds={0} />);
+        });
+        expect(screen.queryByText("0")).not.toBeInTheDocument();
     });
 
     it("should request continuation when clicking send with a blank idle draft", async () => {
