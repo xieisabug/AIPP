@@ -242,6 +242,7 @@ windowCss: {
 
 - `contributions.slots[].location = "chat.input.send-button-visual"`
 - 插件实现 `renderSlot(slotId, context)`
+- 对于声明 `themeType` 的插件，宿主仅在该插件拥有当前主题时调用发送按钮的两个 slot。一个插件注册多个主题时，可以通过 `context.activeTheme` 区分主题。
 - `context.isResponding` 表示当前按钮处于停止生成状态
 - `context.windowLabel` 可区分 `chat_ui` 与 `butler_experiment`
 - 图片资源优先放在插件目录内，并通过 `systemApi.assetUrl("assets/xxx.svg")` 引用

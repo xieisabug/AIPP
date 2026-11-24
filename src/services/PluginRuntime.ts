@@ -894,6 +894,32 @@ class PluginRuntime {
         };
     }
 
+    renderSendButtonSlot(
+        plugins: LoadedPlugin[],
+        location: "chat.input.send-button-visual" | "chat.input.send-button-icon",
+        context: Record<string, unknown> & { activeTheme: string },
+    ): React.ReactNode {
+        const themeOwner = this.pluginThemes.get(context.activeTheme)?.ownerCode;
+        const entries = plugins
+            .filter((plugin) => !plugin.pluginType.includes("themeType") || plugin.code === themeOwner)
+            .flatMap((plugin) => (plugin.contributions?.slots ?? [])
+                .filter((slot) => slot.location === location)
+                .map((slot) => ({ plugin, slot })))
+            .sort((a, b) => (a.slot.order ?? 100) - (b.slot.order ?? 100) || a.plugin.code.localeCompare(b.plugin.code));
+
+        for (const { plugin, slot } of entries) {
+            const instance = plugin.instance;
+            if (!instance || !("renderSlot" in instance) || typeof instance.renderSlot !== "function") continue;
+            try {
+                const rendered = instance.renderSlot(slot.id, context);
+                if (rendered) return rendered;
+            } catch (error) {
+                console.error(`[PluginRuntime] Failed to render slot '${slot.id}' from '${plugin.code}':`, error);
+            }
+        }
+        return null;
+    }
+
     async listDisplayThemes(): Promise<PluginThemeDefinition[]> {
         return [...this.pluginThemes.values()]
             .map((theme) => ({

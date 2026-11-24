@@ -63,6 +63,7 @@ interface AgentRuntimeInfo {
 
 // 导入新创建的 hooks
 import { usePluginManagement } from "@/hooks/usePluginManagement";
+import { pluginRuntime } from "@/services/PluginRuntime";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
 import { useConversationDraft } from "@/hooks/useConversationDraft";
 import { previewMobile } from "@/mobile/navigation";
@@ -2177,60 +2178,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ]
         );
 
-        const renderSendButtonSlot = useCallback((location: string) => {
-            const slotEntries = pluginList
-                .flatMap((plugin) =>
-                    (plugin.contributions?.slots ?? []).map((slot: {
-                        id: string;
-                        location: string;
-                        order?: number | null;
-                    }) => ({
-                        plugin,
-                        slot,
-                    }))
-                )
-                .filter(({ slot }) => slot.location === location)
-                .sort((left, right) => {
-                    const leftOrder = left.slot.order ?? 100;
-                    const rightOrder = right.slot.order ?? 100;
-                    if (leftOrder !== rightOrder) {
-                        return leftOrder - rightOrder;
-                    }
-                    return String(left.plugin.code ?? "").localeCompare(String(right.plugin.code ?? ""));
-                });
-
-            for (const { plugin, slot } of slotEntries) {
-                const instance = plugin.instance as
-                    | {
-                        renderSlot?: (slotId: string, context?: Record<string, unknown>) => ReactNode;
-                    }
-                    | null;
-                if (typeof instance?.renderSlot !== "function") {
-                    continue;
-                }
-                try {
-                    const rendered = instance.renderSlot(slot.id, sendButtonSlotContext);
-                    if (rendered) {
-                        return rendered;
-                    }
-                } catch (error) {
-                    console.error(
-                        `[ConversationUI] Failed to render plugin slot '${slot.id}' from '${plugin.code}':`,
-                        error
-                    );
-                }
-            }
-            return null;
-        }, [pluginList, sendButtonSlotContext]);
-
         const sendButtonVisualSlot = useMemo(
-            () => renderSendButtonSlot("chat.input.send-button-visual"),
-            [renderSendButtonSlot]
+            () => pluginRuntime.renderSendButtonSlot(pluginList, "chat.input.send-button-visual", sendButtonSlotContext),
+            [pluginList, sendButtonSlotContext]
         );
 
         const sendButtonIconSlot = useMemo(
-            () => renderSendButtonSlot("chat.input.send-button-icon"),
-            [renderSendButtonSlot]
+            () => pluginRuntime.renderSendButtonSlot(pluginList, "chat.input.send-button-icon", sendButtonSlotContext),
+            [pluginList, sendButtonSlotContext]
         );
 
         const acpHeaderActions = useMemo(() => {
