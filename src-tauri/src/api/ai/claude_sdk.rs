@@ -862,6 +862,7 @@ async fn handle_permission(
     conversation_id: i64,
     frame: &Value,
     turn: i64,
+    mcp_scope: Option<&crate::acp_mcp_bridge::provenance::NativeMcpScope>,
     cwd: &std::path::Path,
     run_id: &str,
     instance_id: Option<i64>,
@@ -915,8 +916,10 @@ async fn handle_permission(
         "claude.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
     )?;
     let scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id);
+    let prompt = mcp_scope.and_then(|s| s.current_prompt().ok().flatten());
     super::agent_driver::native_agents::register_session_permission(app, &event, tx, scope,
-        butler_guard.clone(), Some(turn), "Claude Code", cwd).await?;
+        butler_guard.clone(), Some(turn), "Claude Code", cwd, prompt.as_ref(),
+        crate::acp_mcp_bridge::permission::claude_call(&request)).await?;
     let (decision, cancelled_resolution) = wait_claude_permission_decision(
         &state, &event.request_id, rx, cancellation, cancel_generation,
     ).await;
@@ -1820,7 +1823,7 @@ pub fn spawn_claude_session_task(
                             "control_request" => {
                                 if let Err(error) =
                                     crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message_id), handle_permission(
-                                        &app, _conversation_id, &frame, message_id, &config.working_directory, &task_run_id, config.instance_id, &mut stdin,
+                                        &app, _conversation_id, &frame, message_id, config.mcp_scope.as_ref(), &config.working_directory, &task_run_id, config.instance_id, &mut stdin,
                                         &mut cancellation, cancel_generation,
                                     )).await
                                 {

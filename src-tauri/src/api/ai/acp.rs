@@ -4199,8 +4199,10 @@ impl AcpTauriClient {
             "acp.permission", serde_json::to_value(&event).map_err(|e| acp::Error::internal_error().data(e.to_string()))?,
         ).map_err(|e| acp::Error::internal_error().data(e))?;
         let scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native("acp", self.instance_id, self.conversation_id, self.run_id.clone());
+        let call = args.tool_call.meta.as_ref().zip(args.tool_call.fields.raw_input.as_ref())
+            .and_then(|(meta, input)| crate::acp_mcp_bridge::permission::acp_call(meta, input, "AIPP MCP Tools"));
         super::agent_driver::native_agents::register_session_permission(&self.app_handle, &event, tx, scope,
-            butler_guard.clone(), turn, "ACP", &self.working_directory).await
+            butler_guard.clone(), turn, "ACP", &self.working_directory, prompt.as_ref(), call).await
             .map_err(|error| acp::Error::internal_error().data(error))?;
         let response = if let Some(prompt) = prompt {
             let cancellation = prompt.cancellation();

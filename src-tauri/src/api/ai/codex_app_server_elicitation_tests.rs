@@ -70,7 +70,7 @@ async fn test_codex_elicitation_stop_cancels_exact_form_and_keeps_peer() {
     state.store_request("peer".into(), Some(43), peer_sender).await;
     let signal = watch::channel(0).0;
     let cancellation = CodexRequestCancellation {
-        source_message_id: None, instance_id: Some(1), signal: signal.clone(), generation: 0, run_id: "run".into(),
+        mcp_prompt: None, source_message_id: None, instance_id: Some(1), signal: signal.clone(), generation: 0, run_id: "run".into(),
     };
     signal.send_replace(1);
     let (response, resolution) = tokio::time::timeout(Duration::from_secs(1),

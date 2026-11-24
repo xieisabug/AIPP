@@ -225,6 +225,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
         }
         approvals.set(id, { id: frame.id, options: offered });
         emit({ type: 'permission', turn, id, title: frame.params.toolCall?.title, input: frame.params.toolCall?.rawInput,
+          toolMeta: frame.params.toolCall?._meta,
           options: [...offered.map(option => ({ id: option.optionId,
             name: `${option.name || option.optionId}${option.kind === 'allow_always' ? '（会保存到智能体权限规则）' : ''}${option._meta?.['agy.security.warning']?.message ? `：${String(option._meta['agy.security.warning'].message).slice(0, 512)}` : ''}`,
             kind: option.kind })),

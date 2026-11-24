@@ -1,4 +1,5 @@
 pub(crate) mod provenance;
+pub(crate) mod permission;
 mod dynamic;
 
 use crate::db::connection::Connection;
@@ -216,6 +217,11 @@ async fn execute_proxy_tool(
     // Resolve the runtime-owned lease before any asynchronous work. Source IDs
     // supplied in request JSON are intentionally ignored.
     let prompt = provenance::capture(token, conversation_id)?;
+    if let Some(name) = request.get("review_registered_tool") {
+        let exempt = name.as_str().zip(request.get("arguments"))
+            .is_some_and(|call| prompt.review_exempt(app_handle, call));
+        return Ok(json!({"exempt": exempt}));
+    }
     let cancel = prompt.cancellation();
     let server_id = request
         .get("server_id")
@@ -243,7 +249,9 @@ async fn execute_proxy_tool(
         .map(|k| k == crate::proactive::tools::PROACTIVE_RUN_KIND)
         .unwrap_or(false);
     prompt.ensure_active()?;
+    let exempt_prompt = prompt.clone();
     let execute = dynamic::dispatch(&db, server, tool_name, &parameters, conversation_id, &access, |target| async move {
+        exempt_prompt.check_exempt_target(server_id, tool_name, &arguments, &target)?;
         let audited_call_id = if is_proactive {
             crate::proactive::gate::admit_proxy_tool(
                 app_handle,
@@ -502,6 +510,7 @@ impl AcpManualMcpBridge {
             })),
             "ping" => Ok(json!({})),
             "tools/list" => self.list_tools(),
+            "aipp/reviewExemption" => self.review_exemption(&params),
             "tools/call" => self.handle_tool_call(params),
             _ => Err(format!("Unsupported MCP method: {method}")),
         };
@@ -541,6 +550,15 @@ impl AcpManualMcpBridge {
             ],
             "isError": false
         }))
+    }
+
+    fn review_exemption(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        send_proxy_request(
+            self.proxy_addr.as_deref().ok_or("AIPP MCP proxy address missing")?,
+            false,
+            json!({"token": self.proxy_token, "conversation_id": self.conversation_id,
+                "review_registered_tool": params["name"], "arguments": params["arguments"]}),
+        )
     }
 
     fn list_tools(&mut self) -> Result<serde_json::Value, String> {
@@ -633,12 +651,12 @@ impl AcpManualMcpBridge {
         server_id: i64,
         tool_name: &str,
     ) -> bool {
-        operation_server_ids.contains(&server_id)
-            && matches!(
-                tool_name,
-                "read_file" | "write_file" | "execute_bash" | "get_bash_output"
-            )
+        operation_server_ids.contains(&server_id) && is_native_operation_duplicate(tool_name)
     }
+}
+
+fn is_native_operation_duplicate(name: &str) -> bool {
+    matches!(name, "read_file" | "write_file" | "execute_bash" | "get_bash_output")
 }
 
 fn call_proxy_tool(
@@ -650,6 +668,13 @@ fn call_proxy_tool(
     waits_for_answer: bool,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    send_proxy_request(proxy_addr, waits_for_answer, json!({
+        "token": proxy_token, "conversation_id": conversation_id, "server_id": server_id,
+        "tool_name": tool_name, "arguments": arguments,
+    }))
+}
+
+fn send_proxy_request(proxy_addr: &str, waits_for_answer: bool, request: serde_json::Value) -> Result<serde_json::Value, String> {
     let mut stream = TcpStream::connect(proxy_addr)
         .map_err(|error| format!("Failed to connect AIPP MCP proxy: {error}"))?;
     stream
@@ -659,13 +684,6 @@ fn call_proxy_tool(
         .set_write_timeout(Some(std::time::Duration::from_secs(30)))
         .map_err(|error| error.to_string())?;
 
-    let request = json!({
-        "token": proxy_token,
-        "conversation_id": conversation_id,
-        "server_id": server_id,
-        "tool_name": tool_name,
-        "arguments": arguments,
-    });
     serde_json::to_writer(&mut stream, &request).map_err(|error| error.to_string())?;
     stream.write_all(b"\n").map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;

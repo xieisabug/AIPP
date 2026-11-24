@@ -544,7 +544,8 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                                 continue;
                             }
                             let review = prepared.config.review.then(|| (driver.metadata().display_name, prepared.config.cwd.display().to_string()));
-                            queue_permission(&app, &identity, turn.id, &frame, tx.clone(), review).await?;
+                            let prompt = prepared.mcp_scope.as_ref().map(|s| s.current_prompt()).transpose()?.flatten();
+                            queue_permission(&app, &identity, turn.id, &frame, tx.clone(), review, prompt.as_ref()).await?;
                         }
                         Some("question") => {
                             if cancel_deadline.is_some() {
@@ -734,6 +735,21 @@ pub(crate) fn permission_parameters(input: &Value) -> String {
 /// Never picks a persistent `allow_always` option on the user's behalf.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ReviewOutcome { Allow(String), Ask(String) }
+
+pub(crate) async fn approve_exempt_mcp_call(
+    app: &tauri::AppHandle, event: &crate::api::ai::acp::AcpPermissionRequestEvent,
+    scope: &super::approval::AgentRequestScope, prompt: Option<&crate::acp_mcp_bridge::provenance::CapturedNativeMcpPrompt>,
+    call: Option<(&str, &Value)>,
+) -> bool {
+    use super::approval::{AgentInteractionReply, AgentPermissionReply, AgentReplyTarget};
+    let Some((prompt, call)) = prompt.zip(call) else { return false };
+    if event.options.iter().filter(|option| option.kind == "allow_once").count() != 1 { return false; }
+    let ReviewOutcome::Allow(option_id) = review_outcome(&event.options, "safe", "") else { return false };
+    if !prompt.review_exempt(app, call) { return false; }
+    let target = AgentReplyTarget { request_id: event.request_id.clone(), scope: scope.clone() };
+    crate::api::operation_api::resolve_agent_interaction_response(app, target,
+        AgentInteractionReply::Permission(AgentPermissionReply::Select { option_id })).await.is_ok()
+}
 pub(crate) fn review_outcome(options: &[crate::api::ai::acp::AcpPermissionOptionPayload], verdict: &str, reason: &str) -> ReviewOutcome {
     match verdict {
         "safe" => match options.iter().find(|option| option.kind == "allow_once") {
@@ -754,6 +770,7 @@ pub(crate) async fn register_session_permission(
     sender: oneshot::Sender<crate::api::ai::acp::AcpPermissionDecision>, scope: super::approval::AgentRequestScope,
     guard: Option<crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard>,
     turn: Option<i64>, agent: &'static str, cwd: &std::path::Path,
+    prompt: Option<&crate::acp_mcp_bridge::provenance::CapturedNativeMcpPrompt>, call: Option<(&str, &Value)>,
 ) -> Result<(), String> {
     let conversation_id = event.conversation_id.ok_or("原生权限请求缺少会话编号")?;
     let (is_proactive, review_turn) = {
@@ -782,6 +799,7 @@ pub(crate) async fn register_session_permission(
     };
     let state = app.state::<crate::api::ai::acp::AcpPermissionState>();
     state.store_request_guarded(event.clone(), sender, scope.clone(), guard).await?;
+    if approve_exempt_mcp_call(app, event, &scope, prompt, call).await { return Ok(()); }
     if let Some(turn) = review_turn {
         if is_proactive {
             tauri::async_runtime::spawn(review_proactive_permission(
@@ -902,7 +920,7 @@ pub(crate) async fn review_permission(app: tauri::AppHandle, event: crate::api::
 }
 
 async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity, turn: i64, frame: &Value, tx: mpsc::UnboundedSender<Command>,
-    review: Option<(&'static str, String)>) -> Result<(), String> {
+    review: Option<(&'static str, String)>, prompt: Option<&crate::acp_mcp_bridge::provenance::CapturedNativeMcpPrompt>) -> Result<(), String> {
     use crate::api::ai::acp::{AcpPermissionState, AcpPermissionRequestEvent, AcpPermissionOptionPayload, AcpPermissionDecision};
     let native_id = frame["id"].as_str().ok_or("Native permission request omitted ID")?.to_string();
     let request_id = format!("{}:{}:{}:{turn}:{native_id}", identity.driver_id, identity.conversation_id, identity.run_id.as_deref().unwrap_or_default());
@@ -921,13 +939,17 @@ async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity,
     let scope = super::approval::AgentRequestScope::native(&identity.driver_id, identity.instance_id.as_deref().and_then(|id|id.parse().ok()), identity.conversation_id, identity.run_id.as_deref().unwrap_or_default());
     let (sender, receiver) = oneshot::channel();
     app.state::<AcpPermissionState>().store_request_guarded(event.clone(), sender, scope.clone(), guard.clone()).await?;
-    match review {
-        Some((agent, working_directory)) => { tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, turn, agent, working_directory)); }
-        None => {
-            if let Err(error) = present_permission(app, &event, json!(event)).await {
-                app.state::<AcpPermissionState>().remove_request(&event.request_id).await;
-                return Err(error);
-            }
+    let call = match identity.driver_id.as_str() {
+        "kiro" | "antigravity" => frame["toolMeta"].as_object().zip(frame.get("input"))
+            .and_then(|(meta, input)| crate::acp_mcp_bridge::permission::acp_call(meta, input, "aipp")),
+        _ => None,
+    };
+    if !approve_exempt_mcp_call(app, &event, &scope, prompt, call).await {
+        if let Some((agent, working_directory)) = review {
+            tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, turn, agent, working_directory));
+        } else if let Err(error) = present_permission(app, &event, json!(event)).await {
+            app.state::<AcpPermissionState>().remove_request(&event.request_id).await;
+            return Err(error);
         }
     }
     let app = app.clone();

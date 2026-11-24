@@ -1,10 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openPi } from './pi.mjs';
 import { piFixture } from './test-helpers.mjs';
+
+test('should skip Pi confirmation only for a registered bridge tool cleared with its actual arguments', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aipp-pi-permission-'));
+  const previous = process.env.AIPP_PI_MCP;
+  const previousApproval = process.env.AIPP_PI_APPROVAL;
+  const hooks = new Map(), tools = [];
+  try {
+    for (const file of ['common.mjs', 'pi-extension.mjs']) {
+      await copyFile(new URL(file, import.meta.url), join(root, file));
+    }
+    const dependency = join(root, 'node_modules', 'typebox');
+    await mkdir(dependency, { recursive: true });
+    await writeFile(join(dependency, 'package.json'), JSON.stringify({ type: 'module', exports: './index.js' }));
+    await writeFile(join(dependency, 'index.js'), 'export const Type = { Unsafe: schema => schema };');
+    const fixture = join(root, 'bridge.mjs');
+    await writeFile(fixture, `
+      import { createInterface } from 'node:readline';
+      for await (const line of createInterface({input: process.stdin})) {
+        const {id,method,params} = JSON.parse(line);
+        if (!id) continue;
+        let result = {};
+        if (method === 'tools/list') result = {tools:[{name:'aipp_t42_schedule_task'}]};
+        if (method === 'aipp/reviewExemption') result = {exempt: params.name === 'aipp_t42_schedule_task' && params.arguments.action === 'list'};
+        console.log(JSON.stringify({id,result}));
+      }
+    `);
+    process.env.AIPP_PI_MCP = JSON.stringify({command:process.execPath,args:[fixture]});
+    process.env.AIPP_PI_APPROVAL = 'all';
+    const {default: install} = await import(pathToFileURL(join(root, 'pi-extension.mjs')).href);
+    await install({on: (name, fn) => hooks.set(name, fn), registerTool: t => tools.push(t), getAllTools: () => tools});
+    const denied = {ui:{confirm: async () => false}};
+    const run = (toolName, action) => hooks.get('tool_call')({toolName,input:{action}}, denied);
+    assert.equal(await run('aipp_t42_schedule_task','list'), undefined);
+    assert.equal((await run('aipp_t42_schedule_task','delete')).block, true);
+    assert.equal((await run('bash','list')).block, true);
+    tools[0] = {...tools[0], parameters:{}, sourceInfo:{path:'other-extension.mjs'}};
+    assert.equal((await run('aipp_t42_schedule_task','list')).block, true);
+  } finally {
+    await hooks.get('session_shutdown')?.();
+    if (previous === undefined) delete process.env.AIPP_PI_MCP; else process.env.AIPP_PI_MCP = previous;
+    if (previousApproval === undefined) delete process.env.AIPP_PI_APPROVAL; else process.env.AIPP_PI_APPROVAL = previousApproval;
+    await rm(root, {recursive:true,force:true});
+  }
+});
 
 test('should report every completed model request once when Pi repeats messages at agent_end', async () => {
   const f = piFixture(), events = [];

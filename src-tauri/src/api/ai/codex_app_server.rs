@@ -687,6 +687,7 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
 /// Cancellation generations belong to the prompt at enqueue time, so an idle
 /// Stop cannot cancel a later prompt, and Stop during startup is not lost.
 struct CodexRequestCancellation {
+    mcp_prompt: Option<crate::acp_mcp_bridge::provenance::CapturedNativeMcpPrompt>,
     source_message_id: Option<i64>,
     instance_id: Option<i64>,
     signal: watch::Sender<u64>,
@@ -832,7 +833,11 @@ async fn handle_approval_request(
         (is_proactive, review_turn)
     };
     permission_state.store_request_guarded(event.clone(), decision_tx, scope.clone(), butler_guard.clone()).await?;
-    if let Some(turn) = review_turn {
+    let exempt = super::agent_driver::native_agents::approve_exempt_mcp_call(
+        app_handle, &event, &scope, cancellation.and_then(|c| c.mcp_prompt.as_ref()),
+        crate::acp_mcp_bridge::permission::codex_call(method, &params),
+    ).await;
+    if let Some(turn) = review_turn.filter(|_| !exempt) {
         if is_proactive {
             tauri::async_runtime::spawn(super::agent_driver::native_agents::review_proactive_permission(
                 app_handle.clone(), event.clone(), scope, turn, "Codex",
@@ -844,7 +849,7 @@ async fn handle_approval_request(
                 params["cwd"].as_str().unwrap_or("未提供").to_string(),
             ));
         }
-    } else {
+    } else if !exempt {
         permission_state.mark_presented(&request_id, json!(event)).await;
         if let Err(error) = emit_permission_request_event(
             app_handle, ACP_PERMISSION_REQUEST_EVENT, Some(conversation_id), &event,
@@ -2354,6 +2359,7 @@ async fn run_session(
     failure_stage: &mut AgentFailureStage,
 ) -> Result<(), String> {
     let mut request_cancellation = CodexRequestCancellation {
+        mcp_prompt: None,
         source_message_id: None,
         signal: cancellation, generation: 0, run_id: run_id.to_string(), instance_id: config.instance_id,
     };
@@ -2567,6 +2573,7 @@ async fn run_session(
                 *failure_stage = AgentFailureStage::SendPrompt;
                 request_cancellation.generation = cancellation_generation;
                 request_cancellation.source_message_id = Some(message_id);
+                request_cancellation.mcp_prompt = mcp_scope.current_prompt()?;
                 let turn_start_time = chrono::Utc::now();
                 // 手动压缩：改发 thread/compact/start（立即返回 {}，压缩作为一轮 turn 以通知推进）
                 let manual_compact = images.is_empty() && super::agent_driver::manual_compact::is_manual_compact_prompt(&prompt);

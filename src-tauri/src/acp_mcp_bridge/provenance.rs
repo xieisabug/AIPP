@@ -18,14 +18,14 @@ struct ScopeInner {
     token: String,
     conversation_id: i64,
     active: Mutex<Option<Arc<PromptIdentity>>>,
-    selected_tools_file: Mutex<Option<super::SelectedMcpToolsFile>>,
+    selected_tools: Mutex<Option<(super::SelectedMcpToolsFile, Arc<super::permission::Catalog>)>>,
 }
 impl Drop for ScopeInner {
     fn drop(&mut self) {
         if let Ok(active) = self.active.get_mut() {
             if let Some(prompt) = active.take() { prompt.cancel.cancel(); }
         }
-        if let Ok(file) = self.selected_tools_file.get_mut() {
+        if let Ok(file) = self.selected_tools.get_mut() {
             file.take();
         }
         if let Ok(mut registry) = scopes().lock() { registry.remove(&self.token); }
@@ -43,6 +43,8 @@ struct PromptIdentity {
     message_id: i64,
     cancel: CancellationToken,
     signal: Mutex<Option<(watch::Receiver<u64>, u64)>>,
+    catalog: Arc<super::permission::Catalog>,
+    exemptions: Mutex<super::permission::Exemptions>,
 }
 /// The scope's token is an opaque capability for one runtime, never a global
 /// token that lets a bridge choose another conversation/source in JSON.
@@ -52,7 +54,7 @@ impl NativeMcpScope {
             token: uuid::Uuid::new_v4().to_string(),
             conversation_id,
             active: Mutex::new(None),
-            selected_tools_file: Mutex::new(None),
+            selected_tools: Mutex::new(None),
         });
         scopes().lock().map_err(|_| "Native MCP scope registry is poisoned")?
             .insert(inner.token.clone(), Arc::downgrade(&inner));
@@ -62,9 +64,10 @@ impl NativeMcpScope {
     /// Write the selected MCP tools JSON to a scope-owned temporary file so large
     /// tool payloads never exceed Windows' 32 KB environment variable limit.
     pub fn attach_selected_tools_file(&self, payload: &str) -> Result<std::path::PathBuf, String> {
+        let catalog = super::permission::catalog(payload)?;
         let file = super::SelectedMcpToolsFile::write(payload)?;
         let path = file.path().to_path_buf();
-        *self.0.selected_tools_file.lock().map_err(|_| "Native MCP tools file state is poisoned")? = Some(file);
+        *self.0.selected_tools.lock().map_err(|_| "Native MCP tools file state is poisoned")? = Some((file, Arc::new(catalog)));
         Ok(path)
     }
     pub(crate) fn current_prompt(&self) -> Result<Option<CapturedNativeMcpPrompt>, String> {
@@ -78,7 +81,10 @@ impl NativeMcpScope {
         if message_id <= 0 { return Err("Native MCP prompt requires a persisted message identity".into()); }
         let mut active = self.0.active.lock().map_err(|_| "Native MCP prompt state is poisoned")?;
         if active.is_some() { return Err("Native MCP runtime already has an active prompt".into()); }
-        let identity = Arc::new(PromptIdentity { message_id, cancel: CancellationToken::new(), signal: Mutex::new(None) });
+        let catalog = self.0.selected_tools.lock().map_err(|_| "Native MCP catalog lock poisoned")?
+            .as_ref().map(|(_, catalog)| catalog.clone()).unwrap_or_default();
+        let identity = Arc::new(PromptIdentity { message_id, cancel: CancellationToken::new(), signal: Mutex::new(None),
+            catalog, exemptions: Mutex::default() });
         *active = Some(identity.clone());
         Ok(NativeMcpPrompt { scope: Arc::downgrade(&self.0), identity, watcher: None })
     }
@@ -124,6 +130,23 @@ impl Drop for NativeMcpPrompt {
 #[derive(Clone)]
 pub struct CapturedNativeMcpPrompt { conversation_id: i64, identity: Arc<PromptIdentity> }
 impl CapturedNativeMcpPrompt {
+    pub(crate) fn review_exempt(&self, app: &tauri::AppHandle, (name, args): (&str, &serde_json::Value)) -> bool {
+        let Some(tool) = self.identity.catalog.get(name) else { return false };
+        if self.ensure_active().is_err() || !args.is_object() { return false; }
+        let cid = self.conversation_id;
+        let Ok(kind) = crate::mcp::butler_tools::conversation_kind(app, Some(cid)) else { return false };
+        if matches!(kind.as_str(), "scheduled_run" | crate::proactive::tools::PROACTIVE_RUN_KIND) { return false; }
+        let Ok(db) = crate::db::mcp_db::MCPDatabase::new(app) else { return false };
+        let Ok(access) = crate::mcp::assistant_access::Restrictions::conversation(app, Some(cid)) else { return false };
+        let Some(target) = super::permission::exempt_target(&db, tool, args, cid, &kind, &access) else { return false };
+        let Ok(mut exemptions) = self.identity.exemptions.lock() else { return false };
+        exemptions.record(tool, args, &target);
+        true
+    }
+
+    pub(super) fn check_exempt_target(&self, server: i64, name: &str, args: &serde_json::Value, target: &super::dynamic::Target) -> Result<(), String> {
+        self.identity.exemptions.lock().map_err(|_| "Native MCP exemption lock poisoned")?.check(server, name, args, target)
+    }
     pub fn source_message_id(&self) -> i64 { self.identity.message_id }
     pub fn cancellation(&self) -> CancellationToken { self.identity.cancel.clone() }
     /// Carry immutable provenance across asynchronous approvals/tool execution.

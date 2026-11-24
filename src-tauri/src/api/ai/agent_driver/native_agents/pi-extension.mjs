@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { jsonLines } from './common.mjs';
 import { Type } from 'typebox';
 
-// Pi's built-in tools that only read. Everything else (bash, edit, write, MCP tools) still asks.
+// Pi's own read-only tools. AIPP tools use the bridge's per-call classification.
 export const READ_ONLY_TOOLS = new Set(['read', 'grep', 'find', 'ls']);
 
 // Runs inside Pi, using its extension/tool API. A failed MCP handshake must stop
@@ -21,9 +22,22 @@ export default async function aippExtension(pi) {
       }
     });
     const approval = process.env.AIPP_PI_APPROVAL || 'all';
+    const registrations = new Map();
+    let reviewBridgeCall;
     if (!['all', 'read_only', 'none'].includes(approval)) throw new Error(`Unsupported Pi approval scope '${approval}'`);
     if (approval !== 'none') pi.on('tool_call', async (event, context) => {
       if (approval === 'read_only' && READ_ONLY_TOOLS.has(event.toolName)) return;
+      if (registrations.has(event.toolName)) {
+        const matches = pi.getAllTools?.().filter(tool => tool.name === event.toolName);
+        const active = matches?.length === 1 && matches[0];
+        const ownsTool = active && (active.sourceInfo?.path
+          ? active.sourceInfo.path === fileURLToPath(import.meta.url)
+          : active.parameters === registrations.get(event.toolName));
+        if (ownsTool) {
+          const review = await reviewBridgeCall(event.toolName, event.input).catch(() => null);
+          if (review?.exempt === true) return;
+        }
+      }
       if (!(await context.ui.confirm(`允许 Pi 使用 ${event.toolName}`, JSON.stringify(event.input)))) {
         return { block: true, reason: 'User denied this tool call' };
       }
@@ -58,13 +72,16 @@ export default async function aippExtension(pi) {
         child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
       });
       await call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'aipp-pi', version: '1' } });
+      reviewBridgeCall = (name, args) => call('aipp/reviewExemption', { name, arguments: args });
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
       let cursor;
       do {
         const result = await call('tools/list', cursor ? { cursor } : {});
         for (const tool of result.tools) {
+          const parameters = Type.Unsafe({ ...tool.inputSchema, type: tool.inputSchema?.type || 'object', properties: tool.inputSchema?.properties || {} });
+          registrations.set(tool.name, parameters);
           pi.registerTool({ name: tool.name, label: tool.name, description: tool.description || tool.name,
-            parameters: Type.Unsafe({ ...tool.inputSchema, type: tool.inputSchema?.type || 'object', properties: tool.inputSchema?.properties || {} }),
+            parameters,
             async execute(_id, params) {
               const result = await call('tools/call', { name: tool.name, arguments: params }, tool._meta?.['aipp/waitsForAnswer'] === true);
               if (result.isError) throw new Error(JSON.stringify(result.content));

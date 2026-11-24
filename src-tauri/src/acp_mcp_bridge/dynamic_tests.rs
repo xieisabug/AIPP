@@ -20,6 +20,27 @@ fn fixture() -> (MCPDatabase,MCPServer,i64,i64) {
 fn arguments() -> String { json!({"server_name":"Notes","tool_name":"read_notes","parameters":{"query":"hello"}}).to_string() }
 
 #[test]
+fn test_native_review_exemption_checks_loaded_dynamic_target_in_current_conversation() {
+    use crate::acp_mcp_bridge::permission::{catalog, exempt_target};
+    let (db, agent, _, external_tool) = fixture();
+    let wrapper = db.get_mcp_server_tools(agent.id).unwrap().into_iter().find(|t| t.tool_name == "call_mcp_tool").unwrap();
+    let registrations = catalog(&json!([{"server_id":agent.id,"tools":[{"tool_id":wrapper.id,"tool_name":wrapper.tool_name}]}]).to_string()).unwrap();
+    let registered = &registrations[&crate::acp_mcp_bridge::acp_loaded_tool_name(wrapper.id, &wrapper.tool_name)];
+    let artifact = db.upsert_mcp_server_with_builtin("Artifact", None, "stdio", Some("aipp:artifact"),
+        None, None, None, None, false, true, true, true, false).unwrap();
+    let id = db.upsert_mcp_server_tool(artifact, "show_artifact", None, Some("{}")).unwrap();
+    db.update_mcp_server_tool(id, true, false).unwrap();
+    db.rebuild_dynamic_mcp_catalog().unwrap();
+    db.upsert_conversation_loaded_tool(7, id, None).unwrap();
+    db.upsert_conversation_loaded_tool(7, external_tool, None).unwrap();
+    let args = json!({"server_name":"Artifact","tool_name":"show_artifact","parameters":{}});
+    let resolve = |cid, args: &serde_json::Value| exempt_target(&db, registered, args, cid, "", &Restrictions::default());
+    assert_eq!(resolve(7, &args).unwrap().server.id, artifact);
+    assert!(resolve(8, &args).is_none());
+    assert!(resolve(7, &serde_json::from_str(&arguments()).unwrap()).is_none());
+}
+
+#[test]
 fn test_native_dynamic_call_requires_object_parameters_even_for_loaded_target() {
     let (db, agent, _, tool) = fixture();
     db.upsert_conversation_loaded_tool(7, tool, None).unwrap();
