@@ -2,13 +2,6 @@ use super::*;
 use rusqlite::Connection;
 
 #[test]
-fn test_review_parameters_reject_truncation_before_model_call() {
-    assert!(validate_review_parameters(&"字".repeat(PROMPT_PARAM_LIMIT)).is_ok());
-    assert!(validate_review_parameters(&"字".repeat(PROMPT_PARAM_LIMIT + 1))
-        .unwrap_err().contains("无法完整审核"));
-}
-
-#[test]
 fn test_review_options_reject_adapters_that_ignore_schema() {
     for adapter in [AdapterKind::Copilot, AdapterKind::Cohere, AdapterKind::Ollama] {
         assert!(review_chat_options(adapter).unwrap_err().contains("不受当前适配器支持"));
@@ -390,12 +383,24 @@ fn test_format_schema_as_field_notes_flattens_properties() {
 }
 
 #[test]
-fn test_review_user_prompt_truncates_long_parameters() {
-    let long_params = "x".repeat(PROMPT_PARAM_LIMIT + 12);
-    let user = build_review_user_prompt("ops", "bash", &long_params, None, None);
-    assert!(user.contains("参数已截断"));
-    assert!(user.contains(&format!("原长度 {}", PROMPT_PARAM_LIMIT + 12)));
-    assert!(!user.contains(&long_params));
+fn test_review_requests_include_complete_long_parameters() {
+    use crate::decision::{encode_request, DecisionProtocol};
+
+    let parameters = serde_json::json!({
+        "path": "notes.md",
+        "content": format!("{}末尾的修改", "内容".repeat(6000)),
+    }).to_string();
+    let prompt = build_review_user_prompt("fs", "write_file", &parameters, None, None);
+    assert!(prompt.ends_with(&parameters));
+
+    for (model, protocol, field) in [
+        ("jev-latest", DecisionProtocol::TypesafeSystemOne, "state"),
+        ("gpt-6-luna", DecisionProtocol::OpenAiDecisions, "input"),
+    ] {
+        let request = build_decision_review_request(model, &prompt, false);
+        let payload = encode_request(protocol, &request).unwrap();
+        assert!(payload[field].as_str().unwrap().ends_with(&parameters));
+    }
 }
 
 #[test]
@@ -721,6 +726,17 @@ async fn test_review_output_operational_errors_do_not_retry() {
         assert!(result.is_err());
         assert_eq!(payloads.len(), 1);
     }
+}
+
+#[tokio::test]
+async fn test_review_output_preserves_context_limit_error() {
+    let message = "Input exceeds the model's maximum context length";
+    let body = serde_json::json!({
+        "error": { "message": message, "code": "context_length_exceeded" }
+    });
+    let (result, payloads) = run_review_output_fixture("auto", false, vec![(400, body.to_string())]).await;
+    assert!(result.unwrap_err().contains(message));
+    assert_eq!(payloads.len(), 1);
 }
 
 #[tokio::test]

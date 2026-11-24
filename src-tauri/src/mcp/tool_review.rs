@@ -61,7 +61,6 @@ pub async fn cancel_tool_review(call_id: i64) -> bool {
 pub const REVIEW_TIMEOUT_SECS: u64 = 20;
 pub const DEFAULT_DECISION_REVIEW_THRESHOLD: f64 = 0.90;
 pub const DECISION_INTENT_VIOLATION_THRESHOLD: f64 = 0.50;
-const PROMPT_PARAM_LIMIT: usize = 8000;
 const PROMPT_DESCRIPTION_LIMIT: usize = 2000;
 const PROMPT_SCHEMA_LIMIT: usize = 4000;
 
@@ -299,14 +298,6 @@ fn review_response_text(response: &ChatResponse) -> Result<String, String> {
         ));
     }
     Ok(text)
-}
-
-fn validate_review_parameters(parameters: &str) -> Result<(), String> {
-    let count = parameters.chars().count();
-    if count > PROMPT_PARAM_LIMIT {
-        return Err(format!("自动审核参数过长（{count} 字符，上限 {PROMPT_PARAM_LIMIT}），无法完整审核，请人工确认"));
-    }
-    Ok(())
 }
 
 fn preview_text(text: &str) -> String {
@@ -634,7 +625,7 @@ fn build_review_user_prompt(
         ),
     }
     prompt.push_str("本次调用参数:\n");
-    prompt.push_str(&truncate_for_prompt(parameters, PROMPT_PARAM_LIMIT, "参数"));
+    prompt.push_str(parameters);
     prompt
 }
 
@@ -1104,12 +1095,6 @@ async fn review_with_definition(
             );
         }
     };
-
-    if let Err(detail) = validate_review_parameters(parameters) {
-        return error_outcome(
-            &model_code, Some(provider_id), started.elapsed().as_millis() as i64, detail,
-        );
-    }
 
     if crate::decision::is_decision_mode(&model_detail.model.request_mode) {
         let network_proxy = get_network_proxy_from_config(&config_feature_map);
