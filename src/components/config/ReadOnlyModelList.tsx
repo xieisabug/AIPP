@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '../ui/button';
-import { Tag, ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from 'sonner';
 import ModelTagBadge from './ModelTagBadge';
@@ -101,8 +101,7 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
         <div className="space-y-4">
             <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Tag className="h-4 w-4" />
+                    <div className="text-sm text-muted-foreground">
                         <span className="font-medium">
                             {tags.length > 0 ? `已配置模型 (${tags.length})` : "模型列表"}
                         </span>

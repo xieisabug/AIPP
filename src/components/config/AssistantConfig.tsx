@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
-import { Bot, Settings, User, Download } from "lucide-react";
+import { Bot, Settings, User, ClipboardPaste } from "lucide-react";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
@@ -732,7 +732,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             onClick={openImportDialog}
                             className="shadow-sm hover:shadow-md transition-all"
                         >
-                            <Download className="h-4 w-4" />
+                            <ClipboardPaste className="h-4 w-4" />
                         </Button>
                     </TooltipTrigger>
                     <TooltipContent>导入助手</TooltipContent>
@@ -863,7 +863,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                                     onClick={openImportDialog}
                                                     className="shadow-lg hover:shadow-xl transition-all"
                                                 >
-                                                    <Download className="h-4 w-4" />
+                                                    <ClipboardPaste className="h-4 w-4" />
                                                 </Button>
                                             </TooltipTrigger>
                                             <TooltipContent>导入助手</TooltipContent>

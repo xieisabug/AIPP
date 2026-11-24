@@ -10,7 +10,7 @@ import ImportDialog from "../ImportDialog";
 import PasswordDialog from "../PasswordDialog";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
-import { Zap, Settings, Server, Download, Plus } from "lucide-react";
+import { Settings, Cloud, ClipboardPaste, Plus } from "lucide-react";
 import { toast } from 'sonner';
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
@@ -24,6 +24,19 @@ import {
     ConfigPageLoading,
     SelectOption
 } from "../common";
+
+// 启用状态用小圆点表示，与「应用与工具」的 AppStatusBadge 一致：只有圆点带颜色
+function ProviderStatusDot({ enabled }: { enabled: boolean }) {
+    const label = enabled ? "已启用" : "未启用";
+    return (
+        <span
+            role="img"
+            aria-label={label}
+            title={label}
+            className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${enabled ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
+        />
+    );
+}
 
 interface LLMProvider {
     id: string;
@@ -231,7 +244,7 @@ const LLMProviderConfig: React.FC = () => {
         LLMProviders.map(provider => ({
             id: provider.id,
             label: provider.name,
-            icon: provider.is_enabled ? <Zap className="h-4 w-4" /> : <Settings className="h-4 w-4" />
+            icon: <ProviderStatusDot enabled={provider.is_enabled} />
         })), [LLMProviders]);
 
     // 下拉菜单选择回调
@@ -264,7 +277,7 @@ const LLMProviderConfig: React.FC = () => {
                         onClick={() => setImportDialogOpen(true)}
                         className="shadow-sm hover:shadow-md transition-all"
                     >
-                        <Download className="h-4 w-4" />
+                        <ClipboardPaste className="h-4 w-4" />
                     </Button>
                 </TooltipTrigger>
                 <TooltipContent>导入提供商</TooltipContent>
@@ -285,7 +298,7 @@ const LLMProviderConfig: React.FC = () => {
         <SidebarList
             title="提供商"
             description="选择提供商进行配置"
-            icon={<Server className="h-5 w-5" />}
+            icon={<Cloud className="h-5 w-5" />}
             searchValue={searchQuery}
             onSearchChange={setSearchQuery}
             searchPlaceholder="搜索提供商..."
@@ -302,7 +315,9 @@ const LLMProviderConfig: React.FC = () => {
                             <div className="truncate">{provider.name}</div>
                         </div>
                         {provider.is_enabled && (
-                            <Zap className="h-3 w-3 ml-2 flex-shrink-0" />
+                            <span className="ml-2 flex">
+                                <ProviderStatusDot enabled />
+                            </span>
                         )}
                     </div>
                 </ListItemButton>
@@ -349,7 +364,7 @@ const LLMProviderConfig: React.FC = () => {
                     sidebar={null}
                     content={
                         <EmptyState
-                            icon={<Server className="h-8 w-8 text-muted-foreground" />}
+                            icon={<Cloud className="h-8 w-8 text-muted-foreground" />}
                             title="还没有配置提供商"
                             description="开始添加你的第一个 AI 模型提供商，享受智能助手的强大功能"
                             action={
@@ -369,7 +384,7 @@ const LLMProviderConfig: React.FC = () => {
                                                     onClick={() => setImportDialogOpen(true)}
                                                     className="shadow-lg hover:shadow-xl transition-all"
                                                 >
-                                                    <Download className="h-4 w-4" />
+                                                    <ClipboardPaste className="h-4 w-4" />
                                                 </Button>
                                             </TooltipTrigger>
                                             <TooltipContent>导入提供商</TooltipContent>

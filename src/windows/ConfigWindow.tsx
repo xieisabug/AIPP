@@ -11,7 +11,7 @@ const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTa
 const VaultConfig = React.lazy(() => import("../components/config/VaultConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, KeyRound, ListChecks, Puzzle, Server, Settings, Sparkles } from "lucide-react";
+import { Bot, Cloud, KeyRound, LayoutGrid, ListChecks, Puzzle, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
@@ -30,7 +30,6 @@ import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { ChevronLeft, Home, Menu } from "lucide-react";
-import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
 import { navigateMobile, popMobile, registerMobileBackHandler, subscribeMobileConfigNavigation } from "../mobile/navigation";
 import { canLeaveConfigNow, requestConfigLeave } from "@/lib/configLeaveGuard";
@@ -83,8 +82,8 @@ function ConfigWindow() {
             {
                 id: "llm-provider-config",
                 name: "提供商",
-                icon: <Server className="w-full h-full text-muted-foreground" />,
-                iconSelected: <Server className="w-full h-full text-foreground" />,
+                icon: <Cloud className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Cloud className="w-full h-full text-foreground" />,
             },
             {
                 id: "assistant-config",
@@ -95,8 +94,8 @@ function ConfigWindow() {
             {
                 id: "mcp-config",
                 name: "应用与工具",
-                icon: <MCP className="w-full h-full text-muted-foreground" />,
-                iconSelected: <MCP className="w-full h-full text-foreground" />,
+                icon: <LayoutGrid className="w-full h-full text-muted-foreground" />,
+                iconSelected: <LayoutGrid className="w-full h-full text-foreground" />,
             },
             {
                 id: "vault-config",
