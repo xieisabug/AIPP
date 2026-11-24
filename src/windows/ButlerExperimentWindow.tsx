@@ -1442,7 +1442,8 @@ function ButlerExperimentWindow() {
                                 </button>
                             }
                         />
-                        <CompactDialogBody className="space-y-4">
+                        {/* pb-0：表单的 sticky 保存栏以滚动容器的内边距为吸附边界，留底部内边距会让它悬在弹窗底边上方并露出下面的内容 */}
+                        <CompactDialogBody className="space-y-4 pb-0">
                             <p className="text-xs text-muted-foreground">
                                 在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。其他通用配置请前往右上角「AIPP 设置」。
                             </p>

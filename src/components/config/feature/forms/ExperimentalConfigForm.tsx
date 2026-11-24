@@ -637,7 +637,8 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                 className={
                     showSummarySection
                         ? "bottom-space border-border shadow-none"
-                        : "border-0 shadow-none"
+                        // 嵌在弹窗里时保存栏就是最后一块，去掉卡片底部内边距让它贴住弹窗底边
+                        : "border-0 shadow-none pb-0"
                 }
             >
                 {showSummarySection ? (
