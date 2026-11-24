@@ -261,7 +261,15 @@ fn rank_nodes(candidates: &mut [DetectedProgram]) -> Option<DetectedProgram> {
     candidates.iter().find(|candidate| candidate.ok && candidate.warning.is_none()).cloned()
 }
 
-async fn detect_node(command: &str, search_path: &OsString) -> NodeStatus {
+fn explicit_node_path(command: &str, search_path: &OsString, cwd: &Path) -> Result<PathBuf, String> {
+    let path = Path::new(command);
+    if path.is_absolute() || path.components().count() > 1 {
+        return Ok(cwd.join(path));
+    }
+    which::which_in(command, Some(search_path), cwd).map_err(|error| format!("无法定位 {command}：{error}"))
+}
+
+async fn detect_node(command: &str, search_path: &OsString, cwd: &Path) -> NodeStatus {
     let locations = dedupe(node_locations(search_path));
     let mut candidates = futures::future::join_all(locations.into_iter().map(|(path, source)| async move {
         let result = program_version(&path).await;
@@ -271,16 +279,13 @@ async fn detect_node(command: &str, search_path: &OsString) -> NodeStatus {
     let configured = Path::new(command);
     let selected = if command == "node" {
         newest
-    } else if configured.is_absolute() {
-        let found = candidates.iter().find(|candidate| identity(Path::new(&candidate.path)) == identity(configured)).cloned();
-        Some(match found { Some(found) => found, None => node_program(configured, "自定义".into(), if configured.is_file() { program_version(configured).await } else { Err("文件不存在".into()) }) })
     } else {
-        match which::which_in(command, Some(search_path), std::env::current_dir().unwrap_or_default()) {
+        match explicit_node_path(command, search_path, cwd) {
             Ok(path) => {
-                let found = candidates.iter().find(|candidate| identity(Path::new(&candidate.path)) == identity(&path)).cloned();
-                Some(match found { Some(found) => found, None => node_program(&path, "PATH".into(), program_version(&path).await) })
+                let found = candidates.iter().find(|candidate| Path::new(&candidate.path) == path).cloned();
+                Some(match found { Some(found) => found, None => node_program(&path, "自定义".into(), program_version(&path).await) })
             }
-            Err(error) => Some(node_program(configured, "自定义".into(), Err(format!("无法定位 {command}：{error}")))),
+            Err(error) => Some(node_program(configured, "自定义".into(), Err(error))),
         }
     };
     NodeStatus { configured: if command == "node" { String::new() } else { command.to_string() }, required: NODE_MINIMUM.into(), selected, candidates }
@@ -302,9 +307,14 @@ impl NodeStatus {
 }
 
 /// Only resolve on a new bridge launch. Live sessions keep their running Node.
-pub(super) async fn resolve_launch_node(command: &str, env: &mut HashMap<String, String>) -> Result<String, String> {
-    if command != "node" { return Ok(command.to_string()); }
-    detect_node(command, &effective_path(env)).await.auto_command(env)
+pub(super) async fn resolve_launch_node(command: &str, env: &mut HashMap<String, String>, cwd: &Path) -> Result<String, String> {
+    let path = effective_path(env);
+    if command == "node" {
+        return detect_node(command, &path, cwd).await.auto_command(env);
+    }
+    let selected = explicit_node_path(command, &path, cwd)?.display().to_string();
+    with_node_on_path(&selected, env, std::env::var_os("PATH"), false);
+    Ok(selected)
 }
 
 fn cli_program(result: &Value, source: String, recommended: Option<&str>) -> DetectedProgram {
@@ -378,7 +388,7 @@ fn tail(text: &str, chars: usize) -> String {
     text.chars().skip(count.saturating_sub(chars)).collect()
 }
 
-fn provider_settings(settings: &HashMap<String, String>) -> Vec<LLMProviderConfig> {
+pub(crate) fn provider_settings(settings: &HashMap<String, String>) -> Vec<LLMProviderConfig> {
     settings.iter().map(|(name, value)| LLMProviderConfig {
         id: 0, name: name.clone(), value: value.clone(), llm_provider_id: 0, append_location: String::new(), is_addition: false,
     }).collect()
@@ -408,12 +418,13 @@ impl Context {
     fn standalone_antigravity(&self, driver: &str) -> bool { driver == "antigravity" && self.get("antigravity_runtime").as_deref() == Some("standalone") }
 }
 
-fn managed_sdk_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(super) fn managed_sdk_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("agent-runtimes").join("cursor-sdk"))
 }
 
 /// Node's require() walks up from the start directory through every `node_modules`.
 pub(crate) fn find_cursor_sdk(start: &Path) -> Option<(PathBuf, Option<String>)> {
+    if !start.is_dir() { return None; }
     start.ancestors().find_map(|dir| {
         let manifest = dir.join("node_modules").join("@cursor").join("sdk").join("package.json");
         manifest.is_file().then(|| {
@@ -425,25 +436,44 @@ pub(crate) fn find_cursor_sdk(start: &Path) -> Option<(PathBuf, Option<String>)>
     })
 }
 
+fn managed_cursor_sdk(dir: &Path) -> Option<(PathBuf, Option<String>)> {
+    find_cursor_sdk(dir).filter(|(installed, _)| installed == dir)
+}
+
 fn install_commands(spec: &ToolSpec) -> Vec<InstallCommand> {
     let platform = if cfg!(windows) { "windows" } else { "unix" };
     spec.install.iter().filter(|(_, _, only)| only.is_empty() || *only == platform)
         .map(|(label, command, _)| InstallCommand { label: label.to_string(), command: command.to_string() }).collect()
 }
 
+/// Match createRequire's workspace search before using an existing AIPP installation.
+/// Keep an explicit directory, including a missing one, so the loader reports its own error.
+pub(super) fn cursor_sdk_directory(cwd: &Path, configured: Option<&str>, managed: Option<&Path>) -> (PathBuf, &'static str) {
+    if let Some(value) = configured.map(str::trim).filter(|value| !value.is_empty()) {
+        return (cwd.join(expand_home(value)), "所选目录");
+    }
+    if find_cursor_sdk(cwd).is_none() {
+        if let Some((installed, _)) = managed.and_then(managed_cursor_sdk) {
+            return (installed, "AIPP 管理");
+        }
+    }
+    (cwd.to_path_buf(), "工作目录")
+}
+
 fn detect_cursor(app: &tauri::AppHandle, context: &Context, spec: &ToolSpec, node: &NodeStatus, provider_id: Option<i64>) -> ToolStatus {
     let configured = context.get("agent_sdk_directory").map(|value| value.trim().to_string()).unwrap_or_default();
     let managed = managed_sdk_directory(app).ok();
-    let start = if configured.is_empty() { context.run_dir.clone() } else { expand_home(&configured) };
+    let (start, source) = cursor_sdk_directory(&context.run_dir, Some(&configured), managed.as_deref());
     let program = |dir: PathBuf, version: Option<String>, source: &str| DetectedProgram {
         path: dir.display().to_string(), source: source.into(), version, ok: true, warning: None, error: None };
     let selected = match find_cursor_sdk(&start) {
-        Some((dir, version)) => Some(program(dir, version, if configured.is_empty() { "工作目录" } else { "所选目录" })),
-        None => Some(DetectedProgram { path: start.display().to_string(), source: if configured.is_empty() { "工作目录".into() } else { "所选目录".into() },
-            error: Some(format!("{} 中没有安装 {CURSOR_SDK_PACKAGE}", start.display())), ..Default::default() }),
+        Some((dir, version)) => Some(program(dir, version, source)),
+        None => Some(DetectedProgram { path: start.display().to_string(), source: source.into(),
+            error: Some(if start.is_dir() { format!("{} 中没有安装 {CURSOR_SDK_PACKAGE}", start.display()) }
+                else { format!("SDK 目录不存在：{}", start.display()) }), ..Default::default() }),
     };
     let mut candidates = Vec::new();
-    if let Some((dir, version)) = managed.as_deref().and_then(find_cursor_sdk) { candidates.push(program(dir, version, "AIPP 管理")); }
+    if let Some((dir, version)) = managed.as_deref().and_then(managed_cursor_sdk) { candidates.push(program(dir, version, "AIPP 管理")); }
     let mut warnings = Vec::new();
     let uses_api_key = context.env.keys().any(|key| key == "CURSOR_API_KEY") || std::env::var_os("CURSOR_API_KEY").is_some();
     let now = chrono::Utc::now().timestamp_millis();
@@ -466,43 +496,108 @@ fn detect_cursor(app: &tauri::AppHandle, context: &Context, spec: &ToolSpec, nod
         docs_url: spec.docs_url.into(), managed_directory: managed.map(|dir| dir.display().to_string()), warnings, account, uses_api_key }
 }
 
-async fn detect_cli(driver: &str, context: &Context, spec: &ToolSpec, node: &NodeStatus) -> ToolStatus {
-    let standalone = context.standalone_antigravity(driver);
-    let default_command = if standalone { "antigravity-acp" } else { spec.command };
-    let configured = context.get("agent_cli_command").map(|value| value.trim().to_string()).unwrap_or_default();
-    let command = if configured.is_empty() { default_command.to_string() } else { configured.clone() };
-    let path_var = effective_path(&context.env);
-    let path_dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
-    // Candidate files: the selected Node's directory, every Node install (nvm-style
-    // globals live beside node), PATH, then installer/package-manager locations.
-    let mut scan = Vec::new();
+fn cli_candidates(driver: &str, standalone: bool, default_command: &str, env: &HashMap<String, String>, cwd: &Path) -> Vec<(PathBuf, String)> {
+    let path = effective_path(env);
+    let path_dirs: Vec<_> = std::env::split_paths(&path).filter(|dir| !dir.as_os_str().is_empty()).map(|dir| cwd.join(dir)).collect();
+    let mut scan = path_dirs.clone();
     if !standalone {
-        scan.extend(node.selected.iter().chain(node.candidates.iter()).filter_map(|node| Path::new(&node.path).parent().map(Path::to_path_buf)));
-        scan.extend(path_dirs.iter().cloned());
+        if let Some(pnpm) = env.get("PNPM_HOME").map(PathBuf::from).or_else(|| env_dir("PNPM_HOME")).filter(|path| path.is_absolute()) {
+            scan.push(pnpm);
+        }
         scan.extend(tool_dirs(driver));
+        scan.extend(dedupe(node_locations(&path)).into_iter().filter_map(|(node, _)| node.parent().map(Path::to_path_buf)));
     }
-    let files = dedupe(scan.into_iter().filter_map(|dir| command_in(&dir, default_command, cfg!(windows), Path::is_file))
-        .map(|path| { let label = source_label(&path, &path_dirs); (path, label) }).collect());
-    let mut commands = vec![json!({"key": "selected", "command": command})];
-    commands.extend(files.iter().take(12).enumerate().map(|(index, (path, _))| json!({"key": index.to_string(), "command": path})));
+    dedupe(scan.into_iter().filter_map(|dir| command_in(&dir, default_command, cfg!(windows), Path::is_file))
+        .map(|path| { let label = source_label(&path, &path_dirs); (path, label) }).collect())
+}
+
+struct CliSelection {
+    default_command: &'static str,
+    command: String,
+    files: Vec<(PathBuf, String)>,
+    automatic: bool,
+}
+
+async fn select_cli(driver: &str, spec: &ToolSpec, standalone: bool, configured: Option<&str>,
+    env: &HashMap<String, String>, cwd: &Path, list_alternatives: bool) -> Result<CliSelection, String> {
+    let default_command = if standalone { "antigravity-acp" } else { spec.command };
+    let explicit = configured.map(str::trim).filter(|cmd| !cmd.is_empty() && *cmd != default_command);
+    let files = if explicit.is_none() || list_alternatives {
+        let driver = driver.to_owned();
+        let cwd = cwd.to_owned();
+        let env = env.clone();
+        tokio::task::spawn_blocking(move || cli_candidates(&driver, standalone, default_command, &env, &cwd))
+            .await.map_err(|error| format!("查找 {default_command} 安装目录失败：{error}"))?
+    } else { Vec::new() };
+    let command = match explicit {
+        Some(cmd) => cmd.to_owned(),
+        None => files.first().map(|(path, _)| path.display().to_string()).unwrap_or_else(|| default_command.into()),
+    };
+    Ok(CliSelection { command, default_command, files, automatic: explicit.is_none() })
+}
+
+impl CliSelection {
+    async fn probe(&self, node: &str, cwd: &Path, env: &HashMap<String, String>, spec: &ToolSpec, first_working: bool)
+        -> Result<(DetectedProgram, Vec<DetectedProgram>), String> {
+        let mut commands: Vec<_> = self.files.iter().enumerate()
+            .map(|(index, (path, _))| json!({"key": index.to_string(), "command": path})).collect();
+        let selected_key = match self.files.iter().position(|(path, _)| path == Path::new(&self.command)) {
+            Some(index) => index.to_string(),
+            None => {
+                commands.push(json!({"key": "selected", "command": self.command}));
+                "selected".into()
+            }
+        };
+        let data = bridge_call(node, cwd, env,
+            json!({"type":"detect", "id":"detect", "commands":commands, "firstWorking":first_working}),
+            Duration::from_secs(60), |_| {}).await?;
+        let results = data["commands"].as_array().ok_or("detect response omitted commands")?;
+        let configured_result = results.iter().find(|result| result["key"] == selected_key);
+        let selected = if self.automatic { results.iter().find(|result| result["ok"] == true).or(configured_result) } else { configured_result };
+        let selected = selected.ok_or("detect response omitted selected CLI")?;
+        let program = |result: &Value| {
+            let index = result["key"].as_str().and_then(|key| key.parse::<usize>().ok());
+            let source = index.and_then(|index| self.files.get(index)).map(|(_, source)| source.as_str())
+                .unwrap_or(if self.automatic { "PATH" } else { "自定义" });
+            cli_program(result, source.into(), spec.recommended)
+        };
+        let candidates = results.iter().filter(|result| result["key"] != "selected").map(program).collect();
+        Ok((program(selected), candidates))
+    }
+
+    async fn launch_command(self, node: &str, cwd: &Path, env: &HashMap<String, String>, spec: &ToolSpec) -> Result<String, String> {
+        if !self.automatic || self.files.len() < 2 { return Ok(self.command); }
+        let (selected, candidates) = self.probe(node, cwd, env, spec, true).await?;
+        if selected.ok { return Ok(selected.path); }
+        let failures = candidates.iter().map(|p| format!("{}：{}", p.path, p.error.as_deref().unwrap_or("未返回错误详情"))).collect::<Vec<_>>();
+        Err(format!("{} 的候选程序均未通过 --version 检测：\n{}", spec.display_name, failures.join("\n")))
+    }
+}
+
+/// The same bridge configuration is used for chat, model discovery and browser login.
+pub(super) async fn prepare_bridge_launch(driver: &str, config: &mut NativeConfig) -> Result<String, String> {
+    let node = resolve_launch_node(&config.node, &mut config.env, &config.cwd).await?;
+    if driver != "cursor" {
+        let standalone = driver == "antigravity" && config.wire["runtime"] == "standalone";
+        let spec = spec(driver).ok_or_else(|| format!("Unknown native agent driver: {driver}"))?;
+        let selected = select_cli(driver, &spec, standalone, config.wire["command"].as_str(), &config.env, &config.cwd, false).await?;
+        config.wire["command"] = json!(selected.launch_command(&node, &config.cwd, &config.env, &spec).await?);
+    }
+    Ok(node)
+}
+
+async fn detect_cli(driver: &str, context: &Context, spec: &ToolSpec, node: &NodeStatus) -> Result<ToolStatus, String> {
+    let standalone = context.standalone_antigravity(driver);
+    let configured = context.get("agent_cli_command").map(|value| value.trim().to_string()).unwrap_or_default();
+    let lookup = select_cli(driver, spec, standalone, Some(&configured), &context.env, &context.run_dir, true).await?;
     let node_ok = node.selected.as_ref().is_some_and(|node| node.ok);
     let detected = if node_ok {
-        bridge_call(&context.node, &context.run_dir, &context.env, json!({"type": "detect", "id": "detect", "commands": commands}), Duration::from_secs(60), |_| {}).await
-            .and_then(|data| data["commands"].as_array().cloned().ok_or_else(|| "detect response omitted commands".to_string()))
+        lookup.probe(&context.node, &context.run_dir, &context.env, spec, false).await
     } else { Err(format!("需要先选择可运行的 Node.js（≥ {NODE_MINIMUM}）才能检测 {}", spec.display_name)) };
     let (selected, candidates) = match detected {
-        Ok(results) => {
-            let find = |key: &str| results.iter().find(|result| result["key"] == key);
-            let selected = find("selected").map(|result| {
-                let path = result["resolved"].as_str().map(PathBuf::from);
-                let source = if configured.is_empty() { path.as_deref().map(|path| source_label(path, &path_dirs)).unwrap_or_else(|| "PATH".into()) } else { "自定义".into() };
-                cli_program(result, source, spec.recommended)
-            });
-            let candidates = files.iter().take(12).enumerate().filter_map(|(index, (_, source))| find(&index.to_string()).map(|result| cli_program(result, source.clone(), spec.recommended))).collect();
-            (selected, candidates)
-        }
-        Err(error) => (Some(DetectedProgram { path: command.clone(), source: "未检测".into(), error: Some(error), ..Default::default() }),
-            files.iter().map(|(path, source)| DetectedProgram { path: path.display().to_string(), source: source.clone(), ..Default::default() }).collect()),
+        Ok((selected, candidates)) => (Some(selected), candidates),
+        Err(error) => (Some(DetectedProgram { path: lookup.command, source: "未检测".into(), error: Some(error), ..Default::default() }),
+            lookup.files.iter().map(|(path, source)| DetectedProgram { path: path.display().to_string(), source: source.clone(), ..Default::default() }).collect()),
     };
     let mut warnings = Vec::new();
     match driver {
@@ -510,20 +605,23 @@ async fn detect_cli(driver: &str, context: &Context, spec: &ToolSpec, node: &Nod
         "pi" | "opencode" => warnings.push(format!("复用本机 {} 的登录与配置；未登录时先在终端运行 {}", spec.display_name, spec.command)),
         _ => {}
     }
-    ToolStatus { kind: "cli", display_name: if standalone { "Antigravity 独立 ACP 程序".into() } else { spec.display_name.into() },
-        default_command: default_command.into(), configured, can_update: !standalone && node_ok && selected.as_ref().is_some_and(|program| program.ok),
+    Ok(ToolStatus { kind: "cli", display_name: if standalone { "Antigravity 独立 ACP 程序".into() } else { spec.display_name.into() },
+        default_command: lookup.default_command.into(), configured, can_update: !standalone && node_ok && selected.as_ref().is_some_and(|program| program.ok),
         selected, candidates, install_commands: if standalone { Vec::new() } else { install_commands(spec) },
-        docs_url: spec.docs_url.into(), managed_directory: None, warnings, account: None, uses_api_key: false }
+        docs_url: spec.docs_url.into(), managed_directory: None, warnings, account: None, uses_api_key: false })
 }
 
 pub(crate) async fn detect_environment(app: &tauri::AppHandle, driver: &str, settings: &HashMap<String, String>, provider_id: Option<i64>) -> Result<NativeAgentEnvironment, String> {
     let spec = spec(driver).ok_or_else(|| format!("Unknown native agent driver: {driver}"))?;
     let mut context = Context::new(settings)?;
-    let node = detect_node(&context.node, &effective_path(&context.env)).await;
+    let node = detect_node(&context.node, &effective_path(&context.env), &context.run_dir).await;
     if context.node == "node" && node.selected.is_some() {
         context.node = node.auto_command(&mut context.env)?;
+    } else if let Some(selected) = node.selected.as_ref().filter(|selected| selected.ok) {
+        context.node = selected.path.clone();
+        with_node_on_path(&context.node, &mut context.env, std::env::var_os("PATH"), false);
     }
-    let tool = if driver == "cursor" { detect_cursor(app, &context, &spec, &node, provider_id) } else { detect_cli(driver, &context, &spec, &node).await };
+    let tool = if driver == "cursor" { detect_cursor(app, &context, &spec, &node, provider_id) } else { detect_cli(driver, &context, &spec, &node).await? };
     Ok(NativeAgentEnvironment { driver: driver.into(), node, tool, working_directory: context.working_directory })
 }
 
@@ -617,7 +715,7 @@ pub async fn run_native_agent_update(app: tauri::AppHandle, feature_config_state
     let spec = spec(&driver).ok_or_else(|| format!("Unknown native agent driver: {driver}"))?;
     let mut context = Context::new(&settings)?;
     if context.standalone_antigravity(&driver) { return Err("独立 ACP 程序由你自行安装和管理，AIPP 不提供一键更新".into()); }
-    context.node = resolve_launch_node(&context.node, &mut context.env).await?;
+    context.node = resolve_launch_node(&context.node, &mut context.env, &context.run_dir).await?;
     {
         let mut set = updating().lock().map_err(|_| "update state lock poisoned")?;
         if !set.insert(driver.clone()) { return Err(format!("{} 正在更新中", spec.display_name)); }
@@ -633,12 +731,17 @@ pub async fn run_native_agent_update(app: tauri::AppHandle, feature_config_state
         let _ = on_log.send(format!("使用全局网络代理 {proxy}\n"));
     }
     let (request, sdk_directory) = if driver == "cursor" {
-        let directory = match context.get("agent_sdk_directory") { Some(dir) => expand_home(dir.trim()), None => managed_sdk_directory(&app)? };
+        let configured = context.get("agent_sdk_directory");
+        let managed = managed_sdk_directory(&app)?;
+        let (start, _) = cursor_sdk_directory(&context.run_dir, configured.as_deref(), Some(&managed));
+        let directory = find_cursor_sdk(&start).map(|(dir, _)| dir)
+            .unwrap_or_else(|| if configured.is_some() { start } else { managed });
         tokio::fs::create_dir_all(&directory).await.map_err(|e| format!("无法创建 SDK 目录 {}：{e}", directory.display()))?;
         let args = json!(["install", "--prefix", directory, format!("{CURSOR_SDK_PACKAGE}@latest"), "--no-audit", "--no-fund"]);
         (json!({"type": "exec", "id": "exec", "tool": "npm", "args": args}), Some(directory))
     } else {
-        let command = context.get("agent_cli_command").map(|value| value.trim().to_string()).unwrap_or_else(|| spec.command.into());
+        let selected = select_cli(&driver, &spec, false, context.get("agent_cli_command").as_deref(), &context.env, &context.run_dir, false).await?;
+        let command = selected.launch_command(&context.node, &context.run_dir, &context.env, &spec).await?;
         (json!({"type": "exec", "id": "exec", "command": command, "args": spec.update_args}), None)
     };
     let description = match &sdk_directory {

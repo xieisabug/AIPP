@@ -35,6 +35,15 @@ pub fn expand(raw: &str, root: &Path, values: &HashMap<String,String>) -> Result
 }
 
 pub struct Launch { pub program: String, pub args: Vec<String>, pub cwd: PathBuf, pub env: HashMap<String,String> }
+
+fn set_plugin_env(env: &mut HashMap<String, String>, key: &str, value: String) {
+    // Windows treats PATH and Path as the same key. Resolve overrides before
+    // both executable discovery and Command::envs see this environment.
+    #[cfg(windows)]
+    let key = key.to_ascii_uppercase();
+    env.insert(key.to_owned(), value);
+}
+
 pub fn launch(config: &Value, root: &Path, values: &HashMap<String,String>) -> Result<Launch,String> {
     let command = config["command"].as_str().ok_or("stdio 配置缺少 command")?;
     let mut program = expand(command, root, values)?;
@@ -47,11 +56,11 @@ pub fn launch(config: &Value, root: &Path, values: &HashMap<String,String>) -> R
     if let Some(items) = config.get("env") {
         for (key,value) in items.as_object().ok_or("stdio env 必须是对象")? {
             if key.is_empty() || key.contains(['=', '\0']) { return Err("stdio 环境变量名无效".into()); }
-            env.insert(key.clone(), expand(value.as_str().ok_or("stdio env 值必须为字符串")?,root,values)?);
+            set_plugin_env(&mut env, key, expand(value.as_str().ok_or("stdio env 值必须为字符串")?,root,values)?);
         }
     }
-    env.extend(values.clone());
-    for key in ["CODEX_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"] { env.insert(key.into(), root.to_string_lossy().into()); }
+    for (key, value) in values { set_plugin_env(&mut env, key, value.clone()); }
+    for key in ["CODEX_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"] { set_plugin_env(&mut env, key, root.to_string_lossy().into()); }
     let cwd = if let Some(dir) = config["cwd"].as_str() {
         let dir = expand(dir,root,values)?;
         let path = if dir=="." || dir=="./" {root.into()} else if Path::new(&dir).is_absolute() { PathBuf::from(dir) } else { root.join(format::safe_path(&dir)?) };
@@ -62,21 +71,52 @@ pub fn launch(config: &Value, root: &Path, values: &HashMap<String,String>) -> R
     Ok(Launch { program, args, cwd, env })
 }
 
-pub fn command(spec: Launch) -> Result<Command,String> {
+#[cfg(windows)]
+fn plugin_path(env: &HashMap<String, String>, cwd: &Path) -> Result<(std::ffi::OsString, bool), String> {
+    let configured = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH"));
+    let path = configured.map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+    // Resolve relative entries against the plugin's working directory, as its child would.
+    let dirs = std::env::split_paths(&path).filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| cwd.join(dir));
+    let paths = std::env::join_paths(dirs).map_err(|_| "插件 PATH 中包含无效目录".to_owned())?;
+    Ok((paths, configured.is_some()))
+}
+
+#[cfg(windows)]
+fn plugin_npm(program: &str, env: &HashMap<String, String>, cwd: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let (paths, configured) = plugin_path(env, cwd)?;
+    let installation = |node: PathBuf| {
+        let script = node.parent()?.join(format!("node_modules/npm/bin/{program}-cli.js"));
+        (node.is_file() && script.is_file()).then_some((node, script))
+    };
+    let mut selected = std::env::split_paths(&paths).filter(|dir| dir.is_absolute())
+        .find_map(|dir| installation(dir.join("node.exe")));
+    if selected.is_none() && !configured {
+        selected = crate::api::ai::agent_driver::native_agents::env::node_locations(&paths)
+            .into_iter().find_map(|(node, _)| installation(node));
+    }
+    selected.ok_or_else(|| format!("插件需要 {program}，未在插件运行环境中找到同时包含 Node.js 和 npm 的安装"))
+}
+
+pub fn command(mut spec: Launch) -> Result<Command,String> {
     let mut program = spec.program; let mut args = spec.args;
     // npm's Windows .cmd shim needs a shell; invoke the installed JS CLI through Node instead.
     #[cfg(windows)]
     if program == "npx" || program == "npm" {
-        let node = which::which("node").map_err(|e| format!("插件需要 Node.js/npm：{e}"))?;
-        let cli = node.parent().ok_or("Node 路径没有父目录")?.join(format!("node_modules/npm/bin/{program}-cli.js"));
-        if !cli.is_file() { return Err(format!("找不到 npm CLI：{}；请安装完整 Node.js/npm",cli.display())); }
+        let (node, cli) = plugin_npm(&program, &spec.env, &spec.cwd)?;
+        crate::api::ai::agent_driver::native_agents::with_node_on_path(
+            &node.to_string_lossy(), &mut spec.env, std::env::var_os("PATH"), true,
+        );
         args.insert(0,cli.to_string_lossy().into()); program = node.to_string_lossy().into();
     }
     #[cfg(windows)]
     if Path::new(&program).is_file() && Path::new(&program).extension().is_none() {
         let first = std::fs::read(&program).map_err(|e| e.to_string())?;
         if first.starts_with(b"#!/bin/sh") || first.starts_with(b"#!/usr/bin/env bash") {
-            let shell = which::which("bash").map_err(|e| format!("插件启动脚本需要 POSIX shell（例如 Git Bash）：{e}"))?;
+            let (path, _) = plugin_path(&spec.env, &spec.cwd)?;
+            let shell = which::which_in("bash.exe", Some(path), &spec.cwd)
+                .map_err(|_| "插件启动脚本需要 POSIX shell，未在插件运行环境中找到 bash.exe")?;
             args.insert(0, program); program = shell.to_string_lossy().into();
         }
     }

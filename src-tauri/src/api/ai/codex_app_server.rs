@@ -359,16 +359,6 @@ impl CodexSessionEntry {
     }
 }
 
-/// 解析环境变量配置：优先按 JSON 对象解析（provider 表单使用 JSON 格式），
-/// 否则按每行 KEY=VALUE 解析（与 ACP 通道及助手级配置的格式一致）
-fn merge_codex_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
-    if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(raw) {
-        env_vars.extend(parsed);
-        return;
-    }
-    crate::api::ai::acp::merge_acp_env_blob(env_vars, raw);
-}
-
 pub fn extract_codex_app_server_config(
     model_configs: &[crate::db::assistant_db::AssistantModelConfig],
     provider_configs: &[crate::db::llm_db::LLMProviderConfig],
@@ -406,7 +396,7 @@ pub fn extract_codex_app_server_config(
         }
     }
     for raw in [provider_value("acp_env_vars"), model_value("acp_env_vars")].into_iter().flatten() {
-        merge_codex_env_blob(&mut env_vars, &raw);
+        super::acp::merge_acp_env_blob(&mut env_vars, &raw);
     }
     // 审批策略/沙箱模式的默认值与 provider 表单默认值保持一致，
     // 保证存量 provider（从未保存过这两项配置）也能在界面上反显生效值
@@ -2196,15 +2186,14 @@ async fn spawn_process(
     config: &CodexAppServerConfig,
     stderr_buffer: CodexStderrBuffer,
 ) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
-    let resolved_cli = official_cli::codex_for_session(&config.cli_command).await?;
-    let mut command = Command::from(resolved_cli.command());
+    let resolved_cli = official_cli::for_session("codex", &config.cli_command, &config.env_vars).await?;
+    let mut command = Command::from(resolved_cli.command(&config.env_vars));
     command
         .arg("app-server")
         .arg("--listen")
         .arg("stdio://")
         .args(&config.additional_args)
         .current_dir(&config.working_directory)
-        .envs(&config.env_vars)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

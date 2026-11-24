@@ -785,6 +785,8 @@ pub fn run() {
         })
         .setup(|app| {
             let app_handle = app.handle();
+            #[cfg(windows)]
+            utils::bun_utils::BunUtils::initialize_managed_bin(app_handle);
 
             // 系统托盘菜单和图标初始化
             #[cfg(desktop)]

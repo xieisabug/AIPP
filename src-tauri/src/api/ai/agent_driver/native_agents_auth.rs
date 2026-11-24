@@ -107,7 +107,7 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
         catalog::models(app, provider_id, config, true).await?;
         return Ok(Value::Null);
     }
-    let node = env::resolve_launch_node(&config.node, &mut config.env).await?;
+    let node = env::prepare_bridge_launch(driver, &mut config).await?;
     let account_lock = catalog::gate(provider_id);
     let _account_guard = if driver == "antigravity" {
         let guard = account_lock.lock().await;

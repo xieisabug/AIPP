@@ -31,7 +31,7 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 首次返回正文、推理或工具
 Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动检测运行环境，不需要手动填写命令：
 
 - **Node.js 运行时**：默认「自动」从 PATH、版本管理器（如 nvm、fnm、Volta）及常见安装目录中选择本机可运行的最高版本，最低要求为 22.19.0。同版本优先采用 PATH 中的安装。新启动的桥接进程使用该可执行文件，其目录排在子进程 PATH 首位。需要固定版本时，可以选择列表中的安装或填写自定义路径。固定版本低于要求时，设置页会标注并提示可改用的版本。
-- **智能体程序**：在所选 Node 目录、PATH 以及各官方安装器和 npm / pnpm / Bun 全局目录中查找 `pi`、`opencode`、`kiro-cli`、`agy`，显示实际会启动的文件和版本（通过与会话相同的启动解析运行 `--version`，例如 Windows 上会显示解析到的 `.ps1` shim）。可选择自动、某个检测到的安装或自定义路径。未安装时显示官方安装命令（可复制）和文档链接。
+- **智能体程序**：自动模式先查找会话的 PATH，然后查找官方安装器、npm / pnpm / Bun 全局目录以及其他 Node 安装目录。添加向导和设置页显示所选程序运行 `--version` 的结果。聊天、模型列表、登录和更新都按相同顺序定位程序。固定到某个文件后，如果文件缺失或无法启动，会显示该程序的错误。未安装时设置页提供官方安装命令和文档链接。
 - **更新**：检测到版本后自动对照最新发布（Pi / OpenCode / Cursor SDK 查 npm，Kiro 查官方 manifest，Antigravity 查官方 CHANGELOG，结果缓存 30 分钟），有新版本时显示「更新」。更新使用智能体自带的更新命令（`pi update self`、`opencode upgrade`、`kiro-cli update`、`agy update`），输出实时显示；失败时保留退出码与输出，可使用全局代理重试。有会话正在回复时拒绝更新；空闲会话会先关闭，下次发送消息时按原会话恢复。Antigravity「独立 ACP 程序」由用户自行管理，不提供一键更新。
 - **工作目录**使用文件夹选择器（也可手动输入），目录不存在时直接提示。
 
@@ -39,7 +39,7 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 
 这几类提供商表单的「环境状态」与原生智能体使用同样的展示：一行「版本 · 路径」，下方是「检查更新」「重新检测」。提供商设置里的「CLI 命令」同时用于环境检测、模型探测和会话启动。安装了多份 CLI 时，可以直接填写目标程序的绝对路径，点击「重新检测」查看实际路径和版本。Windows 会按 PATH 顺序查找可执行文件或启动脚本，并检查用户目录下的常用安装位置。探测失败时会显示搜索目录或版本命令的具体错误。已安装的 Codex 可以直接使用，选择通过 AIPP 一键安装时才需要 Bun。 Windows 上保留默认命令 `codex` 时，AIPP 会检查本机候选安装，优先使用 npm/pnpm 启动脚本所对应的同版本 Windows 原生程序；候选版本检测失败会继续查找，全部失败时显示各自原因。手填路径始终只使用指定程序。 ACP 适配器仍检测所选命令。
 
-- **Codex**：未安装时可通过 Bun 一键安装 `@openai/codex`；默认命令的检查更新查 npm，更新使用 `bun add -g`。指定其他命令或路径时，通过相应安装方式更新。
+- **Codex** 支持通过 Bun 一键安装 `@openai/codex`。已有安装使用当前选中的启动器。AIPP 核对 npm、pnpm 或 Bun 的全局目录及包入口，确认来源后使用对应的包管理器更新，并重新检测启动器和实际版本。无法确认来源时，设置页提示使用原安装方式手动更新。
 - **Claude Code**：按官方说明自行安装；检查更新查 npm 上的 `@anthropic-ai/claude-code`，更新运行 Claude Code 自带的 `claude update`，更新的是实际检测到的那份安装（原生安装或 npm 安装）。失败时保留输出，可使用全局代理重试。
 - **Gemini、Kimi Code、DeepSeek Harness**：由用户自行安装和更新，只提供重新检测。
 
@@ -99,7 +99,7 @@ Pi 遇到临时连接错误时，会按 Pi 本机的重试设置在当前会话�
 | Cursor | `@cursor/sdk`、Cursor 账号登录或 API Key | 官方 SDK 的本机执行模式；保存并恢复 agent ID |
 | OpenCode | 已安装并完成登录的 `opencode` | 本机 HTTP/SSE 服务；保存并恢复 session ID |
 
-Cursor SDK 可在表单中「一键安装」：用所选 Node.js 自带的 npm 把最新 `@cursor/sdk` 安装到 AIPP 应用数据目录 `agent-runtimes/cursor-sdk`（若已选择 SDK 目录则装到该目录），完成后自动填入目录；之后有新版本时同样可一键更新。也可以选择已有的安装目录；留空时从工作目录向上查找 `node_modules/@cursor/sdk`（与运行时解析一致）。
+Cursor SDK 目录留空时，AIPP 先从工作目录向上查找 `node_modules/@cursor/sdk`，然后查找应用数据目录 `agent-runtimes/cursor-sdk` 中的托管安装。填写目录后，从指定位置加载 SDK。设置页用所选 Node.js 自带的 npm 更新当前安装。首次一键安装使用填写的目录，留空则装入托管目录，安装完成后自动填入目录。
 
 账号有两种方式，不需要 Cursor 编辑器或 CLI 的登录（SDK 不读取它们）：
 - **登录 Cursor（推荐）**：点击「登录 Cursor」，在浏览器完成 Cursor 登录。AIPP 通过 SDK 官方的 `Cursor.auth.login()` 生成一个名为「AIPP - <提供商名称>」、90 天有效的密钥，只保存在应用数据目录 `agent-profiles/cursor/<provider-id>/auth.json`（每个提供商实例独立、不同步、界面不显示密钥），会话和模型发现自动使用。登录页只允许打开 `cursor.com` 域名；可取消，最多等待 5 分钟。「退出登录」会关闭空闲的 Cursor 会话并删除本地密钥；密钥在到期前仍有效，可在 Cursor 后台的 API Keys 中撤销。过期后表单提示重新登录。账号需要 Cursor 付费计划。
@@ -290,7 +290,7 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 ## 配置输入
 
 ### 支持的 ACP CLI
-- `claude-code-acp`：Claude Code 的 ACP 适配器（`@zed-industries/claude-code-acp`），支持 Bun 一键安装
+- `claude-code-acp`（`@zed-industries/claude-code-acp`）支持 Bun 一键安装。环境检测实际启动适配器，通过 ACP `initialize` 读取版本，无需新建会话。npm、pnpm 和 Bun 安装都可检测，自动更新与 Codex 使用相同的安装来源核验。
 - `gemini`：Gemini CLI 原生支持 ACP，需用户自行安装
 - `kimi`：在「ACP」中选择 Kimi Code CLI。检测和会话启动按相同顺序查找程序，先查 PATH，再查用户安装目录（含 `~/.kimi-code/bin`）。首次使用需在 Kimi 中完成 `/login`。AIPP 自动运行 `kimi acp`，可在助手或新对话中选择 Kimi 通过 `session/new` 返回的模型与 Thinking 选项。
 - `dsh-acp-server`：DeepSeek Harness 的 ACP 插件，需 Node.js >= 22 并手动安装 `@deepseek-ai/dsh` 与 `dsh-acp-server`，模型与密钥在 dsh 中配置

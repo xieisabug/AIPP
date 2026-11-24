@@ -21,6 +21,16 @@ interface JSONImportDialogProps {
     onCatalog?: (id: string) => Promise<void>;
 }
 
+// The stdio field is editable text. Preserve each imported argv entry, including
+// empty strings, quotes and Windows paths, for the backend's literal argument parser.
+function quoteStdioArgument(value: string): string {
+    if (value && !/[\s'"\\]/.test(value)) return value;
+    const trailing = value.match(/\\+$/)?.[0] ?? '';
+    const body = value.slice(0, value.length - trailing.length).replaceAll("'", "\\'");
+    // A trailing backslash before a single quote escapes that quote in legacy
+    // commands. Encode the trailing run in its own double-quoted section.
+    return "'" + body + "'" + (trailing ? '"' + trailing.repeat(2) + '"' : '');
+}
 
 const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
     isOpen,
@@ -104,13 +114,14 @@ const JSONImportDialog: React.FC<JSONImportDialogProps> = ({
                 url = config.url;
             } else if (config.command || config.args) {
                 transport_type = 'stdio';
-                if (config.command && config.args) {
-                    command = `${config.command} ${config.args.join(' ')}`;
-                } else if (config.command) {
-                    command = config.command;
-                } else {
+                if (typeof config.command !== 'string' || !config.command) {
                     throw new Error(`服务器 "${serverName}" 的stdio配置必须包含command字段`);
                 }
+                const args: unknown = config.args ?? [];
+                if (!Array.isArray(args) || !args.every(arg => typeof arg === 'string')) {
+                    throw new Error(`服务器 "${serverName}" 的 args 必须是字符串数组`);
+                }
+                command = [config.command, ...args].map(quoteStdioArgument).join(' ');
             } else {
                 throw new Error(`服务器 "${serverName}" 必须包含url或command/args字段`);
             }

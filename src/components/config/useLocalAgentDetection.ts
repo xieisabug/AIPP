@@ -12,6 +12,7 @@ export type LocalAgentStatus =
         program: string;
         version: string | null;
         path: string | null;
+        error?: string;
         /** 原生智能体经 Node.js 桥接运行；其他类型为 undefined */
         node?: { ok: boolean; version: string | null; required: string };
     }
@@ -33,19 +34,20 @@ const CLI_CHECKS: Record<string, { command: string; program: string }> = {
 async function detectNative(driver: string): Promise<LocalAgentStatus> {
     const env = await invoke<NativeAgentEnvironment>("detect_native_agent_environment", { driver, settings: {}, providerId: null });
     const tool = env.tool;
-    const found = tool.selected?.ok ? tool.selected : tool.candidates.find((candidate) => candidate.ok) ?? null;
+    const found = tool.selected?.ok ? tool.selected : null;
     const node = env.node.selected;
     return {
         state: found ? "installed" : "missing",
         program: tool.display_name,
         version: found?.version ?? null,
         path: found?.path ?? null,
-        node: { ok: Boolean(node?.ok), version: node?.version ?? null, required: env.node.required },
+        error: tool.selected?.error ?? undefined,
+        node: { ok: Boolean(node?.ok && !node.warning), version: node?.version ?? null, required: env.node.required },
     };
 }
 
 async function detectCli(command: string, program: string): Promise<LocalAgentStatus> {
-    const info = await invoke<AcpLibraryInfo>("check_acp_library", { cliCommand: command });
+    const info = await invoke<AcpLibraryInfo>("check_acp_library", { cliCommand: command, checkUpdateSource: false });
     return {
         state: info.installed ? "installed" : "missing",
         program,
@@ -84,7 +86,7 @@ export function useLocalAgentDetection(apiTypes: readonly ProviderApiTypeOption[
         if (types.includes("acp")) {
             Promise.all(ACP_CLI_OPTIONS.map(async (option) => {
                 try {
-                    const info = await invoke<AcpLibraryInfo>("check_acp_library", { cliCommand: option.value });
+                    const info = await invoke<AcpLibraryInfo>("check_acp_library", { cliCommand: option.value, checkUpdateSource: false });
                     return { value: option.value, label: option.label, installed: info.installed, version: info.version };
                 } catch {
                     return { value: option.value, label: option.label, installed: false, version: null };

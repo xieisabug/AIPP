@@ -57,6 +57,22 @@ test('should keep a failed exit code distinct from success when detecting CLIs',
   assert.equal(result.output, 'unknown flag');
 });
 
+test('should stop after the first working installation when earlier CLIs fail', async () => {
+  const commands = ['broken', 'usable', 'unused'].map(command => ({ key: command, command }));
+  const attempted = [];
+  const result = await detect(commands, {
+    firstWorking: true,
+    resolveCommand: command => command,
+    launchPlan: command => ({ resolved: command }),
+    launch: command => {
+      attempted.push(command);
+      return fakeChild({ code: command === 'broken' ? 2 : 0 });
+    },
+  });
+  assert.deepEqual(attempted, ['broken', 'usable']);
+  assert.deepEqual(result.map(item => item.ok), [false, true]);
+});
+
 test('should stream output and stop the process tree when a maintenance command times out', async () => {
   const chunks = [];
   const finished = await run('opencode', ['upgrade'], { start: () => fakeChild({ stdout: 'Upgrading…\n', code: 0 }), onOutput: text => chunks.push(text) });

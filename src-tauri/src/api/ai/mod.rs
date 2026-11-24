@@ -1,4 +1,5 @@
 pub mod acp;
+pub(crate) mod acp_adapter_probe;
 pub(crate) mod agent_driver;
 pub(crate) mod agent_activity;
 pub(crate) mod claude_activity;

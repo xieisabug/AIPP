@@ -85,7 +85,7 @@ export const AgentProgramField: React.FC<{
             <ProgramPicker
                 value={value}
                 autoValues={["", command]}
-                autoLabel={`自动（PATH 中的 ${command || "程序"}）`}
+                autoLabel={`自动查找 ${command || "程序"}`}
                 selected={tool?.selected ?? null}
                 candidates={tool?.candidates ?? []}
                 detecting={state.detecting}
@@ -127,7 +127,7 @@ export const CursorSdkField: React.FC<{
     };
     return (
         <div className="flex flex-col gap-2">
-            <FolderPicker value={value} onChange={onChange} placeholder="留空则从工作目录向上查找 node_modules/@cursor/sdk" />
+            <FolderPicker value={value} onChange={onChange} placeholder="自动查找工作目录及其上级、AIPP 管理目录中的 SDK" />
             <ProgramStatus program={selected} detecting={state.detecting} />
             {managed && selected && !samePath(managed.path, selected.path) && (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

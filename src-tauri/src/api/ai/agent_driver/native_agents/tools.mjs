@@ -34,7 +34,7 @@ export function run(command, args, { timeout = 20000, onOutput, start = launch }
 export async function detect(commands, dependencies = {}) {
   const plan = dependencies.launchPlan || launchPlan;
   const resolve = dependencies.resolveCommand || resolveCommand;
-  return Promise.all(commands.map(async ({ key, command }) => {
+  const probe = async ({ key, command }) => {
     const resolved = resolve(command);
     try {
       const target = plan(command, ['--version']);
@@ -43,7 +43,26 @@ export async function detect(commands, dependencies = {}) {
     } catch (error) {
       return { key, command, resolved, ok: false, error: error.message };
     }
-  }));
+  };
+  if (dependencies.firstWorking) {
+    const results = [];
+    for (const candidate of commands) {
+      const result = await probe(candidate);
+      results.push(result);
+      if (result.ok) break;
+    }
+    return results;
+  }
+  const results = new Array(commands.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < commands.length) {
+      const index = next++;
+      results[index] = await probe(commands[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, commands.length) }, worker));
+  return results;
 }
 
 // npm shipped with the running Node: <dir>/node_modules/npm (Windows, official zips)

@@ -15,6 +15,7 @@ use crate::db::assistant_db::AssistantDatabase;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::{ConversationLoadedMCPTool, MCPDatabase, MCPServer, MCPToolCall};
 use crate::mcp::builtin_mcp::{execute_aipp_builtin_tool, is_builtin_mcp_call};
+use crate::mcp::stdio_args::split_command_line;
 use crate::mcp::is_dynamic_mcp_loading_enabled_for_assistant;
 use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
@@ -1132,44 +1133,6 @@ pub(super) fn parse_tool_arguments(parameters: &str) -> Result<JsonMap<String, s
         serde_json::Value::Object(map) => Ok(map),
         _ => bail!("参数必须是 JSON 对象"),
     }
-}
-
-/// 简单命令行解析，支持单双引号与反斜杠转义。
-fn split_command_line(input: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-    for c in input.chars() {
-        if escape {
-            buf.push(c);
-            escape = false;
-            continue;
-        }
-        match c {
-            '\\' => {
-                escape = true;
-            }
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            ' ' | '\t' | '\n' if !in_single && !in_double => {
-                if !buf.is_empty() {
-                    parts.push(buf.clone());
-                    buf.clear();
-                }
-            }
-            _ => buf.push(c),
-        }
-    }
-    if !buf.is_empty() {
-        parts.push(buf);
-    }
-    parts
 }
 
 /// 构建 `CallToolRequestParam` 结构。

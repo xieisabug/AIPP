@@ -30,7 +30,7 @@ jsonLines(process.stdin, request => {
         } finally { await login.close(); }
       } else throw new Error(`Browser login is not supported by ${request.driver}`);
     } else if (request.type === 'detect') {
-      data = { node: nodeRuntime(), commands: await detect(request.commands || []) };
+      data = { node: nodeRuntime(), commands: await detect(request.commands || [], { firstWorking: request.firstWorking }) };
     } else if (request.type === 'exec') {
       const command = request.tool === 'npm' ? npmCli() : request.command;
       if (!command) throw new Error('exec request omitted its command');

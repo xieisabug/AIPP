@@ -68,8 +68,17 @@ pub fn is_claude_code_provider(
         || provider_api_type.eq_ignore_ascii_case("anthropic")
         || (provider_api_type.eq_ignore_ascii_case("acp")
             && provider_configs.iter().any(|config| {
-                matches!(config.name.as_str(), "acp_cli_command" | "claude_cli_command")
-                    && config.value.to_ascii_lowercase().contains("claude")
+                let command = config.value.trim();
+                if config.name == "claude_cli_command" {
+                    return !command.is_empty();
+                }
+                if config.name != "acp_cli_command" {
+                    return false;
+                }
+                // A legacy ACP provider pointing at the official Claude CLI speaks stream-json.
+                // The separately installed claude-code-acp adapter speaks ACP.
+                let file = command.rsplit(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase();
+                matches!(file.as_str(), "claude" | "claude.exe" | "claude.com" | "claude.cmd" | "claude.bat" | "claude.ps1")
             }))
 }
 
@@ -221,7 +230,7 @@ pub(crate) async fn discover_claude_models(mut config: ClaudeSdkConfig, provider
     PROBES.get_or_probe(key.clone(), move || async move {
         // Discovery asks for the entire catalog, including when the stored selection is a CLI-default sentinel.
         config.model = None;
-        let resolved = official_cli::resolve(&config.cli_command).await?;
+        let resolved = official_cli::for_session("claude", &config.cli_command, &config.env_vars).await?.path;
         let mut command = build_claude_command(&config, None, &resolved);
         command.args(["--no-session-persistence", "--strict-mcp-config"]);
         let mut child = command.spawn().map_err(|e|format!("启动 Claude Code 模型探测失败（{}）：{e}", resolved.display()))?;
@@ -1220,7 +1229,7 @@ async fn spawn_claude_process_with_diagnostics(
     tokio::process::ChildStdin,
     tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ), String> {
-    let resolved = official_cli::resolve(&config.cli_command).await?;
+    let resolved = official_cli::for_session("claude", &config.cli_command, &config.env_vars).await?.path;
     let mut command = build_claude_command(config, session_id, &resolved);
     tracing::info!(
         cli = %resolved.display(),
@@ -1288,7 +1297,7 @@ fn build_claude_command(
     session_id: Option<&str>,
     resolved: &std::path::Path,
 ) -> Command {
-    let mut command = Command::from(official_cli::command(resolved));
+    let mut command = Command::from(official_cli::command(resolved, &config.env_vars));
     command.args([
         "--print",
         "--verbose",
@@ -1308,7 +1317,7 @@ fn build_claude_command(
     if let Some(model) = &config.model { command.args(["--model", model]); }
     if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
     if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
-    command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    command.current_dir(&config.working_directory).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     command
 }
 

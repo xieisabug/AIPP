@@ -90,6 +90,14 @@ pub struct AcpLaunchPlan {
     pub proxy_strategy: String,
 }
 
+impl AcpLaunchPlan {
+    fn command(&self, environment: &HashMap<String, String>) -> std::process::Command {
+        let mut command = super::official_cli::command(&self.program, environment);
+        command.args(&self.args).envs(&self.extra_env);
+        command
+    }
+}
+
 async fn build_acp_manual_mcp_servers(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
@@ -297,6 +305,13 @@ pub fn refresh_acp_selected_mcp_tools_payload(
 }
 
 pub(crate) fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
+    // Provider forms accept JSON as well as the KEY=VALUE format used by assistants.
+    if let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(raw) {
+        for (key, value) in entries {
+            insert_cli_env(env_vars, &key, value);
+        }
+        return;
+    }
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -306,10 +321,18 @@ pub(crate) fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &s
         if let Some((key, value)) = trimmed.split_once('=') {
             let key = key.trim();
             if !key.is_empty() {
-                env_vars.insert(key.to_string(), value.trim().to_string());
+                insert_cli_env(env_vars, key, value.trim().to_string());
             }
         }
     }
+}
+
+fn insert_cli_env(env_vars: &mut HashMap<String, String>, key: &str, value: String) {
+    #[cfg(windows)]
+    if let Some(previous) = env_vars.keys().find(|name| name.eq_ignore_ascii_case(key) && *name != key).cloned() {
+        env_vars.remove(&previous);
+    }
+    env_vars.insert(key.to_string(), value);
 }
 
 const CLAUDE_SETTINGS_AUTH_MODE: &str = "claude_settings";
@@ -318,16 +341,9 @@ const CLAUDE_AUTH_ENV_KEYS: [&str; 3] =
     ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
 
 fn env_blob_contains_any_key(raw: &str, keys: &[&str]) -> bool {
-    raw.lines().any(|line| {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            return false;
-        }
-
-        trimmed.split_once('=').is_some_and(|(key, _)| {
-            keys.iter().any(|candidate| key.trim().eq_ignore_ascii_case(candidate))
-        })
-    })
+    let mut environment = HashMap::new();
+    merge_acp_env_blob(&mut environment, raw);
+    environment.keys().any(|key| keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate)))
 }
 
 fn has_explicit_claude_auth_override(
@@ -390,47 +406,26 @@ fn resolve_claude_auth_mode(
 }
 
 fn load_claude_settings_env_vars_from_path(
-    path: &Path,
+    path: &Path, require_auth: bool,
 ) -> Result<HashMap<String, String>, AppError> {
-    let raw = fs::read_to_string(path).map_err(|e| {
-        AppError::UnknownError(format!(
-            "读取 Claude settings.json 失败 ({}): {}",
-            path.display(),
-            e
-        ))
-    })?;
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if !require_auth && error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(AppError::UnknownError(format!("读取 Claude settings.json 失败 ({}): {error}", path.display()))),
+    };
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        AppError::UnknownError(format!(
-            "解析 Claude settings.json 失败 ({}): {}",
-            path.display(),
-            e
-        ))
+        AppError::UnknownError(format!("解析 Claude settings.json 失败 ({}): {e}", path.display()))
     })?;
-    let env_object = parsed.get("env").and_then(|value| value.as_object()).ok_or_else(|| {
-        AppError::UnknownError(format!("Claude settings.json 中缺少 env 对象 ({})", path.display()))
-    })?;
-
-    let mut env_vars = HashMap::new();
-    for (key, value) in env_object {
-        if let Some(string_value) = value.as_str() {
-            env_vars.insert(key.to_string(), string_value.to_string());
-        }
+    let Some(env_object) = parsed.get("env").and_then(|value| value.as_object()) else {
+        if !require_auth && parsed.get("env").is_none() { return Ok(HashMap::new()); }
+        return Err(AppError::UnknownError(format!("Claude settings.json 中缺少 env 对象 ({})", path.display())));
+    };
+    let env_vars: HashMap<_, _> = env_object.iter()
+        .filter_map(|(name, value)| value.as_str().map(|s| (name.clone(), s.to_owned()))).collect();
+    if require_auth && env_vars.is_empty() {
+        return Err(AppError::UnknownError(format!("Claude settings.json 的 env 对象为空 ({})", path.display())));
     }
-
-    if env_vars.is_empty() {
-        return Err(AppError::UnknownError(format!(
-            "Claude settings.json 的 env 对象为空 ({})",
-            path.display()
-        )));
-    }
-
     Ok(env_vars)
-}
-
-fn load_claude_settings_env_vars() -> Result<HashMap<String, String>, AppError> {
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| AppError::UnknownError("无法确定用户 home 目录".to_string()))?;
-    load_claude_settings_env_vars_from_path(&home_dir.join(".claude").join("settings.json"))
 }
 
 fn get_claude_model_override(
@@ -1395,23 +1390,20 @@ pub async fn probe_acp_session_config_options(
         ));
     }
 
-    let resolved_cli_command = resolve_acp_cli_path(&config.cli_command).await?;
+    let resolved_cli_command = resolve_acp_cli_path(&config.cli_command, &config.env_vars).await?;
     let launch_plan = build_acp_launch_plan(
         &config.cli_command,
         &resolved_cli_command,
         &config.additional_args,
         &config.env_vars,
     );
-    let mut command = Command::from(super::official_cli::command(&launch_plan.program));
+    let mut command = Command::from(launch_plan.command(&config.env_vars));
     command
         .current_dir(&config.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .envs(&config.env_vars)
-        .envs(&launch_plan.extra_env)
-        .args(&launch_plan.args);
+        .kill_on_drop(true);
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -1740,77 +1732,8 @@ pub fn spawn_agent_idle_reaper_once(app_handle: tauri::AppHandle) {
     });
 }
 
-pub async fn resolve_acp_cli_path(cli_command: &str) -> Result<PathBuf, String> {
-    if cli_command == "kimi" {
-        return super::official_cli::resolve(cli_command).await;
-    }
-    let name = cli_command.to_owned();
-    tokio::task::spawn_blocking(move || resolve_generic_acp_cli_path(&name)).await
-        .map_err(|error| format!("查找 ACP 命令 {cli_command} 失败：{error}"))
-}
-
-/// Resolve a generic ACP CLI command to its full path
-///
-/// This function tries to find the CLI executable in the following order:
-/// 1. If the command is already an absolute path, use it directly
-/// 2. Check ~/.bun/bin/ for bun-installed global packages
-/// 3. Check system PATH
-/// 4. Fall back to the original command (let the system handle it)
-pub(crate) fn resolve_generic_acp_cli_path(cli_command: &str) -> PathBuf {
-    let cli_path = PathBuf::from(cli_command);
-
-    // If it's already an absolute path, use it directly
-    if cli_path.is_absolute() {
-        info!("ACP: CLI command is already an absolute path");
-        return cli_path;
-    }
-
-    // Check ~/.bun/bin/ first (bun-installed global packages)
-    if let Some(home) = dirs::home_dir() {
-        // On Windows, bun creates .exe files for global packages
-        #[cfg(target_os = "windows")]
-        let exe_name = format!("{}.exe", cli_command);
-        #[cfg(not(target_os = "windows"))]
-        let exe_name = cli_command.to_string();
-
-        let bun_bin_path = home.join(".bun").join("bin").join(&exe_name);
-        info!("ACP: Checking bun bin path: {}", bun_bin_path.display());
-        if bun_bin_path.exists() {
-            info!("ACP: Found CLI in bun bin: {}", bun_bin_path.display());
-            return bun_bin_path;
-        }
-
-        // Also check without .exe on Windows (in case user provides full name)
-        #[cfg(target_os = "windows")]
-        {
-            let bun_bin_path_no_ext = home.join(".bun").join("bin").join(cli_command);
-            if bun_bin_path_no_ext.exists() {
-                info!("ACP: Found CLI in bun bin (no ext): {}", bun_bin_path_no_ext.display());
-                return bun_bin_path_no_ext;
-            }
-        }
-    }
-
-    // Check system PATH using platform-specific command
-    #[cfg(target_os = "windows")]
-    let which_cmd = "where";
-    #[cfg(not(target_os = "windows"))]
-    let which_cmd = "which";
-
-    if let Ok(output) = background_command(which_cmd).arg(cli_command).output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // On Windows, `where` may return multiple lines, take the first one
-            let first_path = path_str.lines().next().unwrap_or("").trim();
-            if !first_path.is_empty() {
-                info!("ACP: Found CLI in system PATH: {}", first_path);
-                return PathBuf::from(first_path);
-            }
-        }
-    }
-
-    info!("ACP: CLI not found in known paths, using original command: {}", cli_command);
-    cli_path
+pub async fn resolve_acp_cli_path(cli_command: &str, env_vars: &HashMap<String, String>) -> Result<PathBuf, String> {
+    super::official_cli::for_session(cli_command, cli_command, env_vars).await.map(|program| program.path)
 }
 
 fn has_proxy_env_vars(env_vars: &HashMap<String, String>) -> bool {
@@ -1855,8 +1778,10 @@ fn find_latest_node_in_dir(base_dir: &Path, nested_suffix: &Path) -> Option<Path
     })
 }
 
-fn resolve_node_runtime_path() -> Option<PathBuf> {
-    if let Ok(node_path) = which::which("node") {
+fn resolve_node_runtime_path(environment: &HashMap<String, String>) -> Option<PathBuf> {
+    let path = super::official_cli::env_value(environment, "PATH").unwrap_or_default();
+    let directories: Vec<_> = std::env::split_paths(&path).filter(|dir| dir.is_absolute()).collect();
+    if let Ok(node_path) = super::official_cli::find_in_dirs(if cfg!(windows) { "node.exe" } else { "node" }, &directories) {
         return Some(node_path);
     }
 
@@ -1929,8 +1854,8 @@ fn resolve_node_runtime_path() -> Option<PathBuf> {
     .find(|path| test_node_executable(path))
 }
 
-fn node_supports_use_env_proxy(node_path: &Path) -> bool {
-    let Ok(output) = background_command(node_path).arg("--help").output() else {
+fn node_supports_use_env_proxy(node_path: &Path, environment: &HashMap<String, String>) -> bool {
+    let Ok(output) = background_command(node_path).envs(environment).arg("--help").output() else {
         return false;
     };
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains("--use-env-proxy")
@@ -1970,7 +1895,7 @@ pub fn build_acp_launch_plan(
         return plan;
     }
 
-    let Some(node_path) = resolve_node_runtime_path() else {
+    let Some(node_path) = resolve_node_runtime_path(env_vars) else {
         plan.proxy_strategy = "standard-env-node-not-found".to_string();
         return plan;
     };
@@ -1981,7 +1906,7 @@ pub fn build_acp_launch_plan(
 
     if has_proxy_env_vars(env_vars) {
         plan.extra_env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
-        if node_supports_use_env_proxy(&node_path) {
+        if node_supports_use_env_proxy(&node_path, env_vars) {
             plan.args.insert(0, "--use-env-proxy".to_string());
             plan.proxy_strategy = "node-use-env-proxy-flag".to_string();
         } else {
@@ -1992,6 +1917,10 @@ pub fn build_acp_launch_plan(
     }
 
     plan
+}
+
+pub(crate) fn build_acp_command(cli_command: &str, path: &Path, args: &[String], environment: &HashMap<String, String>) -> std::process::Command {
+    build_acp_launch_plan(cli_command, path, args, environment).command(environment)
 }
 
 /// Extract text content from a ContentBlock
@@ -4897,7 +4826,7 @@ async fn run_acp_session(
     );
     let permission_manager = Arc::new(PermissionManager::new(app_handle.clone()));
 
-    let resolved_cli_command = match resolve_acp_cli_path(&acp_config.cli_command).await {
+    let resolved_cli_command = match resolve_acp_cli_path(&acp_config.cli_command, &acp_config.env_vars).await {
         Ok(path) => path,
         Err(error) => fail_startup!(error),
     };
@@ -4946,41 +4875,21 @@ async fn run_acp_session(
         )
         .await;
 
-    let mut cmd = Command::from(super::official_cli::command(&launch_plan.program));
+    let mut cmd = Command::from(launch_plan.command(&acp_config.env_vars));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    for (key, value) in &acp_config.env_vars {
-        cmd.env(key, value);
-        debug!(
-            "ACP: Set env var: {}={}",
-            key,
-            if key.to_lowercase().contains("key") || key.to_lowercase().contains("token") {
-                "***"
-            } else {
-                value
-            }
-        );
-    }
     if !acp_config.env_vars.is_empty() {
         info!("ACP: Environment variables set: {}", acp_config.env_vars.len());
     }
 
-    for (key, value) in &launch_plan.extra_env {
-        cmd.env(key, value);
-        debug!("ACP: Set runtime env var: {}={}", key, value);
-    }
     if !launch_plan.extra_env.is_empty() {
         info!("ACP: Runtime environment variables set: {}", launch_plan.extra_env.len());
     }
 
-    if !launch_plan.args.is_empty() {
-        cmd.args(&launch_plan.args);
-        info!("ACP: Effective args: {:?}", launch_plan.args);
-    }
 
     info!("ACP: Spawning process...");
     let mut child = match cmd.spawn() {
@@ -5918,7 +5827,7 @@ async fn run_acp_session_delete(
     session_id: &str,
     acp_config: AcpConfig,
 ) -> Result<(), AppError> {
-    let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command).await
+    let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command, &acp_config.env_vars).await
         .map_err(AppError::UnknownError)?;
     let launch_plan = build_acp_launch_plan(
         &acp_config.cli_command,
@@ -5927,21 +5836,12 @@ async fn run_acp_session_delete(
         &acp_config.env_vars,
     );
 
-    let mut cmd = Command::from(super::official_cli::command(&launch_plan.program));
+    let mut cmd = Command::from(launch_plan.command(&acp_config.env_vars));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    for (key, value) in &acp_config.env_vars {
-        cmd.env(key, value);
-    }
-    for (key, value) in &launch_plan.extra_env {
-        cmd.env(key, value);
-    }
-    if !launch_plan.args.is_empty() {
-        cmd.args(&launch_plan.args);
-    }
     let mut child = cmd.spawn().map_err(|error| {
         AppError::UnknownError(format!(
             "failed to spawn ACP process '{}' for session/delete: {error}",
@@ -6080,6 +5980,20 @@ pub fn extract_acp_config(
     model_configs: &[AssistantModelConfig],
     provider_configs: &[LLMProviderConfig],
 ) -> Result<AcpConfig, AppError> {
+    extract_acp_config_with_auth(model_configs, provider_configs, true)
+}
+
+/// The adapter's initialize handshake works before login. Apply any existing environment
+/// settings while allowing installation detection before the auth settings file is created.
+pub(crate) fn acp_installation_environment(provider_configs: &[LLMProviderConfig]) -> Result<HashMap<String, String>, AppError> {
+    extract_acp_config_with_auth(&[], provider_configs, false).map(|config| config.env_vars)
+}
+
+fn extract_acp_config_with_auth(
+    model_configs: &[AssistantModelConfig],
+    provider_configs: &[LLMProviderConfig],
+    require_auth: bool,
+) -> Result<AcpConfig, AppError> {
     // Helper to get value from provider_configs
     let get_provider_config = |name: &str| -> Option<String> {
         provider_configs
@@ -6135,7 +6049,8 @@ pub fn extract_acp_config(
     let mut env_vars = HashMap::new();
 
     if claude_auth_mode.as_deref() == Some(CLAUDE_SETTINGS_AUTH_MODE) {
-        let settings_env = load_claude_settings_env_vars()?;
+        let home = dirs::home_dir().ok_or_else(|| AppError::UnknownError("无法确定用户 home 目录".to_string()))?;
+        let settings_env = load_claude_settings_env_vars_from_path(&home.join(".claude/settings.json"), require_auth)?;
         info!(
             "ACP Claude auth env loaded from ~/.claude/settings.json: {} vars",
             settings_env.len()
@@ -6158,7 +6073,7 @@ pub fn extract_acp_config(
         }
 
         if let Some(key) = config.name.strip_prefix("acp_env_") {
-            env_vars.insert(key.to_uppercase(), config.value.clone());
+            insert_cli_env(&mut env_vars, &key.to_uppercase(), config.value.clone());
         }
     }
 
@@ -6182,7 +6097,7 @@ pub fn extract_acp_config(
 
         if let Some(key) = config.name.strip_prefix("acp_env_") {
             if let Some(value) = &config.value {
-                env_vars.insert(key.to_uppercase(), value.clone());
+                insert_cli_env(&mut env_vars, &key.to_uppercase(), value.clone());
             }
         }
     }
@@ -6770,7 +6685,7 @@ mod tests {
         )
         .unwrap();
 
-        let env_vars = load_claude_settings_env_vars_from_path(file.path()).unwrap();
+        let env_vars = load_claude_settings_env_vars_from_path(file.path(), true).unwrap();
 
         assert_eq!(env_vars.get("ANTHROPIC_API_KEY"), Some(&"test-key".to_string()));
         assert_eq!(

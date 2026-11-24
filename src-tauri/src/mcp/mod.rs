@@ -18,6 +18,7 @@ pub mod tool_review;
 pub mod tool_review_output;
 pub mod prompt;
 pub mod registry_api;
+pub(crate) mod stdio_args;
 pub mod summarizer;
 pub mod util;
 

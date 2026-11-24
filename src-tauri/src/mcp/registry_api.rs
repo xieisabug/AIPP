@@ -16,43 +16,7 @@ const STDIO_TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT_DEFAULT_MS: u64 = 30_000; // 连接阶段默认毫秒
 
-// 简单的命令行解析，支持双引号/单引号与反斜杠转义，不依赖额外 crate
-fn split_command_line(input: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-    for c in input.chars() {
-        if escape {
-            buf.push(c);
-            escape = false;
-            continue;
-        }
-        match c {
-            '\\' => {
-                escape = true;
-            }
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            ' ' | '\t' | '\n' if !in_single && !in_double => {
-                if !buf.is_empty() {
-                    parts.push(buf.clone());
-                    buf.clear();
-                }
-            }
-            _ => buf.push(c),
-        }
-    }
-    if !buf.is_empty() {
-        parts.push(buf);
-    }
-    parts
-}
+use crate::mcp::stdio_args::split_command_line;
 
 // 环境变量解析：忽略空行与以#开头的注释，只处理 KEY=VALUE 形式
 pub(crate) fn parse_env_vars(env: &str) -> Vec<(String, String)> {

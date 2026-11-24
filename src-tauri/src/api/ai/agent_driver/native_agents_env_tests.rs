@@ -84,9 +84,10 @@ fn test_native_agent_env_selected_node_directory_is_prepended_once() {
 #[ignore = "requires a supported Node installed in a discovered location outside PATH"]
 async fn test_native_agent_env_launch_with_empty_path_uses_discovered_node_for_children() {
     let mut env = HashMap::from([("PATH".to_string(), String::new())]);
-    let status = detect_node("node", &effective_path(&env)).await;
+    let cwd = std::env::current_dir().unwrap();
+    let status = detect_node("node", &effective_path(&env), &cwd).await;
     let selected = status.selected.expect("install a supported Node in a version manager or installer directory");
-    let command = resolve_launch_node("node", &mut env).await.unwrap();
+    let command = resolve_launch_node("node", &mut env, &cwd).await.unwrap();
     assert_eq!(command, selected.path);
     assert_eq!(Path::new(&env["PATH"]), Path::new(&command).parent().unwrap());
     let output = tokio::process::Command::new(command).envs(env)
@@ -121,6 +122,117 @@ fn test_native_agent_env_cursor_sdk_lookup_walks_parent_directories_like_require
     assert_eq!(find_cursor_sdk(&nested), Some((root.path().to_path_buf(), Some("1.2.0".into()))));
     let empty = tempfile::tempdir().unwrap();
     assert!(find_cursor_sdk(empty.path()).is_none_or(|(dir, _)| !dir.starts_with(empty.path())), "an empty directory has no SDK of its own");
+}
+
+#[tokio::test]
+async fn test_native_agent_env_launch_cli_uses_the_installer_candidate_and_preserves_explicit_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let global = root.path().join("package manager");
+    let first = root.path().join("path");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::create_dir_all(&first).unwrap();
+    let env = HashMap::from([("PATH".into(), String::new()), ("PNPM_HOME".into(), global.display().to_string())]);
+    for driver in ["pi", "opencode", "kiro", "antigravity"] {
+        let spec = ToolSpec { command: "aipp-test-cli", ..spec(driver).unwrap() };
+        let filename = if cfg!(windows) { format!("{}.exe", spec.command) } else { spec.command.into() };
+        let installed = global.join(&filename);
+        std::fs::write(&installed, "").unwrap();
+        let mut config = NativeConfig {
+            node: root.path().join("fixture-node").display().to_string(), cwd: root.path().to_owned(), env: env.clone(), wire: json!({}), review: false,
+        };
+        let files = cli_candidates(driver, false, spec.command, &env, root.path());
+        assert_eq!(files.first().unwrap().0, installed);
+        let selected = select_cli(driver, &spec, false, None, &env, root.path(), false).await.unwrap();
+        assert_eq!(Path::new(&selected.command), installed);
+
+        let preferred = first.join(&filename);
+        std::fs::write(&preferred, "").unwrap();
+        config.env.insert("PATH".into(), first.display().to_string());
+        let selected = select_cli(driver, &spec, false, Some(spec.command), &config.env, root.path(), false).await.unwrap();
+        assert_eq!(Path::new(&selected.command), preferred);
+        let missing = root.path().join("missing").join(&filename);
+        config.wire["command"] = json!(missing);
+        prepare_bridge_launch(driver, &mut config).await.unwrap();
+        assert_eq!(config.wire["command"], json!(missing));
+    }
+}
+
+#[tokio::test]
+async fn test_native_agent_env_bad_cli_candidates_before_thirteenth_working_installation() {
+    let root = tempfile::tempdir().unwrap();
+    let node = which::which("node").expect("Node.js is required for native bridge tests").display().to_string();
+    let spec = ToolSpec { command: "aipp-test-cli.mjs", ..spec("antigravity").unwrap() };
+    let mut paths = Vec::new();
+    for index in 0..13 {
+        let dir = root.path().join(index.to_string());
+        std::fs::create_dir(&dir).unwrap();
+        let script = if index == 12 { "console.log('1.2.3')" } else { "process.exit(2)" };
+        std::fs::write(dir.join(spec.command), script).unwrap();
+        paths.push(dir);
+    }
+    let expected = paths[12].join(spec.command).display().to_string();
+    let env = HashMap::from([("PATH".into(), std::env::join_paths(&paths).unwrap().to_string_lossy().into_owned())]);
+    let lookup = select_cli("antigravity", &spec, false, None, &env, root.path(), true).await.unwrap();
+    let (selected, alternatives) = lookup.probe(&node, root.path(), &env, &spec, false).await.unwrap();
+    assert_eq!(alternatives.len(), 13);
+    assert!(alternatives[..12].iter().all(|entry| !entry.ok));
+    assert_eq!(selected.path, expected);
+    assert_eq!(lookup.launch_command(&node, root.path(), &env, &spec).await.unwrap(), expected);
+
+    let broken = paths[0].join(spec.command).display().to_string();
+    let explicit = select_cli("antigravity", &spec, false, Some(&broken), &env, root.path(), true).await.unwrap();
+    let (selected, _) = explicit.probe(&node, root.path(), &env, &spec, false).await.unwrap();
+    assert!(!selected.ok);
+    assert_eq!(selected.path, broken);
+    assert_eq!(explicit.launch_command(&node, root.path(), &env, &spec).await.unwrap(), broken);
+}
+
+#[tokio::test]
+#[ignore = "requires a supported Node and the official Antigravity CLI installed outside PATH"]
+async fn test_native_agent_env_antigravity_detect_and_launch_with_empty_path() {
+    let settings = HashMap::from([("acp_env_vars".into(), "PATH=".into())]);
+    let mut context = Context::new(&settings).unwrap();
+    context.env.insert("PATH".into(), String::new());
+    let mut config = configuration(&[], &context.providers, None).unwrap();
+    config.env = context.env.clone();
+    let node = detect_node("node", &effective_path(&context.env), &context.run_dir).await;
+    context.node = node.auto_command(&mut context.env).unwrap();
+    let spec = spec("antigravity").unwrap();
+    let tool = detect_cli("antigravity", &context, &spec, &node).await.unwrap();
+    let selected = tool.selected.unwrap();
+    assert!(selected.ok, "{selected:?}");
+    assert!(Path::new(&selected.path).is_absolute());
+    let launch_node = prepare_bridge_launch("antigravity", &mut config).await.unwrap();
+    assert_eq!(launch_node, context.node);
+    assert_eq!(config.wire["command"], json!(selected.path));
+    let output = bridge_call(&launch_node, &config.cwd, &config.env,
+        json!({"type":"exec","id":"version","command":config.wire["command"],"args":["--version"]}),
+        Duration::from_secs(30), |_| {}).await.unwrap();
+    assert_eq!(output["code"], 0, "{output}");
+    assert_eq!(version_token(output["output"].as_str().unwrap()), selected.version);
+    eprintln!("Node: {launch_node}, Antigravity: {} ({})", selected.path, output["output"].as_str().unwrap().trim());
+}
+
+#[test]
+fn test_native_agent_env_cursor_prefers_workspace_then_managed_and_keeps_explicit_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let cwd = workspace.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let managed = root.path().join("managed");
+    let install = |dir: &Path| {
+        let package = dir.join("node_modules/@cursor/sdk");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("package.json"), r#"{"version":"1.0.0"}"#).unwrap();
+    };
+    install(&managed);
+    assert_eq!(cursor_sdk_directory(&cwd, None, Some(&managed)), (managed.clone(), "AIPP 管理"));
+    assert_eq!(cursor_sdk_directory(&cwd, Some("missing"), Some(&managed)), (cwd.join("missing"), "所选目录"));
+    install(&workspace);
+    let (start, source) = cursor_sdk_directory(&cwd, None, Some(&managed));
+    assert_eq!(source, "工作目录");
+    assert_eq!(find_cursor_sdk(&start).unwrap().0, workspace);
+    assert!(find_cursor_sdk(&cwd.join("missing")).is_none());
 }
 
 #[test]

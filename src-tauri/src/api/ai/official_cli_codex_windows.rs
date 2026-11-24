@@ -1,8 +1,9 @@
-use super::{candidates, probe_version, search_dirs, ProbeError, Program};
+use super::{candidates, ProbeError, Program};
 use serde::Deserialize;
 use std::{collections::{HashMap, HashSet}, fs, path::{Component, Path, PathBuf}, process::Command};
 
 pub(super) struct Package {
+    pub(super) launcher: PathBuf,
     root: PathBuf,
     pnpm: bool,
 }
@@ -49,7 +50,7 @@ fn shim_package(shim: &Path) -> Option<Package> {
         let root = fs::canonicalize(entry.parent()?.parent()?).ok()?;
         let pnpm = root.ancestors().any(|dir| dir.file_name().is_some_and(|s| s == ".pnpm"))
             || js.starts_with("global");
-        return Some(Package { root, pnpm });
+        return Some(Package { root, pnpm, launcher: shim.to_path_buf() });
     }
     None
 }
@@ -85,13 +86,6 @@ fn native_program(shim: &Path) -> Option<Program> {
     None
 }
 
-pub(super) async fn detect() -> Result<(Program, String), ProbeError> {
-    let dirs = search_dirs("codex");
-    let programs = tokio::task::spawn_blocking(move || discover(&dirs)).await
-        .map_err(|e| ProbeError { path: None, message: format!("查找 Codex 失败：{e}") })??;
-    first_working(programs).await
-}
-
 pub(in crate::api::ai) fn discover(dirs: &[PathBuf]) -> Result<Vec<Program>, ProbeError> {
     let mut programs = Vec::new();
     let mut seen = HashSet::new();
@@ -107,17 +101,4 @@ pub(in crate::api::ai) fn discover(dirs: &[PathBuf]) -> Result<Vec<Program>, Pro
         return Err(ProbeError { path: None, message: format!("找不到命令 codex。已检查目录：{}", searched.join("；")) });
     }
     Ok(programs)
-}
-
-pub(in crate::api::ai) async fn first_working(programs: Vec<Program>) -> Result<(Program, String), ProbeError> {
-    let first = programs.first().map(|p| p.path.clone());
-    let mut errors = Vec::new();
-    for program in programs {
-        match probe_version(&program).await {
-            Ok(version) if semver::Version::parse(&version).is_ok() => return Ok((program, version)),
-            Ok(_) => errors.push(format!("{} --version 未返回 Codex 版本号", program.path.display())),
-            Err(error) => errors.push(error),
-        }
-    }
-    Err(ProbeError { path: first, message: errors.join("\n") })
 }

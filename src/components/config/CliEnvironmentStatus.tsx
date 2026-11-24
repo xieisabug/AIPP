@@ -92,6 +92,7 @@ export const CliEnvironmentStatus: React.FC<CliEnvironmentStatusProps> = ({ env,
         return (
             <div className="flex flex-col gap-2">
                 <ProgramStatus program={program} />
+                {info?.update_hint && <p className="text-xs text-muted-foreground">{info.update_hint}</p>}
                 {controls}
             </div>
         );

@@ -825,7 +825,7 @@ const DeepSeekSuiteOptions: React.FC<{
 
 /** 类型卡片上的「本机已安装」「已添加」标识。 */
 const TypeBadges: React.FC<{ installed: LocalAgentStatus | undefined; added: number }> = ({ installed, added }) => {
-    const isInstalled = installed?.state === "installed";
+    const isInstalled = installed?.state === "installed" && (!installed.node || installed.node.ok);
     if (!isInstalled && added === 0) return null;
     return (
         <span className="mt-1 flex flex-wrap gap-1">

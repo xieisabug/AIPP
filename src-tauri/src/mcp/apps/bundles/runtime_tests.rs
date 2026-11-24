@@ -2,6 +2,36 @@ use super::{runtime,format,store};
 use serde_json::json;
 use std::collections::HashMap;
 
+#[cfg(windows)]
+#[test]
+fn test_plugin_npx_uses_configured_path_before_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("custom node");
+    let scripts = bin.join("node_modules/npm/bin");
+    let shim = root.path().join("shim");
+    std::fs::create_dir(&shim).unwrap();
+    std::fs::write(shim.join("node.exe"), []).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(bin.join("node.exe"), []).unwrap();
+    std::fs::write(scripts.join("npx-cli.js"), []).unwrap();
+    let spec = |path: &str| {
+        let config = json!({"command":"npx","args":["package"],"env":{"Path":"manifest-only"}});
+        let values = HashMap::from([("PATH".to_owned(), path.to_owned())]);
+        let launch = runtime::launch(&config, root.path(), &values).unwrap();
+        assert_eq!(launch.env.keys().filter(|key| key.eq_ignore_ascii_case("path")).count(), 1);
+        launch
+    };
+    assert!(runtime::command(spec("missing")).is_err());
+    let cmd = runtime::command(spec("shim;custom node")).unwrap();
+    let cmd = cmd.as_std();
+    assert_eq!(std::path::Path::new(cmd.get_program()), bin.join("node.exe"));
+    let child_path = cmd.get_envs().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).unwrap().1.unwrap();
+    assert_eq!(std::env::split_paths(child_path).next().unwrap(), bin);
+    let args: Vec<_> = cmd.get_args().collect();
+    assert_eq!(std::path::Path::new(args[0]), scripts.join("npx-cli.js"));
+    assert_eq!(args[1], "package");
+}
+
 #[test]
 fn test_plugin_runtime_preserves_argv_and_expands_only_declared_variables() {
     let root=std::path::Path::new("plugin directory");

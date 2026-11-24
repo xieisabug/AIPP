@@ -119,6 +119,10 @@ pub(crate) fn configure_instance(app: &tauri::AppHandle, provider_id: i64, drive
     }
     if driver == "cursor" {
         config.wire["auth_store"] = json!(auth::cursor_auth_store(app, provider_id)?);
+        let managed = env::managed_sdk_directory(app).map_err(error)?;
+        let (directory, _) = env::cursor_sdk_directory(&config.cwd, config.wire["sdk_directory"].as_str(), Some(&managed));
+        if !directory.is_dir() { return Err(error(format!("Cursor SDK 目录不存在：{}", directory.display()))); }
+        config.wire["sdk_directory"] = json!(directory);
     }
     Ok(())
 }
@@ -371,7 +375,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
         } else { None };
         let files = bridge.as_ref().map_err(Clone::clone)?;
         prepared.config.wire["temp_root"] = json!(files.0);
-        let node = env::resolve_launch_node(&prepared.config.node, &mut prepared.config.env).await?;
+        let node = env::prepare_bridge_launch(driver.0, &mut prepared.config).await?;
         let mut command = tokio::process::Command::new(&node);
         command.arg(files.0.join("bridge.mjs")).current_dir(&prepared.config.cwd).envs(&prepared.config.env)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -661,7 +665,7 @@ pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Resu
     if !is_native_agent(driver) { return Err(format!("Unknown native agent driver: {driver}")); }
     let files = bridge_files().await?;
     config.wire["temp_root"] = json!(files.0);
-    let node = env::resolve_launch_node(&config.node, &mut config.env).await?;
+    let node = env::prepare_bridge_launch(driver, &mut config).await?;
     let mut command = tokio::process::Command::new(&node);
     command.arg(files.0.join("bridge.mjs")).current_dir(&config.cwd).envs(&config.env)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);

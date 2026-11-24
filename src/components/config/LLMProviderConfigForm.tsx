@@ -205,12 +205,18 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const acpCliCommand = form.watch("acp_cli_command");
     const claudeAuthMode = form.watch("acp_claude_auth_mode") || "claude_settings";
 
-    // ACP 环境检测 Hook
-    const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
+    // Keep the probe on the same provider environment while edits are being saved.
+    const environmentValues = Object.entries(form.watch()).filter(([key, value]) =>
+        typeof value === "string" && (key.startsWith("acp_env_") || key === "proxy_enabled"
+            || (isAcpProvider && (key === "acp_claude_auth_mode" || key === "acp_claude_env_vars"))
+            || (isClaudeSdkProvider && ["api_key", "endpoint", "base_url"].includes(key))));
+    const environmentKey = JSON.stringify(environmentValues);
+    const probeSettings = useMemo<Record<string, string>>(() => Object.fromEntries(JSON.parse(environmentKey)), [environmentKey]);
+    const acpEnv = useAcpEnvironment(isAcpProvider && loadedId === id ? (acpCliCommand || "") : "", undefined, probeSettings);
     const codexEnv = useAcpEnvironment(isCodexAppServerProvider && loadedId === id ? "codex" : "",
-        form.watch("codex_cli_command")?.trim() || "codex");
+        form.watch("codex_cli_command")?.trim() || "codex", probeSettings);
     const claudeEnv = useAcpEnvironment(isClaudeSdkProvider && loadedId === id ? "claude" : "",
-        form.watch("claude_cli_command")?.trim() || acpCliCommand?.trim() || "claude");
+        form.watch("claude_cli_command")?.trim() || acpCliCommand?.trim() || "claude", probeSettings);
 
     const saves = useMemo(() => {
         type Field = { value: string; revision: number; pending: boolean; timer?: ReturnType<typeof setTimeout>; running: boolean };

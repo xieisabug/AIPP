@@ -4,7 +4,6 @@ use crate::api::ai::acp::{
     AcpConfig, AcpSessionConfigOptionPayload,
 };
 use crate::api::agent_model_cache::ProbeCache;
-use crate::api::ai::official_cli;
 use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, probe_codex_model_options, CodexAppServerConfig,
     CodexModelProbe, CODEX_APP_SERVER_API_TYPE,
@@ -581,14 +580,12 @@ fn is_proxy_env_key(key: &str) -> bool {
     matches!(key.to_ascii_lowercase().as_str(), "http_proxy" | "https_proxy" | "all_proxy")
 }
 
-fn trim_probe_output(value: &[u8]) -> String {
-    let text = String::from_utf8_lossy(value).trim().to_string();
-    const LIMIT: usize = 1000;
-    if text.len() <= LIMIT {
-        text
-    } else {
-        format!("{}...", &text[..LIMIT])
-    }
+fn trim_probe_output(value: &[u8], env: &HashMap<String, String>) -> String {
+    let text = crate::api::ai::agent_driver::failure::AgentDiagnosticBuffer::for_environment(env)
+        .sanitize(String::from_utf8_lossy(value).trim());
+    let mut chars = text.chars();
+    let result: String = chars.by_ref().take(1000).collect();
+    if chars.next().is_some() { format!("{result}...") } else { result }
 }
 
 #[tauri::command]
@@ -1144,7 +1141,7 @@ pub async fn get_acp_launch_diagnostics(
         0
     };
 
-    let resolved_cli_path = resolve_acp_cli_path(&acp_config.cli_command).await?;
+    let resolved_cli_path = resolve_acp_cli_path(&acp_config.cli_command, &acp_config.env_vars).await?;
     let launch_plan = build_acp_launch_plan(
         &acp_config.cli_command,
         &resolved_cli_path,
@@ -1162,34 +1159,26 @@ pub async fn get_acp_launch_diagnostics(
     let mut all_env_keys = acp_config.env_vars.keys().cloned().collect::<Vec<_>>();
     all_env_keys.sort();
 
-    let version_probe = {
-        let resolved_cli_path = resolved_cli_path.clone();
-        let working_directory = acp_config.working_directory.clone();
-        let env_vars: HashMap<String, String> = acp_config.env_vars.clone();
-        tokio::task::spawn_blocking(move || {
-            match official_cli::command(&resolved_cli_path)
-                .arg("--version")
-                .current_dir(&working_directory)
-                .envs(&env_vars)
-                .output()
-            {
-                Ok(output) => AcpCommandProbe {
-                    success: output.status.success(),
-                    exit_code: output.status.code(),
-                    stdout: trim_probe_output(&output.stdout),
-                    stderr: trim_probe_output(&output.stderr),
-                },
-                Err(error) => AcpCommandProbe {
-                    success: false,
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: error.to_string(),
-                },
-            }
-        })
-        .await
-        .map_err(|e| e.to_string())?
+    let probe = if acp_config.cli_command == "claude-code-acp" {
+        crate::api::ai::acp_adapter_probe::probe_version(&resolved_cli_path, &acp_config.env_vars).await
+            .map(|version| AcpCommandProbe { success: true, exit_code: None, stdout: version, stderr: String::new() })
+    } else {
+        let command = crate::api::ai::acp::build_acp_command("", &resolved_cli_path, &[], &acp_config.env_vars);
+        let mut command = tokio::process::Command::from(command);
+        command.arg("--version").current_dir(&acp_config.working_directory).kill_on_drop(true);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
+            Ok(Ok(output)) => Ok(AcpCommandProbe {
+                success: output.status.success(), exit_code: output.status.code(),
+                stdout: trim_probe_output(&output.stdout, &acp_config.env_vars),
+                stderr: trim_probe_output(&output.stderr, &acp_config.env_vars),
+            }),
+            Ok(Err(error)) => Err(format!("{} --version：{error}", resolved_cli_path.display())),
+            Err(_) => Err(format!("{} --version 超过 10 秒未返回", resolved_cli_path.display())),
+        }
     };
+    let version_probe = probe.unwrap_or_else(|error| AcpCommandProbe {
+        success: false, exit_code: None, stdout: String::new(), stderr: error,
+    });
 
     let mut notes = Vec::new();
     if !proxy_enabled {
@@ -1204,7 +1193,7 @@ pub async fn get_acp_launch_diagnostics(
         );
     }
     if !version_probe.success {
-        notes.push("CLI --version 探测失败，请优先确认 ACP CLI 是否可执行".to_string());
+        notes.push("CLI 版本探测失败，请检查选定的 ACP CLI 和错误输出".to_string());
     }
 
     Ok(AcpLaunchDiagnostics {

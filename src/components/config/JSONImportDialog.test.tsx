@@ -4,6 +4,20 @@ import JSONImportDialog from './JSONImportDialog';
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({readText: vi.fn(async () => '')}));
 
 describe('JSON connection import', () => {
+    it('should preserve Windows paths, quotes and empty arguments when importing stdio', async () => {
+        const onImport = vi.fn();
+        render(<JSONImportDialog isOpen onClose={vi.fn()} onImport={onImport}/>);
+        const command = 'C:\\Program Files\\node.exe';
+        const args = ["C:\\team's files\\", '', 'a"b', '--foo'];
+        fireEvent.change(screen.getByLabelText('JSON配置'), {target:{value: JSON.stringify({
+            mcpServers: {local: {command, args}},
+        })}});
+        fireEvent.click(screen.getByRole('button',{name:'预览配置'}));
+        const saved = "'C:\\Program Files\\node.exe' 'C:\\team\\'s files'\"\\\\\" '' 'a\"b' --foo";
+        expect(await screen.findByDisplayValue(saved)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button',{name:'保存为停用连接'}));
+        await waitFor(() => expect(onImport).toHaveBeenCalledWith([expect.objectContaining({command: saved})]));
+    });
     it('should preview every local command and ignore incoming grants before saving', async () => {
         const onImport = vi.fn();
         render(<JSONImportDialog isOpen onClose={vi.fn()} onImport={onImport}/>);

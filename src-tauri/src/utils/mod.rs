@@ -9,6 +9,7 @@ pub mod reply_quote;
 pub mod shell_utils;
 pub mod share_utils;
 pub mod turn_context;
+mod tool_runtime;
 pub mod uv_utils;
 pub mod window_utils;
 

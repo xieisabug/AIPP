@@ -14,43 +14,7 @@ use crate::mcp::MCPInfoForAssistant;
 // 命令行解析测试 (测试 split_command_line 的行为)
 // ============================================================================
 
-/// 辅助函数：模拟 split_command_line 逻辑
-fn split_command_line(input: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-    for c in input.chars() {
-        if escape {
-            buf.push(c);
-            escape = false;
-            continue;
-        }
-        match c {
-            '\\' => {
-                escape = true;
-            }
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            ' ' | '\t' | '\n' if !in_single && !in_double => {
-                if !buf.is_empty() {
-                    parts.push(buf.clone());
-                    buf.clear();
-                }
-            }
-            _ => buf.push(c),
-        }
-    }
-    if !buf.is_empty() {
-        parts.push(buf);
-    }
-    parts
-}
+use crate::mcp::stdio_args::split_command_line;
 
 /// 测试简单命令
 #[test]

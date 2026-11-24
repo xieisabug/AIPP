@@ -107,7 +107,9 @@ const EnvironmentList: React.FC<{ status: LocalAgentStatus | undefined }> = ({ s
                     )}
                 </>
             ) : (
-                <StatusLine>未检测到 {status.program}，创建后可在详情页查看安装方法</StatusLine>
+                <StatusLine>{status.error
+                    ? `${status.program} 检测失败：${status.error}`
+                    : `未检测到 ${status.program}，创建后可在详情页查看安装方法`}</StatusLine>
             )}
             {status.node && (
                 <KeyValue label="Node.js">

@@ -50,12 +50,12 @@ describe("LLM provider field autosave", () => {
         mocks.cliEnvironment.mockClear();
         const path = `C:/Tools/Local Agent/${command}.exe`;
         mocks.invoke.mockImplementation(async (op: string) =>
-            op === "get_llm_provider_config" ? [{ name: key, value: path }] : []);
+            op === "get_llm_provider_config" ? [{ name: key, value: path }, { name: "acp_env_vars", value: "PATH=C:/Local Agent" }] : []);
         render(<LLMProviderConfigForm id="1" index={0} apiType={apiType} name="Agent" description=""
             isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
         await refresh();
-        expect(mocks.cliEnvironment).toHaveBeenCalledWith(command, path);
-        expect(mocks.cliEnvironment).not.toHaveBeenCalledWith(command, command);
+        expect(mocks.cliEnvironment).toHaveBeenCalledWith(command, path, expect.objectContaining({ acp_env_vars: "PATH=C:/Local Agent" }));
+        expect(mocks.cliEnvironment).not.toHaveBeenCalledWith(command, command, expect.anything());
     });
     it.each(["pi", "cursor", "opencode", "kiro", "antigravity", "codex_app_server", "claude_sdk"])(
         "should persist the proxy switch when editing a %s provider", async apiType => {

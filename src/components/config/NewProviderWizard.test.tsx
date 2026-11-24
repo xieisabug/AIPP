@@ -22,6 +22,8 @@ interface SetupOptions {
     installedClis?: Record<string, string>;
     /** detect_native_agent_environment：已安装的原生智能体 */
     installedNative?: string[];
+    candidateOnlyNative?: string[];
+    missingNode?: boolean;
     defaults?: Record<string, unknown>;
     vaultAvailable?: boolean;
     servers?: unknown[];
@@ -39,12 +41,13 @@ const SEARCH_TEMPLATE = {
     ],
 };
 
-function nativeEnvironment(driver: string, installed: boolean) {
+function nativeEnvironment(driver: string, installed: boolean, candidateOnly: boolean, missingNode: boolean) {
     const program = { path: `/bin/${driver}`, source: "PATH", version: "1.2.3", ok: installed, warning: null, error: installed ? null : "missing" };
     return {
         driver,
-        node: { configured: "", required: "22.19.0", selected: { ...program, path: "/bin/node", version: "22.20.0", ok: true }, candidates: [] },
-        tool: { kind: "cli", display_name: `${driver} CLI`, default_command: driver, configured: "", selected: program, candidates: [],
+        node: { configured: "", required: "22.19.0", selected: missingNode ? null : { ...program, path: "/bin/node", version: "22.20.0", ok: true }, candidates: [] },
+        tool: { kind: "cli", display_name: `${driver} CLI`, default_command: driver, configured: "", selected: program,
+            candidates: candidateOnly ? [{ ...program, path: `/alternative/${driver}`, ok: true, error: null }] : [],
             install_commands: [], docs_url: "", can_update: false, managed_directory: null, warnings: [], account: null, uses_api_key: false },
         working_directory: { configured: "", resolved: "", exists: true },
     };
@@ -61,8 +64,11 @@ function setup(options: SetupOptions = {}) {
         return { cli_command: command, package_name: command, installed: Boolean(version), version: version ?? null,
             installed_path: version ? `/usr/bin/${command}` : null, requires_external_install: false, install_hint: "" };
     });
-    mockInvokeHandler("detect_native_agent_environment", (args) =>
-        nativeEnvironment(String(args?.driver), options.installedNative?.includes(String(args?.driver)) ?? false));
+    mockInvokeHandler("detect_native_agent_environment", (args) => {
+        const driver = String(args?.driver);
+        return nativeEnvironment(driver, options.installedNative?.includes(driver) ?? false,
+            options.candidateOnlyNative?.includes(driver) ?? false, options.missingNode ?? false);
+    });
     mockInvokeHandler("read_local_agent_defaults", (args) =>
         options.defaults?.[String(args?.apiType)] ?? { source: null, found: false, settings: {}, info: [], notes: [] });
     mockInvokeHandler("vault_capability", () => ({ available: options.vaultAvailable ?? false }));
@@ -117,6 +123,9 @@ describe("NewProviderWizard", () => {
 
     it("should list API types as a grid of buttons instead of a dropdown", () => {
         setup();
+        for (const cliCommand of ["codex", "claude-code-acp"]) {
+            expect(invoke).toHaveBeenCalledWith("check_acp_library", { cliCommand, checkUpdateSource: false });
+        }
         expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
         expect(screen.getByTestId("wizard-step")).toHaveTextContent("1/3 · 选择 API 类型");
         for (const label of ["OpenAI API", "Anthropic API", "Codex", "GitHub Copilot"]) {
@@ -421,6 +430,23 @@ describe("NewProviderWizard", () => {
         await waitFor(() => expect(screen.getByText(/opencode CLI 1\.2\.3/)).toBeInTheDocument());
         expect(screen.getByText("v22.20.0")).toBeInTheDocument();
         expect(await screen.findByText(/没有自定义配置，OpenCode 将使用它自己的默认值/)).toBeInTheDocument();
+    });
+
+    it("should report a failed selected program when only an alternative installation works", async () => {
+        setup({ candidateOnlyNative: ["opencode"] });
+        fireEvent.click(screen.getByRole("button", { name: /^OpenCode\s*本机/ }));
+        expect(await screen.findByText("opencode CLI 检测失败：missing")).toBeInTheDocument();
+        expect(screen.queryByText("/alternative/opencode")).not.toBeInTheDocument();
+    });
+
+    it("should show the installed SDK and missing runtime separately when Cursor has no usable Node", async () => {
+        setup({ installedNative: ["cursor"], missingNode: true });
+        await waitFor(() => expect(screen.queryByText("检测本机安装…")).not.toBeInTheDocument());
+        const cursor = screen.getByRole("button", { name: /^Cursor\b/ });
+        expect(within(cursor).queryByText("本机已安装")).not.toBeInTheDocument();
+        fireEvent.click(cursor);
+        expect(await screen.findByText("/bin/cursor")).toBeInTheDocument();
+        expect(await screen.findByText("需要 22.19.0 或更新版本")).toBeInTheDocument();
     });
 });
 
