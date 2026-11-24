@@ -2,6 +2,27 @@ use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 
 #[test]
+fn test_native_agent_usage_normalizes_protocols_and_sums_requests() {
+    for (driver, input, output, total, expected_output) in [
+        ("pi", 10, 12, 0, 12), ("cursor", 10, 12, 0, 12),
+        ("opencode", 10, 12, 0, 15), ("kiro", 60, 12, 72, 12),
+        ("antigravity", 10, 12, 75, 15),
+    ] {
+        let mut usage = TurnUsage::default();
+        for _ in 0..2 {
+            usage.add(driver, serde_json::from_value(json!({
+                "inputTokens": input, "outputTokens": output, "totalTokens": total,
+                "cachedReadTokens": 45, "cachedWriteTokens": 5, "thoughtTokens": 3
+            })).unwrap());
+        }
+        assert_eq!((usage.input, usage.output), (120, expected_output * 2), "{driver}");
+        assert_eq!(usage.total(), 120 + expected_output * 2);
+        assert_eq!(usage.metadata()["cached_input_tokens"], 90);
+        assert_eq!(usage.metadata()["cached_write_tokens"], 10);
+    }
+}
+
+#[test]
 fn test_native_agent_proxy_environment_and_cache_key() {
     for driver in DRIVER_IDS {
         let mut config = configuration(&[], &[], None).unwrap();

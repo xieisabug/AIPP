@@ -157,6 +157,8 @@ pub struct ConversationTokenStats {
     pub cached_write_tokens: i64,
     pub by_model: Vec<ModelTokenBreakdown>,
     pub estimated_message_count: i64,
+    #[serde(default)]
+    pub missing_agent_usage_count: i64,
     /// 以下消息数只统计范围内会话自身的消息行，不含委派。
     pub message_count: i64,
     pub system_message_count: i64,
@@ -224,10 +226,15 @@ struct MessageRow {
 impl MessageRow {
     fn is_model_output(&self) -> bool {
         matches!(self.message_type.as_str(), "response" | "reasoning")
+            || (self.message_type == "error" && self.model_id == Some(AGENT_TURN_MODEL_ID)
+                && self.metadata.usage_source.as_deref() == Some("reported"))
     }
 
     fn has_usage(&self) -> bool {
         self.total > 0 || self.input > 0 || self.output > 0
+            || (self.model_id == Some(AGENT_TURN_MODEL_ID)
+                && matches!(self.message_type.as_str(), "response" | "error")
+                && self.metadata.usage_source.as_deref() == Some("reported"))
     }
 }
 
@@ -481,7 +488,7 @@ fn load_messages(conn: &Connection, range: &ScopeRange) -> rusqlite::Result<Vec<
     let type_filter = if range.kind == RangeKind::Own {
         ""
     } else {
-        " AND message_type IN ('response', 'reasoning')"
+        " AND message_type IN ('response', 'reasoning', 'error')"
     };
     let mut stmt = conn.prepare(&format!(
         "SELECT id, message_type, llm_model_id, llm_model_name, token_count, input_token_count,
@@ -558,6 +565,11 @@ fn agent_display_name(name: &str) -> Option<&'static str> {
         "claude-code" => Some("Claude Code"),
         "codex-app-server" => Some("Codex"),
         "acp" => Some("ACP"),
+        "pi" => Some("Pi"),
+        "cursor" => Some("Cursor"),
+        "opencode" => Some("OpenCode"),
+        "kiro" => Some("Kiro"),
+        "antigravity" => Some("Antigravity"),
         _ => None,
     }
 }
@@ -612,6 +624,7 @@ pub fn token_stats(
     let mut auxiliary: Vec<AuxiliaryTokenUsage> = Vec::new();
     let mut type_counts: HashMap<String, i64> = HashMap::new();
     let mut message_count = 0_i64;
+    let mut missing_agent_usage_count = 0;
     let mut single_conversation_rows: Vec<MessageRow> = Vec::new();
 
     for range in &ranges {
@@ -625,6 +638,11 @@ pub fn token_stats(
             aggregator.observe_time(row);
             if !row.is_model_output() {
                 continue;
+            }
+            if row.message_type == "response" && row.model_id == Some(AGENT_TURN_MODEL_ID)
+                && row.finish_time.is_some() && !row.has_usage() && row.metadata.usage_source.is_none()
+            {
+                missing_agent_usage_count += 1;
             }
             aggregator.add_usage(
                 is_delegated,
@@ -732,6 +750,7 @@ pub fn token_stats(
         cached_write_tokens: totals.cached_write,
         by_model,
         estimated_message_count: totals.estimated,
+        missing_agent_usage_count,
         message_count,
         system_message_count: count("system"),
         user_message_count: count("user"),

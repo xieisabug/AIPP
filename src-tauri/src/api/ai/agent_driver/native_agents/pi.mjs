@@ -123,6 +123,10 @@ export async function openPi(config, emit, dependencies = {}) {
       emit({ ...base, ...activity });
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      // agent_end repeats the individual message_end records.
+      const usage = frame.message.usage;
+      if (usage) emit({ type: 'usage', turn, usage: { inputTokens: usage.input, outputTokens: usage.output,
+        cachedReadTokens: usage.cacheRead, cachedWriteTokens: usage.cacheWrite } });
       modelError = frame.message.stopReason === 'error' ? frame.message.errorMessage || 'Pi model error has no errorMessage' : undefined;
     }
     if (frame.type === 'auto_retry_end' && !frame.success && frame.finalError) modelError = frame.finalError;

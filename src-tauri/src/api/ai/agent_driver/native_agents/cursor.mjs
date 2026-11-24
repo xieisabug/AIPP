@@ -152,6 +152,9 @@ export async function openCursor(config, emit, dependencies = {}) {
         void run.wait().then(result => {
           if (active !== current) return;
           active = null; run = undefined;
+          const usage = result.usage;
+          if (usage) emit({ type: 'usage', turn, usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+            cachedReadTokens: usage.cacheReadTokens, cachedWriteTokens: usage.cacheWriteTokens, thoughtTokens: usage.reasoningTokens } });
           const diagnostic = result.status === 'finished' ? transportDiagnostic(result.result ?? diagnosticText) : undefined;
           const unexpected = !['finished', 'error', 'cancelled'].includes(result.status);
           const error = diagnostic || (result.status === 'error' ? JSON.stringify(result) : unexpected ? `Cursor returned unsupported run status: ${JSON.stringify(result)}` : undefined);

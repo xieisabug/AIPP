@@ -175,6 +175,7 @@ export function ConversationStatsDialog({
         ? (context.latest_input_tokens / context.context_window_size) * 100
         : 0;
     const composition = stats ? usageComposition(stats, isGroup) : [];
+    const missingAgentUsage = stats?.missing_agent_usage_count ?? 0;
     const messageTypes = stats ? [
         { label: "系统", value: stats.system_message_count },
         { label: "用户", value: stats.user_message_count },
@@ -254,7 +255,12 @@ export function ConversationStatsDialog({
                                 </div>
                             </div>}
 
-                            <TokenUsageDisplay
+                            {missingAgentUsage > 0 && (
+                                <p className="text-sm text-muted-foreground">
+                                    有 {formatNumber(missingAgentUsage)} 轮智能体回复缺少 Token 用量记录
+                                </p>
+                            )}
+                            {(missingAgentUsage === 0 || stats.by_model.length > 0) && <TokenUsageDisplay
                                 total={stats.total_tokens}
                                 input={stats.input_tokens}
                                 output={stats.output_tokens}
@@ -262,7 +268,7 @@ export function ConversationStatsDialog({
                                 cachedInput={stats.cached_input_tokens ?? stats.cached_read_tokens}
                                 cachedWrite={stats.cached_write_tokens}
                                 showPercentage={true}
-                            />
+                            />}
 
                             {composition.length > 1 && (
                                 <div className="space-y-1.5 text-sm" data-aipp-slot="conversation-stats-composition">

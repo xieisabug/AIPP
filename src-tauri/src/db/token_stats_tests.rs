@@ -115,6 +115,40 @@ fn test_token_stats_counts_tasks_and_delivered_peer_turns_only() {
 }
 
 #[test]
+fn test_native_agent_usage_persists_absolute_totals_and_preserves_failure_metadata() {
+    let conn = fixture();
+    conversations(&conn, &[10]);
+    msg(&conn, 1, 10, "response", Some((0, "pi")), (0, 0, 0), Some(r#"{"opencode_go":{"allowance":0.5}}"#));
+    let repo = super::super::conversation_db::MessageRepository::new(conn);
+    let metadata = serde_json::json!({"cached_read_tokens":20, "cached_write_tokens":3, "usage_source":"reported"});
+    for _ in 0..2 {
+        repo.update_agent_usage(1, 30, 5, &metadata).unwrap();
+    }
+    repo.finish_agent_failure(10, 1, "test failure", "{}", None).unwrap();
+    repo.update_agent_usage(1, 0, 0, &metadata).unwrap();
+    let persisted = repo.token_stats(1).unwrap();
+    assert_eq!((persisted.total_tokens, persisted.cached_input_tokens, persisted.cached_write_tokens), (35, 20, 3));
+    assert_eq!(persisted.opencode_go.unwrap()["allowance"], 0.5);
+}
+
+#[test]
+fn test_native_agent_usage_counts_reported_zero_partial_failure_and_missing_history() {
+    let conn = fixture();
+    conversations(&conn, &[10]);
+    let model = Some((AGENT_TURN_MODEL_ID, "pi"));
+    msg(&conn, 1, 10, "response", model, (0, 0, 0), None); // old completed reply
+    msg(&conn, 2, 10, "response", model, (0, 0, 0), None); // still streaming
+    msg(&conn, 3, 10, "response", model, (0, 0, 0), Some(r#"{"usage_source":"reported"}"#));
+    msg(&conn, 4, 10, "error", model, (70, 50, 20), Some(r#"{"usage_source":"reported","cached_read_tokens":35,"cached_write_tokens":3}"#));
+    conn.execute("UPDATE message SET finish_time=created_time WHERE id != 2", []).unwrap();
+    let result = stats(&conn, 10);
+    assert_eq!(result.missing_agent_usage_count, 1);
+    assert_eq!((result.total_tokens, result.cached_input_tokens, result.cached_write_tokens), (70, 35, 3));
+    assert_eq!(result.by_model[0].model_name, "Pi");
+    assert_eq!(result.by_model[0].request_count, 2);
+}
+
+#[test]
 fn test_token_stats_is_empty_without_delegation() {
     let conn = fixture();
     conversations(&conn, &[20]);

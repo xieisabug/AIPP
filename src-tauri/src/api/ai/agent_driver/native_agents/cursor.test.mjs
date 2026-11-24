@@ -40,6 +40,20 @@ function cursorFixture() {
   return { turns, events, sdk: { Agent: { async create() { return agent; } } } };
 }
 
+test('should record Cursor run usage before settling a cancelled run', async () => {
+  const f = cursorFixture();
+  const runtime = await openCursor({ cwd: '/repo' }, e => f.events.push(e), f);
+  try {
+    await runtime.prompt('task', 'turn');
+    f.turns[0].finish({ status: 'cancelled', usage: {
+      inputTokens: 9, outputTokens: 11, cacheReadTokens: 44, cacheWriteTokens: 5, reasoningTokens: 6 } });
+    await tick();
+    assert.deepEqual(f.events[0], { type: 'usage', turn: 'turn', usage: {
+      inputTokens: 9, outputTokens: 11, cachedReadTokens: 44, cachedWriteTokens: 5, thoughtTokens: 6 } });
+    assert.equal(f.events.at(-1).cancelled, true);
+  } finally { await runtime.close(); }
+});
+
 test('should split Cursor thinking phases at native completion and tool boundaries', async () => {
   const f = cursorFixture();
   const runtime = await openCursor({ cwd: '/repo' }, e => f.events.push(e), f);

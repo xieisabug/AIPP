@@ -445,6 +445,7 @@ export interface ConversationTokenStats {
     cached_write_tokens: number;
     by_model: ModelTokenBreakdown[];
     estimated_message_count: number;
+    missing_agent_usage_count?: number;
     /** 以下消息数只统计本会话（群聊为成员执行会话）自身的消息，不含委派 */
     message_count: number;
     system_message_count: number;

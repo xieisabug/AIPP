@@ -8,6 +8,8 @@ Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与
 
 Pi、Cursor、OpenCode、Kiro、Antigravity 首次返回正文、推理或工具活动时，聊天边框从用户消息移到承载输出的助手消息，管家状态同步结束“投递中”。Codex 的推理和计划有独立消息，边框会跟随当前收到内容的消息；正在执行的 MCP 工具仍优先高亮。
 
+点击会话右上角的「对话信息」可查看累计 Token、输入、输出和缓存读写。各智能体的上报方式见 [Token 统计](./12-Token统计.md)。
+
 ### 管家会话的角色和工具说明
 
 管家主会话、联系人、独立任务和群成员共用 AIPP 的角色构造逻辑。模型按本次 MCP 目录里的实际注册名和参数定义调用工具。动态工具先加载，将回执条目的 `server`、`tool` 分别填入 `server_name`、`tool_name`，再用 `call_mcp_tool` 传对象类型的 `parameters`，无参数时传 `{}`。角色与工具说明在原生驱动发送时注入；用户消息、附件、引用和长期记忆仍走原有本轮上下文链路。
