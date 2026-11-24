@@ -9,6 +9,7 @@ import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
 import { OtherConfigForm } from "./forms/OtherConfigForm";
 import { AboutConfigForm } from "./forms/AboutConfigForm";
 import { ExperimentalConfigForm } from "./forms/ExperimentalConfigForm";
+import type { SaveFeatureConfigFn } from "./forms/experimentalConfigShared";
 
 interface FeatureItem {
     id: string;
@@ -66,7 +67,7 @@ interface FeatureFormRendererProps {
     onSaveShortcuts: () => Promise<void>;
     onSaveExperimental: () => Promise<void>;
     /** Passed through to ExperimentalConfigForm for the onboarding wizard. */
-    saveFeatureConfig?: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
+    saveFeatureConfig?: SaveFeatureConfigFn;
     /** Called when onboarding wizard finishes to refresh config. */
     onConfigRefresh?: () => void;
 }

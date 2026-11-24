@@ -438,22 +438,15 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         const values = displayForm.getValues();
         await saveFeatureConfig("display", serializeDisplayFormValues(values));
 
-        const currentExperimentalConfig = featureConfig.get("experimental");
-        const preservedExperimentalValues = {
-            ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
-            ...Object.fromEntries(currentExperimentalConfig?.entries() ?? []),
-            butler_feishu_app_secret: "",
-        };
         const canUseButlerHomeWindow =
-            String(preservedExperimentalValues.butler_experiment_enabled) === "true";
+            featureConfig.get("experimental")?.get("butler_experiment_enabled") === "true";
         const defaultHomeWindow =
             values.default_home_window === "butler_experiment" && !canUseButlerHomeWindow
                 ? "ask"
                 : String(values.default_home_window || "ask");
-        await saveExperimentalConfigValues(saveFeatureConfig, {
-            ...preservedExperimentalValues,
+        await saveFeatureConfig("experimental", {
             default_home_window: defaultHomeWindow,
-        });
+        }, true);
     }, [displayForm, featureConfig, saveFeatureConfig]);
 
     const handleSaveSummaryConfig = useCallback(async () => {
@@ -500,25 +493,17 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             auto_review_provider_id: autoReviewModel.provider_id,
             auto_review_output_mode: values.auto_review_output_mode,
             auto_review_decision_threshold: String(values.auto_review_decision_threshold || "0.90"),
-        });
+        }, true);
 
-        const currentExperimentalConfig = featureConfig.get("experimental");
-        const preservedExperimentalValues = {
-            ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
-            ...Object.fromEntries(currentExperimentalConfig?.entries() ?? []),
-            butler_feishu_app_secret: "",
-        };
-
-        await saveExperimentalConfigValues(saveFeatureConfig, {
-            ...preservedExperimentalValues,
+        await saveFeatureConfig("experimental", {
             context_compaction_enabled: String(values.context_compaction_enabled),
             context_max_input_tokens: String(values.context_max_input_tokens || "128000"),
             context_compaction_threshold: String(
                 values.context_compaction_threshold || "0.80"
             ),
             context_tail_ratio: String(values.context_tail_ratio || "0.30"),
-        });
-    }, [summaryForm, saveFeatureConfig, featureConfig]);
+        }, true);
+    }, [summaryForm, saveFeatureConfig]);
 
     const handleSaveNetworkConfig = useCallback(async () => {
         const values = networkForm.getValues();

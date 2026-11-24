@@ -18,7 +18,6 @@ export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     butler_work_continuation_enabled: "true",
 
     butler_display_name: "总管家",
-    default_home_window: "ask",
     butler_model_id: "",
     butler_helper_model_id: "",
     butler_group_dispatch_model_id: "",
@@ -34,10 +33,6 @@ export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     butler_feishu_only_reply_feishu_originated: "false",
     butler_feishu_allowed_open_ids: "",
     butler_feishu_allowed_chat_ids: "",
-    context_compaction_enabled: "false",
-    context_max_input_tokens: "128000",
-    context_compaction_threshold: "0.80",
-    context_tail_ratio: "0.30",
     butler_trust_all_workspaces: "false",
     butler_trusted_workspaces: "",
 } as const;
@@ -52,19 +47,20 @@ export type ExperimentalConfigFormState = Record<
     string | boolean
 >;
 
-interface SaveFeatureConfigFn {
-    (featureCode: string, config: Record<string, unknown>): Promise<unknown>;
+export interface SaveFeatureConfigFn {
+    (featureCode: string, config: Record<string, unknown>, partial?: boolean): Promise<unknown>;
 }
 
 function parseModelValue(modelValue: string) {
-    if (!modelValue) {
+    const separator = modelValue.lastIndexOf("%%");
+    const providerId = modelValue.slice(separator + 2);
+    if (separator <= 0 || !/^[1-9]\d*$/.test(providerId)) {
         return { model_code: "", provider_id: "" };
     }
 
-    const parts = modelValue.split("%%");
     return {
-        model_code: parts[0] || "",
-        provider_id: parts[1] || "",
+        model_code: modelValue.slice(0, separator),
+        provider_id: providerId,
     };
 }
 
@@ -74,11 +70,12 @@ export function buildExperimentalConfigFormValues(
     const summaryConfig = featureConfig.get("conversation_summary");
     const experimentalConfig = featureConfig.get("experimental");
 
-    const experimentalModel = experimentalConfig?.get("conversation_summary_model") || "";
-    const experimentalProviderId =
-        experimentalConfig?.get("conversation_summary_provider_id") || "";
-    const legacyModel = summaryConfig?.get("conversation_summary_model") || "";
-    const legacyProviderId = summaryConfig?.get("conversation_summary_provider_id") || "";
+    // Use the same group as the summary scheduler, including an explicitly cleared selection.
+    const summary = ["conversation_summary_enabled", "conversation_summary_model", "conversation_summary_provider_id"]
+        .some((key) => experimentalConfig?.has(key)) ? experimentalConfig : summaryConfig;
+    const model = summary?.get("conversation_summary_model") || "";
+    const provider = summary?.get("conversation_summary_provider_id") || "";
+    const selection = model && provider ? `${model}%%${provider}` : model;
     const workspaceConfig = buildButlerWorkspaceConfig({
         mainWorkspacePath: experimentalConfig?.get("butler_main_workspace_path"),
         mainWorkspaceDescription: experimentalConfig?.get("butler_main_workspace_description"),
@@ -94,23 +91,14 @@ export function buildExperimentalConfigFormValues(
             experimentalConfig?.get("assistant_summary_enabled") || "false",
         assistant_summarizer_model_id:
             experimentalConfig?.get("assistant_summarizer_model_id") || "",
-        conversation_summary_enabled:
-            experimentalConfig?.get("conversation_summary_enabled")
-            || summaryConfig?.get("conversation_summary_enabled")
-            || "false",
-        conversation_summary_model:
-            experimentalModel && experimentalProviderId
-                ? `${experimentalModel}%%${experimentalProviderId}`
-                : legacyModel && legacyProviderId
-                    ? `${legacyModel}%%${legacyProviderId}`
-                    : "",
+        conversation_summary_enabled: summary?.get("conversation_summary_enabled") || "false",
+        conversation_summary_model: parseModelValue(selection).provider_id ? selection : "",
         butler_experiment_enabled:
             experimentalConfig?.get("butler_experiment_enabled") || "false",
         butler_task_dispatch_enabled: experimentalConfig?.get("butler_task_dispatch_enabled") ?? "true",
         butler_peer_collaboration_enabled: experimentalConfig?.get("butler_peer_collaboration_enabled") ?? "true",
         butler_work_continuation_enabled: experimentalConfig?.get("butler_work_continuation_enabled") ?? "true",
         butler_display_name: experimentalConfig?.get("butler_display_name") || "总管家",
-        default_home_window: experimentalConfig?.get("default_home_window") || "ask",
         butler_model_id: experimentalConfig?.get("butler_model_id") || "",
         butler_helper_model_id: experimentalConfig?.get("butler_helper_model_id") || "",
         butler_group_dispatch_model_id:
@@ -135,13 +123,6 @@ export function buildExperimentalConfigFormValues(
             experimentalConfig?.get("butler_feishu_allowed_open_ids") || "",
         butler_feishu_allowed_chat_ids:
             experimentalConfig?.get("butler_feishu_allowed_chat_ids") || "",
-        context_compaction_enabled:
-            experimentalConfig?.get("context_compaction_enabled") || "false",
-        context_max_input_tokens:
-            experimentalConfig?.get("context_max_input_tokens") || "128000",
-        context_compaction_threshold:
-            experimentalConfig?.get("context_compaction_threshold") || "0.80",
-        context_tail_ratio: experimentalConfig?.get("context_tail_ratio") || "0.30",
         butler_trust_all_workspaces:
             experimentalConfig?.get("butler_trust_all_workspaces") || "false",
         butler_trusted_workspaces:
@@ -153,7 +134,8 @@ export function buildExperimentalConfigFormValues(
 
 export async function saveExperimentalConfigValues(
     saveFeatureConfig: SaveFeatureConfigFn,
-    values: Record<string, unknown>
+    values: Record<string, unknown>,
+    scope: "all" | "butler" = "all",
 ) {
     const conversationSummaryModel = parseModelValue(
         String(values.conversation_summary_model || "")
@@ -168,20 +150,12 @@ export async function saveExperimentalConfigValues(
         }).trustedWorkspaces,
     });
 
-    await saveFeatureConfig("experimental", {
-        dynamic_mcp_loading_enabled: String(values.dynamic_mcp_loading_enabled),
-        mcp_summarizer_model_id: String(values.mcp_summarizer_model_id || ""),
-        assistant_summary_enabled: String(values.assistant_summary_enabled),
-        assistant_summarizer_model_id: String(values.assistant_summarizer_model_id || ""),
-        conversation_summary_enabled: String(values.conversation_summary_enabled),
-        conversation_summary_model: conversationSummaryModel.model_code,
-        conversation_summary_provider_id: conversationSummaryModel.provider_id,
+    const butler = {
         butler_experiment_enabled: String(values.butler_experiment_enabled),
         butler_task_dispatch_enabled: String(values.butler_task_dispatch_enabled),
         butler_peer_collaboration_enabled: String(values.butler_peer_collaboration_enabled),
         butler_work_continuation_enabled: String(values.butler_work_continuation_enabled),
         butler_display_name: String(values.butler_display_name || "总管家"),
-        default_home_window: String(values.default_home_window || "ask"),
         butler_model_id: String(values.butler_model_id || ""),
         butler_helper_model_id: String(values.butler_helper_model_id || ""),
         butler_group_dispatch_model_id: String(values.butler_group_dispatch_model_id || ""),
@@ -202,13 +176,21 @@ export async function saveExperimentalConfigValues(
         ),
         butler_feishu_allowed_open_ids: String(values.butler_feishu_allowed_open_ids || ""),
         butler_feishu_allowed_chat_ids: String(values.butler_feishu_allowed_chat_ids || ""),
-        context_compaction_enabled: String(values.context_compaction_enabled),
-        context_max_input_tokens: String(values.context_max_input_tokens || "128000"),
-        context_compaction_threshold: String(
-            values.context_compaction_threshold || "0.80"
-        ),
-        context_tail_ratio: String(values.context_tail_ratio || "0.30"),
         butler_trust_all_workspaces: String(values.butler_trust_all_workspaces),
         butler_trusted_workspaces: workspaceConfig.trustedWorkspacesRaw,
-    });
+    };
+    if (scope === "butler") {
+        await saveFeatureConfig("experimental", butler, true);
+        return;
+    }
+    await saveFeatureConfig("experimental", {
+        ...butler,
+        dynamic_mcp_loading_enabled: String(values.dynamic_mcp_loading_enabled),
+        mcp_summarizer_model_id: String(values.mcp_summarizer_model_id || ""),
+        assistant_summary_enabled: String(values.assistant_summary_enabled),
+        assistant_summarizer_model_id: String(values.assistant_summarizer_model_id || ""),
+        conversation_summary_enabled: String(values.conversation_summary_enabled),
+        conversation_summary_model: conversationSummaryModel.model_code,
+        conversation_summary_provider_id: conversationSummaryModel.provider_id,
+    }, true);
 }

@@ -45,12 +45,13 @@ export const useFeatureConfig = () => {
     }, []);
 
     // 保存功能配置
-    const saveFeatureConfig = useCallback((featureCode: string, config: Record<string, any>) => {
+    const saveFeatureConfig = useCallback((featureCode: string, config: Record<string, any>, partial = false) => {
         // Send both camelCase and snake_case for compatibility with Rust command arg names
         return invoke("save_feature_config", {
             featureCode,
             feature_code: featureCode,
             config,
+            partial,
         }).then(() => {
             // 重新加载配置
             return loadFeatureConfig();

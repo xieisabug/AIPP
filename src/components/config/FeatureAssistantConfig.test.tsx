@@ -142,6 +142,20 @@ describe("FeatureAssistantConfig network config", () => {
         expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_feature_config")).toHaveLength(0);
     });
 
+    it("should save only the home window preference in experimental settings when saving display settings", async () => {
+        mockInvokeHandler("get_all_feature_config", () => [
+            { id: 1, feature_code: "experimental", key: "conversation_summary_model", value: "shared" },
+            { id: 2, feature_code: "experimental", key: "conversation_summary_provider_id", value: "7" },
+        ]);
+        mockInvokeHandler("save_feature_config", () => undefined);
+        mockInvokeHandler("list_syntect_themes", () => []);
+        mockInvokeHandler("get_enabled_plugins", () => []);
+        render(<FeatureAssistantConfig subNav="display" />);
+        await userEvent.click(await screen.findByRole("button", { name: "保存配置" }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_feature_config",
+            expect.objectContaining({ featureCode: "experimental", partial: true, config: { default_home_window: "ask" } })));
+    });
+
     it("hides the shortcuts settings on Android", async () => {
         platformState.value = "android";
         window.innerWidth = 1400;
@@ -204,6 +218,16 @@ describe("FeatureAssistantConfig network config", () => {
                     }),
                 })
             );
+            expect(invoke).toHaveBeenCalledWith("save_feature_config", expect.objectContaining({
+                featureCode: "experimental",
+                partial: true,
+                config: {
+                    context_compaction_enabled: "false",
+                    context_max_input_tokens: "128000",
+                    context_compaction_threshold: "0.80",
+                    context_tail_ratio: "0.30",
+                },
+            }));
         });
     });
 });

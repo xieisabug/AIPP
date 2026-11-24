@@ -278,12 +278,10 @@ function ButlerExperimentWindow() {
         const target = profileTarget;
         let nameSaved = false;
         try {
-            const latest = await loadFeatureConfig();
             if (target.id === undefined) {
                 await saveFeatureConfig("experimental", {
-                    ...Object.fromEntries(latest.get("experimental") ?? []),
                     butler_display_name: name,
-                });
+                }, true);
             } else {
                 const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: target.id });
                 const [firstModel, ...otherModels] = detail.model;
@@ -1095,7 +1093,7 @@ function ButlerExperimentWindow() {
     const handleSaveButlerSettings = useCallback(async () => {
         // 主动整理先保存：它有后端校验（时间段、Open ID），不通过时整次保存直接报错
         await proactive.save();
-        await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues());
+        await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues(), "butler");
     }, [butlerSettingsForm, saveFeatureConfig, proactive.save]);
 
     const toggleExecutionDetails = () => {
@@ -1482,7 +1480,6 @@ function ButlerExperimentWindow() {
                     existingFeishuEnabled={feishuEnabled}
                     existingFeishuAppId={getConfigValue("experimental", "butler_feishu_app_id") || ""}
                     existingFeishuBaseUrl={getConfigValue("experimental", "butler_feishu_base_url") || "https://open.feishu.cn"}
-                    initialValues={buildExperimentalConfigFormValues(featureConfig)}
                     saveFeatureConfig={saveFeatureConfig}
                     onComplete={handleOnboardingComplete}
                 />

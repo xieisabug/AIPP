@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FolderPicker } from "@/components/config/FolderPicker";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
+import type { SaveFeatureConfigFn } from "./experimentalConfigShared";
 import {
     buildButlerWorkspaceConfig,
     BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
@@ -37,7 +38,7 @@ interface ExperimentalConfigFormProps {
     onSave: () => Promise<void>;
     scope?: "all" | "butler";
     /** When provided, enables the onboarding wizard button inside the butler section. */
-    saveFeatureConfig?: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
+    saveFeatureConfig?: SaveFeatureConfigFn;
     /** Called after the onboarding wizard saves config so the parent can refresh. */
     onConfigRefresh?: () => void;
     /** Extra Butler groups (e.g. 主动整理) rendered before 高级配置; saved by the same footer via `onSave`. */
@@ -1558,7 +1559,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                     existingFeishuEnabled={feishuEnabled}
                     existingFeishuAppId={feishuAppId}
                     existingFeishuBaseUrl={feishuBaseUrl}
-                    initialValues={form.getValues()}
                     saveFeatureConfig={saveFeatureConfigProp}
                     onComplete={() => {
                         onConfigRefresh?.();

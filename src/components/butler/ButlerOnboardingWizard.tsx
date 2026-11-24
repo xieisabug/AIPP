@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { CheckCircle2, ChevronLeft, ChevronRight } from "lucide-react";
@@ -11,7 +11,7 @@ import {
     CompactDialogFooter,
 } from "@/components/ui/dialog";
 import { useModels } from "@/hooks/useModels";
-import { saveExperimentalConfigValues } from "@/components/config/feature/forms/experimentalConfigShared";
+import type { SaveFeatureConfigFn } from "@/components/config/feature/forms/experimentalConfigShared";
 import { useButlerOnboarding } from "./useButlerOnboarding";
 import {
     serializeButlerWorkspaceConfig,
@@ -36,8 +36,7 @@ interface ButlerOnboardingWizardProps {
     existingFeishuEnabled?: boolean;
     existingFeishuAppId?: string;
     existingFeishuBaseUrl?: string;
-    initialValues?: Record<string, unknown>;
-    saveFeatureConfig: (featureCode: string, config: Record<string, unknown>) => Promise<unknown>;
+    saveFeatureConfig: SaveFeatureConfigFn;
     onComplete: () => void;
 }
 
@@ -52,12 +51,10 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
     existingFeishuEnabled,
     existingFeishuAppId,
     existingFeishuBaseUrl,
-    initialValues,
     saveFeatureConfig,
     onComplete,
 }) => {
     const [saving, setSaving] = useState(false);
-    const initialValuesRef = useRef<Record<string, unknown>>(initialValues || {});
 
     const {
         state,
@@ -105,12 +102,6 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         [models]
     );
 
-    useEffect(() => {
-        if (open) {
-            initialValuesRef.current = initialValues || {};
-        }
-    }, [initialValues, open]);
-
     const persistWizard = useCallback(async (closeAfterSave: boolean) => {
         setSaving(true);
         try {
@@ -119,8 +110,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                 mainWorkspaceDescription: state.mainWorkspaceDescription,
                 trustedWorkspaces: state.trustedWorkspaces,
             });
-            await saveExperimentalConfigValues(saveFeatureConfig, {
-                ...initialValuesRef.current,
+            await saveFeatureConfig("experimental", {
                 butler_experiment_enabled: "true",
                 butler_model_id: state.modelId,
                 butler_display_name: state.displayName || "总管家",
@@ -131,20 +121,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                 butler_feishu_enabled: String(state.feishuEnabled),
                 butler_feishu_app_id: state.feishuAppId,
                 butler_feishu_base_url: state.feishuBaseUrl,
-            });
-            initialValuesRef.current = {
-                ...initialValuesRef.current,
-                butler_experiment_enabled: "true",
-                butler_model_id: state.modelId,
-                butler_display_name: state.displayName || "总管家",
-                butler_main_workspace_path: workspaceConfig.mainWorkspacePath,
-                butler_main_workspace_description: workspaceConfig.mainWorkspaceDescription,
-                butler_trust_all_workspaces: String(state.trustAllWorkspaces),
-                butler_trusted_workspaces: workspaceConfig.trustedWorkspacesRaw,
-                butler_feishu_enabled: String(state.feishuEnabled),
-                butler_feishu_app_id: state.feishuAppId,
-                butler_feishu_base_url: state.feishuBaseUrl,
-            };
+            }, true);
 
             // Save Feishu secret separately if provided
             if (state.feishuEnabled && state.feishuAppSecret.trim()) {

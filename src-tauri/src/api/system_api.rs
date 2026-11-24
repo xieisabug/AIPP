@@ -92,12 +92,59 @@ pub async fn get_all_feature_config(
     Ok(configs)
 }
 
+// Several settings pages own different keys in the same group. A save from
+// one page must leave the other pages' values and sync identities intact.
+fn persist_feature_settings(
+    db: &mut SystemDatabase,
+    feature_code: &str,
+    mut changes: HashMap<String, String>,
+    partial: bool,
+) -> Result<HashMap<String, String>, String> {
+    let tx = db.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let workspace_keys = [
+        "butler_experiment_enabled", "butler_main_workspace_path",
+        "butler_main_workspace_description", "butler_trusted_workspaces",
+    ];
+    let edits_workspace = workspace_keys.iter().any(|key| changes.contains_key(*key));
+    if feature_code == "experimental" && (!partial || edits_workspace) {
+        use rusqlite::OptionalExtension;
+        if partial {
+            for key in workspace_keys {
+                if changes.contains_key(key) { continue; }
+                if let Some(value) = tx.query_row(
+                    "SELECT value FROM feature_config WHERE feature_code = ?1 AND key = ?2",
+                    (feature_code, key), |row| row.get::<_, String>(0),
+                ).optional().map_err(|e| e.to_string())? {
+                    changes.insert(key.to_string(), value);
+                }
+            }
+        }
+        changes = crate::api::butler_api::normalize_butler_experimental_config(&changes)?;
+    }
+    if !partial {
+        tx.execute("DELETE FROM feature_config WHERE feature_code = ?1", [feature_code])
+            .map_err(|e| e.to_string())?;
+    }
+    for (key, value) in &changes {
+        tx.execute(
+            "INSERT INTO feature_config (feature_code, key, value, data_type, description)
+             VALUES (?1, ?2, ?3, 'string', '')
+             ON CONFLICT(feature_code, key) DO UPDATE SET value = excluded.value",
+            (feature_code, key, value),
+        ).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(changes)
+}
+
 #[tauri::command]
 pub async fn save_feature_config(
     app_handle: tauri::AppHandle,
     state: State<'_, FeatureConfigState>,
     feature_code: String,
     config: HashMap<String, String>,
+    partial: Option<bool>,
 ) -> Result<(), String> {
     if feature_code == "butler_appearance" {
         let system = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
@@ -147,28 +194,11 @@ pub async fn save_feature_config(
         crate::sync::schedule_sync_after_local_change(&app_handle);
         return Ok(());
     }
-    let config = if feature_code == "experimental" {
-        crate::api::butler_api::normalize_butler_experimental_config(&config)?
-    } else {
-        config
-    };
-    let db = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let _ = db.delete_feature_config_by_feature_code(feature_code.as_str());
-    for (key, value) in config.iter() {
-        db.add_feature_config(&FeatureConfig {
-            id: None,
-            feature_code: feature_code.clone(),
-            key: key.clone(),
-            value: value.clone(),
-            data_type: "string".to_string(),
-            description: Some("".to_string()),
-        })
-        .map_err(|e| e.to_string())?;
-    }
-
-    // 更新内存状态
     let mut configs = state.configs.lock().await;
     let mut config_feature_map = state.config_feature_map.lock().await;
+    let partial = partial.unwrap_or(false);
+    let mut db = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let config = persist_feature_settings(&mut db, &feature_code, config, partial)?;
 
     let model_key = "mcp_summarizer_model_id";
     let summary_model_changed = feature_code == "experimental" && config.get(model_key).is_some_and(|model|
@@ -176,8 +206,10 @@ pub async fn save_feature_config(
             .is_none_or(|old| old.value != *model));
 
     // 删除旧的配置
-    configs.retain(|c| c.feature_code != feature_code);
-    config_feature_map.remove(&feature_code);
+    configs.retain(|c| c.feature_code != feature_code || (partial && !config.contains_key(&c.key)));
+    if !partial {
+        config_feature_map.remove(&feature_code);
+    }
 
     // 添加新的配置
     for (key, value) in config.iter() {
@@ -631,6 +663,10 @@ pub async fn open_image(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "system_api_tests.rs"]
+mod system_api_tests;
 
 #[cfg(test)]
 mod mobile_unsupported_tests {
