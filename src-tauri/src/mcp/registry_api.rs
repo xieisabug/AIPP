@@ -323,11 +323,8 @@ pub async fn update_mcp_server(
 
 /// Vault references must point at existing credentials, and only where AIPP resolves them.
 fn validate_vault_references(app: &tauri::AppHandle, request: &MCPServerRequest) -> Result<(), String> {
-    let texts: Vec<&str> = [request.environment_variables.as_deref(), request.headers.as_deref()].into_iter().flatten().collect();
-    if !texts.iter().any(|t| crate::vault::config_ref::contains(t)) { return Ok(()); }
-    crate::vault::config_ref::mcp_target(&request.transport_type, request.command.as_deref(), request.url.as_deref(), request.environment_variables.as_deref())
-        .map_err(|e| e.message)?;
-    crate::vault::config_ref::validate(app, &texts)
+    crate::vault::config_ref::validate_mcp(app, &request.transport_type, request.command.as_deref(),
+        request.url.as_deref(), request.environment_variables.as_deref(), request.headers.as_deref())
 }
 
 /// Saving in Settings is the user's confirmation of where the referenced credentials go. SuperAdmin

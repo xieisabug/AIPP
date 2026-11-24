@@ -259,7 +259,7 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 
 内置「搜索工具」（`aipp:search`）在设置 → 应用与工具 → 搜索工具中选择一个**搜索服务**，`search_web` 与 `search_http` 都按它执行：
 
-- **本地搜索（浏览器）**：默认，仅桌面。用浏览器打开所选搜索引擎（Google、Bing、DuckDuckGo、Kagi）。选择 Kagi 时才出现「Kagi 会话链接」。
+- **本地搜索（浏览器）**：默认，仅桌面。用浏览器打开所选搜索引擎（Google、Bing、DuckDuckGo、Kagi）。选择 Kagi 时才出现「Kagi 会话链接」。从 HTTP 搜索切回本地时，原 API Key 配置会保留。本地模式跳过该凭据；切回 HTTP 搜索并保存时，才按当前 API 地址校验并确认保险箱引用。
 - **DeepSeek**：填写 DeepSeek API Key；默认地址 `https://api.deepseek.com/v1/tools/search`。结果摘要使用 DeepSeek 给模型准备的长摘要（`summary`），关键词最多 128 个字符。按成功次数计费（每千次 5 元，无结果、失败不计费）。
 - **Tavily**：填写 API Key；默认地址 `https://api.tavily.com/search`。
 - **Brave Search**：填写 API Key；默认地址 `https://api.search.brave.com/res/v1/web/search`。

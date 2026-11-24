@@ -162,10 +162,14 @@ pub const BUILTIN_SEARCH_COMMAND: &str = "aipp:search";
 const BUILTIN_SEARCH_KEY: &str = "HTTP_SEARCH_API_KEY";
 const BUILTIN_SEARCH_CONTEXT: &str = "内置搜索工具";
 
-fn builtin_search_env_target(env: &std::collections::HashMap<String, String>) -> Result<Target, RefError> {
+fn check_search_reference_fields(env: &std::collections::HashMap<String, String>) -> Result<(), RefError> {
     if env.iter().any(|(name, value)| contains(name) || (name != BUILTIN_SEARCH_KEY && contains(value))) {
         return Err(RefError::new("invalid_target", "内置搜索工具只有「HTTP 搜索 API Key」可以引用保险箱"));
     }
+    Ok(())
+}
+
+fn builtin_search_env_target(env: &std::collections::HashMap<String, String>) -> Result<Target, RefError> {
     let (_, endpoint) = crate::mcp::builtin_mcp::search::http_search::configured_endpoint(env)
         .map_err(|e| RefError::new("invalid_target", e))?;
     Target::site(endpoint.as_str())
@@ -174,15 +178,28 @@ fn builtin_search_env_target(env: &std::collections::HashMap<String, String>) ->
 /// Built-in search sends its API key to the configured HTTP search endpoint (DeepSeek Fetch uses the
 /// same origin), so that origin is the destination to confirm. Computed from the handler's own parse.
 pub fn builtin_search_target(env_text: &str) -> Result<Target, RefError> {
-    builtin_search_env_target(&crate::mcp::builtin_mcp::search::handler::parse_search_env(env_text))
+    let env = crate::mcp::builtin_mcp::search::handler::parse_search_env(env_text);
+    check_search_reference_fields(&env)?;
+    builtin_search_env_target(&env)
+}
+
+/// The saved HTTP key is dormant while the search handler uses the local browser.
+fn active_search_key(env: &std::collections::HashMap<String, String>) -> Result<Option<(&str, Target)>, RefError> {
+    check_search_reference_fields(env)?;
+    if crate::mcp::builtin_mcp::search::http_search::uses_local_search(env) {
+        return Ok(None);
+    }
+    let Some(key) = env.get(BUILTIN_SEARCH_KEY).filter(|value| contains(value)) else {
+        return Ok(None);
+    };
+    Ok(Some((key, builtin_search_env_target(env)?)))
 }
 
 /// Resolve a referenced `HTTP_SEARCH_API_KEY` in place, for the endpoint the request will go to.
 /// Fails closed when the credential was not confirmed for that endpoint (e.g. a model changed it).
 pub(crate) async fn resolve_builtin_search_key(app: &AppHandle, env: &mut std::collections::HashMap<String, String>) -> Result<Vec<String>, String> {
-    if !env.values().chain(env.keys()).any(|v| contains(v)) { return Ok(Vec::new()); }
-    let target = builtin_search_env_target(env).map_err(|e| e.message)?;
-    let raw = env.get(BUILTIN_SEARCH_KEY).cloned().unwrap_or_default();
+    let Some((key, target)) = active_search_key(env).map_err(|e| e.message)? else { return Ok(Vec::new()) };
+    let raw = key.to_owned();
     let app = app.clone();
     let (mut values, secrets) = tokio::task::spawn_blocking(move || resolve_blocking(&app, vec![raw], &target, BUILTIN_SEARCH_CONTEXT))
         .await.map_err(|e| e.to_string())?.map_err(|e| e.message)?;
@@ -241,13 +258,10 @@ fn resolve_stdio_env_with(
 
 // ---------- confirmation (Settings save commands only) ----------
 
-/// Check that every reference in `texts` points at an existing entry.
-pub fn validate(app: &AppHandle, texts: &[&str]) -> Result<(), String> {
-    let mut refs = Vec::new();
-    for text in texts { refs.extend(parse(text).map_err(|e| e.message)?); }
+fn validate(app: &AppHandle, refs: &[Reference]) -> Result<(), String> {
     if refs.is_empty() { return Ok(()); }
-    let metas = personal_vault::metas(app, &ids(&refs))?;
-    for reference in &refs {
+    let metas = personal_vault::metas(app, &ids(refs))?;
+    for reference in refs {
         if !metas.contains_key(&reference.id) {
             return Err("引用的条目已不在保险箱中（可能已被删除），请重新选择".into());
         }
@@ -255,24 +269,45 @@ pub fn validate(app: &AppHandle, texts: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// Record that the user confirmed sending the references in `texts` to `target`.
-fn confirm(app: &AppHandle, texts: &[&str], target: &Target, source: &str, label: &str) -> Result<(), String> {
-    validate(app, texts)?;
-    let mut refs = Vec::new();
-    for text in texts { refs.extend(parse(text).map_err(|e| e.message)?); }
+fn confirm(app: &AppHandle, refs: &[Reference], target: &Target, source: &str, label: &str) -> Result<(), String> {
+    validate(app, refs)?;
     if refs.is_empty() { return Ok(()); }
-    if personal_vault::bind_config(app, &ids(&refs), source, &target.key(), label, &target.detail())? {
+    if personal_vault::bind_config(app, &ids(refs), source, &target.key(), label, &target.detail())? {
         crate::api::vault_api::notify_changed(app);
+    }
+    Ok(())
+}
+
+/// Local search preserves the HTTP key for switching back. Only active credentials have a destination.
+fn active_mcp_references(transport: &str, command: Option<&str>, url: Option<&str>, env_text: Option<&str>, headers: Option<&str>) -> Result<Option<(Target, Vec<Reference>)>, RefError> {
+    if ![env_text, headers].into_iter().flatten().any(contains) { return Ok(None); }
+    if transport == "stdio" && command == Some(BUILTIN_SEARCH_COMMAND) {
+        if headers.is_some_and(contains) {
+            return Err(RefError::new("invalid_target", "内置搜索工具的请求头不支持保险箱引用"));
+        }
+        let env = crate::mcp::builtin_mcp::search::handler::parse_search_env(env_text.unwrap_or_default());
+        let Some((key, target)) = active_search_key(&env)? else { return Ok(None) };
+        return Ok(Some((target, parse(key)?)));
+    }
+    let target = mcp_target(transport, command, url, env_text)?;
+    let mut refs = Vec::new();
+    for text in [env_text, headers].into_iter().flatten() { refs.extend(parse(text)?); }
+    Ok(Some((target, refs)))
+}
+
+pub fn validate_mcp(app: &AppHandle, transport: &str, command: Option<&str>, url: Option<&str>, env_text: Option<&str>, headers: Option<&str>) -> Result<(), String> {
+    if let Some((_, refs)) = active_mcp_references(transport, command, url, env_text, headers).map_err(|e| e.message)? {
+        validate(app, &refs)?;
     }
     Ok(())
 }
 
 /// Settings save of an MCP server (after the row is written, so `id` is known).
 pub fn confirm_mcp(app: &AppHandle, id: i64, name: &str, transport_type: &str, command: Option<&str>, url: Option<&str>, env_text: Option<&str>, headers: Option<&str>) -> Result<(), String> {
-    let texts: Vec<&str> = [env_text, headers].into_iter().flatten().collect();
-    if !texts.iter().any(|t| contains(t)) { return Ok(()); }
-    let target = mcp_target(transport_type, command, url, env_text).map_err(|e| e.message)?;
-    confirm(app, &texts, &target, &format!("mcp:{id}"), &mcp_context(name))
+    if let Some((target, refs)) = active_mcp_references(transport_type, command, url, env_text, headers).map_err(|e| e.message)? {
+        confirm(app, &refs, &target, &format!("mcp:{id}"), &mcp_context(name))?;
+    }
+    Ok(())
 }
 
 fn provider_context(name: &str) -> String { format!("Provider「{name}」") }
@@ -310,14 +345,14 @@ pub fn validate_provider_key(app: &AppHandle, provider_id: i64, value: &str) -> 
     let endpoint = db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
         .into_iter().find(|c| c.name == "endpoint").map(|c| c.value);
     provider_target(&provider.api_type, endpoint.as_deref()).map_err(|e| e.message)?;
-    validate(app, &[value])
+    validate(app, &parse(value).map_err(|e| e.message)?)
 }
 
 /// Settings save of a provider field (API key, endpoint or type): confirm its current site.
 pub fn confirm_provider(app: &AppHandle, provider_id: i64) -> Result<(), String> {
     let Some(row) = provider_rows(app, Some(provider_id), MARKER)?.into_iter().next() else { return Ok(()) };
     let target = provider_target(&row.api_type, row.endpoint.as_deref()).map_err(|e| e.message)?;
-    confirm(app, &[&row.api_key], &target, &format!("provider:{}", row.id), &provider_context(&row.name))
+    confirm(app, &parse(&row.api_key).map_err(|e| e.message)?, &target, &format!("provider:{}", row.id), &provider_context(&row.name))
 }
 
 /// Migration must bind the destination the user inspected, even if the provider endpoint changes
@@ -329,7 +364,7 @@ pub(crate) fn confirm_provider_target(app: &AppHandle, provider_id: i64, expecte
     if current != *expected {
         return Err("Provider 目标在迁移期间已变化，原配置保持不变，请重新扫描".into());
     }
-    confirm(app, &[&row.api_key], expected, &format!("provider:{}", row.id), &provider_context(&row.name))
+    confirm(app, &parse(&row.api_key).map_err(|e| e.message)?, expected, &format!("provider:{}", row.id), &provider_context(&row.name))
 }
 
 // ---------- provider runtime ----------
@@ -478,8 +513,10 @@ fn require_reference(item_id: &str, texts: &[&str]) -> Result<(), String> {
 }
 
 fn mcp_confirmation(item_id: &str, server: &MCPServer) -> Result<ReferenceConfirmation, String> {
-    require_reference(item_id, &[server.headers.as_deref().unwrap_or_default(), server.environment_variables.as_deref().unwrap_or_default()])?;
-    let target = mcp_target(&server.transport_type, server.command.as_deref(), server.url.as_deref(), server.environment_variables.as_deref()).map_err(|e| e.message)?;
+    let active = active_mcp_references(&server.transport_type, server.command.as_deref(), server.url.as_deref(),
+        server.environment_variables.as_deref(), server.headers.as_deref()).map_err(|e| e.message)?;
+    let (target, _) = active.filter(|(_, refs)| refs.iter().any(|r| r.id == item_id))
+        .ok_or("当前配置未使用此凭据，无需确认")?;
     let source = format!("mcp:{}", server.id);
     let snapshot = confirmation_snapshot(item_id, &source, &target, server)?;
     Ok(ReferenceConfirmation { item_id: item_id.into(), source, label: mcp_context(&server.name), target, snapshot })

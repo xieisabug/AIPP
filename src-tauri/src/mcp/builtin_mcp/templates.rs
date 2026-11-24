@@ -1667,13 +1667,8 @@ pub async fn add_or_update_aipp_builtin_server(
         });
 
         // Settings save: vault references must be allowed for this builtin and exist (confirmed below).
-        let env_has_refs = env_str.as_deref().is_some_and(crate::vault::config_ref::contains);
-        if env_has_refs {
-            crate::vault::config_ref::mcp_target(&tpl.transport_type, Some(&tpl.command), None, env_str.as_deref())
-                .map_err(|e| anyhow::anyhow!(e.message))?;
-            crate::vault::config_ref::validate(&app_handle, &[env_str.as_deref().unwrap_or_default()])
-                .map_err(|e| anyhow::anyhow!(e))?;
-        }
+        crate::vault::config_ref::validate_mcp(&app_handle, &tpl.transport_type, Some(&tpl.command), None, env_str.as_deref(), None)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         let db = MCPDatabase::new(&app_handle).context("Create MCPDatabase failed")?;
         let server_id = db
@@ -1695,11 +1690,9 @@ pub async fn add_or_update_aipp_builtin_server(
             .context("Upsert builtin server failed")?;
 
         // Saving in Settings is the user's confirmation of where the referenced credential goes.
-        if env_has_refs {
-            crate::vault::config_ref::confirm_mcp(&app_handle, server_id, name.as_deref().unwrap_or(&tpl.name),
-                &tpl.transport_type, Some(&tpl.command), None, env_str.as_deref(), None)
-                .map_err(|e| anyhow::anyhow!(e))?;
-        }
+        crate::vault::config_ref::confirm_mcp(&app_handle, server_id, name.as_deref().unwrap_or(&tpl.name),
+            &tpl.transport_type, Some(&tpl.command), None, env_str.as_deref(), None)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         // 注册工具
         for tool in get_builtin_tools_for_command(&tpl.command) {

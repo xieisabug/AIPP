@@ -101,6 +101,21 @@ fn test_builtin_search_target_is_the_configured_search_origin() {
 }
 
 #[test]
+fn test_builtin_search_switching_to_local_suspends_http_key_until_http_is_selected() {
+    let settings = format!("SEARCH_ENGINE=kagi\nHTTP_SEARCH_API_KEY=vault://{ID}\nHTTP_SEARCH_ENDPOINT=https://relay.example/search");
+    let active = |env: &str| active_mcp_references("stdio", Some(BUILTIN_SEARCH_COMMAND), None, Some(env), None);
+    for provider in ["HTTP_SEARCH_PROVIDER=local", "HTTP_SEARCH_PROVIDER=disabled", ""] {
+        assert_eq!(active(&format!("{provider}\n{settings}")).unwrap(), None);
+    }
+    let http = format!("HTTP_SEARCH_PROVIDER=deepseek\n{settings}");
+    assert_eq!(active(&http).unwrap(), Some((Target::Site("https://relay.example".into()), vec![Reference { id: ID.into() }])));
+    let malformed = settings.replace(&reference(ID), "vault://invalid");
+    assert_eq!(active(&format!("HTTP_SEARCH_PROVIDER=local\n{malformed}")).unwrap(), None);
+    assert_eq!(active(&format!("HTTP_SEARCH_PROVIDER=deepseek\n{malformed}")).unwrap_err().code, "invalid_reference");
+    assert_eq!(active(&format!("HTTP_SEARCH_PROVIDER=local\n{settings}\nKAGI_SESSION_URL=vault://{OTHER}")).unwrap_err().code, "invalid_target");
+}
+
+#[test]
 fn test_builtin_search_rejects_references_outside_the_api_key() {
     for env in [
         format!("HTTP_SEARCH_PROVIDER=deepseek\nPROXY_SERVER=vault://{ID}"),
