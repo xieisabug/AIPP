@@ -86,6 +86,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
+import { FloatingWindowControls, WINDOW_HEADER_HEIGHT } from "./window/WindowTitleBar";
 import ConversationExportDialog from "./conversation/ConversationExportDialog";
 import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail, { makeTurnPreview } from "./conversation/ConversationTurnRail";
@@ -428,6 +429,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [persistedSnapshot, setPersistedSnapshot] = useState<ConversationWithMessages>();
         const persistedSnapshotRevision = useRef(0);
         const [composerRows, setComposerRows] = useState<Message[]>([]);
+        // 新会话的首条消息在会话建好之前就已上屏。从这一刻起按「已有会话」布局（标题栏、详情栏、列表），
+        // 否则 ID 到达时标题栏与详情栏才出现，把列表压低、挤窄，气泡在发送动画结束后跳一下。
+        const viewConversationId = conversationId || (composerRows.some(row => row.conversation_id === 0) ? "0" : "");
         const currentView = useRef(conversationId);
         currentView.current = conversationId;
         // Only the initiating composer may adopt a newly allocated conversation ID.
@@ -588,7 +592,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
         // 详情栏展开时窗口控制按钮在详情栏头部，否则在会话头部末尾
-        const headerShowsWindowControls = showWindowControls && !(sidebarExpanded && !isMobile && !hideSidebar && !sidebarWindowOpen && !!conversationId);
+        const headerShowsWindowControls = showWindowControls && !(sidebarExpanded && !isMobile && !hideSidebar && !sidebarWindowOpen && !!viewConversationId);
 
         const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
             setSidebarExpanded(isExpanded);
@@ -597,10 +601,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // Reset sidebar width when conversation changes or sidebar becomes invisible
         useEffect(() => {
-            if (!conversationId || isMobile) {
+            if (!viewConversationId || isMobile) {
                 setSidebarWidth(0);
             }
-        }, [conversationId, isMobile]);
+        }, [viewConversationId, isMobile]);
 
         // ============= 事件处理逻辑 =============
 
@@ -2520,7 +2524,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         ) : null}
                         {renderHeader ? renderHeader({ showWindowControls: headerShowsWindowControls }) : !isMobile && !hideHeader && (
                             <ConversationHeader
-                                conversationId={conversationId}
+                                conversationId={viewConversationId}
                                 conversation={conversation}
                                 onEdit={openTitleEditDialog}
                                 onDelete={handleDeleteConversationSuccess}
@@ -2528,12 +2532,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 onStatsOpenChange={setStatsDialogOpen}
                                 exportOpen={exportDialogOpen}
                                 onExportOpenChange={setExportDialogOpen}
-                                allowRename={allowRename}
-                                allowDelete={allowDelete}
+                                allowRename={allowRename && !!conversationId}
+                                allowDelete={allowDelete && !!conversationId}
                                 extraActions={acpHeaderActions}
                                 showWindowControls={headerShowsWindowControls}
                             />
                         )}
+                        {/* 没有会话（也没有正在新建的会话）时没有标题栏：Windows 窗口控制按钮浮在右上角、与标题栏同一中线 */}
+                        {showWindowControls && !renderHeader && !isMobile && !viewConversationId
+                            && <FloatingWindowControls centerY={WINDOW_HEADER_HEIGHT / 2} right={12} />}
 
                         <div
                             ref={scrollContainerRef}
@@ -2554,7 +2561,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 butlerBubbleMotion={windowLabel === "butler_experiment"}
                                 historyLoaded={!isLoadingShow && String(conversation?.id) === conversationId}
                                 isMobile={isMobile}
-                                conversationId={conversationId || (composerRows.some(row => row.conversation_id === 0) ? "0" : "")}
+                                conversationId={viewConversationId}
                                 // MessageList props
                                 allDisplayMessages={transcript}
                                 streamingMessages={resultOnly ? EMPTY_STREAMS : streamingMessages}
@@ -2633,7 +2640,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             placement="bottom"
                             isMobile={isMobile}
                             sidebarWidth={sidebarWidth}
-                            sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
+                            sidebarVisible={!isMobile && !hideSidebar && Boolean(viewConversationId)}
                             sendButtonIcon={sendButtonIconSlot}
                             sendButtonVisual={sendButtonVisualSlot}
                             commandMode={windowLabel === "butler_experiment" ? "butler" : "chat"}
@@ -2660,12 +2667,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     </div>
 
                     {/* Right sidebar - only show on desktop when sidebar window is not open */}
-                    {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
+                    {!isMobile && !hideSidebar && viewConversationId && !sidebarWindowOpen && (
                         <ChatSidebar
                             todos={sidebarTodos}
                             artifacts={artifacts}
                             contextItems={contextItems}
-                            conversationId={conversationId}
+                            conversationId={viewConversationId}
                             pluginList={pluginList}
                             toggleRequestVersion={sidebarToggleRequestVersion}
                             focusedContextId={focusedContextId}

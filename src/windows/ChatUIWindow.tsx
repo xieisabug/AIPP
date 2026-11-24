@@ -7,7 +7,6 @@ import ChatUIInfomation from "../components/ChatUIInfomation";
 import {
     MAC_TRAFFIC_LIGHTS_SAFE_LEFT,
     FloatingWindowControls,
-    WINDOW_HEADER_HEIGHT,
     useFramelessTitleBar,
     useMacOverlayTitleBar,
     useWindowControlsInset,
@@ -1046,12 +1045,11 @@ function ChatUIWindow() {
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
                         onPreviewFileContextClick={handlePreviewFileContextSelection}
+                        // Windows 窗口控制按钮由 ConversationUI 摆放：有标题栏时排进标题栏或展开的详情栏头部，
+                        // 没有会话时浮在右上角（新会话发出首条消息后标题栏立即出现，按钮随之移入）
                         showWindowControls
                     />
                 </div>
-                {/* Windows 窗口控制按钮：有会话时排进会话标题栏或展开的详情栏头部（见 ConversationUI.showWindowControls），
-                    未选会话时没有头部，浮在右上角、与头部同一中线 */}
-                {!selectedConversation && <FloatingWindowControls centerY={WINDOW_HEADER_HEIGHT / 2} right={12} />}
 
                 <ConversationSearchDialog
                     open={searchOpen}
