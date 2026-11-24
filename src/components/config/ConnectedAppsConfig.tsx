@@ -21,6 +21,9 @@ import AgentPluginsConfig, { PluginSource, PluginCatalog } from './apps/AgentPlu
 import AppDetailSheet, { Selection, sourceMatches } from './apps/AppDetailSheet';
 import AppIcon, { OfficialIcon } from './apps/AppIcon';
 import AppStatusBadge from './apps/AppStatusBadge';
+import CatalogCard, { CatalogTag } from './catalog/CatalogCard';
+import CatalogListRow from './catalog/CatalogListRow';
+import FilterChips from './catalog/FilterChips';
 import { aggregateStatus, DisplayStatus, displayStatus, toolSummary } from './apps/appStatus';
 import { DirectoryCard, useAppDirectory } from './apps/useAppDirectory';
 import { importDisabled, type ConnectionCheck } from './apps/connectionManagement';
@@ -33,24 +36,9 @@ const BUILTIN = '内置工具';
 function AppCard({ name, meta, description, badge, status, idle, action, icon, onClick }: {
     name: string; meta?: string; description: string; badge?: string; status?: DisplayStatus; idle?: string; action: string; icon: ReactNode; onClick: () => void;
 }) {
-    return <button type="button" onClick={onClick}
-        className="group flex h-full flex-col gap-3 rounded-xl border bg-card p-4 text-left transition-colors hover:border-foreground/20 hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
-        <div className="flex w-full items-start gap-3">
-            {icon}
-            <div className="min-w-0 flex-1 pt-0.5">
-                <div className="flex items-center gap-2">
-                    <span className="truncate font-medium">{name}</span>
-                    {badge && <span className="shrink-0 rounded border px-1.5 py-px text-[10px] leading-4 text-muted-foreground">{badge}</span>}
-                </div>
-                {meta && <p className="mt-0.5 truncate text-xs text-muted-foreground">{meta}</p>}
-            </div>
-        </div>
-        <p className="line-clamp-2 min-h-10 w-full flex-1 text-sm leading-5 text-muted-foreground">{description}</p>
-        <div className="flex w-full items-center justify-between gap-2 border-t pt-3 text-xs">
-            {status ? <AppStatusBadge status={status} /> : <span className="text-muted-foreground">{idle}</span>}
-            <span className="inline-flex items-center gap-0.5 text-muted-foreground transition-colors group-hover:text-foreground">{action}<ChevronRight className="h-3.5 w-3.5" /></span>
-        </div>
-    </button>;
+    return <CatalogCard name={name} meta={meta} description={description} icon={icon} action={action} onClick={onClick}
+        badges={badge && <CatalogTag>{badge}</CatalogTag>}
+        status={status ? <AppStatusBadge status={status} /> : <span className="text-muted-foreground">{idle}</span>} />;
 }
 
 function Section({ title, count, more, children }: { title: string; count?: number; more?: () => void; children: ReactNode }) {
@@ -194,7 +182,7 @@ export default function ConnectedAppsConfig() {
         const status = appStatus(card);
         return <AppCard key={card.id} name={card.name} description={card.description} meta={card.publisher}
             icon={<AppIcon icon={card.icon ?? undefined} official={card}/>} status={status}
-            idle={card.kind==='app'?'未连接':'应用'} action={status?'管理':card.kind==='app'?'连接':'查看'} onClick={()=>void openCard(card)} />;
+            idle={card.kind==='app'?'未连接':'能力包'} action={status?'管理':card.kind==='app'?'连接':'查看'} onClick={()=>void openCard(card)} />;
     })}</div>;
     const catalogPage = <div className="space-y-8">
         {category!==ALL && <Button variant="ghost" onClick={()=>setCategory(ALL)}><ArrowLeft/>返回应用目录</Button>}
@@ -230,16 +218,12 @@ export default function ConnectedAppsConfig() {
                     {filteredServers.map(({ server, status }) => {
                         const connection = connectionOf.get(server.id);
                         const summary = toolSummary(tools.get(server.id), server, connection);
-                        return <button key={server.id} type="button" className="flex w-full items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none" onClick={() => setSelection({ kind: 'server', serverId: server.id })}>
-                            <AppIcon size="sm" builtinCommand={server.is_builtin ? server.command : undefined} icon={apps.find(app => app.id === connection?.app_id)?.icon ?? connection?.definition.icon} official={official(connection?.definition.plugin_source)} />
-                            <div className="min-w-0 flex-1">
-                                <p className="truncate text-sm font-medium">{connection?.label ?? server.name}</p>
-                                <p className="truncate text-xs text-muted-foreground">{server.is_builtin ? '内置工具' : connection ? connection.definition.name : `自定义 MCP · ${server.transport_type}`}</p>
-                            </div>
-                            <AppStatusBadge status={status} className="w-28 shrink-0" />
-                            <span className={cn('hidden w-24 shrink-0 text-right text-xs sm:block', summary.known ? 'text-foreground/80' : 'text-muted-foreground')}>{summary.label}</span>
-                            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        </button>;
+                        return <CatalogListRow key={server.id} onClick={() => setSelection({ kind: 'server', serverId: server.id })}
+                            icon={<AppIcon size="sm" builtinCommand={server.is_builtin ? server.command : undefined} icon={apps.find(app => app.id === connection?.app_id)?.icon ?? connection?.definition.icon} official={official(connection?.definition.plugin_source)} />}
+                            title={connection?.label ?? server.name}
+                            subtitle={server.is_builtin ? '内置工具' : connection ? connection.definition.name : `自定义 MCP · ${server.transport_type}`}
+                            status={<AppStatusBadge status={status} />}
+                            detail={<span className={cn(summary.known ? 'text-foreground/80' : 'text-muted-foreground')}>{summary.label}</span>} />;
                     })}
                 </div>}
     </div>;
@@ -263,7 +247,7 @@ export default function ConnectedAppsConfig() {
                                 <DropdownMenuItem key={template.id} onSelect={() => { setInitialConfig(template.template); setConfigOpen(true); }}>{template.name} 模板</DropdownMenuItem>)}
                             <DropdownMenuItem onSelect={() => setImportOpen(true)}>从 JSON 导入</DropdownMenuItem>
                             {!mobile && <><DropdownMenuSeparator /><DropdownMenuLabel className="text-xs font-normal text-muted-foreground">高级</DropdownMenuLabel>
-                                <DropdownMenuItem onSelect={() => { setPluginSource(undefined); setPluginsOpen(true); }}>高级插件来源管理</DropdownMenuItem></>}
+                                <DropdownMenuItem onSelect={() => { setPluginSource(undefined); setPluginsOpen(true); }}>能力包来源管理</DropdownMenuItem></>}
                         </DropdownMenuContent>
                     </DropdownMenu>
                 </div>
@@ -284,9 +268,7 @@ export default function ConnectedAppsConfig() {
                     <Input className="pl-9" aria-label="搜索应用与工具" placeholder="搜索应用、工具或用途…" value={query} onChange={e => setQuery(e.target.value)} />
                 </div>
             </div>
-            {page === 'installed' && <div className="-mt-2 flex gap-1.5 overflow-x-auto pb-1">{categories.map(item =>
-                <Button key={item} size="sm" variant={category === item ? 'secondary' : 'ghost'} className={cn('h-7 shrink-0 rounded-full px-3 text-xs', category !== item && 'text-muted-foreground')} onClick={() => setCategory(item)}>{item}</Button>)}
-            </div>}
+            {page === 'installed' && <FilterChips label="连接分类" items={categories.map(item => ({ value: item, label: item }))} value={category} onChange={setCategory} />}
             {error && <p role="alert" className="rounded-lg border border-destructive/30 px-4 py-3 text-sm text-destructive">{error}</p>}
             {page === 'catalog' ? catalogPage : installedPage}
         </div>
@@ -303,8 +285,8 @@ export default function ConnectedAppsConfig() {
             <SheetContent className="w-full overflow-hidden sm:max-w-3xl">
                 <ConfigSheetBody>
                     <SheetHeader>
-                        <SheetTitle>GitHub 插件</SheetTitle>
-                        <SheetDescription>高级来源管理；应用详情与安装请从应用目录进入。</SheetDescription>
+                        <SheetTitle>能力包</SheetTitle>
+                        <SheetDescription>能力包一次装好一组 MCP 连接和技能，供助手使用。这里管理来源；详情与安装请从应用目录进入。</SheetDescription>
                     </SheetHeader>
                     {pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig directoryCatalog={pluginCatalog} initialSource={pluginSource} onChanged={() => void reload()} /></div>}
                 </ConfigSheetBody>

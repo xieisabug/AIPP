@@ -27,7 +27,7 @@ export default function AppAssistantAccess({ serverId, pluginKey }: { serverId?:
         } catch (e) { setError(String(e)); }
         finally { setBusy(undefined); }
     };
-    const target = serverId ? '此连接' : '此插件';
+    const target = serverId ? '此连接' : '此能力包';
     const allowed = rows.filter(row => row.enabled).length;
     return <section className="space-y-4">
         <div className="flex items-start justify-between gap-4">

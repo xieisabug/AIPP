@@ -73,7 +73,8 @@ GET /api/plugins
     }
   ],
   "sourceUrl": "string",
-  "sha256": "sha256:string"
+  "sha256": "sha256:string",
+  "previewImages": ["https://aipp-helper.xiejingyang.com/plugin-previews/<code>-1.webp"]
 }
 ```
 
@@ -95,6 +96,8 @@ GET /api/plugins
 ]
 ```
 
+`sha256` 不只是下载校验：客户端安装时会重新拉取本接口，核对来源、`sha256`、`dirs` 与条目一致后才把这次安装记为「官方」。缺少 `sha256` 的条目仍可安装，但不会显示「官方」标记。
+
 ### 可选字段
 
 ```json
@@ -102,9 +105,12 @@ GET /api/plugins
   "author",
   "tags",
   "minAippVersion",
-  "isExperimental"
+  "isExperimental",
+  "previewImages"
 ]
 ```
+
+`previewImages`：插件市场卡片与详情的效果预览图，第一张做卡片缩略图（约 3:1，建议 1200×400 webp），最多 6 张。客户端只加载 `https://aipp-helper.xiejingyang.com/plugin-previews/` 前缀的地址，其他地址会被丢弃。没有预览图时客户端按插件类型显示通用插画。
 
 ## 3. source 格式
 

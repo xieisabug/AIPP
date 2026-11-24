@@ -250,11 +250,11 @@ describe('ConnectedAppsConfig', () => {
         expect(await screen.findByText('Knowledge capture')).toBeInTheDocument();
         expect(screen.getByRole('heading',{name:'应用 1'})).toBeInTheDocument();
         expect(screen.getByRole('heading',{name:'技能 1'})).toBeInTheDocument();
-        expect(screen.getByRole('button',{name:'安装插件'})).toBeInTheDocument();
+        expect(screen.getByRole('button',{name:'安装能力包'})).toBeInTheDocument();
         expect(screen.getByRole('button',{name:'连接'})).toBeInTheDocument();
         expect(screen.queryByText('此应用未声明配套技能。')).not.toBeInTheDocument();
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();
-        expect(screen.queryByRole('button',{name:'查看 Notion 官方插件与配套 Skills'})).not.toBeInTheDocument();
+        expect(screen.queryByRole('button',{name:'查看 Notion 官方能力包与配套 Skills'})).not.toBeInTheDocument();
     });
 
     it('should resolve a plugin-created connection directly from the unified catalog', async () => {

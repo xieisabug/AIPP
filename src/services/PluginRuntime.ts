@@ -934,6 +934,13 @@ class PluginRuntime {
             .sort((a, b) => a.label.localeCompare(b.label));
     }
 
+    /** 某个插件当前注册的主题变量（插件市场用来画配色预览）。 */
+    listThemeVariablesOf(pluginCode: string): Record<string, string>[] {
+        return [...this.pluginThemes.values()]
+            .filter((theme) => theme.ownerCode === pluginCode)
+            .map((theme) => ({ ...theme.variables }));
+    }
+
     private registerPluginTheme(plugin: BackendPluginItem, theme: PluginThemeDefinition): void {
         const themeId = this.normalizeThemeId(theme.id);
         if (!themeId) {

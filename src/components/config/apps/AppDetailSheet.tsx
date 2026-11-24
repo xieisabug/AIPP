@@ -26,6 +26,7 @@ import AppRelatedSkills from './AppRelatedSkills';
 import AppTransportSettings from './AppTransportSettings';
 import AgentPluginsConfig, { PluginCatalog, PluginSource } from './AgentPluginsConfig';
 import { authLabel, displayStatus, toolSummary } from './appStatus';
+import { InfoList, Notice } from '../catalog/DetailParts';
 
 export type Selection = { kind: 'app'; appId: string } | { kind: 'server'; serverId: number } | { kind: 'plugin'; source: PluginSource; name: string };
 
@@ -46,28 +47,6 @@ interface Props {
     mobile: boolean;
     refresh: () => Promise<void>;
     onOpenPluginManager: (source?: PluginSource) => void;
-}
-
-type NoticeTone = 'neutral' | 'warn' | 'error';
-function Notice({ tone = 'neutral', icon, title, children, actions }: { tone?: NoticeTone; icon: ReactNode; title: string; children?: ReactNode; actions?: ReactNode }) {
-    return <div role={tone === 'neutral' ? 'note' : 'alert'} className={cn('flex gap-3 rounded-lg border px-4 py-3 text-sm',
-        tone === 'warn' && 'border-amber-500/40 bg-amber-500/5', tone === 'error' && 'border-destructive/40 bg-destructive/5', tone === 'neutral' && 'bg-muted/40')}>
-        <span className={cn('mt-0.5 shrink-0 [&_svg]:h-4 [&_svg]:w-4', tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : tone === 'error' ? 'text-destructive' : 'text-muted-foreground')}>{icon}</span>
-        <div className="min-w-0 flex-1 space-y-1">
-            <p className="font-medium">{title}</p>
-            {children && <div className="break-words text-muted-foreground">{children}</div>}
-            {actions && <div className="flex flex-wrap gap-2 pt-2">{actions}</div>}
-        </div>
-    </div>;
-}
-
-function InfoList({ rows }: { rows: [string, ReactNode][] }) {
-    return <section className="space-y-3">
-        <h4 className="text-sm font-medium">信息</h4>
-        <dl className="grid grid-cols-[6.5rem_1fr] gap-x-4 gap-y-3 rounded-lg border px-4 py-3 text-sm">
-            {rows.map(([term, value]) => <div key={term} className="contents"><dt className="text-muted-foreground">{term}</dt><dd className="min-w-0 break-words">{value}</dd></div>)}
-        </dl>
-    </section>;
 }
 
 function Panel({ title, description, children, danger = false }: { title: string; description?: ReactNode; children: ReactNode; danger?: boolean }) {
@@ -126,7 +105,7 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
     const openPluginConnection = (definition: AppDefinition) => run('', async () => {
         const items = await invoke<{ preview: { key: string; source: PluginSource } }[]>('list_agent_plugins');
         const found = items.find(i => definition.id.startsWith(`agent-plugin:${i.preview.key}:`));
-        if (!found) throw new Error('插件已卸载，请从 GitHub 插件重新安装');
+        if (!found) throw new Error('能力包已卸载，请从能力包来源重新安装');
         onOpenPluginManager(found.preview.source);
     });
 
@@ -238,7 +217,7 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
         }
         const primary = !server && app
             ? app.connection.transport === 'stdio'
-                ? <Button size="sm" variant="outline" onClick={() => void openPluginConnection(app)}>管理插件本地连接</Button>
+                ? <Button size="sm" variant="outline" onClick={() => void openPluginConnection(app)}>管理能力包本地连接</Button>
                 : <Button size="sm" disabled={!appSupported(app)} onClick={() => startConnect()}><Plug className="h-4 w-4" />{matching.length ? '添加连接' : '连接'}</Button>
             : connection && server?.is_enabled && !status?.attention && connection.status !== 'disconnected' && connection.credential_on_device !== false
                 ? <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void verify(server.id)}>{busyIcon('正在测试连接…') ?? <RefreshCw className="h-4 w-4" />}测试连接</Button>
@@ -348,7 +327,7 @@ export default function AppDetailSheet({ directoryCards, checks, selection, onSe
                                         <div className="space-y-0.5"><p>{connection.label}</p><p className="text-xs text-muted-foreground">{authLabel(connection.definition.connection.auth)}</p></div>
                                         {connection.definition.connection.transport !== 'stdio'
                                             ? <Button size="sm" variant="outline" onClick={() => startConnect(connection)}>重新配置</Button>
-                                            : <Button size="sm" variant="outline" onClick={() => void openPluginConnection(connection.definition)}>管理插件本地连接</Button>}
+                                            : <Button size="sm" variant="outline" onClick={() => void openPluginConnection(connection.definition)}>管理能力包本地连接</Button>}
                                     </div>
                                 </Panel>
                                 {['http', 'http_api'].includes(server.transport_type) && <Panel title="网络" description="调整超时和代理不需要重新授权。">

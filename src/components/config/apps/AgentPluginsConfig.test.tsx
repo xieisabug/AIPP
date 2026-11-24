@@ -62,21 +62,21 @@ describe('AgentPluginsConfig', () => {
         const onChanged = vi.fn();
         vi.mocked(invoke).mockImplementation(async command => command === 'inspect_agent_plugin' ? preview : command === 'install_agent_plugin' ? { preview, installed_at: 'now' } : []);
         render(<AgentPluginsConfig initialSource={source} onChanged={onChanged} />);
-        fireEvent.click(await screen.findByRole('button', { name: '安装插件与技能' }));
+        fireEvent.click(await screen.findByRole('button', { name: '安装能力包' }));
         await waitFor(() => expect(onChanged).toHaveBeenCalled());
         expect(invoke).toHaveBeenCalledWith('install_agent_plugin', { source, revision: preview.revision, digest: 'sha' });
     });
     it('should block replacement when local plugin files were modified', async () => {
         vi.mocked(invoke).mockImplementation(async command => command === 'inspect_agent_plugin' ? { ...preview, locally_modified: true } : []);
         render(<AgentPluginsConfig initialSource={source} onChanged={vi.fn()} />);
-        expect(await screen.findByRole('button', { name: '安装插件与技能' })).toBeDisabled();
+        expect(await screen.findByRole('button', { name: '安装能力包' })).toBeDisabled();
         expect(screen.getByRole('alert')).toHaveTextContent('本地修改');
     });
     it('should retain the error and avoid installation when GitHub inspection fails', async () => {
         vi.mocked(invoke).mockImplementation(async command => { if (command === 'inspect_agent_plugin') throw new Error('GitHub HTTP 403'); return []; });
         render(<AgentPluginsConfig initialSource={source} onChanged={vi.fn()} />);
         expect(await screen.findByRole('alert')).toHaveTextContent('GitHub HTTP 403');
-        expect(screen.queryByRole('button', { name: '安装插件与技能' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: '安装能力包' })).not.toBeInTheDocument();
     });
     it('should launch stdio with encrypted-input values only after the user starts it', async () => {
         const local = { ...preview, servers: [{name: 'local', config: {command: 'node', args: ['./server.mjs']}, reason: null}] };
@@ -89,7 +89,7 @@ describe('AgentPluginsConfig', () => {
         render(<AgentPluginsConfig initialSource={source} onChanged={vi.fn()} />);
         const add = await screen.findByRole('button',{name:'添加连接'});
         await waitFor(() => expect(add).toBeEnabled()); fireEvent.click(add);
-        const input = await screen.findByRole('textbox',{name:'插件环境变量 JSON'});
+        const input = await screen.findByRole('textbox',{name:'能力包环境变量 JSON'});
         expect(invoke).not.toHaveBeenCalledWith('connect_agent_plugin_stdio',expect.anything());
         fireEvent.change(input,{target:{value:'{"TOKEN":"test-input"}'}});
         fireEvent.click(screen.getByRole('button',{name:'启动并检测工具'}));
@@ -114,12 +114,12 @@ describe('AgentPluginsConfig', () => {
             return [];
         });
         render(<AgentPluginsConfig initialSource={source} onChanged={onChanged} />);
-        fireEvent.click(await screen.findByRole('button', { name: '卸载插件' }));
+        fireEvent.click(await screen.findByRole('button', { name: '卸载能力包' }));
         expect(screen.getByRole('alertdialog')).toBeInTheDocument();
         fireEvent.click(screen.getByRole('button', { name: '取消' }));
         expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
         expect(invoke).not.toHaveBeenCalledWith('uninstall_agent_plugin', expect.anything());
-        fireEvent.click(screen.getByRole('button', { name: '卸载插件' }));
+        fireEvent.click(screen.getByRole('button', { name: '卸载能力包' }));
         fireEvent.click(screen.getByRole('button', { name: '确认卸载' }));
         await screen.findByRole('button', { name: '已安装 0' });
         expect(invoke).toHaveBeenCalledWith('uninstall_agent_plugin', { key: 'abc', revokeRemote: true });
@@ -133,7 +133,7 @@ describe('AgentPluginsConfig', () => {
             return [];
         });
         render(<AgentPluginsConfig initialSource={source} onChanged={vi.fn()} />);
-        fireEvent.click(await screen.findByRole('button', { name: '卸载插件' }));
+        fireEvent.click(await screen.findByRole('button', { name: '卸载能力包' }));
         fireEvent.click(screen.getByRole('button', { name: '确认卸载' }));
         expect(await screen.findByRole('alert')).toHaveTextContent('服务商撤销未完成');
         expect(screen.getByRole('alertdialog')).toBeInTheDocument();
@@ -155,15 +155,15 @@ describe('AgentPluginsConfig', () => {
         render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} onConnect={onConnect} />);
         expect(await screen.findByText('保存笔记')).toBeInTheDocument();
         expect(screen.queryByRole('textbox', {name:'GitHub 仓库'})).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', {name:'返回插件目录'})).not.toBeInTheDocument();
-        fireEvent.click(screen.getByRole('button', {name:'安装插件'}));
+        expect(screen.queryByRole('button', {name:'返回能力包目录'})).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', {name:'安装能力包'}));
         await waitFor(() => expect(onConnect).toHaveBeenCalledOnce());
         expect(invoke).toHaveBeenCalledWith('install_agent_plugin',{source,revision:preview.revision,digest:preview.digest});
-        await waitFor(() => expect(screen.getByRole('button',{name:'更多插件操作'})).toBeEnabled());
-        await userEvent.click(screen.getByRole('button',{name:'更多插件操作'}));
+        await waitFor(() => expect(screen.getByRole('button',{name:'更多能力包操作'})).toBeEnabled());
+        await userEvent.click(screen.getByRole('button',{name:'更多能力包操作'}));
         await userEvent.click(screen.getByRole('menuitem',{name:'卸载应用'}));
         fireEvent.click(await screen.findByRole('button',{name:'确认卸载'}));
-        expect(await screen.findByRole('button',{name:'安装插件'})).toBeInTheDocument();
+        expect(await screen.findByRole('button',{name:'安装能力包'})).toBeInTheDocument();
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();
     });
 
@@ -203,15 +203,15 @@ describe('AgentPluginsConfig', () => {
             return [];
         });
         const first = render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} onConnect={vi.fn()} />);
-        await waitFor(() => expect(screen.getByRole('button', {name:'安装插件'})).toBeEnabled());
+        await waitFor(() => expect(screen.getByRole('button', {name:'安装能力包'})).toBeEnabled());
         expect(screen.queryByRole('button', {name:'检查更新'})).not.toBeInTheDocument();
         expect(screen.queryByText('高级管理与连接设置')).not.toBeInTheDocument();
-        fireEvent.click(screen.getByRole('button', {name:'安装插件'}));
+        fireEvent.click(screen.getByRole('button', {name:'安装能力包'}));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith('install_agent_plugin', expect.anything()));
         first.unmount();
         render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} onConnect={vi.fn()} />);
         await screen.findByText('保存笔记');
-        expect(screen.getByRole('button', {name:'安装插件'})).toBeDisabled();
+        expect(screen.getByRole('button', {name:'安装能力包'})).toBeDisabled();
         expect(screen.getByRole('status')).toHaveTextContent('正在准备安装');
         finish();
         await waitFor(() => expect(screen.getByRole('button', {name:'连接 Notion'})).toBeEnabled());

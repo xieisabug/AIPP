@@ -396,13 +396,15 @@ async fn download_office_plugin(app_handle: &AppHandle, use_proxy: bool) -> Resu
         .into_iter()
         .find(|p| p.code == OFFICE_PREVIEW_PLUGIN_CODE || p.id == OFFICE_PREVIEW_PLUGIN_CODE);
 
-    let (source, dirs, expected_sha256) = match official {
+    let (source, dirs, expected_sha256, official_id) = match official {
         Some(entry) => {
             let source = entry
                 .source
                 .ok_or_else(|| "官方插件目录中的 office-preview-plugin 缺少下载地址".to_string())?;
             let dirs = if entry.dirs.is_empty() { default_office_plugin_dirs() } else { entry.dirs };
-            (source, dirs, entry.sha256)
+            // 只有目录给了 sha256 才能按官方插件记录；否则照常安装，但不标官方。
+            let official_id = entry.sha256.as_ref().map(|_| entry.id.clone());
+            (source, dirs, entry.sha256, official_id)
         }
         None => (
             PluginInstallRecipeSource {
@@ -414,10 +416,11 @@ async fn download_office_plugin(app_handle: &AppHandle, use_proxy: bool) -> Resu
             },
             default_office_plugin_dirs(),
             None,
+            None,
         ),
     };
 
-    install_plugin_archive_source(app_handle.clone(), source, dirs, expected_sha256, use_proxy, true)
+    install_plugin_archive_source(app_handle.clone(), source, dirs, expected_sha256, use_proxy, true, official_id)
         .await
         .map(|_| ())
 }

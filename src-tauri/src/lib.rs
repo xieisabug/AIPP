@@ -97,7 +97,7 @@ use crate::api::operation_api::{confirm_agent_interaction, confirm_acp_elicitati
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
     get_plugin_assistant_configs, get_plugin_avatar_assets, get_plugin_config, get_plugin_data,
-    get_plugin_detail, get_plugin_hook_registrations, get_plugin_root_dir,
+    get_plugin_detail, get_plugin_hook_registrations, get_plugin_preview_image, get_plugin_root_dir,
     inspect_plugin_archive_source, install_plugin, install_plugin_archive_source,
     list_plugin_avatar_assets, list_plugin_hook_audit_logs, list_plugins,
     plugin_append_message, plugin_create_conversation, plugin_data_query, plugin_data_schema,
@@ -1529,6 +1529,7 @@ pub fn run() {
             inspect_plugin_archive_source,
             install_plugin_archive_source,
             get_plugin_detail,
+            get_plugin_preview_image,
             get_plugin_avatar_assets,
             verify_plugin_entry_checksum,
             list_plugins,

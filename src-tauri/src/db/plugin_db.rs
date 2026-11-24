@@ -115,6 +115,18 @@ pub struct PluginDatabase {
     pub conn: Connection,
 }
 
+/// 插件是从哪里装进来的。kind: official / github / zip / localZip。
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallSource {
+    pub folder_name: String,
+    pub kind: String,
+    pub official_id: Option<String>,
+    pub source_label: String,
+    pub archive_sha256: Option<String>,
+    pub installed_at: DateTime<Utc>,
+}
+
 impl PluginDatabase {
     #[instrument(level = "debug", skip(app_handle), fields(db = "plugin.db"))]
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
@@ -234,7 +246,64 @@ impl PluginDatabase {
             )",
             [],
         )?;
+
+        // 按插件目录名记录安装来源；只有后端核对过官方目录的安装才会写 kind = 'official'。
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS PluginInstallSource (
+                folder_name TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                official_id TEXT,
+                source_label TEXT NOT NULL,
+                archive_sha256 TEXT,
+                installed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
         debug!("Plugin database tables ensured");
+        Ok(())
+    }
+
+    pub fn upsert_plugin_install_source(&self, record: &PluginInstallSource) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO PluginInstallSource (folder_name, kind, official_id, source_label, archive_sha256, installed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(folder_name) DO UPDATE SET
+                kind = excluded.kind,
+                official_id = excluded.official_id,
+                source_label = excluded.source_label,
+                archive_sha256 = excluded.archive_sha256,
+                installed_at = excluded.installed_at",
+            params![
+                record.folder_name,
+                record.kind,
+                record.official_id,
+                record.source_label,
+                record.archive_sha256,
+                record.installed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_plugin_install_sources(&self) -> Result<Vec<PluginInstallSource>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT folder_name, kind, official_id, source_label, archive_sha256, installed_at FROM PluginInstallSource",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PluginInstallSource {
+                folder_name: row.get(0)?,
+                kind: row.get(1)?,
+                official_id: row.get(2)?,
+                source_label: row.get(3)?,
+                archive_sha256: row.get(4)?,
+                installed_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_plugin_install_source(&self, folder_name: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM PluginInstallSource WHERE folder_name = ?1", [folder_name])?;
         Ok(())
     }
 

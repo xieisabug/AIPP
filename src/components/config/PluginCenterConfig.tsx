@@ -1,1683 +1,260 @@
-import { ConfigSaveFooter } from "@/components/common/ConfigSaveFooter";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { toast } from "sonner";
-import { isMobileAppPlatform, usePlatform } from "@/hooks/use-platform";
-import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { openPath } from '@tauri-apps/plugin-opener';
+import { CloudOff, Plus, RefreshCw, Search, XCircle } from 'lucide-react';
+import { toast } from 'sonner';
+import { isMobileAppPlatform, usePlatform } from '@/hooks/use-platform';
+import { pluginRuntime, type LoadedPlugin } from '@/services/PluginRuntime';
+import { cn } from '@/utils/utils';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import AppStatusBadge from './apps/AppStatusBadge';
+import CatalogListRow from './catalog/CatalogListRow';
+import FilterChips from './catalog/FilterChips';
+import { Notice } from './catalog/DetailParts';
+import PluginCard, { OfficialBadge, PluginTypeIcon } from './plugins/PluginCard';
+import PluginDetailSheet, { type PluginDetailActions } from './plugins/PluginDetailSheet';
+import PluginSourceInstallDialog from './plugins/PluginSourceInstallDialog';
+import { contributionSummary } from './plugins/pluginDescribe';
 import {
-    CheckCircle2,
-    ChevronDown,
-    Download,
-    ExternalLink,
-    FolderOpen,
-    Loader2,
-    Plus,
-    Power,
-    PowerOff,
-    Puzzle,
-    RefreshCcw,
-    RefreshCw,
-    Trash2,
-    XCircle,
-} from "lucide-react";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
-import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import {
-    Dialog,
-    CompactDialogContent,
-    CompactDialogHeader,
-    CompactDialogBody,
-} from "../ui/dialog";
-import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
-import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
-} from "../ui/alert-dialog";
-import { ConfigPageLayout, ConfigPageLoading, ListItemButton, SidebarList } from "../common";
-import { pluginRuntime } from "../../services/PluginRuntime";
-import PluginViewHost from "../plugin/PluginViewHost";
-import type { LoadedPlugin } from "../../services/PluginRuntime";
-import AnimatedAvatar, { coreColorOf } from "../avatar/AnimatedAvatar";
-import { DeclarativeArtwork } from "../avatar/DeclarativeArtwork";
-import { toAvatarDefinition, type PluginAvatarAssetBundle } from "../avatar/avatarRegistry";
-import { defaultAppearance } from "../butler/butlerAppearance";
+    buildPluginEntries, matchesPluginQuery, pluginDisplayStatus, pluginTypeLabel, PLUGIN_TYPES, sourceLabel,
+    type InstalledPlugin, type OfficialPlugin, type PluginEntry, type PluginInstallState,
+} from './plugins/pluginCatalog';
 
-const PLUGIN_CENTER_VIEW_LOCATION = "config.plugin-center";
-const DEFAULT_PLUGIN_DETAIL_TAB = "plugin-ui";
+const ALL = 'all';
+const TYPE_ORDER: string[] = PLUGIN_TYPES.map(type => type.code);
+type Page = 'market' | 'mine';
 
-interface PluginCenterConfigProps {
-    pluginList: LoadedPlugin[];
-}
+interface Props { pluginList: LoadedPlugin[]; navigateTo?: (menuKey: string) => void }
 
-interface PluginRegistryItem {
-    entryAccessError?: string | null;
-    mobileUnavailableReason?: string | null;
-    pluginId: number;
-    name: string;
-    version: string;
-    code: string;
-    description?: string | null;
-    author?: string | null;
-    pluginType: string[];
-    permissions?: string[];
-    runtime?: {
-        type: string;
-        entry: string;
-        protocol?: string | null;
-        checksum?: string | null;
-    } | null;
-    contributions?: {
-        bangs?: Array<{
-            name: string;
-            aliases?: string[];
-            complete?: string | null;
-            description?: string | null;
-        }>;
-        hooks?: Array<{
-            name: string;
-            kind?: string;
-            priority?: number;
-            timeoutMs?: number;
-            failurePolicy?: string;
-            isActive?: boolean;
-        }>;
-        views?: Array<{
-            id: string;
-            location: string;
-            title: string;
-            description?: string | null;
-        }>;
-        actions?: Array<{
-            id: string;
-            location: string;
-            title: string;
-            description?: string | null;
-            order?: number | null;
-        }>;
-        assistantFormFields?: Array<{
-            key: string;
-            label: string;
-            type: string;
-        }>;
-        avatars?: unknown[];
-        accessories?: unknown[];
-    };
-    isActive: boolean;
-    isInstalled: boolean;
-}
-
-interface PluginInstallRecipeSource {
-    type: "github" | "zip" | "localZip";
-    repo?: string | null;
-    ref?: string;
-    url?: string | null;
-    path?: string | null;
-}
-
-interface PluginInstallRecipeDir {
-    from: string;
-    to: string;
-}
-
-interface OfficialPlugin {
-    id: string;
-    code: string;
-    name: string;
-    description: string;
-    version?: string | null;
-    author?: string | null;
-    tags?: string[];
-    pluginTypes: string[];
-    permissions: string[];
-    minAippVersion?: string | null;
-    isExperimental?: boolean;
-    source?: PluginInstallRecipeSource | null;
-    dirs?: PluginInstallRecipeDir[];
-    sourceUrl?: string | null;
-    sha256?: string | null;
-    isInstalled?: boolean;
-    installedVersion?: string | null;
-    isActive?: boolean;
-}
-
-interface PluginInstallValidation {
-    isInstallable: boolean;
-    warnings: string[];
-    errors: string[];
-}
-
-interface PluginInstallPlanPlugin {
-    from: string;
-    to: string;
-    code: string;
-    name: string;
-    version: string;
-    description?: string | null;
-    pluginType: string[];
-    permissions: string[];
-    willReplace: boolean;
-    installedVersion?: string | null;
-    validation: PluginInstallValidation;
-}
-
-interface PluginDetailItem {
-    pluginId?: number | null;
-    code: string;
-    name: string;
-    version: string;
-    description?: string | null;
-    author?: string | null;
-    pluginType: string[];
-    permissions: string[];
-    runtime: {
-        type: string;
-        entry: string;
-        protocol?: string | null;
-        checksum?: string | null;
-    };
-    contributions?: PluginRegistryItem["contributions"];
-    isInstalled: boolean;
-    isActive: boolean;
-    pluginDir: string;
-    entryPath: string;
-    entrySha256?: string | null;
-    configs: PluginConfigItem[];
-    hookRegistrations: PluginHookRegistrationItem[];
-}
-
-type OfficialPluginFetchStatus = "idle" | "loading" | "success" | "timeout" | "error";
-type PluginArchiveInstallStatus = "idle" | "installing" | "installed" | "failed";
-
-interface PluginArchiveRequest {
-    source: PluginInstallRecipeSource;
-    dirs?: PluginInstallRecipeDir[];
-    expectedSha256?: string | null;
-    useProxy: boolean;
-}
-
-interface PluginConfigItem {
-    configId: number;
-    pluginId: number;
-    configKey: string;
-    configValue?: string | null;
-}
-
-interface PluginHookRegistrationItem {
-    id: number;
-    pluginId: number;
-    hookName: string;
-    hookKind: string;
-    priority: number;
-    timeoutMs: number;
-    failurePolicy: string;
-    isActive: boolean;
-}
-
-interface PluginHookAuditLogItem {
-    id: number;
-    pluginId: number;
-    hookName: string;
-    conversationId?: number | null;
-    messageId?: number | null;
-    status: string;
-    action?: string | null;
-    durationMs?: number | null;
-    error?: string | null;
-    createdAt: string;
-}
-
-const PLUGIN_TYPE_LABELS: Record<string, string> = {
-    interfaceType: "界面",
-    applicationType: "应用",
-    toolType: "工具",
-    themeType: "主题",
-    avatarType: "形象",
-    markdownType: "Markdown",
-    messageType: "消息",
-    exportType: "导出",
-};
-
-const getPluginTypeLabel = (type: string) => PLUGIN_TYPE_LABELS[type] ?? type;
-
-function parsePluginSourceInput(input: string): {
-    source: PluginInstallRecipeSource;
-    dirs?: PluginInstallRecipeDir[];
-    expectedSha256?: string | null;
-} {
-    const value = input.trim();
-    if (!value) {
-        throw new Error("请输入 GitHub 仓库或 ZIP 链接");
-    }
-    if (/^https?:\/\/.+\.zip(\?.*)?$/i.test(value)) {
-        return { source: { type: "zip", url: value } };
-    }
-    const shorthandMatch = value.match(/^([\w.-]+\/[\w.-]+)(?:#(.+))?$/);
-    if (shorthandMatch) {
-        return {
-            source: {
-                type: "github",
-                repo: shorthandMatch[1],
-                ref: shorthandMatch[2] || "main",
-            },
-        };
-    }
-    const url = new URL(value);
-    if (url.hostname !== "github.com") {
-        throw new Error("只支持 GitHub 仓库链接或 ZIP 下载链接");
-    }
-    const segments = url.pathname.split("/").filter(Boolean);
-    if (segments.length < 2) {
-        throw new Error("GitHub 链接必须包含 owner/repo");
-    }
-    const repo = `${segments[0]}/${segments[1]}`;
-    if (segments[2] === "tree" && segments[3]) {
-        const ref = segments[3];
-        const path = segments.slice(4).join("/");
-        return {
-            source: { type: "github", repo, ref },
-            dirs: path
-                ? [
-                    {
-                        from: path,
-                        to: path.split("/").filter(Boolean).pop() || segments[1],
-                    },
-                ]
-                : undefined,
-        };
-    }
-    return { source: { type: "github", repo, ref: "main" } };
-}
-
-const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) => {
+/**
+ * 插件页：骨架、筛选、详情抽屉沿用「应用与工具」（catalog/ 共享组件），
+ * 卡片换成效果预览卡，分类用 AIPP 插件类型的主分类。
+ */
+export default function PluginCenterConfig({ pluginList, navigateTo }: Props) {
     const platform = usePlatform();
-    const isMobilePlatform = isMobileAppPlatform(platform);
-    const [plugins, setPlugins] = useState<PluginRegistryItem[]>([]);
+    const mobile = isMobileAppPlatform(platform);
+    const [page, setPage] = useState<Page>('market');
+    const [query, setQuery] = useState('');
+    const [type, setType] = useState<string>(ALL);
+    const [installed, setInstalled] = useState<InstalledPlugin[]>([]);
+    const [installedLoaded, setInstalledLoaded] = useState(false);
+    const [scanError, setScanError] = useState('');
+    const [official, setOfficial] = useState<OfficialPlugin[]>([]);
+    const [officialState, setOfficialState] = useState<'loading' | 'ready' | 'error'>('loading');
+    const [officialError, setOfficialError] = useState('');
     const [runtimePlugins, setRuntimePlugins] = useState<LoadedPlugin[]>(pluginList);
-    const [runtimeRefreshing, setRuntimeRefreshing] = useState(false);
-    const [selectedPluginId, setSelectedPluginId] = useState<number | null>(null);
-    const [searchQuery, setSearchQuery] = useState("");
-    const [loading, setLoading] = useState(false);
-    // 首次读取插件列表完成前不渲染列表与「插件商店」占位
-    const [pluginsLoaded, setPluginsLoaded] = useState(false);
-    const [scanError, setScanError] = useState("");
-    const [configs, setConfigs] = useState<PluginConfigItem[]>([]);
-    const [configLoading, setConfigLoading] = useState(false);
-    const [newConfigKey, setNewConfigKey] = useState("");
-    const [newConfigValue, setNewConfigValue] = useState("");
-    const [hookRegistrations, setHookRegistrations] = useState<PluginHookRegistrationItem[]>([]);
-    const [hookAuditLogs, setHookAuditLogs] = useState<PluginHookAuditLogItem[]>([]);
-    const [hookDebugLoading, setHookDebugLoading] = useState(false);
-    const [pluginDetail, setPluginDetail] = useState<PluginDetailItem | null>(null);
-    const [pluginDetailLoading, setPluginDetailLoading] = useState(false);
-    const [pluginAvatarAssets, setPluginAvatarAssets] = useState<PluginAvatarAssetBundle | null>(null);
-    const [pluginAvatarAssetsError, setPluginAvatarAssetsError] = useState("");
-    const [actionBusy, setActionBusy] = useState(false);
-    const [pendingUninstallPlugin, setPendingUninstallPlugin] = useState<PluginRegistryItem | null>(null);
-    const [officialPlugins, setOfficialPlugins] = useState<OfficialPlugin[]>([]);
-    const [officialFetchStatus, setOfficialFetchStatus] = useState<OfficialPluginFetchStatus>("idle");
-    const [officialFetchError, setOfficialFetchError] = useState("");
-    const [sourceInput, setSourceInput] = useState("");
-    const [sourceInputError, setSourceInputError] = useState("");
-    const [isInstallingArchive, setIsInstallingArchive] = useState(false);
-    const [sourceInstallError, setSourceInstallError] = useState("");
-    const [lastSourceInstallRequest, setLastSourceInstallRequest] = useState<PluginArchiveRequest | null>(null);
-    const [officialInstallStatusMap, setOfficialInstallStatusMap] = useState<Record<string, PluginArchiveInstallStatus>>({});
-    const [officialInstallErrorMap, setOfficialInstallErrorMap] = useState<Record<string, string>>({});
-    const [installDialogOpen, setInstallDialogOpen] = useState(false);
-    const [installDialogTab, setInstallDialogTab] = useState<"recommended" | "source">("recommended");
-    const [activePluginDetailTab, setActivePluginDetailTab] = useState(DEFAULT_PLUGIN_DETAIL_TAB);
-    const missingReminderKeyRef = useRef("");
+    const [installs, setInstalls] = useState<Record<string, PluginInstallState>>({});
+    const [selectedCode, setSelectedCode] = useState<string>();
+    const [busy, setBusy] = useState(false);
+    const [sourceOpen, setSourceOpen] = useState(false);
 
-    useEffect(() => {
-        setRuntimePlugins(pluginList);
-    }, [pluginList]);
+    useEffect(() => { setRuntimePlugins(pluginList); }, [pluginList]);
 
-    useEffect(() => {
-        setActivePluginDetailTab(DEFAULT_PLUGIN_DETAIL_TAB);
-    }, [selectedPluginId]);
-
-    const loadedPluginByCode = useMemo(() => {
-        const map = new Map<string, LoadedPlugin>();
-        runtimePlugins.forEach((plugin) => {
-            map.set(plugin.code, plugin);
-        });
-        return map;
-    }, [runtimePlugins]);
-
-    const syncRuntimePlugins = useCallback(async (forceReload = true) => {
-        setRuntimeRefreshing(true);
-        try {
-            const items = forceReload
-                ? await pluginRuntime.reloadPlugins()
-                : await pluginRuntime.loadPlugins();
-            setRuntimePlugins(items);
-            return items;
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to refresh runtime plugins:", error);
-            throw error;
-        } finally {
-            setRuntimeRefreshing(false);
-        }
+    const syncRuntime = useCallback(async () => {
+        const items = await pluginRuntime.reloadPlugins();
+        setRuntimePlugins(items);
+        return items;
     }, []);
 
-    const loadPlugins = useCallback(async () => {
-        setLoading(true);
+    const loadInstalled = useCallback(async () => {
         try {
-            const items = await invoke<PluginRegistryItem[]>("list_plugins");
-            setPlugins(items);
-            const missingPlugins = items.filter((item) => !item.isInstalled);
-            const reminderKey = missingPlugins
-                .map((item) => item.code)
-                .sort()
-                .join(",");
-            if (missingPlugins.length > 0 && reminderKey !== missingReminderKeyRef.current) {
-                const preview = missingPlugins
-                    .map((item) => item.name)
-                    .slice(0, 3)
-                    .join("、");
-                const suffix = missingPlugins.length > 3 ? ` 等${missingPlugins.length}个` : "";
-                toast.warning(`发现插件目录缺失，请在插件中手动卸载：${preview}${suffix}`);
-            }
-            missingReminderKeyRef.current = reminderKey;
-            setSelectedPluginId((prev) => {
-                if (prev && items.some((item) => item.pluginId === prev)) {
-                    return prev;
-                }
-                return items.length > 0 ? items[0].pluginId : null;
-            });
-            await syncRuntimePlugins(true);
-            setScanError("");
+            setInstalled(await invoke<InstalledPlugin[]>('list_plugins'));
+            setScanError('');
+            await syncRuntime().catch(error => console.error('[PluginCenterConfig] 刷新插件运行时失败', error));
         } catch (error) {
-            console.error("[PluginCenterConfig] Failed to load plugins:", error);
             setScanError(String(error));
         } finally {
-            setLoading(false);
-            setPluginsLoaded(true);
+            setInstalledLoaded(true);
         }
-    }, [syncRuntimePlugins]);
+    }, [syncRuntime]);
 
-    const fetchOfficialPlugins = useCallback(async (useProxy = false) => {
-        setOfficialFetchStatus("loading");
-        setOfficialFetchError("");
+    const loadOfficial = useCallback(async (useProxy = false) => {
+        setOfficialState('loading');
         try {
-            const items = await invoke<OfficialPlugin[]>("fetch_official_plugins", { useProxy });
-            setOfficialPlugins(items);
-            setOfficialFetchStatus("success");
+            setOfficial(await invoke<OfficialPlugin[]>('fetch_official_plugins', { useProxy }));
+            setOfficialState('ready'); setOfficialError('');
         } catch (error) {
-            const message = String(error);
-            setOfficialFetchError(message);
-            setOfficialFetchStatus(
-                message.includes("超时") || message.toLowerCase().includes("timeout")
-                    ? "timeout"
-                    : "error"
-            );
-        }
-    }, []);
-
-    const handleSelectLocalZip = useCallback(async () => {
-        try {
-            const selected = await open({
-                multiple: false,
-                directory: false,
-                filters: [
-                    {
-                        name: "ZIP 插件包",
-                        extensions: ["zip"],
-                    },
-                ],
-            });
-            if (!selected || typeof selected !== "string") {
-                return;
-            }
-            setSourceInput(selected);
-            setSourceInputError("");
-        } catch (error) {
-            toast.error("选择插件 ZIP 失败: " + error);
-        }
-    }, []);
-
-    const installPluginArchiveRequest = useCallback(
-        async (request: PluginArchiveRequest) => {
-            const result = await invoke<{ installedPlugins: PluginInstallPlanPlugin[] }>(
-                "install_plugin_archive_source",
-                {
-                    source: request.source,
-                    selections: request.dirs && request.dirs.length > 0 ? request.dirs : [],
-                    expectedSha256: request.expectedSha256 || null,
-                    useProxy: request.useProxy,
-                    enableAfterInstall: true,
-                }
-            );
-            await loadPlugins();
-            return result;
-        },
-        [loadPlugins]
-    );
-
-    const handleInstallOfficialPlugin = useCallback(
-        async (plugin: OfficialPlugin, useProxy = false) => {
-            if (!plugin.source) {
-                toast.error(`推荐插件 ${plugin.name} 缺少安装来源`);
-                return;
-            }
-
-            const request: PluginArchiveRequest = {
-                source: plugin.source,
-                dirs: plugin.dirs,
-                expectedSha256: plugin.sha256 || null,
-                useProxy,
-            };
-
-            setOfficialInstallStatusMap((prev) => ({ ...prev, [plugin.id]: "installing" }));
-            setOfficialInstallErrorMap((prev) => {
-                const next = { ...prev };
-                delete next[plugin.id];
-                return next;
-            });
-
-            try {
-                const result = await installPluginArchiveRequest(request);
-                setOfficialInstallStatusMap((prev) => ({ ...prev, [plugin.id]: "installed" }));
-                setOfficialPlugins((prev) =>
-                    prev.map((item) =>
-                        item.id === plugin.id
-                            ? {
-                                ...item,
-                                isInstalled: true,
-                                isActive: true,
-                                installedVersion: result.installedPlugins[0]?.version ?? item.installedVersion,
-                            }
-                            : item
-                    )
-                );
-                toast.success(`已安装 ${result.installedPlugins.length} 个插件`);
-            } catch (error) {
-                const message = String(error instanceof Error ? error.message : error);
-                setOfficialInstallStatusMap((prev) => ({ ...prev, [plugin.id]: "failed" }));
-                setOfficialInstallErrorMap((prev) => ({ ...prev, [plugin.id]: message }));
-            }
-        },
-        [installPluginArchiveRequest]
-    );
-
-    const installCustomSource = useCallback(async (request: PluginArchiveRequest) => {
-        setIsInstallingArchive(true);
-        setSourceInstallError("");
-        setLastSourceInstallRequest(request);
-        try {
-            const result = await installPluginArchiveRequest(request);
-            toast.success(`已安装 ${result.installedPlugins.length} 个插件`);
-            setInstallDialogOpen(false);
-        } catch (error) {
-            const message = String(error instanceof Error ? error.message : error);
-            setSourceInstallError(message);
-            toast.error("安装插件失败: " + message);
-        } finally {
-            setIsInstallingArchive(false);
-        }
-    }, [installPluginArchiveRequest]);
-
-    const handleInstallCustomSource = useCallback(
-        async (useProxy = false) => {
-            let parsed;
-            try {
-                parsed = parsePluginSourceInput(sourceInput);
-                setSourceInputError("");
-            } catch (error) {
-                const message = String(error instanceof Error ? error.message : error);
-                setSourceInputError(message);
-                return;
-            }
-
-            await installCustomSource({
-                source: parsed.source,
-                dirs: parsed.dirs,
-                expectedSha256: parsed.expectedSha256 || null,
-                useProxy,
-            });
-        },
-        [installCustomSource, sourceInput]
-    );
-
-    const handleRetryCustomSourceInstall = useCallback(
-        async (useProxy: boolean) => {
-            if (!lastSourceInstallRequest) {
-                return;
-            }
-            await installCustomSource({
-                ...lastSourceInstallRequest,
-                useProxy,
-            });
-        },
-        [installCustomSource, lastSourceInstallRequest]
-    );
-
-    const handleShowInstallDialog = useCallback(() => {
-        setInstallDialogTab("recommended");
-        setInstallDialogOpen(true);
-    }, []);
-
-    const handleCloseInstallDialog = useCallback((open: boolean) => {
-        setInstallDialogOpen(open);
-        if (!open) {
-            setSourceInputError("");
-            setSourceInstallError("");
-            setLastSourceInstallRequest(null);
-        }
-    }, []);
-
-    const handleOpenPluginFolder = useCallback(async () => {
-        try {
-            const pluginRoot = await invoke<string>("get_plugin_root_dir");
-            await openPath(pluginRoot);
-        } catch (error) {
-            toast.error("打开插件文件夹失败: " + error);
-        }
-    }, []);
-
-    const getOfficialPluginRepositoryUrl = useCallback((plugin: OfficialPlugin) => {
-        if (plugin.sourceUrl) {
-            return plugin.sourceUrl;
-        }
-        if (plugin.source?.type === "github" && plugin.source.repo) {
-            return `https://github.com/${plugin.source.repo}`;
-        }
-        return null;
-    }, []);
-
-    const handleOpenOfficialPluginRepository = useCallback(
-        async (plugin: OfficialPlugin) => {
-            const url = getOfficialPluginRepositoryUrl(plugin);
-            if (!url) {
-                toast.error(`${plugin.name} 缺少仓库链接`);
-                return;
-            }
-            try {
-                await invoke("open_source_url", { url });
-            } catch (error) {
-                toast.error("打开插件仓库失败: " + error);
-            }
-        },
-        [getOfficialPluginRepositoryUrl]
-    );
-
-    const selectedPlugin = useMemo(
-        () => plugins.find((item) => item.pluginId === selectedPluginId) || null,
-        [plugins, selectedPluginId]
-    );
-
-    const loadConfigs = useCallback(async (pluginId: number) => {
-        setConfigLoading(true);
-        try {
-            const result = await invoke<PluginConfigItem[]>("get_plugin_config", { pluginId });
-            setConfigs(result);
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to load plugin configs:", error);
-            toast.error("加载插件配置失败");
-        } finally {
-            setConfigLoading(false);
-        }
-    }, []);
-
-    const loadHookDebugInfo = useCallback(async (pluginId: number) => {
-        setHookDebugLoading(true);
-        try {
-            const [registrations, logs] = await Promise.all([
-                invoke<PluginHookRegistrationItem[]>("get_plugin_hook_registrations", { pluginId }),
-                invoke<PluginHookAuditLogItem[]>("list_plugin_hook_audit_logs", { limit: 100 }),
-            ]);
-            setHookRegistrations(registrations);
-            setHookAuditLogs(logs.filter((item) => item.pluginId === pluginId));
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to load hook debug info:", error);
-            toast.error("加载插件 Hook 调试信息失败");
-        } finally {
-            setHookDebugLoading(false);
-        }
-    }, []);
-
-    const loadPluginDetail = useCallback(async (code: string) => {
-        setPluginDetailLoading(true);
-        try {
-            const detail = await invoke<PluginDetailItem>("get_plugin_detail", { code });
-            setPluginDetail(detail);
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to load plugin detail:", error);
-            setPluginDetail(null);
-            toast.error(`加载插件详情失败：${String(error)}`);
-        } finally {
-            setPluginDetailLoading(false);
-        }
-    }, []);
-
-    const loadPluginAvatarAssets = useCallback(async (plugin: PluginRegistryItem) => {
-        const hasAssets = (plugin.contributions?.avatars?.length ?? 0) > 0
-            || (plugin.contributions?.accessories?.length ?? 0) > 0;
-        if (!hasAssets || !plugin.isInstalled) {
-            setPluginAvatarAssets(null);
-            setPluginAvatarAssetsError("");
-            return;
-        }
-        try {
-            const bundle = await invoke<PluginAvatarAssetBundle>("get_plugin_avatar_assets", { code: plugin.code });
-            setPluginAvatarAssets(bundle);
-            setPluginAvatarAssetsError("");
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to load plugin avatar assets:", error);
-            setPluginAvatarAssets(null);
-            setPluginAvatarAssetsError(String(error));
+            setOfficialError(String(error)); setOfficialState('error');
         }
     }, []);
 
     useEffect(() => {
-        loadPlugins();
-        const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
-            loadPlugins();
-        });
-        return () => {
-            unlistenRegistryChanged.then((unlisten) => unlisten());
-        };
-    }, [loadPlugins]);
+        void loadInstalled();
+        void loadOfficial();
+        const unlisten = listen('plugin_registry_changed', () => { void loadInstalled(); });
+        return () => { void unlisten.then(fn => fn()); };
+    }, [loadInstalled, loadOfficial]);
 
-    useEffect(() => {
-        if (selectedPluginId) {
-            const selected = plugins.find((item) => item.pluginId === selectedPluginId);
-            loadConfigs(selectedPluginId);
-            loadHookDebugInfo(selectedPluginId);
-            if (selected) {
-                loadPluginDetail(selected.code);
-                loadPluginAvatarAssets(selected);
+    const loadedByCode = useMemo(() => new Map(runtimePlugins.map(item => [item.code, item])), [runtimePlugins]);
+    const entries = useMemo(() => buildPluginEntries(official, installed), [official, installed]);
+    const statusOf = useCallback((entry: PluginEntry) => pluginDisplayStatus(entry, { install: installs[entry.code], loaded: loadedByCode.get(entry.code), mobile }), [installs, loadedByCode, mobile]);
+
+    // 市场 = 官方目录；我的插件 = 本机已安装（含第三方），出问题的排最前。
+    const pageEntries = useMemo(() => {
+        const list = page === 'market'
+            ? entries.filter(entry => entry.official).sort((a, b) => TYPE_ORDER.indexOf(a.primaryType) - TYPE_ORDER.indexOf(b.primaryType))
+            : entries.filter(entry => entry.installed).map((entry, index) => ({ entry, index, attention: statusOf(entry).attention }))
+                .sort((a, b) => Number(b.attention) - Number(a.attention) || a.index - b.index).map(item => item.entry);
+        return list;
+    }, [entries, page, statusOf]);
+    const typeItems = useMemo(() => {
+        const counts = new Map<string, number>();
+        for (const entry of pageEntries) counts.set(entry.primaryType, (counts.get(entry.primaryType) ?? 0) + 1);
+        return [{ value: ALL, label: '全部', count: pageEntries.length },
+            ...[...counts.keys()].sort((a, b) => TYPE_ORDER.indexOf(a) - TYPE_ORDER.indexOf(b)).map(code => ({ value: code, label: pluginTypeLabel(code), count: counts.get(code) }))];
+    }, [pageEntries]);
+    const visible = pageEntries.filter(entry => (type === ALL || entry.primaryType === type) && matchesPluginQuery(entry, query));
+    const installedCount = entries.filter(entry => entry.installed).length;
+    const attentionCount = entries.filter(entry => entry.installed && statusOf(entry).attention).length;
+    const selected = entries.find(entry => entry.code === selectedCode);
+
+    const openFolder = useCallback(() => {
+        void invoke<string>('get_plugin_root_dir').then(openPath).catch(error => toast.error(`打开插件文件夹失败：${String(error)}`));
+    }, []);
+
+    const actions: PluginDetailActions = useMemo(() => ({
+        install: async (entry, useProxy = false) => {
+            const item = entry.official;
+            if (!item?.source) { toast.error(`${entry.name} 缺少安装来源`); return; }
+            setInstalls(prev => ({ ...prev, [entry.code]: { status: 'installing' } }));
+            try {
+                await invoke('install_plugin_archive_source', {
+                    source: item.source, selections: item.dirs ?? [], expectedSha256: item.sha256 ?? null, useProxy, enableAfterInstall: true, officialId: item.id,
+                });
+                setInstalls(prev => { const next = { ...prev }; delete next[entry.code]; return next; });
+                toast.success(`${entry.installed ? '已更新' : '已安装'}：${entry.name}`);
+                await loadInstalled();
+            } catch (error) {
+                setInstalls(prev => ({ ...prev, [entry.code]: { status: 'failed', error: String(error) } }));
             }
-        } else {
-            setConfigs([]);
-            setHookRegistrations([]);
-            setHookAuditLogs([]);
-            setPluginDetail(null);
-            setPluginAvatarAssets(null);
-            setPluginAvatarAssetsError("");
-        }
-    }, [selectedPluginId, plugins, loadConfigs, loadHookDebugInfo, loadPluginDetail, loadPluginAvatarAssets]);
+        },
+        toggle: async plugin => {
+            setBusy(true);
+            try {
+                await invoke(plugin.isActive ? 'disable_plugin' : 'enable_plugin', { pluginId: plugin.pluginId });
+                await loadInstalled();
+            } catch (error) {
+                toast.error(`${plugin.isActive ? '停用' : '启用'}插件失败：${String(error)}`);
+            } finally { setBusy(false); }
+        },
+        uninstall: async plugin => {
+            setBusy(true);
+            try {
+                await invoke('uninstall_plugin', { pluginId: plugin.pluginId });
+                toast.success(`已卸载插件：${plugin.name}`);
+                await loadInstalled();
+            } catch (error) {
+                toast.error(`卸载插件失败：${String(error)}`);
+                throw error;
+            } finally { setBusy(false); }
+        },
+        retryLoad: async plugin => {
+            setBusy(true);
+            try {
+                if (plugin.entryAccessError) { await loadInstalled(); return; }
+                const items = await syncRuntime();
+                if (items.some(item => item.code === plugin.code && item.instance)) toast.success('插件运行时已刷新');
+            } catch (error) {
+                toast.error(`刷新插件运行时失败：${String(error)}`);
+            } finally { setBusy(false); }
+        },
+        openFolder,
+    }), [loadInstalled, openFolder, syncRuntime]);
 
-    useEffect(() => {
-        if (installDialogOpen && officialFetchStatus === "idle") {
-            fetchOfficialPlugins(false);
-        }
-    }, [fetchOfficialPlugins, installDialogOpen, officialFetchStatus]);
+    const switchPage = (next: string) => { setPage(next as Page); setType(ALL); };
+    const refreshing = officialState === 'loading';
 
-    const filteredPlugins = useMemo(() => {
-        const query = searchQuery.trim().toLowerCase();
-        if (!query) {
-            return plugins;
-        }
-        return plugins.filter(
-            (plugin) =>
-                plugin.name.toLowerCase().includes(query) ||
-                plugin.code.toLowerCase().includes(query) ||
-                (plugin.description || "").toLowerCase().includes(query)
-        );
-    }, [plugins, searchQuery]);
+    const marketBody = () => officialState === 'error' && !official.length
+        ? <Notice tone="warn" icon={<CloudOff />} title="无法获取插件市场" actions={<>
+            <Button size="sm" variant="outline" onClick={() => void loadOfficial()}>重试</Button>
+            <Button size="sm" variant="ghost" onClick={() => void loadOfficial(true)}>使用代理重试</Button>
+        </>}>{officialError}</Notice>
+        : officialState === 'loading' && !official.length
+            ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{[0, 1, 2, 3, 4, 5].map(i => <div key={i} className="h-[196px] animate-pulse rounded-xl bg-muted" />)}</div>
+            : !visible.length ? <p className="rounded-xl border border-dashed py-12 text-center text-sm text-muted-foreground">没有匹配的插件。</p>
+                : <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{visible.map(entry =>
+                    <PluginCard key={entry.code} entry={entry} install={installs[entry.code]} loaded={loadedByCode.get(entry.code)} mobile={mobile} onOpen={() => setSelectedCode(entry.code)} />)}</div>;
 
-    const selectOptions = useMemo(
-        () =>
-            filteredPlugins.map((plugin) => {
-                const failed = plugin.isActive && (plugin.entryAccessError || loadedPluginByCode.get(plugin.code)?.loadError);
-                const problem = failed ? "加载失败" : !plugin.isInstalled ? "目录缺失" : null;
-                return {
-                    id: String(plugin.pluginId),
-                    label: problem ? `${plugin.name}（${problem}）` : plugin.name,
-                    problem,
-                    icon: problem
-                        ? <XCircle className="h-4 w-4 text-destructive" />
-                        : plugin.isActive
-                            ? <Power className="h-4 w-4 text-emerald-500" />
-                            : <PowerOff className="h-4 w-4 text-muted-foreground" />,
-                };
-            }),
-        [filteredPlugins, loadedPluginByCode]
-    );
-
-    const currentLoadedPlugin = selectedPlugin ? loadedPluginByCode.get(selectedPlugin.code) : null;
-    const loadError = selectedPlugin?.isActive && (selectedPlugin.entryAccessError || currentLoadedPlugin?.loadError);
-    const fileAccessDenied = selectedPlugin?.entryAccessError || currentLoadedPlugin?.fileAccessDenied;
-    const pluginCenterViews = useMemo(
-        () =>
-            (selectedPlugin?.contributions?.views ?? []).filter(
-                (view) => view.location === PLUGIN_CENTER_VIEW_LOCATION
-            ),
-        [selectedPlugin]
-    );
-    const hasPluginCenterViews = pluginCenterViews.length > 0;
-    const selectedPluginViewHostItems = useMemo<LoadedPlugin[]>(() => {
-        if (!selectedPlugin) {
-            return [];
-        }
-        if (currentLoadedPlugin) {
-            return [currentLoadedPlugin];
-        }
-        return [
-            {
-                pluginId: selectedPlugin.pluginId,
-                name: selectedPlugin.name,
-                version: selectedPlugin.version,
-                code: selectedPlugin.code,
-                pluginType: selectedPlugin.pluginType,
-                contributions: selectedPlugin.contributions,
-                instance: null,
-            },
-        ];
-    }, [selectedPlugin, currentLoadedPlugin]);
-    const selectedRuntimeType = selectedPlugin?.runtime?.type ?? "js";
-    const pluginViewBlockedReason = useMemo(() => {
-        if (!selectedPlugin) {
-            return "请选择一个插件。";
-        }
-        if (!hasPluginCenterViews) {
-            return "当前插件没有声明插件界面。";
-        }
-        if (!selectedPlugin.isInstalled) {
-            return "插件目录缺失，请先卸载该记录。";
-        }
-        if (!selectedPlugin.isActive) {
-            return "插件已禁用，启用后可使用插件界面。";
-        }
-        if (selectedRuntimeType !== "js") {
-            return "该插件不是 JS 运行时，不会加载前端插件界面。";
-        }
-        if (!currentLoadedPlugin) {
-            return "插件运行时未加载该插件，请刷新插件运行时。";
-        }
-        if (currentLoadedPlugin.loadError) {
-            return currentLoadedPlugin.loadError;
-        }
-        if (!currentLoadedPlugin.instance) {
-            return "插件加载失败（实例为空），请检查插件脚本导出。";
-        }
-        if (!("renderView" in currentLoadedPlugin.instance) || typeof currentLoadedPlugin.instance.renderView !== "function") {
-            return "插件已加载，但未实现 renderView()。";
-        }
-        return null;
-    }, [selectedPlugin, currentLoadedPlugin, hasPluginCenterViews, selectedRuntimeType]);
-    const canRenderPluginViews = !pluginViewBlockedReason;
-
-    const handleTogglePlugin = useCallback(async () => {
-        if (!selectedPlugin || actionBusy) {
-            return;
-        }
-        setActionBusy(true);
-        try {
-            if (selectedPlugin.isActive) {
-                await invoke("disable_plugin", { pluginId: selectedPlugin.pluginId });
-                toast.success(`已禁用插件：${selectedPlugin.name}`);
-            } else {
-                await invoke("enable_plugin", { pluginId: selectedPlugin.pluginId });
-                toast.success(`已启用插件：${selectedPlugin.name}`);
-            }
-            await loadPlugins();
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to toggle plugin status:", error);
-            toast.error(`插件启停失败：${String(error)}`);
-        } finally {
-            setActionBusy(false);
-        }
-    }, [selectedPlugin, actionBusy, loadPlugins]);
-
-    const handleSaveConfig = useCallback(async () => {
-        if (!selectedPlugin || !newConfigKey.trim()) {
-            toast.error("请填写配置键");
-            return;
-        }
-        setActionBusy(true);
-        try {
-            await invoke("set_plugin_config", {
-                pluginId: selectedPlugin.pluginId,
-                key: newConfigKey.trim(),
-                value: newConfigValue.trim() ? newConfigValue : null,
-            });
-            toast.success("插件配置已保存");
-            setNewConfigKey("");
-            setNewConfigValue("");
-            await loadConfigs(selectedPlugin.pluginId);
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to save plugin config:", error);
-            toast.error("保存插件配置失败");
-        } finally {
-            setActionBusy(false);
-        }
-    }, [selectedPlugin, newConfigKey, newConfigValue, loadConfigs]);
-
-    const handleRequestUninstallPlugin = useCallback(() => {
-        if (!selectedPlugin || actionBusy) {
-            return;
-        }
-        setPendingUninstallPlugin(selectedPlugin);
-    }, [selectedPlugin, actionBusy]);
-
-    const handleConfirmUninstallPlugin = useCallback(async () => {
-        const plugin = pendingUninstallPlugin;
-        if (!plugin || actionBusy) {
-            return;
-        }
-        setActionBusy(true);
-        try {
-            await invoke("uninstall_plugin", { pluginId: plugin.pluginId });
-            toast.success(`已卸载插件：${plugin.name}`);
-            setPendingUninstallPlugin(null);
-            await loadPlugins();
-        } catch (error) {
-            console.error("[PluginCenterConfig] Failed to uninstall plugin:", error);
-            toast.error("卸载插件失败");
-        } finally {
-            setActionBusy(false);
-        }
-    }, [pendingUninstallPlugin, actionBusy, loadPlugins]);
-
-    const pluginDetailContent = pluginDetailLoading ? (
-        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-            加载插件详情中...
-        </div>
-    ) : !pluginDetail ? (
-        <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-            暂无插件详情。
-        </div>
-    ) : (
-        <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <div className="rounded-md border border-border p-3 text-sm">
-                    <div className="font-medium">安装目录</div>
-                    <div className="mt-1 break-all text-muted-foreground">{pluginDetail.pluginDir}</div>
-                </div>
-                <div className="rounded-md border border-border p-3 text-sm">
-                    <div className="font-medium">入口文件</div>
-                    <div className="mt-1 break-all text-muted-foreground">{pluginDetail.entryPath}</div>
-                    {pluginDetail.entrySha256 && (
-                        <div className="mt-1 break-all text-xs text-muted-foreground">
-                            {pluginDetail.entrySha256}
-                        </div>
-                    )}
-                </div>
+    const mineBody = () => !installedLoaded
+        ? <div className="space-y-2">{[0, 1, 2].map(i => <div key={i} className="h-16 animate-pulse rounded-lg bg-muted" />)}</div>
+        : !visible.length
+            ? <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed py-12 text-sm text-muted-foreground">
+                <p>{installedCount ? '没有匹配的插件。' : '还没有安装插件。'}</p>
+                {!installedCount && <Button size="sm" variant="outline" onClick={() => switchPage('market')}>浏览插件市场</Button>}
             </div>
-            <div className="rounded-md border border-border p-3 text-sm">
-                <div className="font-medium">Runtime</div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                    <Badge variant="outline">{pluginDetail.runtime.type}</Badge>
-                    <Badge variant="outline">{pluginDetail.runtime.entry}</Badge>
-                    {pluginDetail.runtime.checksum && (
-                        <Badge variant="secondary">{pluginDetail.runtime.checksum}</Badge>
-                    )}
-                </div>
-            </div>
-            <div className="rounded-md border border-border p-3 text-sm">
-                <div className="font-medium">权限</div>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                    {pluginDetail.permissions.length === 0 ? (
-                        <span className="text-muted-foreground">未声明权限</span>
-                    ) : (
-                        pluginDetail.permissions.map((permission) => (
-                            <Badge key={permission} variant="secondary">
-                                {permission}
-                            </Badge>
-                        ))
-                    )}
-                </div>
-            </div>
-            <div className="rounded-md border border-border p-3 text-sm">
-                <div className="font-medium">贡献点</div>
-                <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-5">
-                    <Badge variant="outline">Bangs {pluginDetail.contributions?.bangs?.length ?? 0}</Badge>
-                    <Badge variant="outline">Hooks {pluginDetail.contributions?.hooks?.length ?? 0}</Badge>
-                    <Badge variant="outline">视图 {pluginDetail.contributions?.views?.length ?? 0}</Badge>
-                    <Badge variant="outline">Actions {pluginDetail.contributions?.actions?.length ?? 0}</Badge>
-                    <Badge variant="outline">
-                        Fields {pluginDetail.contributions?.assistantFormFields?.length ?? 0}
-                    </Badge>
-                    <Badge variant="outline">
-                        形象 {pluginDetail.contributions?.avatars?.length ?? 0}
-                    </Badge>
-                    <Badge variant="outline">
-                        配饰 {pluginDetail.contributions?.accessories?.length ?? 0}
-                    </Badge>
-                </div>
-            </div>
-        </div>
-    );
+            : <div className="divide-y overflow-hidden rounded-xl border">{visible.flatMap(entry => {
+                const plugin = entry.installed;
+                if (!plugin) return [];
+                return <CatalogListRow key={entry.code} onClick={() => setSelectedCode(entry.code)}
+                    icon={<PluginTypeIcon type={entry.primaryType} size="sm" />}
+                    title={entry.name}
+                    titleExtra={<>{entry.verifiedOfficial && <OfficialBadge />}<span className="shrink-0 text-xs font-normal text-muted-foreground">{pluginTypeLabel(entry.primaryType)}</span></>}
+                    subtitle={entry.verifiedOfficial ? `v${plugin.version}` : `${sourceLabel(entry)} · v${plugin.version}`}
+                    status={<AppStatusBadge status={statusOf(entry)} />}
+                    detail={contributionSummary(plugin)}
+                    control={plugin.isInstalled
+                        ? <Switch aria-label={`${plugin.isActive ? '停用' : '启用'} ${plugin.name}`} checked={plugin.isActive} disabled={busy || (mobile && !!plugin.mobileUnavailableReason && !plugin.isActive)}
+                            onCheckedChange={() => void actions.toggle(plugin)} />
+                        : <span className="w-8" />} />;
+            })}</div>;
 
-    const recommendedPluginsContent = (
-        <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+    return <div className={cn('h-full overflow-y-auto bg-background', mobile && '[&_button]:min-h-11')}>
+        <div className="space-y-6 px-4 py-6 sm:py-8">
+            <header className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                    <div className="text-sm font-medium">官方推荐插件</div>
-                    <div className="text-xs text-muted-foreground">
-                        从官方接口获取预编译插件包，并下载安装到本地插件目录。
-                    </div>
+                    <h2 className="text-xl font-semibold tracking-tight">插件</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                        改变 AIPP 本身：主题、形象、消息渲染、快捷命令和新的界面。
+                        {navigateTo && <>想让助手连接外部服务？<button type="button" className="text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground" onClick={() => navigateTo('mcp-config')}>前往应用与工具</button></>}
+                    </p>
                 </div>
-                <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => fetchOfficialPlugins(false)} disabled={officialFetchStatus === "loading"}>
-                        <RefreshCcw className={`h-4 w-4 ${officialFetchStatus === "loading" ? "animate-spin" : ""}`} />
-                        <span className="ml-2">刷新</span>
+                <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="icon" aria-label="刷新插件市场和已安装插件" disabled={refreshing} onClick={() => { void loadOfficial(); void loadInstalled(); }}>
+                        <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
                     </Button>
-                    {officialFetchStatus === "timeout" || officialFetchStatus === "error" ? (
-                        <Button variant="outline" size="sm" onClick={() => fetchOfficialPlugins(true)}>
-                            使用代理重试
-                        </Button>
-                    ) : null}
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild><Button variant="outline"><Plus className="h-4 w-4" />安装</Button></DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-52">
+                            <DropdownMenuItem onSelect={() => setSourceOpen(true)}>从 GitHub / ZIP 安装…</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            {!mobile && <DropdownMenuItem onSelect={openFolder}>打开插件文件夹</DropdownMenuItem>}
+                            <DropdownMenuItem onSelect={() => void loadInstalled()}>重新扫描插件目录</DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                 </div>
-            </div>
-            {officialFetchStatus === "idle" ? (
-                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                    点击刷新获取官方推荐插件。
-                </div>
-            ) : officialFetchStatus === "loading" ? (
-                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                    正在获取推荐插件...
-                </div>
-            ) : officialFetchError ? (
-                <div className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">
-                    {officialFetchError}
-                </div>
-            ) : officialPlugins.length === 0 ? (
-                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                    暂无官方推荐插件。
-                </div>
-            ) : (
-                <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {officialPlugins.map((plugin) => {
-                        const status = officialInstallStatusMap[plugin.id] ?? "idle";
-                        const error = officialInstallErrorMap[plugin.id];
-                        const isBusy = status === "installing";
-                        const hasSource = !!plugin.source;
-                        const repositoryUrl = getOfficialPluginRepositoryUrl(plugin);
+            </header>
 
-                        return (
-                            <Card key={plugin.id} className="shadow-none">
-                                <CardHeader>
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div>
-                                            <CardTitle className="text-base">{plugin.name}</CardTitle>
-                                            <CardDescription className="mt-1">{plugin.description}</CardDescription>
-                                        </div>
-                                        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                                            {plugin.isInstalled && <Badge variant="secondary">已安装</Badge>}
-                                            {status === "installed" && (
-                                                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                                                    <CheckCircle2 className="h-3.5 w-3.5" />
-                                                    已完成
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </CardHeader>
-                                <CardContent className="space-y-3">
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {plugin.version && <Badge variant="outline">v{plugin.version}</Badge>}
-                                        {plugin.isExperimental && <Badge variant="secondary">实验性</Badge>}
-                                        {plugin.pluginTypes.map((type) => (
-                                            <Badge key={type} variant="outline">
-                                                {getPluginTypeLabel(type)}
-                                            </Badge>
-                                        ))}
-                                    </div>
-                                    {plugin.permissions.length > 0 && (
-                                        <div className="flex flex-wrap gap-1.5">
-                                            {plugin.permissions.map((permission) => (
-                                                <Badge key={permission} variant="secondary">
-                                                    {permission}
-                                                </Badge>
-                                            ))}
-                                        </div>
-                                    )}
-                                    <div className="flex flex-wrap gap-2">
-                                        <Button
-                                            size="sm"
-                                            onClick={() => handleInstallOfficialPlugin(plugin)}
-                                            disabled={!hasSource || isBusy || status === "installed"}
-                                            className="gap-1.5"
-                                        >
-                                            {isBusy ? (
-                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                            ) : status === "installed" ? (
-                                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                            ) : (
-                                                <Download className="h-3.5 w-3.5" />
-                                            )}
-                                            {status === "installing"
-                                                ? "安装中"
-                                                : status === "installed"
-                                                    ? "已完成"
-                                                    : plugin.isInstalled
-                                                        ? "重新安装"
-                                                        : "安装"}
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => handleOpenOfficialPluginRepository(plugin)}
-                                            disabled={!repositoryUrl}
-                                            className="gap-1.5"
-                                        >
-                                            <ExternalLink className="h-3.5 w-3.5" />
-                                            前往仓库
-                                        </Button>
-                                    </div>
-                                    {status === "failed" && error && (
-                                        <div className="flex items-start gap-2 text-xs text-destructive">
-                                            <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                                            <div className="min-w-0 flex-1 space-y-1">
-                                                <div className="break-words">{error}</div>
-                                                <div className="flex flex-wrap gap-2 pt-1">
-                                                    <Button
-                                                        variant="outline"
-                                                        size="sm"
-                                                        className="h-6 text-xs"
-                                                        onClick={() => handleInstallOfficialPlugin(plugin)}
-                                                    >
-                                                        重试
-                                                    </Button>
-                                                    <Button
-                                                        variant="outline"
-                                                        size="sm"
-                                                        className="h-6 gap-1 text-xs"
-                                                        onClick={() => handleInstallOfficialPlugin(plugin, true)}
-                                                    >
-                                                        <RefreshCw className="h-3 w-3" />
-                                                        使用代理重试
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-                                </CardContent>
-                            </Card>
-                        );
-                    })}
-                </div>
-            )}
-        </div>
-    );
-
-    const sourceInstallContent = (
-        <div className="space-y-4">
-            <div>
-                <div className="text-sm font-medium">从 GitHub / ZIP 安装</div>
-                <div className="text-xs text-muted-foreground">
-                    支持 owner/repo、owner/repo#ref、GitHub 仓库链接、GitHub tree 路径、ZIP 链接和本地 ZIP 文件。
-                </div>
-            </div>
-            <div className="flex flex-col gap-2 md:flex-row">
-                <Input
-                    value={sourceInput}
-                    onChange={(event) => setSourceInput(event.target.value)}
-                    placeholder="owner/repo#main 或 https://example.com/plugin.zip"
-                />
-                <Button onClick={() => handleInstallCustomSource(false)} disabled={isInstallingArchive} className="gap-2">
-                    {isInstallingArchive && <Loader2 className="h-4 w-4 animate-spin" />}
-                    {isInstallingArchive ? "安装中" : "安装"}
-                </Button>
-                <Button variant="outline" onClick={() => handleInstallCustomSource(true)} disabled={isInstallingArchive}>
-                    使用代理安装
-                </Button>
-                <Button className={isMobilePlatform ? "hidden" : undefined} variant="outline" onClick={handleSelectLocalZip} disabled={isInstallingArchive}>
-                    选择 ZIP 文件
-                </Button>
-            </div>
-            {sourceInputError && <div className="text-sm text-destructive">{sourceInputError}</div>}
-            {sourceInstallError && (
-                <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
-                    <div className="font-medium">安装失败</div>
-                    <div className="mt-1 break-words text-xs text-muted-foreground">{sourceInstallError}</div>
-                    {lastSourceInstallRequest && (
-                        <div className="mt-2 flex flex-wrap gap-2">
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleRetryCustomSourceInstall(lastSourceInstallRequest.useProxy)}
-                                disabled={isInstallingArchive}
-                            >
-                                重试安装
-                            </Button>
-                            {!lastSourceInstallRequest.useProxy && (
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => handleRetryCustomSourceInstall(true)}
-                                    disabled={isInstallingArchive}
-                                    className="gap-1"
-                                >
-                                    <RefreshCw className="h-3.5 w-3.5" />
-                                    使用代理重试
-                                </Button>
-                            )}
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
-    );
-
-    const pluginActionDropdown = (
-        <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <Button iconLabel="更多插件操作" variant="outline" size="sm" className="gap-2" disabled={loading}>
-                    <ChevronDown className="h-4 w-4" />
-                </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className={isMobilePlatform ? "w-56 [&_[role=menuitem]]:min-h-11" : "w-56"}>
-                <DropdownMenuItem
-                    onClick={loadPlugins}
-                    disabled={loading}
-                    className="flex items-center gap-2 cursor-pointer"
-                >
-                    <div className="flex flex-col">
-                        <span className="font-medium">扫描插件</span>
-                        <span className="text-xs text-muted-foreground">扫描本地插件目录并刷新运行时</span>
-                    </div>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                    onClick={handleShowInstallDialog}
-                    className="flex items-center gap-2 cursor-pointer"
-                >
-                    <div className="flex flex-col">
-                        <span className="font-medium">安装</span>
-                        <span className="text-xs text-muted-foreground">从推荐列表、GitHub 或 ZIP 安装插件</span>
-                    </div>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                    onClick={handleOpenPluginFolder}
-                    className={isMobilePlatform ? "hidden" : "flex items-center gap-2 cursor-pointer"}
-                >
-                    <div className="flex flex-col">
-                        <span className="font-medium">打开插件文件夹</span>
-                        <span className="text-xs text-muted-foreground">手动管理本地插件文件</span>
-                    </div>
-                </DropdownMenuItem>
-            </DropdownMenuContent>
-        </DropdownMenu>
-    );
-
-    const sidebar = (
-        <SidebarList
-            title="插件"
-            description="统一管理已安装插件及其配置"
-            icon={<Puzzle className="h-5 w-5" />}
-            searchValue={searchQuery}
-            onSearchChange={setSearchQuery}
-            searchPlaceholder="搜索插件..."
-            addButton={pluginActionDropdown}
-        >
-            {selectOptions.map((option) => (
-                <ListItemButton
-                    key={option.id}
-                    isSelected={String(selectedPluginId) === option.id}
-                    onClick={() => setSelectedPluginId(Number(option.id))}
-                >
-                    <div className={`truncate ${option.problem ? "text-destructive" : ""}`}>
-                        {option.label}
-                    </div>
-                </ListItemButton>
-            ))}
-        </SidebarList>
-    );
-
-    const renderLoadError = (detail: string, denied: boolean, title: string) => (
-        <Alert variant="destructive" className="mb-4 min-w-0 border-destructive/40">
-            <XCircle />
-            <AlertTitle>{denied ? "系统拒绝读取插件文件" : title}</AlertTitle>
-            <AlertDescription className="min-w-0">
-                {denied && (
-                    <>
-                        <p>{platform === "macos"
-                            ? "在访达中选中下方路径对应的项目，打开「显示简介 → 共享与权限」，确认当前用户可以读取。如果之前拒绝过 AIPP 访问该位置，可在「系统设置 → 隐私与安全 → 文件和文件夹」打开对应开关，然后重试。"
-                            : platform === "windows"
-                                ? "打开下方路径对应文件或文件夹的「属性 → 安全」，确认当前用户有读取权限，然后重试。"
-                                : "请检查下方路径对应文件及其所在目录的读取权限，然后重试。"}</p>
-                        {!isMobilePlatform && <Button size="sm" variant="outline" onClick={handleOpenPluginFolder}>打开插件文件夹</Button>}
-                    </>
-                )}
-                <details className="max-w-full min-w-0" open={denied ? true : undefined}>
-                    <summary className="cursor-pointer">错误详情</summary>
-                    <p className="mt-1 whitespace-pre-wrap break-all">{detail}</p>
-                </details>
-            </AlertDescription>
-        </Alert>
-    );
-
-    const content = scanError ? (
-        <div>
-            {renderLoadError(scanError, scanError.startsWith("PLUGIN_FILE_PERMISSION_DENIED:"), "加载插件列表失败")}
-            <Button variant="outline" size="sm" onClick={loadPlugins} disabled={loading}>重新扫描插件</Button>
-        </div>
-    ) : !selectedPlugin ? (
-        <Card className="shadow-none">
-            <CardHeader>
-                <CardTitle className="text-lg">插件商店</CardTitle>
-                <CardDescription>从左侧选择插件查看详情，或通过右上角菜单扫描、安装和打开插件文件夹。</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-wrap gap-2">
-                <Button onClick={handleShowInstallDialog}>
-                    <Plus className="h-4 w-4" />
-                    <span className="ml-2">安装插件</span>
-                </Button>
-                <Button variant="outline" onClick={loadPlugins} disabled={loading}>
-                    <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-                    <span className="ml-2">扫描插件</span>
-                </Button>
-                <Button className={isMobilePlatform ? "hidden" : undefined} variant="outline" onClick={handleOpenPluginFolder}>
-                    <FolderOpen className="h-4 w-4" />
-                    <span className="ml-2">打开插件文件夹</span>
-                </Button>
-            </CardContent>
-        </Card>
-    ) : (
-        <Card className="shadow-none">
-            <CardHeader>
-                <div className="flex items-start justify-between gap-3">
-                    <div>
-                        <CardTitle className="text-lg">{selectedPlugin.name}</CardTitle>
-                        <CardDescription className="mt-1">
-                            {selectedPlugin.description || "暂无描述"}
-                        </CardDescription>
-                        {isMobilePlatform && selectedPlugin.mobileUnavailableReason && (
-                            <p role="status" className="mt-2 text-sm text-muted-foreground">此设备不可运行：{selectedPlugin.mobileUnavailableReason}。配置仍保留。</p>
-                        )}
-                        <div className="mt-2 flex flex-wrap gap-2">
-                            <Badge variant={loadError ? "destructive" : selectedPlugin.isActive ? "default" : "secondary"}>
-                                {loadError ? "加载失败" : selectedPlugin.isActive ? "已启用" : "已禁用"}
-                            </Badge>
-                            {!selectedPlugin.isInstalled && (
-                                <Badge variant="destructive">目录缺失</Badge>
-                            )}
-                            <Badge variant="outline">v{selectedPlugin.version}</Badge>
-                            <Badge variant="outline">Runtime: {selectedRuntimeType.toUpperCase()}</Badge>
-                            {(selectedPlugin.contributions?.hooks?.length ?? 0) > 0 && (
-                                <Badge variant="outline">{selectedPlugin.contributions?.hooks?.length} Hooks</Badge>
-                            )}
-                            {(selectedPlugin.contributions?.views?.length ?? 0) > 0 && (
-                                <Badge variant="outline">{selectedPlugin.contributions?.views?.length} 视图</Badge>
-                            )}
-                            {(selectedPlugin.contributions?.actions?.length ?? 0) > 0 && (
-                                <Badge variant="outline">{selectedPlugin.contributions?.actions?.length} Actions</Badge>
-                            )}
-                            {(selectedPlugin.contributions?.assistantFormFields?.length ?? 0) > 0 && (
-                                <Badge variant="outline">
-                                    {selectedPlugin.contributions?.assistantFormFields?.length} Assistant Fields
-                                </Badge>
-                            )}
-                            {(selectedPlugin.contributions?.avatars?.length ?? 0) > 0 && (
-                                <Badge variant="outline">
-                                    {selectedPlugin.contributions?.avatars?.length} 形象
-                                </Badge>
-                            )}
-                            {(selectedPlugin.contributions?.accessories?.length ?? 0) > 0 && (
-                                <Badge variant="outline">
-                                    {selectedPlugin.contributions?.accessories?.length} 配饰
-                                </Badge>
-                            )}
-                            {selectedPlugin.pluginType.map((type) => (
-                                <Badge key={type} variant="outline">
-                                    {getPluginTypeLabel(type)}
-                                </Badge>
-                            ))}
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <Button
-                            variant="ghost"
-                            size="icon"
-                            className="text-muted-foreground"
-                            onClick={handleTogglePlugin}
-                            disabled={actionBusy || !selectedPlugin.isInstalled || (isMobilePlatform && !selectedPlugin.isActive && !!selectedPlugin.mobileUnavailableReason)}
-                            title={selectedPlugin.isActive ? "禁用插件" : "启用插件"}
-                            aria-label={selectedPlugin.isActive ? "禁用插件" : "启用插件"}
-                        >
-                            {selectedPlugin.isActive ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
-                        </Button>
-                        <Button
-                            variant="ghost"
-                            size="icon"
-                            className="text-muted-foreground"
-                            onClick={handleRequestUninstallPlugin}
-                            disabled={actionBusy}
-                            title="卸载插件"
-                            aria-label="卸载插件"
-                        >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                    </div>
-                </div>
-            </CardHeader>
-            <CardContent>
-                {loadError && renderLoadError(loadError, !!fileAccessDenied, "插件加载失败")}
-                <Tabs value={activePluginDetailTab} onValueChange={setActivePluginDetailTab} className="w-full">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <Tabs value={page} onValueChange={switchPage}>
                     <TabsList>
-                        <TabsTrigger value="plugin-ui">界面</TabsTrigger>
-                        <TabsTrigger value="detail">详情</TabsTrigger>
-                        <TabsTrigger value="config">配置KV</TabsTrigger>
-                        <TabsTrigger value="hooks">Hook 调试</TabsTrigger>
+                        <TabsTrigger value="market" className="px-4">插件市场</TabsTrigger>
+                        <TabsTrigger value="mine" className="gap-1.5 px-4">
+                            我的插件{installedCount > 0 && <span className="text-xs text-muted-foreground">{installedCount}</span>}
+                            {attentionCount > 0 && <span aria-label={`${attentionCount} 个需要处理`} className="h-1.5 w-1.5 rounded-full bg-amber-500" />}
+                        </TabsTrigger>
                     </TabsList>
-                    <TabsContent value="plugin-ui" className="mt-4 space-y-3">
-                        {pluginAvatarAssetsError && (
-                            <Alert variant="destructive" className="border-destructive/40">
-                                <XCircle />
-                                <AlertTitle>形象与配饰资产校验失败</AlertTitle>
-                                <AlertDescription className="break-words">{pluginAvatarAssetsError}</AlertDescription>
-                            </Alert>
-                        )}
-                        {pluginAvatarAssets && (pluginAvatarAssets.avatars.length > 0 || pluginAvatarAssets.accessories.length > 0) && (
-                            <div className="space-y-4 rounded-lg border border-border/60 bg-background p-4" data-aipp-slot="plugin-avatar-preview">
-                                {pluginAvatarAssets.avatars.length > 0 && (
-                                    <div className="space-y-2.5">
-                                        <div className="text-sm font-medium">包含的助手形象（{pluginAvatarAssets.avatars.length}）</div>
-                                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-                                            {pluginAvatarAssets.avatars.map((asset) => {
-                                                const def = toAvatarDefinition(asset);
-                                                if (!def) return null;
-                                                const previewAppearance = {
-                                                    ...defaultAppearance,
-                                                    shape: def.id,
-                                                    colors: {
-                                                        primary: def.defaultColors?.primary ?? defaultAppearance.colors.primary,
-                                                        secondary: def.defaultColors?.secondary ?? defaultAppearance.colors.secondary,
-                                                    },
-                                                };
-                                                return (
-                                                    <div key={asset.id} className="flex flex-col items-center gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-center">
-                                                        <AnimatedAvatar appearance={previewAppearance} definitionOverride={def} size={76} animated state="idle" />
-                                                        <div className="text-xs font-medium">{asset.label}</div>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-                                {pluginAvatarAssets.accessories.length > 0 && (
-                                    <div className="space-y-2.5">
-                                        <div className="text-sm font-medium">包含的配饰（{pluginAvatarAssets.accessories.length}）</div>
-                                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-                                            {pluginAvatarAssets.accessories.map((asset) => {
-                                                const previewPalette = {
-                                                    primary: defaultAppearance.colors.primary,
-                                                    secondary: defaultAppearance.colors.secondary,
-                                                    core: coreColorOf(defaultAppearance),
-                                                };
-                                                return (
-                                                    <div key={asset.id} className="flex flex-col items-center gap-2 rounded-lg border border-border/60 bg-muted/30 p-3 text-center">
-                                                        <svg aria-hidden="true" viewBox={asset.previewViewBox} className="size-12">
-                                                            <DeclarativeArtwork layers={asset.layers} palette={previewPalette} />
-                                                        </svg>
-                                                        <div className="text-xs font-medium">{asset.label}</div>
-                                                        <Badge variant="outline" className="text-[10px]">
-                                                            {asset.slot === "eyes" ? "脸部" : "头部"}
-                                                        </Badge>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-                                <p className="text-xs text-muted-foreground">
-                                    {selectedPlugin.isActive
-                                        ? "已启用，可在助手资料的「形象」面板中选择使用。"
-                                        : "启用此插件后，即可在助手资料的「形象」面板中选择使用。"}
-                                </p>
-                            </div>
-                        )}
-                        {loadError ? null : canRenderPluginViews ? (
-                            <PluginViewHost
-                                pluginList={selectedPluginViewHostItems}
-                                location={PLUGIN_CENTER_VIEW_LOCATION}
-                                emptyDescription="当前插件没有声明插件界面。"
-                            />
-                        ) : selectedRuntimeType === "declarative" && pluginAvatarAssets ? null : (
-                            <div className="rounded-lg border border-border/60 bg-background p-3 md:p-4">
-                                <div className="text-sm text-muted-foreground">
-                                    {pluginViewBlockedReason}
-                                </div>
-                            </div>
-                        )}
-                        {selectedPlugin.isInstalled &&
-                            selectedPlugin.isActive &&
-                            (hasPluginCenterViews || loadError) && (
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="mt-3"
-                                    onClick={async () => {
-                                        try {
-                                            if (selectedPlugin.entryAccessError) {
-                                                await loadPlugins();
-                                                return;
-                                            }
-                                            const items = await syncRuntimePlugins(true);
-                                            if (items.some((item) => item.code === selectedPlugin.code && item.instance)) {
-                                                toast.success("插件运行时已刷新");
-                                            }
-                                        } catch (error) {
-                                            toast.error(`刷新插件运行时失败：${String(error)}`);
-                                        }
-                                    }}
-                                    disabled={runtimeRefreshing || loading}
-                                >
-                                    <RefreshCcw className={`h-4 w-4 ${runtimeRefreshing ? "animate-spin" : ""}`} />
-                                    <span className="ml-2">{loadError ? "重试加载" : "刷新插件运行时"}</span>
-                                </Button>
-                             )}
-                     </TabsContent>
-                    <TabsContent value="detail" className="mt-4">
-                        {pluginDetailContent}
-                    </TabsContent>
-                    <TabsContent value="config" className="mt-4 space-y-4">
-                        <Input
-                            placeholder="config key"
-                            value={newConfigKey}
-                            onChange={(e) => setNewConfigKey(e.target.value)}
-                        />
-                        <Textarea
-                            placeholder="config value（可选）"
-                            value={newConfigValue}
-                            onChange={(e) => setNewConfigValue(e.target.value)}
-                            className="min-h-[80px]"
-                        />
-                        <div className="space-y-2">
-                            {configLoading ? (
-                                <div className="text-sm text-muted-foreground">加载配置中...</div>
-                            ) : configs.length === 0 ? (
-                                <div className="text-sm text-muted-foreground">
-                                    暂无配置项。
-                                </div>
-                            ) : (
-                                configs.map((config) => (
-                                    <div
-                                        key={config.configId}
-                                        className="rounded-md border border-border p-2.5 text-sm"
-                                    >
-                                        <div className="font-medium">{config.configKey}</div>
-                                        <div className="text-muted-foreground break-all">
-                                            {config.configValue ?? "(null)"}
-                                        </div>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                        <ConfigSaveFooter>
-                            <Button onClick={handleSaveConfig} disabled={actionBusy}>保存配置</Button>
-                        </ConfigSaveFooter>
-                    </TabsContent>
-                    <TabsContent value="hooks" className="mt-4 space-y-4">
-                        <div className="flex items-center justify-between gap-3">
-                            <div>
-                                <div className="text-sm font-medium">Hook 注册与执行审计</div>
-                                <div className="text-xs text-muted-foreground">
-                                    显示当前插件声明的 Hook，以及最近 100 条执行记录中属于该插件的日志。
-                                </div>
-                            </div>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => selectedPlugin && loadHookDebugInfo(selectedPlugin.pluginId)}
-                                disabled={hookDebugLoading}
-                            >
-                                <RefreshCcw className={`h-4 w-4 ${hookDebugLoading ? "animate-spin" : ""}`} />
-                                <span className="ml-2">刷新</span>
-                            </Button>
-                        </div>
-                        <div className="space-y-2">
-                            <div className="text-sm font-medium">注册列表</div>
-                            {hookDebugLoading ? (
-                                <div className="text-sm text-muted-foreground">加载 Hook 信息中...</div>
-                            ) : hookRegistrations.length === 0 ? (
-                                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                                    当前插件没有注册 Hook。
-                                </div>
-                            ) : (
-                                hookRegistrations.map((hook) => (
-                                    <div key={hook.id} className="rounded-md border border-border p-3 text-sm">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <span className="font-medium">{hook.hookName}</span>
-                                            <Badge variant={hook.isActive ? "default" : "secondary"}>
-                                                {hook.isActive ? "启用" : "禁用"}
-                                            </Badge>
-                                            <Badge variant="outline">{hook.hookKind}</Badge>
-                                            <Badge variant="outline">优先级 {hook.priority}</Badge>
-                                        </div>
-                                        <div className="mt-1 text-xs text-muted-foreground">
-                                            timeout={hook.timeoutMs}ms / failurePolicy={hook.failurePolicy}
-                                        </div>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                        <div className="space-y-2">
-                            <div className="text-sm font-medium">最近执行日志</div>
-                            {hookAuditLogs.length === 0 ? (
-                                <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
-                                    暂无该插件的 Hook 执行日志。
-                                </div>
-                            ) : (
-                                hookAuditLogs.map((log) => (
-                                    <div key={log.id} className="rounded-md border border-border p-3 text-sm">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <span className="font-medium">{log.hookName}</span>
-                                            <Badge variant={log.status === "success" ? "default" : "destructive"}>
-                                                {log.status}
-                                            </Badge>
-                                            {log.action && <Badge variant="outline">{log.action}</Badge>}
-                                            {typeof log.durationMs === "number" && (
-                                                <Badge variant="outline">{log.durationMs}ms</Badge>
-                                            )}
-                                        </div>
-                                        <div className="mt-1 text-xs text-muted-foreground">
-                                            {log.createdAt}
-                                            {log.conversationId ? ` / conversation ${log.conversationId}` : ""}
-                                            {log.messageId ? ` / message ${log.messageId}` : ""}
-                                        </div>
-                                        {log.error && (
-                                            <div className="mt-2 break-all text-xs text-destructive">{log.error}</div>
-                                        )}
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    </TabsContent>
                 </Tabs>
-            </CardContent>
-        </Card>
-    );
+                <div className="relative sm:w-72">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input className="pl-9" aria-label="搜索插件" placeholder="搜索插件或能力…" value={query} onChange={e => setQuery(e.target.value)} />
+                </div>
+            </div>
 
-    return (
-        <div className={isMobilePlatform ? "h-full [&_button]:min-h-11 [&_button]:min-w-11" : "h-full"}>
-            {pluginsLoaded ? (
-                <ConfigPageLayout
-                    sidebar={sidebar}
-                    content={content}
-                    showEmptyState={false}
-                    selectOptions={selectOptions}
-                    selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
-                    onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
-                    selectPlaceholder="选择插件"
-                />
-            ) : (
-                <ConfigPageLoading />
-            )}
-            <Dialog open={installDialogOpen} onOpenChange={handleCloseInstallDialog}>
-                <CompactDialogContent className={`h-[min(780px,88dvh)] sm:max-w-4xl ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
-                    <CompactDialogHeader
-                        icon={<Puzzle className="h-4 w-4" />}
-                        title="安装插件"
-                        subtitle="推荐插件或从来源安装"
-                        description="安装官方推荐插件，或从 GitHub / ZIP 来源安装已经编译好的插件包。"
-                    />
-                    <CompactDialogBody className="flex flex-col overflow-hidden">
-                        <Tabs
-                            value={installDialogTab}
-                            onValueChange={(value) => setInstallDialogTab(value as "recommended" | "source")}
-                            className="flex min-h-0 flex-1 flex-col overflow-hidden"
-                        >
-                            <TabsList className="shrink-0">
-                                <TabsTrigger value="recommended">推荐插件</TabsTrigger>
-                                <TabsTrigger value="source">来源安装</TabsTrigger>
-                            </TabsList>
-                            <TabsContent value="recommended" className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
-                                {recommendedPluginsContent}
-                            </TabsContent>
-                            <TabsContent value="source" className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
-                                {sourceInstallContent}
-                            </TabsContent>
-                        </Tabs>
-                    </CompactDialogBody>
-                </CompactDialogContent>
-            </Dialog>
-            <AlertDialog
-                open={!!pendingUninstallPlugin}
-                onOpenChange={(open) => {
-                    if (!open && !actionBusy) {
-                        setPendingUninstallPlugin(null);
-                    }
-                }}
-            >
-                <AlertDialogContent className={`flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
-                    <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
-                        <AlertDialogTitle className="text-base font-semibold">确认卸载插件</AlertDialogTitle>
-                    </AlertDialogHeader>
-                    <div className="px-4 py-4 sm:px-5">
-                        <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
-                            {pendingUninstallPlugin
-                                ? `卸载后将删除插件「${pendingUninstallPlugin.name}」的文件夹和数据库记录，且不可恢复。`
-                                : "卸载后将删除插件文件夹和数据库记录，且不可恢复。"}
-                        </AlertDialogDescription>
-                    </div>
-                    <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
-                        <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9" disabled={actionBusy}>取消</AlertDialogCancel>
-                        <AlertDialogAction
-                            className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9"
-                            onClick={handleConfirmUninstallPlugin}
-                            disabled={actionBusy}
-                        >
-                            确认卸载
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+            {typeItems.length > 2 && <FilterChips label="插件分类" items={typeItems} value={type} onChange={setType} />}
+            {scanError && <Notice tone="error" icon={<XCircle />} title={scanError.startsWith('PLUGIN_FILE_PERMISSION_DENIED:') ? '系统拒绝读取插件文件' : '读取已安装插件失败'}
+                actions={<Button size="sm" variant="outline" onClick={() => void loadInstalled()}>重新扫描插件</Button>}>
+                <p className="whitespace-pre-wrap break-all">{scanError}</p></Notice>}
+            {page === 'mine' && attentionCount > 0 && <p className="-mt-3 text-xs text-muted-foreground">{attentionCount} 个插件需要处理，已排在最前。</p>}
+            {page === 'market' ? marketBody() : mineBody()}
         </div>
-    );
-};
 
-export default PluginCenterConfig;
+        <PluginDetailSheet entry={selected} install={selected ? installs[selected.code] : undefined} loaded={selected ? loadedByCode.get(selected.code) : undefined}
+            mobile={mobile} busy={busy} actions={actions} onClose={() => setSelectedCode(undefined)} />
+        <PluginSourceInstallDialog open={sourceOpen} onOpenChange={setSourceOpen} mobile={mobile} onInstalled={loadInstalled} />
+    </div>;
+}

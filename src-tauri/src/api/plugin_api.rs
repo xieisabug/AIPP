@@ -24,7 +24,7 @@ use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent};
 use crate::db::plugin_db::{
     NewPluginHookRegistration, Plugin, PluginAssistantConfiguration, PluginData, PluginDatabase,
-    PluginHookAuditLog, PluginHookRegistration,
+    PluginHookAuditLog, PluginHookRegistration, PluginInstallSource,
 };
 use crate::plugin::avatar_assets::{
     load_plugin_avatar_assets_from_dir, PluginAvatarAssetBundle,
@@ -84,6 +84,12 @@ pub struct PluginListItem {
     pub contributions: PluginContributions,
     pub is_active: bool,
     pub is_installed: bool,
+    /// 安装来源；手动放进插件目录的插件没有记录。
+    #[serde(default)]
+    pub install_source: Option<PluginInstallSource>,
+    /// plugin.json 声明的预览图（相对插件目录，已校验存在）。
+    #[serde(default)]
+    pub preview: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -372,6 +378,9 @@ struct PluginManifest {
     activation_events: Vec<String>,
     #[serde(default)]
     contributions: PluginContributions,
+    /// 预览图，相对插件目录的路径；第一张用作卡片缩略图。
+    #[serde(default)]
+    preview: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -645,6 +654,7 @@ pub struct ResolvedPluginManifest {
     pub activation_events: Vec<String>,
     pub contributions: PluginContributions,
     pub plugin_dir: PathBuf,
+    pub preview: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,6 +697,9 @@ pub struct OfficialPlugin {
     pub installed_version: Option<String>,
     #[serde(default)]
     pub is_active: bool,
+    /// helper 托管的预览图地址；只接受可信前缀，其余在 normalize 时丢弃。
+    #[serde(default)]
+    pub preview_images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1305,6 +1318,7 @@ fn resolve_plugin_manifest_from_dir(dir_path: &Path, code: &str) -> Option<Resol
         runtime,
         activation_events,
         contributions,
+        preview,
     ) =
         if let Some(manifest_data) = manifest {
             let runtime = resolve_runtime_manifest(&manifest_data);
@@ -1331,6 +1345,7 @@ fn resolve_plugin_manifest_from_dir(dir_path: &Path, code: &str) -> Option<Resol
                 runtime,
                 manifest_data.activation_events,
                 manifest_data.contributions,
+                sanitize_preview_paths(dir_path, &manifest_data.preview),
             )
         } else {
             let runtime = PluginRuntimeManifest::default();
@@ -1344,6 +1359,7 @@ fn resolve_plugin_manifest_from_dir(dir_path: &Path, code: &str) -> Option<Resol
                 runtime,
                 vec!["onStartup:ui".to_string()],
                 PluginContributions::default(),
+                Vec::new(),
             )
         };
 
@@ -1369,7 +1385,57 @@ fn resolve_plugin_manifest_from_dir(dir_path: &Path, code: &str) -> Option<Resol
         activation_events,
         contributions,
         plugin_dir: dir_path.to_path_buf(),
+        preview,
     })
+}
+
+const PLUGIN_PREVIEW_MAX_IMAGES: usize = 6;
+const PLUGIN_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// helper 托管预览图的唯一可信前缀，与前端应用图标的 TRUSTED_ICON_PREFIX 同域。
+const TRUSTED_PLUGIN_PREVIEW_PREFIX: &str = "https://aipp-helper.xiejingyang.com/plugin-previews/";
+
+fn plugin_preview_mime(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+/// 只保留插件目录内、受支持格式、真实存在的预览图；非法项记日志后丢弃，不影响插件加载。
+fn sanitize_preview_paths(dir_path: &Path, raw: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for item in raw {
+        let path = item.trim().trim_start_matches("./");
+        if validate_relative_source_path(path).is_err() || plugin_preview_mime(path).is_none() {
+            warn!(preview = %item, plugin_dir = %dir_path.display(), "Ignored invalid plugin preview path");
+            continue;
+        }
+        if !dir_path.join(path).is_file() {
+            warn!(preview = %item, plugin_dir = %dir_path.display(), "Plugin preview image not found");
+            continue;
+        }
+        if !result.iter().any(|existing| existing == path) {
+            result.push(path.to_string());
+        }
+        if result.len() == PLUGIN_PREVIEW_MAX_IMAGES {
+            break;
+        }
+    }
+    result
+}
+
+fn sanitize_official_preview_images(raw: &[String]) -> Vec<String> {
+    raw.iter()
+        .map(|url| url.trim())
+        .filter(|url| url.starts_with(TRUSTED_PLUGIN_PREVIEW_PREFIX) && !url.contains(".."))
+        .take(PLUGIN_PREVIEW_MAX_IMAGES)
+        .map(str::to_string)
+        .collect()
 }
 
 fn resolve_plugin_manifest_for_code(
@@ -1460,9 +1526,55 @@ impl OfficialPlugin {
         self.source = Some(source);
         self.plugin_types = normalize_plugin_types(&self.plugin_types);
         self.permissions = normalize_permissions(&self.permissions);
+        self.preview_images = sanitize_official_preview_images(&self.preview_images);
         enrich_official_plugin_install_state(&mut self, app_handle)?;
         Ok(self)
     }
+}
+
+/// 安装来源记录的 kind；官方必须经过 [`verify_official_install`]。
+fn install_source_kind(source: &PluginInstallRecipeSource) -> &'static str {
+    match source.source_type {
+        PluginInstallRecipeSourceType::GitHub => "github",
+        PluginInstallRecipeSourceType::Zip => "zip",
+        PluginInstallRecipeSourceType::LocalZip => "localZip",
+    }
+}
+
+fn same_install_source(a: &PluginInstallRecipeSource, b: &PluginInstallRecipeSource) -> bool {
+    a.source_type == b.source_type
+        && a.repo.as_deref().map(str::to_ascii_lowercase) == b.repo.as_deref().map(str::to_ascii_lowercase)
+        && a.git_ref == b.git_ref
+        && a.url == b.url
+        && a.path == b.path
+}
+
+/// 核对一次安装请求确实对应官方目录里的条目：来源一致、带 sha256 且与请求一致、目标目录在条目声明内。
+/// 返回 Err 时说明具体哪一项对不上，调用方据此拒绝把这次安装记为官方。
+fn verify_official_install(
+    entry: &OfficialPlugin,
+    source: &PluginInstallRecipeSource,
+    selections: &[PluginInstallRecipeDir],
+    expected_sha256: Option<&str>,
+) -> Result<(), String> {
+    let entry_source = entry.resolve_source()?;
+    if !same_install_source(&entry_source, source) {
+        return Err(format!("安装来源 {} 与官方条目 {} 的来源 {} 不一致", source.source_label(), entry.id, entry_source.source_label()));
+    }
+    let entry_sha = entry.sha256.as_deref().map(normalize_sha256_value).filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("官方条目 {} 没有提供 sha256，无法校验安装包", entry.id))?;
+    let requested = expected_sha256.map(normalize_sha256_value).unwrap_or_default();
+    if requested != entry_sha {
+        return Err(format!("安装请求的 sha256 与官方条目 {} 不一致", entry.id));
+    }
+    if !entry.dirs.is_empty() {
+        for selection in selections {
+            if !entry.dirs.iter().any(|dir| dir.from == selection.from && dir.to == selection.to) {
+                return Err(format!("目录 {} 不在官方条目 {} 的安装范围内", selection.to, entry.id));
+            }
+        }
+    }
+    Ok(())
 }
 
 struct TempPluginExtractDir {
@@ -2488,6 +2600,7 @@ fn plugin_to_item(
     db: &PluginDatabase,
     app_handle: &tauri::AppHandle,
     plugin: Plugin,
+    install_sources: &HashMap<String, PluginInstallSource>,
 ) -> Result<PluginListItem, String> {
     let status = db.get_plugin_status(plugin.plugin_id).map_err(|e| e.to_string())?;
     let plugin_type = get_plugin_types(db, plugin.plugin_id)?;
@@ -2501,12 +2614,14 @@ fn plugin_to_item(
         plugin_id: plugin.plugin_id,
         name: plugin.name,
         version: plugin.version,
+        install_source: install_sources.get(&code).cloned(),
         code: code.clone(),
         description: plugin.description,
         author: plugin.author,
         plugin_type,
         permissions: manifest.as_ref().map(|item| item.permissions.clone()).unwrap_or_default(),
         runtime: manifest.as_ref().map(|item| item.runtime.clone()),
+        preview: manifest.as_ref().map(|item| item.preview.clone()).unwrap_or_default(),
         contributions: manifest.map(|item| item.contributions).unwrap_or_default(),
         is_active: status.map(|value| value.is_active).unwrap_or(true),
     })
@@ -2546,7 +2661,18 @@ pub async fn fetch_official_plugins(
     app_handle: tauri::AppHandle,
     use_proxy: bool,
 ) -> Result<Vec<OfficialPlugin>, String> {
-    let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
+    fetch_official_plugin_entries(&app_handle, use_proxy)
+        .await?
+        .into_iter()
+        .map(|plugin| plugin.normalize(&app_handle))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+async fn fetch_official_plugin_entries(
+    app_handle: &tauri::AppHandle,
+    use_proxy: bool,
+) -> Result<Vec<OfficialPlugin>, String> {
+    let proxy_url = resolve_plugin_proxy_url(app_handle, use_proxy).await?;
     let client = build_plugin_archive_http_client(proxy_url.as_deref())?;
     let response = client
         .get(OFFICIAL_PLUGINS_API)
@@ -2568,14 +2694,10 @@ pub async fn fetch_official_plugins(
         return Err(format!("Official plugins API returned error: {}", response.status()));
     }
 
-    let plugins = response
+    response
         .json::<Vec<OfficialPlugin>>()
         .await
-        .map_err(|e| format!("Failed to parse official plugins response: {}", e))?;
-    plugins
-        .into_iter()
-        .map(|plugin| plugin.normalize(&app_handle))
-        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to parse official plugins response: {}", e))
 }
 
 #[tauri::command]
@@ -2619,8 +2741,18 @@ pub async fn install_plugin_archive_source(
     expected_sha256: Option<String>,
     use_proxy: bool,
     enable_after_install: bool,
+    official_id: Option<String>,
 ) -> Result<PluginArchiveInstallResult, String> {
     validate_plugin_install_dirs(&selections, false)?;
+    // 从市场安装时由后端重新拉取官方目录核对；对不上直接报错，不会退化成普通来源安装。
+    if let Some(id) = official_id.as_deref() {
+        let entries = fetch_official_plugin_entries(&app_handle, use_proxy).await?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| format!("官方插件目录里没有 {}，无法按官方插件安装", id))?;
+        verify_official_install(entry, &source, &selections, expected_sha256.as_deref())?;
+    }
     let plugin_root = get_plugin_root_path(&app_handle)?;
     let proxy_url = resolve_plugin_proxy_url(&app_handle, use_proxy).await?;
     let progress_code = selections.first().map(|d| d.to.clone());
@@ -2662,6 +2794,18 @@ pub async fn install_plugin_archive_source(
     }
 
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let installed_at = Utc::now();
+    for plugin in &plugins {
+        db.upsert_plugin_install_source(&PluginInstallSource {
+            folder_name: plugin.to.clone(),
+            kind: if official_id.is_some() { "official" } else { install_source_kind(&source) }.to_string(),
+            official_id: official_id.clone(),
+            source_label: source.source_label(),
+            archive_sha256: Some(archive.archive_sha256.clone()),
+            installed_at,
+        })
+        .map_err(|e| format!("插件已写入目录，但记录安装来源失败：{}", e))?;
+    }
     sync_registry(&db, &app_handle)?;
     if enable_after_install {
         let all_plugins = db.get_plugins().map_err(|e| e.to_string())?;
@@ -2822,7 +2966,39 @@ pub async fn list_plugins(app_handle: tauri::AppHandle) -> Result<Vec<PluginList
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     sync_registry(&db, &app_handle)?;
     let plugins = dedupe_plugins_by_code(db.get_plugins().map_err(|e| e.to_string())?);
-    plugins.into_iter().map(|plugin| plugin_to_item(&db, &app_handle, plugin)).collect()
+    let install_sources: HashMap<String, PluginInstallSource> = db
+        .get_plugin_install_sources()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|record| (record.folder_name.clone(), record))
+        .collect();
+    plugins
+        .into_iter()
+        .map(|plugin| plugin_to_item(&db, &app_handle, plugin, &install_sources))
+        .collect()
+}
+
+/// 读取 plugin.json 声明的本地预览图，返回 data URL。只允许读取 manifest 预览列表里的文件。
+#[tauri::command]
+pub async fn get_plugin_preview_image(
+    app_handle: tauri::AppHandle,
+    code: String,
+    path: String,
+) -> Result<String, String> {
+    validate_target_dir_name(&code)?;
+    let manifest = resolve_plugin_manifest_for_code(&app_handle, &code)
+        .ok_or_else(|| format!("插件 {} 的 plugin.json 不存在或无效", code))?;
+    if !manifest.preview.iter().any(|item| item == &path) {
+        return Err(format!("{} 不在插件 {} 声明的预览图里", path, code));
+    }
+    let mime = plugin_preview_mime(&path).ok_or_else(|| format!("不支持的预览图格式：{}", path))?;
+    let file = manifest.plugin_dir.join(&path);
+    let size = fs::metadata(&file).map_err(|e| plugin_file_error(&file, e))?.len();
+    if size > PLUGIN_PREVIEW_MAX_BYTES {
+        return Err(format!("预览图 {} 超过 {} MB 上限", path, PLUGIN_PREVIEW_MAX_BYTES / 1024 / 1024));
+    }
+    let bytes = fs::read(&file).map_err(|e| plugin_file_error(&file, e))?;
+    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 #[tauri::command]
@@ -2968,6 +3144,7 @@ pub async fn uninstall_plugin(app_handle: tauri::AppHandle, plugin_id: i64) -> R
     }
 
     db.delete_plugin(plugin_id).map_err(|e| e.to_string())?;
+    db.delete_plugin_install_source(&plugin.folder_name).map_err(|e| e.to_string())?;
 
     emit_plugin_registry_changed(&app_handle, "uninstalled");
     Ok(())
@@ -3717,6 +3894,102 @@ pub async fn plugin_execute_image_task(app_handle: tauri::AppHandle, plugin_id: 
 mod tests {
     use super::*;
     use std::fs;
+
+    fn official_entry(sha256: Option<&str>, dirs: Vec<PluginInstallRecipeDir>) -> OfficialPlugin {
+        serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "code": "demo-plugin",
+            "name": "Demo",
+            "source": { "type": "zip", "url": "https://github.com/xieisabug/AIPP/releases/download/v1/demo.zip" },
+            "dirs": dirs.iter().map(|d| serde_json::json!({"from": d.from, "to": d.to})).collect::<Vec<_>>(),
+            "sha256": sha256,
+            "previewImages": [
+                "https://aipp-helper.xiejingyang.com/plugin-previews/demo-1.webp",
+                "https://evil.example.com/demo.png",
+                "https://aipp-helper.xiejingyang.com/plugin-previews/../secret.png"
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn zip_source(url: &str) -> PluginInstallRecipeSource {
+        PluginInstallRecipeSource {
+            source_type: PluginInstallRecipeSourceType::Zip,
+            repo: None,
+            git_ref: default_git_ref(),
+            url: Some(url.to_string()),
+            path: None,
+        }
+    }
+
+    fn dir(from: &str, to: &str) -> PluginInstallRecipeDir {
+        PluginInstallRecipeDir { from: from.to_string(), to: to.to_string() }
+    }
+
+    #[test]
+    fn test_verify_official_install_accepts_matching_entry() {
+        let entry = official_entry(Some("sha256:ABC"), vec![dir("demo-plugin", "demo-plugin")]);
+        let source = zip_source("https://github.com/xieisabug/AIPP/releases/download/v1/demo.zip");
+        verify_official_install(&entry, &source, &[dir("demo-plugin", "demo-plugin")], Some("abc")).unwrap();
+    }
+
+    #[test]
+    fn test_verify_official_install_rejects_mismatches() {
+        let entry = official_entry(Some("abc"), vec![dir("demo-plugin", "demo-plugin")]);
+        let source = zip_source("https://github.com/xieisabug/AIPP/releases/download/v1/demo.zip");
+        let other = zip_source("https://example.com/demo.zip");
+        assert!(verify_official_install(&entry, &other, &[], Some("abc")).unwrap_err().contains("不一致"));
+        assert!(verify_official_install(&entry, &source, &[], Some("def")).unwrap_err().contains("sha256"));
+        assert!(verify_official_install(&entry, &source, &[], None).unwrap_err().contains("sha256"));
+        let err = verify_official_install(&entry, &source, &[dir("demo-plugin", "other")], Some("abc")).unwrap_err();
+        assert!(err.contains("安装范围"), "{err}");
+        let unsigned = official_entry(None, vec![]);
+        assert!(verify_official_install(&unsigned, &source, &[], None).unwrap_err().contains("没有提供 sha256"));
+    }
+
+    #[test]
+    fn test_official_preview_images_keep_only_trusted_urls() {
+        let entry = official_entry(None, vec![]);
+        assert_eq!(
+            sanitize_official_preview_images(&entry.preview_images),
+            vec!["https://aipp-helper.xiejingyang.com/plugin-previews/demo-1.webp".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_sanitize_preview_paths_keeps_existing_images_inside_plugin_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp_dir.path().join("assets")).unwrap();
+        fs::write(temp_dir.path().join("assets/a.png"), b"png").unwrap();
+        fs::write(temp_dir.path().join("notes.txt"), b"txt").unwrap();
+        let raw = ["./assets/a.png", "assets/a.png", "../outside.png", "/abs.png", "notes.txt", "assets/missing.webp"]
+            .map(String::from);
+        assert_eq!(sanitize_preview_paths(temp_dir.path(), &raw), vec!["assets/a.png".to_string()]);
+    }
+
+    #[test]
+    fn test_plugin_install_source_upsert_and_delete() {
+        let db = PluginDatabase { conn: Connection::open_in_memory().unwrap() };
+        db.create_tables().unwrap();
+        let mut record = PluginInstallSource {
+            folder_name: "demo-plugin".into(),
+            kind: "github".into(),
+            official_id: None,
+            source_label: "owner/repo#main".into(),
+            archive_sha256: Some("abc".into()),
+            installed_at: Utc::now(),
+        };
+        db.upsert_plugin_install_source(&record).unwrap();
+        record.kind = "official".into();
+        record.official_id = Some("demo".into());
+        db.upsert_plugin_install_source(&record).unwrap();
+        let stored = db.get_plugin_install_sources().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].kind, "official");
+        assert_eq!(stored[0].official_id.as_deref(), Some("demo"));
+        db.delete_plugin_install_source("demo-plugin").unwrap();
+        assert!(db.get_plugin_install_sources().unwrap().is_empty());
+    }
 
     #[test]
     fn test_resolve_plugin_recipe_dir_accepts_legacy_code_for_stripped_root() {

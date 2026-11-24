@@ -83,7 +83,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     const inspect = async (value: PluginSource) => {
         setUninstallRequested(false); setStdio(undefined); setClientId(''); setOauthMethod('none'); setRedirectUri(''); setAgentResult('');
         setDefinition(undefined); setEditingConnection(undefined); setServerId(undefined); setTools([]); setSource(value);
-        await run('正在读取插件文件与技能…', async () => { setPreview(await invoke<Preview>('inspect_agent_plugin', { source: value })); });
+        await run('正在读取能力包文件与技能…', async () => { setPreview(await invoke<Preview>('inspect_agent_plugin', { source: value })); });
     };
     useEffect(() => {
         let alive = true;
@@ -92,7 +92,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     }, []);
     useEffect(() => {
         let alive = true;
-        if (initialSource) void run('正在读取插件…', async () => {
+        if (initialSource) void run('正在读取能力包…', async () => {
             const receipts = await invoke<Receipt[]>('list_agent_plugins');
             const local = receipts.find(r => r.preview.source.repo === initialSource.repo && r.preview.source.path === initialSource.path && r.preview.source.git_ref === initialSource.git_ref);
             if (!alive) return;
@@ -192,9 +192,9 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                 {preview.servers.map(server => <div key={server.name} className="space-y-2 rounded-lg border p-3"><p className="text-sm font-medium">{server.name}</p><p className="break-all text-xs text-muted-foreground">{server.config.url ?? [server.config.command, ...(server.config.args ?? [])].join(' ') ?? server.config.type}</p>{server.reason && <p className="text-sm text-destructive">{server.reason}</p>}{(!server.reason || server.reason.includes('OAuth')) && <Button size="sm" variant="outline" disabled={!current || current.preview.digest !== preview.digest || !!busy} onClick={() => void connect(server)}>添加连接</Button>}</div>)}
                 {current && <label className="flex items-center gap-2 text-sm">新连接认证方式<select aria-label="新连接认证方式" className="rounded border bg-background p-2" value={auth} onChange={e => setAuth(e.target.value)}><option value="oauth">浏览器 OAuth</option><option value="none">服务不要求认证</option><option value="bearer">自行提供 Bearer Token</option><option value="headers">配置清单中的请求头</option></select></label>}
                 {current && auth === 'oauth' && <><Input aria-label="OAuth 客户端 ID" placeholder="自己的 OAuth 客户端 ID（可选；不会复用私密客户端）" value={clientId} onChange={e => setClientId(e.target.value)} /><select aria-label="OAuth 客户端认证" className="w-full rounded border bg-background p-2" value={oauthMethod} onChange={e => setOauthMethod(e.target.value)}><option value="none">公共客户端（PKCE）</option><option value="client_secret_post">自有机密客户端 · Secret POST</option><option value="client_secret_basic">自有机密客户端 · Secret Basic</option></select><Input aria-label="OAuth 回调地址" placeholder="自有客户端注册的回调地址（可选，例如 http://127.0.0.1:3000/oauth/callback）" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} /></>}
-                {stdio && current && <div className="space-y-3 rounded-lg border p-3"><h4 className="font-medium">本地服务 · {stdio.name}</h4><p className="text-sm text-muted-foreground">启动时使用插件安装目录，参数直接传入进程。需要本机安装声明的运行时。环境变量保存在加密凭据库；重新连接需要重新填写。声明的变量：{Object.keys(stdio.config.env ?? {}).join('、') || '无'}。</p>
-                    <textarea aria-label="插件环境变量 JSON" className="min-h-24 w-full rounded border bg-background p-2 font-mono text-sm" value={environment} onChange={e => setEnvironment(e.target.value)} spellCheck={false} />
-                    <Button disabled={!!busy} onClick={() => void run('正在启动并检测本地插件…', async () => {
+                {stdio && current && <div className="space-y-3 rounded-lg border p-3"><h4 className="font-medium">本地服务 · {stdio.name}</h4><p className="text-sm text-muted-foreground">启动时使用能力包安装目录，参数直接传入进程。需要本机安装声明的运行时。环境变量保存在加密凭据库；重新连接需要重新填写。声明的变量：{Object.keys(stdio.config.env ?? {}).join('、') || '无'}。</p>
+                    <textarea aria-label="能力包环境变量 JSON" className="min-h-24 w-full rounded border bg-background p-2 font-mono text-sm" value={environment} onChange={e => setEnvironment(e.target.value)} spellCheck={false} />
+                    <Button disabled={!!busy} onClick={() => void run('正在启动并检测本地能力包…', async () => {
                         const values: unknown = JSON.parse(environment);
                         if (!values || Array.isArray(values) || typeof values !== 'object' || Object.values(values).some(v => typeof v !== 'string')) throw new Error('环境变量必须为字符串值的 JSON 对象');
                         const id = await invoke<number>('connect_agent_plugin_stdio', {key: current.preview.key, serverName: stdio.name, values, serverId: stdioReconnect ?? null});
@@ -223,47 +223,47 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
         {error && <p role="alert" className="whitespace-pre-wrap break-words rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error}</p>}
         {busy && <p role="status" className="text-sm text-muted-foreground">{busy}</p>}
         {preview ? <>
-            {!embedded && <Button variant="ghost" disabled={!!busy} onClick={() => { setPreview(undefined); setDefinition(undefined); setServerId(undefined); }}><ArrowLeft className="mr-2 h-4 w-4" />返回插件目录</Button>}
+            {!embedded && <Button variant="ghost" disabled={!!busy} onClick={() => { setPreview(undefined); setDefinition(undefined); setServerId(undefined); }}><ArrowLeft className="mr-2 h-4 w-4" />返回能力包目录</Button>}
             <div className="space-y-2"><div className="flex items-center gap-3">{preview.icon && <img src={preview.icon} alt="" className="h-12 w-12 shrink-0 rounded-xl object-cover" />}<h3 className="text-xl font-semibold">{preview.name}</h3></div><p className="text-sm text-muted-foreground">{description}</p>
                 <div className="flex flex-wrap gap-2"><Badge variant="outline">{preview.publisher || preview.source.repo}</Badge><Badge variant="outline">版本 {preview.version}</Badge><Badge variant="outline">{current ? '已安装' : '未安装'}</Badge></div>
                 <p className="break-all text-xs text-muted-foreground">来源 {preview.source.repo}/{preview.source.path} · 提交 {preview.revision.slice(0, 12)}</p>
                 <Button variant="link" className="px-0" onClick={() => void openUrl(`https://github.com/${preview.source.repo}/tree/${preview.revision}/${preview.source.path}`).catch(e => setError(String(e)))}>查看源文件<ExternalLink className="ml-2 h-4 w-4" /></Button>
             </div>
             <div className="flex flex-wrap gap-2">
-                <Button disabled={!!busy || preview.locally_modified || current?.preview.digest === preview.digest} onClick={() => void run(current ? '正在更新插件…' : '正在安装插件…', async () => {
+                <Button disabled={!!busy || preview.locally_modified || current?.preview.digest === preview.digest} onClick={() => void run(current ? '正在更新能力包…' : '正在安装能力包…', async () => {
                     await installPlugin(preview);
                     await reload(); onChanged(); setPreview({ ...preview, installed_revision: preview.revision });
-                })}><Download className="mr-2 h-4 w-4" />{current ? current.preview.digest === preview.digest ? '已是此版本' : '更新到预览版本' : '安装插件与技能'}</Button>
+                })}><Download className="mr-2 h-4 w-4" />{current ? current.preview.digest === preview.digest ? '已是此版本' : '更新到预览版本' : '安装能力包'}</Button>
                 {current && <Button variant="outline" disabled={!!busy} onClick={() => void inspect(preview.source)}><RefreshCw className="mr-2 h-4 w-4" />检查更新</Button>}
-                {current && <Button variant="destructive" disabled={!!busy} onClick={requestUninstall}>卸载插件</Button>}
+                {current && <Button variant="destructive" disabled={!!busy} onClick={requestUninstall}>卸载能力包</Button>}
                 {current && <Button variant="outline" disabled={!!busy} onClick={() => void run('正在回退…', async () => { await invoke('rollback_agent_plugin', { key: preview.key }); await reload(); onChanged(); await inspect(preview.source); })}>回退上一版本</Button>}
             </div>
             {current && current.preview.digest !== preview.digest && <div className="rounded-lg border p-3 text-sm">已安装 {current.preview.version}（{current.preview.revision.slice(0, 12)}）→ {preview.version}（{preview.revision.slice(0, 12)}）。
                 <p>新增技能：{preview.skills.filter(s => !current.preview.skills.some(i => i.id === s.id)).map(s => s.name).join('、') || '无'}；移除技能：{current.preview.skills.filter(s => !preview.skills.some(i => i.id === s.id)).map(s => s.name).join('、') || '无'}。</p><p>更新保留现有连接和授权；新增技能需要授权后使用。连接定义变化不会自动迁移凭据。</p></div>}
             {uninstallConfirmation}
 
-            {preview.locally_modified && <p role="alert" className="text-sm text-destructive">检测到插件文件有本地修改，已阻止覆盖更新。请先备份并恢复原文件。</p>}
+            {preview.locally_modified && <p role="alert" className="text-sm text-destructive">检测到能力包文件有本地修改，已阻止覆盖更新。请先备份并恢复原文件。</p>}
             {current && current.preview.digest !== preview.digest && <details className="rounded-lg border p-3"><summary className="cursor-pointer text-sm">查看更新文件差异</summary><ul className="mt-2 space-y-1 break-all text-xs">{preview.files.filter(p => !current.preview.files.includes(p) || preview.file_hashes?.[p] !== current.preview.file_hashes?.[p]).map(p => <li key={p}>{current.preview.files.includes(p) ? '修改' : '新增'} · {p}</li>)}{current.preview.files.filter(p => !preview.files.includes(p)).map(p => <li key={p}>删除 · {p}</li>)}</ul></details>}
             {!!preview.dependencies?.length && <section className="space-y-2 rounded-lg border p-3"><h4 className="font-medium">外部连接器依赖</h4>{preview.dependencies.map(d => <div key={d.connector_id} className="text-sm"><span>{d.name} · {d.source ? '仓库中有公开 MCP 接入包' : '仅提供平台连接器 ID，仓库没有公开接入地址'}</span>{d.source && <Button size="sm" variant="link" disabled={!!busy} onClick={() => void inspect(d.source!)}>查看并安装依赖</Button>}</div>)}</section>}
             {preview.notices.length > 0 && <section className="space-y-2 rounded-lg border p-3"><h4 className="text-sm font-medium">兼容性与运行条件</h4>{preview.notices.map(n => <p key={n} className="text-sm text-muted-foreground">{n}</p>)}</section>}
             <section className="space-y-3"><h4 className="font-medium">Skills 与命令 · {preview.skills.length}</h4>
-                {!preview.skills.length && <p className="text-sm text-muted-foreground">这个插件没有声明可发现的 Skills。</p>}
+                {!preview.skills.length && <p className="text-sm text-muted-foreground">这个能力包没有声明可发现的 Skills。</p>}
                 {preview.skills.map(skill => <details key={skill.id} className="rounded-lg border p-3"><summary className="cursor-pointer text-sm font-medium">{skill.kind === 'command' ? '/ ' : ''}{skill.name}<p className="mt-1 font-normal text-muted-foreground">{skill.description}</p></summary><pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">{skill.content}</pre><p className="mt-2 text-xs text-muted-foreground">附属文件 {skill.files.length} 个</p></details>)}
             </section>
             {connectionPanel}
-            {!!preview.agents?.length && <section className="space-y-3"><h4 className="font-medium">子助手定义 · {preview.agents.length}</h4><p className="text-sm text-muted-foreground">选择一个已有助手，继承它的模型、执行通道和工具授权；使用插件的角色定义创建独立助手。创建后可在联系人中使用或参与协作。</p><select aria-label="子助手模板" className="w-full rounded border bg-background p-2" value={templateId} onChange={e => setTemplateId(e.target.value)}><option value="">选择模板助手</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
-                {preview.agents.map(agent => <details key={agent.path} className="rounded border p-3"><summary>{agent.name}</summary><pre className="my-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs">{agent.content}</pre><Button disabled={!current || !templateId || !!busy} onClick={() => void run('正在创建插件助手…',async () => { const id = await invoke<number>('create_agent_plugin_assistant',{key: preview.key,agentPath: agent.path,templateId: Number(templateId)}); setAgentResult(`已创建 ${agent.name}（助手 ${id}），可在助手设置中调整并使用。`); onChanged(); })}>创建此助手</Button></details>)}{agentResult && <p role="status" className="text-sm">{agentResult}</p>}</section>}
+            {!!preview.agents?.length && <section className="space-y-3"><h4 className="font-medium">子助手定义 · {preview.agents.length}</h4><p className="text-sm text-muted-foreground">选择一个已有助手，继承它的模型、执行通道和工具授权；使用能力包的角色定义创建独立助手。创建后可在联系人中使用或参与协作。</p><select aria-label="子助手模板" className="w-full rounded border bg-background p-2" value={templateId} onChange={e => setTemplateId(e.target.value)}><option value="">选择模板助手</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+                {preview.agents.map(agent => <details key={agent.path} className="rounded border p-3"><summary>{agent.name}</summary><pre className="my-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs">{agent.content}</pre><Button disabled={!current || !templateId || !!busy} onClick={() => void run('正在创建能力包助手…',async () => { const id = await invoke<number>('create_agent_plugin_assistant',{key: preview.key,agentPath: agent.path,templateId: Number(templateId)}); setAgentResult(`已创建 ${agent.name}（助手 ${id}），可在助手设置中调整并使用。`); onChanged(); })}>创建此助手</Button></details>)}{agentResult && <p role="status" className="text-sm">{agentResult}</p>}</section>}
             {current && !preview.servers.length && <AppAssistantAccess pluginKey={current.preview.key} />}
             <details className="rounded-lg border p-3"><summary className="cursor-pointer text-sm">完整包文件 · {preview.files.length}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{preview.files.join('\n')}</pre></details>
         </> : <>
             <div className="flex flex-wrap gap-2"><Button variant={!showInstalled ? 'secondary' : 'outline'} onClick={() => setShowInstalled(false)}>GitHub 目录</Button><Button variant={showInstalled ? 'secondary' : 'outline'} onClick={() => setShowInstalled(true)}>已安装 {installed.length}</Button></div>
-            <div className="space-y-3 rounded-lg border p-4"><h4 className="text-sm font-medium">GitHub 插件来源</h4>
+            <div className="space-y-3 rounded-lg border p-4"><h4 className="text-sm font-medium">能力包来源</h4>
                 <Input aria-label="GitHub 仓库" value={source.repo} onChange={e => setSource({ ...source, repo: e.target.value })} placeholder="owner/repo" />
-                <div className="flex flex-wrap gap-2"><Input className="min-w-32 flex-1" aria-label="Git 分支或标签" value={source.git_ref} onChange={e => setSource({ ...source, git_ref: e.target.value })} placeholder="main" /><Input className="min-w-48 flex-1" aria-label="插件目录" value={source.path} onChange={e => setSource({ ...source, path: e.target.value })} placeholder="plugins/notion" /></div>
-                <div className="flex flex-wrap gap-2"><Button disabled={!!busy} onClick={() => void inspect(source)}>预览指定插件</Button><Button variant="outline" disabled={!!busy} onClick={() => void run('正在读取 GitHub 插件目录…', async () => { setCatalog(await invoke<PluginCatalog>('fetch_agent_plugin_catalog', { repo: source.repo, gitRef: source.git_ref })); })}>读取仓库插件目录</Button></div>
+                <div className="flex flex-wrap gap-2"><Input className="min-w-32 flex-1" aria-label="Git 分支或标签" value={source.git_ref} onChange={e => setSource({ ...source, git_ref: e.target.value })} placeholder="main" /><Input className="min-w-48 flex-1" aria-label="仓库内目录" value={source.path} onChange={e => setSource({ ...source, path: e.target.value })} placeholder="plugins/notion" /></div>
+                <div className="flex flex-wrap gap-2"><Button disabled={!!busy} onClick={() => void inspect(source)}>预览指定能力包</Button><Button variant="outline" disabled={!!busy} onClick={() => void run('正在读取仓库能力包目录…', async () => { setCatalog(await invoke<PluginCatalog>('fetch_agent_plugin_catalog', { repo: source.repo, gitRef: source.git_ref })); })}>读取仓库能力包目录</Button></div>
             </div>
-            <Input aria-label="搜索插件" placeholder="搜索插件…" value={query} onChange={e => setQuery(e.target.value)} />
-            {showInstalled ? installed.filter(r => `${r.preview.name} ${r.preview.description}`.toLowerCase().includes(query.toLowerCase())).map(r => <Button key={r.preview.key} variant="outline" className="h-auto w-full justify-start whitespace-normal p-4 text-left" onClick={() => { setUninstallRequested(false); setPreview(r.preview); setStdio(undefined); setEnvironment('{}'); setDefinition(undefined); setEditingConnection(undefined); setServerId(undefined); }}><Package className="mr-3 h-5 w-5 shrink-0" /><span>{r.preview.name}<span className="block text-xs text-muted-foreground">{r.preview.version} · {r.preview.skills.length} 个技能</span></span></Button>) : (catalog?.entries ?? [{ name: 'Notion', description: '预览 OpenAI GitHub 仓库中的 Notion 插件', category: '效率', source: notion }]).filter(e => `${e.name} ${e.description}`.toLowerCase().includes(query.toLowerCase())).map(entry => <Button key={`${entry.source.repo}/${entry.source.path}`} disabled={!!busy} variant="outline" className="h-auto w-full justify-start whitespace-normal p-4 text-left" onClick={() => void inspect(entry.source)}><Package className="mr-3 h-5 w-5 shrink-0" /><span>{entry.name}<span className="block text-xs text-muted-foreground">{entry.description || entry.category}</span></span></Button>)}
+            <Input aria-label="搜索能力包" placeholder="搜索能力包…" value={query} onChange={e => setQuery(e.target.value)} />
+            {showInstalled ? installed.filter(r => `${r.preview.name} ${r.preview.description}`.toLowerCase().includes(query.toLowerCase())).map(r => <Button key={r.preview.key} variant="outline" className="h-auto w-full justify-start whitespace-normal p-4 text-left" onClick={() => { setUninstallRequested(false); setPreview(r.preview); setStdio(undefined); setEnvironment('{}'); setDefinition(undefined); setEditingConnection(undefined); setServerId(undefined); }}><Package className="mr-3 h-5 w-5 shrink-0" /><span>{r.preview.name}<span className="block text-xs text-muted-foreground">{r.preview.version} · {r.preview.skills.length} 个技能</span></span></Button>) : (catalog?.entries ?? [{ name: 'Notion', description: '预览 OpenAI GitHub 仓库中的 Notion 能力包', category: '效率', source: notion }]).filter(e => `${e.name} ${e.description}`.toLowerCase().includes(query.toLowerCase())).map(entry => <Button key={`${entry.source.repo}/${entry.source.path}`} disabled={!!busy} variant="outline" className="h-auto w-full justify-start whitespace-normal p-4 text-left" onClick={() => void inspect(entry.source)}><Package className="mr-3 h-5 w-5 shrink-0" /><span>{entry.name}<span className="block text-xs text-muted-foreground">{entry.description || entry.category}</span></span></Button>)}
         </>}
     </div>;
     if (!embedded) return management;
@@ -281,20 +281,20 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
             {preview && (preview.skills.length > 0 || current) && <section className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                        <p className="mt-0.5 text-xs text-muted-foreground">{current ? `已安装 ${current.preview.version}` : '未安装'} · {preview.publisher || preview.source.repo} 插件包{busy ? ` · ${busy}` : ''}</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">{current ? `已安装 ${current.preview.version}` : '未安装'} · {preview.publisher || preview.source.repo} 能力包{busy ? ` · ${busy}` : ''}</p>
                     </div>
                     <div className="flex items-center gap-1">
                         {preview.skills.length > 0 && (!current || outdated) && <Button size="sm" variant="outline" disabled={!!busy || preview.locally_modified} onClick={install}>
-                            {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{current ? '更新插件' : '安装插件'}
+                            {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{current ? '更新能力包' : '安装能力包'}
                         </Button>}
-                        {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8" aria-label="更多插件操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+                        {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8" aria-label="更多能力包操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                                 <DropdownMenuItem onSelect={() => void inspect(preview.source)}>检查更新</DropdownMenuItem>
                                 <DropdownMenuItem className="text-destructive" onSelect={requestUninstall}>卸载应用</DropdownMenuItem>
                             </DropdownMenuContent></DropdownMenu>}
                     </div>
                 </div>
-                {preview.locally_modified && <p role="alert" className="text-xs text-destructive">检测到插件文件有本地修改，已阻止覆盖更新。</p>}
+                {preview.locally_modified && <p role="alert" className="text-xs text-destructive">检测到能力包文件有本地修改，已阻止覆盖更新。</p>}
                 <CatalogSkills entries={preview.skills} />
             </section>}
             {preview && preview.notices.length > 0 && <details className="rounded-lg border px-4 py-3 text-sm"><summary className="cursor-pointer text-muted-foreground">使用条件与兼容性</summary><div className="space-y-2 pt-3">{preview.notices.map(n => <p key={n} className="text-muted-foreground">{n}</p>)}</div></details>}
@@ -303,7 +303,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     }
     if (managing && !onConnect && preview) {
         const hasServers = preview.servers.length > 0;
-        return <section className="space-y-5" aria-label={hasServers ? '连接设置' : '插件管理'}>
+        return <section className="space-y-5" aria-label={hasServers ? '连接设置' : '能力包管理'}>
             <Button variant="ghost" size="sm" onClick={() => setManaging(false)}>
                 <ArrowLeft className="h-4 w-4" />返回应用详情
             </Button>
@@ -318,17 +318,17 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
         <header className="flex flex-wrap items-center justify-end gap-4">
             <div className="flex items-center gap-2">
                 {current && simpleLogin && !onConnect && !hasConnection && <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => setManaging(true)}>高级连接设置</Button>}
-                {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多插件操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={requestUninstall}>卸载应用</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+                {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多能力包操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={requestUninstall}>卸载应用</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
                 <Button disabled={!!busy || !preview || (!current && preview.locally_modified)} onClick={() => {
                     if (current && simpleLogin && !hasConnection && !onConnect) { void login(); return; }
                     if (current) { if (onConnect) onConnect(); else setManaging(true); return; }
-                    void run('正在安装插件…', async () => {
+                    void run('正在安装能力包…', async () => {
                         if (!preview) return;
                         await installPlugin(preview);
                         await reload(); onChanged();
                         if (mounted.current && (onConnect || !simpleLogin)) { if (onConnect) onConnect(); else setManaging(true); }
                     });
-                }}>{!current && <Plus className="mr-2 h-4 w-4" />}{current ? hasConnection ? '查看连接' : simpleLogin ? `连接 ${preview?.name}` : preview?.servers.length ? '连接应用' : '管理插件' : '安装插件'}</Button>
+                }}>{!current && <Plus className="mr-2 h-4 w-4" />}{current ? hasConnection ? '查看连接' : simpleLogin ? `连接 ${preview?.name}` : preview?.servers.length ? '连接应用' : '管理能力包' : '安装能力包'}</Button>
             </div>
         </header>
         {error && <div role="alert" className="space-y-2 rounded-lg border border-destructive/30 p-3 text-sm text-destructive"><p>{error}</p><Button variant="outline" size="sm" disabled={!!busy} onClick={() => initialSource && void inspect(initialSource)}>重试加载详情</Button></div>}
@@ -340,7 +340,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                 name: server.name, description: server.reason || (server.config.command ? '本地程序' : '远程服务'),
             }))} />
             <CatalogSkills entries={preview.skills} />
-            <section><h3 className="border-b pb-3 text-sm font-medium">信息</h3><dl className="grid grid-cols-[6rem_1fr] gap-x-5 gap-y-4 py-5 text-sm"><dt className="text-muted-foreground">版本</dt><dd>{preview.version}{current && ' · 已安装'}</dd><dt className="text-muted-foreground">发布者</dt><dd>{preview.publisher || preview.source.repo}</dd>{preview.servers.length > 0 && <><dt className="text-muted-foreground">工具</dt><dd>连接后检测实际可用工具</dd></>}<dt className="text-muted-foreground">来源</dt><dd>AIPP 应用目录</dd></dl>{current && <Button variant="outline" size="sm" disabled={!!busy} onClick={() => void inspect(preview.source)}><RefreshCw className="mr-2 h-4 w-4" />检查更新</Button>}{current && current.preview.digest !== preview.digest && <Button className="ml-2" size="sm" disabled={!!busy || preview.locally_modified} onClick={() => void run('正在更新插件…', async () => { await installPlugin(preview); await reload(); onChanged(); })}>更新插件</Button>}</section>
+            <section><h3 className="border-b pb-3 text-sm font-medium">信息</h3><dl className="grid grid-cols-[6rem_1fr] gap-x-5 gap-y-4 py-5 text-sm"><dt className="text-muted-foreground">版本</dt><dd>{preview.version}{current && ' · 已安装'}</dd><dt className="text-muted-foreground">发布者</dt><dd>{preview.publisher || preview.source.repo}</dd>{preview.servers.length > 0 && <><dt className="text-muted-foreground">工具</dt><dd>连接后检测实际可用工具</dd></>}<dt className="text-muted-foreground">来源</dt><dd>AIPP 应用目录</dd></dl>{current && <Button variant="outline" size="sm" disabled={!!busy} onClick={() => void inspect(preview.source)}><RefreshCw className="mr-2 h-4 w-4" />检查更新</Button>}{current && current.preview.digest !== preview.digest && <Button className="ml-2" size="sm" disabled={!!busy || preview.locally_modified} onClick={() => void run('正在更新能力包…', async () => { await installPlugin(preview); await reload(); onChanged(); })}>更新能力包</Button>}</section>
             {preview.notices.length > 0 && <details className="text-sm"><summary className="cursor-pointer text-muted-foreground">使用条件与兼容性</summary><div className="space-y-2 pt-3">{preview.notices.map(n => <p key={n} className="text-muted-foreground">{n}</p>)}</div></details>}
         </>}
         {uninstallConfirmation}
