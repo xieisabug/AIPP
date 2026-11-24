@@ -8,11 +8,45 @@ pub(crate) fn from_configs(
     providers: &[LLMProviderConfig],
     expand_tilde: bool,
 ) -> Result<PathBuf, AppError> {
-    let configured = models.iter().find(|c| c.name == "acp_working_directory")
+    resolve(configured_path(models, providers), expand_tilde, dirs::home_dir)
+}
+
+fn configured_path<'a>(
+    models: &'a [AssistantModelConfig],
+    providers: &'a [LLMProviderConfig],
+) -> Option<&'a str> {
+    models.iter().find(|c| c.name == "acp_working_directory")
         .and_then(|c| c.value.as_deref()).map(str::trim).filter(|s| !s.is_empty())
         .or_else(|| providers.iter().find(|c| c.name == "acp_working_directory")
-            .map(|c| c.value.trim()).filter(|s| !s.is_empty()));
-    resolve(configured, expand_tilde, dirs::home_dir)
+            .map(|c| c.value.trim()).filter(|s| !s.is_empty()))
+}
+
+/// Only a configured directory grants file access. The launch fallback to home does not.
+pub(crate) fn configured_workspace(
+    models: &[AssistantModelConfig],
+    providers: &[LLMProviderConfig],
+    expand_tilde: bool,
+) -> Result<Option<PathBuf>, AppError> {
+    configured_path(models, providers)
+        .map(|path| resolve(Some(path), expand_tilde, dirs::home_dir))
+        .transpose()
+}
+
+pub(crate) fn contains_file_path(workspace: &Path, target: &Path) -> bool {
+    if !workspace.is_absolute() || !workspace.is_dir() || !target.is_absolute() {
+        return false;
+    }
+    let Ok(root) = workspace.canonicalize() else { return false };
+    // For a new file, resolve its closest existing ancestor, including junctions.
+    // A dangling link or an unresolved ".." must not inherit trust from its parent.
+    for ancestor in target.ancestors() {
+        match ancestor.symlink_metadata() {
+            Ok(_) => return ancestor.canonicalize().is_ok_and(|path| path.starts_with(&root)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && ancestor.file_name().is_some() => {}
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 fn resolve(

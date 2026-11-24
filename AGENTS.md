@@ -51,9 +51,9 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 
-**总管家配置管理**：通过现有 SuperAdmin action 管理助手基础资料/复制、通道参数、MCP/Skills、工作区与群名，复用 `assistant_api::management` 应用服务和审计。新建助手默认动态 MCP 和创建时发现的 `.agents` Skills；复制完整保留来源配置，不应用新建默认值。`mcp_loading_mode_explicit` 让新建或显式设置过模式的助手独立保存加载模式，旧助手保留全局实验开关行为。动态发现、加载和调用均尊重助手显式禁用（管家统一运行能力除外）。工作区信任、Agent cwd 与原生沙箱/审批独立；移除当前 cwd 对应工作区须先显式改 cwd。见 [总管家配置管理](./docs/product/18-Butler任务系统.md#通过总管家管理助手配置)。
+**总管家配置管理**：通过现有 SuperAdmin action 管理助手基础资料/复制、通道参数、MCP/Skills、工作区与群名，复用 `assistant_api::management` 应用服务和审计。新建助手默认动态 MCP 和创建时发现的 `.agents` Skills；复制完整保留来源配置，不应用新建默认值。`mcp_loading_mode_explicit` 让新建或显式设置过模式的助手独立保存加载模式，旧助手保留全局实验开关行为。动态发现、加载和调用均尊重助手显式禁用（管家统一运行能力除外）。显式配置或继承的 Agent cwd 同时授予 AIPP 内置文件工具路径信任，原生沙箱与审批沿用通道设置；移除当前 cwd 对应工作区须先显式改 cwd。见 [总管家配置管理](./docs/product/18-Butler任务系统.md#通过总管家管理助手配置)。
 
-**助手权限授予**：SuperAdmin 普通通道/工作区动作仅允许不扩大权限的修改。新增可信范围用 `assistant.grant_workspace`，放宽沙箱/审批或扩大 Codex workspace-write 目录范围用 `assistant.patch_agent_permissions`；两者是静态用户批准动作，批量与定时入口沿用同一批准边界。批准绑定脱敏的前后权限快照，执行时在助手与 provider 写锁下复核；移除覆盖后的继承变化也参与判断。不要把模型传入的标记当作批准。面向用户的设置界面仍是用户本人操作。
+**助手权限授予**：SuperAdmin 普通通道/工作区动作仅允许不扩大权限的修改。新增可信范围用 `assistant.grant_workspace`，改动 Agent cwd 扩大文件信任范围、放宽沙箱/审批或扩大 Codex workspace-write 目录范围用 `assistant.patch_agent_permissions`；两者是静态用户批准动作，批量与定时入口沿用同一批准边界。批准绑定脱敏的前后权限快照，执行时在助手与 provider 写锁下复核；移除覆盖后的继承变化也参与判断。不要把模型传入的标记当作批准。面向用户的设置界面仍是用户本人操作。
 
 ## Essential Build Commands
 

@@ -156,7 +156,7 @@ pub(crate) fn workspace_managed(db: &AssistantDatabase, llm: &LLMDatabase, id: i
     let channel = if assistant.assistant_type==Some(4) { read(db,llm,id)? } else { Value::Null };
     let mut result = json!({"assistant_id":id,"action":action,"saved":!dry_run,"dry_run":dry_run,
         "workspaces":db.get_assistant_workspaces(id).map_err(|e|e.to_string())?,"channel_config":channel,
-        "permissions":"工作区仅表示 AIPP 内置操作的路径信任；目录登记不更改 Agent 沙箱或审批，移除不撤销其他独立授权。执行起点仅由 acp_working_directory 决定，与工作区列表顺序无关。"});
+        "permissions":"Agent 在配置的工作目录中运行，AIPP 内置文件工具信任该目录及其子目录。另行登记的工作区可授予额外的路径信任。原生沙箱与审批按通道配置执行。"});
     if let (Some(policy),Some(before))=(policy,before) {
         result["permission_change"] = super::permissions::finish(policy,before,super::permissions::state(db,llm,id)?,dry_run,"assistant.grant_workspace")?;
     }

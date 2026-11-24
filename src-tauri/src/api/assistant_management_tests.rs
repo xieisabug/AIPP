@@ -528,8 +528,35 @@ fn test_assistant_permissions_cwd_expansion_tracks_workspace_write_scope() {
     assert!(permissions::expands(&before,&after));
     after["permissions"]["codex_sandbox"]=json!("read-only");
     assert!(!permissions::expands(&before,&after));
-    // Changing an execution start directory alone does not grant AIPP path trust.
-    let before = json!({"workspace_paths":[],"permissions":{"acp_working_directory":cwd.to_string_lossy()}});
-    let after = json!({"workspace_paths":[],"permissions":{"acp_working_directory":parent.to_string_lossy()}});
-    assert!(!permissions::expands(&before,&after));
+}
+
+#[test]
+fn test_agent_workspace_claude_file_access_and_directory_change_approval() {
+    use crate::api::ai::working_directory::contains_file_path;
+    use crate::api::assistant_api::configured_agent_workspace;
+    let (db, llm, normal, _) = fixture();
+    llm.add_llm_provider("Claude mock", "claude_sdk", "", false, true).unwrap();
+    let provider = llm.conn.last_insert_rowid();
+    let id = create(&db, &llm, provider, 4);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let effective = || configured_agent_workspace(&db, &llm, id).unwrap();
+    assert!(effective().is_none());
+    llm.add_llm_provider_config(provider, "acp_working_directory", root.to_str().unwrap(), "", false).unwrap();
+    let ordinary = create(&db, &llm, normal, 0);
+    assert!(configured_agent_workspace(&db, &llm, ordinary).unwrap().is_none());
+    assert!(db.get_assistant_workspaces(id).unwrap().is_empty());
+    let inherited = effective().unwrap();
+    assert!(contains_file_path(&inherited, &root.join("Cargo.toml").canonicalize().unwrap()));
+    assert!(contains_file_path(&inherited, &root.join("new-folder/new-file.html")));
+    assert!(!contains_file_path(&inherited, &root.parent().unwrap().join("outside.html")));
+    let set = |dir: &std::path::Path| channel::patch_managed(
+        &db, &llm, id, &json!({"acp_working_directory":dir}), &json!([]), false,
+        Some(permissions::Policy::Ordinary),
+    );
+    assert!(set(root.parent().unwrap()).unwrap_err().contains("assistant.patch_agent_permissions"));
+    set(&root.join("src")).unwrap();
+    assert_eq!(effective().unwrap().canonicalize().unwrap(), root.join("src").canonicalize().unwrap());
+    assert!(!contains_file_path(&effective().unwrap(), &root.join("Cargo.toml")));
+    assert!(channel::patch_managed(&db, &llm, id, &json!({}), &json!(["acp_working_directory"]),
+        false, Some(permissions::Policy::Ordinary)).unwrap_err().contains("assistant.patch_agent_permissions"));
 }

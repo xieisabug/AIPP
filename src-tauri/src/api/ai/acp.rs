@@ -4864,17 +4864,6 @@ async fn run_acp_session(
         fail_startup!(err_msg);
     }
 
-    let trusted_working_directory = acp_config
-        .working_directory
-        .canonicalize()
-        .unwrap_or_else(|_| acp_config.working_directory.clone());
-    operation_state
-        .add_conversation_trusted_path(
-            conversation_id,
-            trusted_working_directory.to_string_lossy().to_string(),
-        )
-        .await;
-
     let mut cmd = Command::from(launch_plan.command(&acp_config.env_vars));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(std::process::Stdio::piped())

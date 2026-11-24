@@ -23,7 +23,14 @@ pub(crate) fn state(db: &AssistantDatabase, llm: &LLMDatabase, id: i64) -> Resul
             let name = field["name"].as_str().unwrap_or("");
             if matches!(name,"acp_working_directory"|"codex_sandbox"|"codex_approval_policy"|"codex_approvals_reviewer"|"tool_review_mode") {
                 let mut value = field["effective_value"].clone();
-                if name=="acp_working_directory" { if let Some(text)=value.as_str() {value=json!(path(text));} }
+                if name=="acp_working_directory" {
+                    if let Some(text)=field["effective_value"].as_str() {
+                        value=json!(path(text));
+                        if field["source"] != "channel_default" && std::path::Path::new(text).is_absolute() {
+                            permissions.insert("agent_workspace".into(), value.clone());
+                        }
+                    }
+                }
                 permissions.insert(name.into(),value);
             }
         }
@@ -46,6 +53,13 @@ pub(crate) fn expands(before: &Value, after: &Value) -> bool {
     // neither direction is unconditionally a permission reduction.
     if ["aipp_tool_review_mode","tool_review_mode"].iter().any(|key|before["permissions"][key]!=after["permissions"][key]) {return true;}
     let paths = before["workspace_paths"].as_array().cloned().unwrap_or_default();
+    if let Some(new) = after["permissions"]["agent_workspace"].as_str() {
+        let old = before["permissions"]["agent_workspace"].as_str();
+        if !old.is_some_and(|root| covered(new, root)) &&
+            !paths.iter().filter_map(Value::as_str).any(|root| covered(new, root)) {
+            return true;
+        }
+    }
     if after["workspace_paths"].as_array().is_some_and(|new|new.iter().filter_map(Value::as_str)
         .any(|p|!paths.iter().filter_map(Value::as_str).any(|old|covered(p,old)))) {return true;}
     for (key,values) in [

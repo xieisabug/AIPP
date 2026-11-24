@@ -937,6 +937,26 @@ pub fn get_assistant_field_value(
         .ok_or_else(|| format!("Field '{}' not found", field_name))
 }
 
+pub(crate) fn configured_agent_workspace(
+    db: &AssistantDatabase,
+    llm: &LLMDatabase,
+    assistant_id: i64,
+) -> Result<Option<std::path::PathBuf>, String> {
+    use crate::api::ai::working_directory;
+    let assistant = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if assistant.assistant_type != Some(4) {
+        return Ok(None);
+    }
+    let models = db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
+    let configs = db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
+    let provider_id = resolve_acp_provider_id(&models, &configs).ok_or("Agent 助手尚未配置提供商")?;
+    let provider = llm.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+    let defaults = llm.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    working_directory::configured_workspace(
+        &configs, &defaults, provider.api_type != CODEX_APP_SERVER_API_TYPE,
+    ).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle), fields(assistant_id))]
 pub fn get_acp_working_directory(

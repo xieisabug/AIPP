@@ -298,7 +298,7 @@ export const useAssistantFormConfig = ({
                         label: "工作目录",
                         value: getAcpConfigValue("acp_working_directory", ""),
                         placeholder: "选择工作目录",
-                        tooltip: "智能体将在此目录下运行",
+                        tooltip: "智能体在此目录中运行，AIPP 内置文件工具会自动放行此目录下的文件操作",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_working_directory", value, "string"),
                     },

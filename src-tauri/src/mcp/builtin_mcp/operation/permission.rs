@@ -203,14 +203,20 @@ impl PermissionManager {
         };
 
         match assistant_db.is_path_in_assistant_workspace(assistant_id, path) {
-            Ok(is_trusted) => {
-                if is_trusted {
-                    debug!(assistant_id, path = %path, "Path is in assistant workspace");
-                }
-                is_trusted
-            }
+            Ok(true) => return true,
+            Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Failed to check assistant workspace");
+            }
+        }
+        let workspace = crate::db::llm_db::LLMDatabase::new(&self.app_handle)
+            .map_err(|error| error.to_string())
+            .and_then(|llm| crate::api::assistant_api::configured_agent_workspace(&assistant_db, &llm, assistant_id));
+        match workspace {
+            Ok(Some(root)) => crate::api::ai::working_directory::contains_file_path(&root, Path::new(path)),
+            Ok(None) => false,
+            Err(error) => {
+                warn!(assistant_id, %error, "Failed to check Agent working directory");
                 false
             }
         }
