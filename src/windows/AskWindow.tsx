@@ -374,7 +374,11 @@ function AskWindow() {
                     aiIsResponsing={aiIsResponsing}
                     placement="top"
                 />
-                <div className="p-5 pb-16 bg-background flex-1 overflow-auto" data-aipp-slot="ask-content">
+                <div
+                    className="p-5 pb-16 bg-background flex-1 overflow-auto"
+                    data-tauri-drag-region={messageId === -1 ? true : undefined}
+                    data-aipp-slot="ask-content"
+                >
                     {/* 错误信息显示区域 */}
                     {errorMessage && (
                         <div

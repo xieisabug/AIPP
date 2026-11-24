@@ -461,4 +461,23 @@ describe("group Vault card placement", () => {
             if (original) vi.mocked(listen).mockImplementation(original);
         }
     });
+
+    it("should mark the empty side columns of the group header as drag regions on Windows", async () => {
+        const { __resetPlatformCacheForTests } = await import("@/hooks/use-platform");
+        __resetPlatformCacheForTests();
+        mockInvokeHandler("get_platform", () => "windows");
+        renderChat();
+
+        const header = await waitFor(() => {
+            const el = document.querySelector('[data-aipp-slot="butler-group-header"]') as HTMLElement | null;
+            expect(el).toBeTruthy();
+            expect(el).toHaveAttribute("data-tauri-drag-region");
+            return el!;
+        });
+        const [leftSpacer, centerButton, rightColumn] = Array.from(header.children) as HTMLElement[];
+        expect(leftSpacer).toHaveAttribute("data-tauri-drag-region");
+        expect(centerButton).not.toHaveAttribute("data-tauri-drag-region");
+        expect(rightColumn).toHaveAttribute("data-tauri-drag-region");
+        expect(screen.getByTitle("群成员")).not.toHaveAttribute("data-tauri-drag-region");
+    });
 });

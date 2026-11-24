@@ -5,7 +5,7 @@ import { PanelRightClose, ExternalLink, ChevronLeft } from 'lucide-react';
 import ChatSidebarContent from './ChatSidebarContent';
 import { TodoItem, CodeArtifact, ContextItem } from './types';
 import type { LoadedPlugin } from '@/services/PluginRuntime';
-import { WINDOW_HEADER_HEIGHT, WindowControls, useFramelessTitleBar } from '@/components/window/WindowTitleBar';
+import { WINDOW_HEADER_HEIGHT, WindowControls, dragRegionProps, useFramelessTitleBar } from '@/components/window/WindowTitleBar';
 
 interface ChatSidebarProps {
     todos: TodoItem[];
@@ -51,6 +51,8 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const framelessTitleBar = useFramelessTitleBar();
+    const canDragHeader = showWindowControls && framelessTitleBar;
+    const headerDrag = dragRegionProps(canDragHeader);
     const [hasAutoExpanded, setHasAutoExpanded] = useState(false);
     const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
     const [isResizing, setIsResizing] = useState(false);
@@ -189,10 +191,17 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                     />
 
                     {/* Header */}
-                    <div className="flex flex-none items-center justify-between border-b border-border pl-4 pr-3" style={{ height: WINDOW_HEADER_HEIGHT }}
-                        data-tauri-drag-region={(showWindowControls && framelessTitleBar) || undefined} data-aipp-slot="chat-inline-sidebar-header">
-                        <span className="text-sm font-medium">详情</span>
-                        <div className="flex items-center gap-1">
+                    <div
+                        className={cn(
+                            "flex flex-none items-center justify-between border-b border-border pl-4 pr-3",
+                            canDragHeader && "select-none",
+                        )}
+                        style={{ height: WINDOW_HEADER_HEIGHT }}
+                        {...headerDrag}
+                        data-aipp-slot="chat-inline-sidebar-header"
+                    >
+                        <span className="text-sm font-medium" {...headerDrag} data-aipp-slot="chat-inline-sidebar-title">详情</span>
+                        <div className="flex items-center gap-1 self-stretch" {...headerDrag}>
                             <Button
                                 variant="ghost"
                                 size="icon"

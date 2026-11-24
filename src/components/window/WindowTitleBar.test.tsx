@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FloatingWindowControls, WindowControls, WindowTitleBar, WindowTopBar } from "./WindowTitleBar";
+import { FloatingWindowControls, WindowControls, WindowTitleBar, WindowTopBar, dragRegionProps } from "./WindowTitleBar";
 
 const platformState = vi.hoisted(() => ({ platform: "windows" as string }));
 vi.mock("@/hooks/use-platform", () => ({ usePlatform: () => platformState.platform }));
@@ -92,14 +92,25 @@ describe("WindowTopBar", () => {
         ["linux", "20px", false, false],
     ])("should lay out the secondary-window title bar on %s", (platform, paddingLeft, draggable, controls) => {
         platformState.platform = platform;
-        render(<WindowTopBar title="定时任务" data-aipp-slot="top"><button>刷新</button></WindowTopBar>);
+        render(<WindowTopBar title="定时任务" icon={<svg data-testid="top-icon" />} data-aipp-slot="top"><button>刷新</button></WindowTopBar>);
         const bar = document.querySelector('[data-aipp-slot="top"]') as HTMLElement;
         expect(bar.style.paddingLeft).toBe(paddingLeft);
         expect(bar.style.height).toBe("68px");
         expect(bar.hasAttribute("data-tauri-drag-region")).toBe(draggable);
-        expect(screen.getByText("定时任务")).toBeInTheDocument();
+        const title = screen.getByText("定时任务");
+        expect(title).toBeInTheDocument();
+        expect(title.hasAttribute("data-tauri-drag-region")).toBe(draggable);
+        const iconWrapper = screen.getByTestId("top-icon").parentElement as HTMLElement;
+        expect(iconWrapper.hasAttribute("data-tauri-drag-region")).toBe(draggable);
+        expect(iconWrapper.className).toContain("[&>svg]:pointer-events-none");
         expect(bar).toContainElement(screen.getByRole("button", { name: "刷新" }));
+        expect(screen.getByRole("button", { name: "刷新" })).not.toHaveAttribute("data-tauri-drag-region");
         expect(!!screen.queryByRole("button", { name: "关闭" })).toBe(controls);
+    });
+
+    it("should toggle dragRegionProps cleanly", () => {
+        expect(dragRegionProps(true)).toEqual({ "data-tauri-drag-region": true });
+        expect(dragRegionProps(false)).toEqual({});
     });
 
     it("should not render on mobile", () => {

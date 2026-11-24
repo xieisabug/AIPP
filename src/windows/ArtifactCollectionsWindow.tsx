@@ -22,7 +22,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useTheme } from "@/hooks/useTheme";
 import { formatIconDisplay } from "@/utils/emojiUtils";
 import { Search, Folder, PackageOpen } from "lucide-react";
-import { WindowTopBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
+import { WindowTopBar, dragRegionProps, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import EditArtifactDialog from "@/components/EditArtifactDialog";
 
 interface ArtifactCollection {
@@ -41,6 +41,7 @@ export default function ArtifactCollectionsWindow() {
     useTheme("artifact_collections");
     // 桌面统一标题栏下标题在顶栏里，页面内不再重复大标题
     const titleBarLayout = useWindowTitleBarLayout();
+    const framelessTitleBar = useFramelessTitleBar();
 
     const [artifacts, setArtifacts] = useState<ArtifactCollection[]>([]);
     const [filteredArtifacts, setFilteredArtifacts] = useState<ArtifactCollection[]>([]);
@@ -159,7 +160,7 @@ export default function ArtifactCollectionsWindow() {
         <div className="flex flex-col h-screen bg-background" data-aipp-window="artifact_collections" data-aipp-slot="window-root">
             {/* 桌面统一标题栏：标题移到顶栏，与聊天 / 管家窗口头部同高 */}
             <WindowTopBar title="Artifacts 合集" icon={<PackageOpen />} data-aipp-slot="artifact-collections-titlebar">
-                <span className="shrink-0 text-xs text-muted-foreground" data-tauri-drag-region>共 {artifacts.length} 个</span>
+                <span className="shrink-0 select-none text-xs text-muted-foreground" {...dragRegionProps(framelessTitleBar)}>共 {artifacts.length} 个</span>
             </WindowTopBar>
             <div className="flex min-h-0 flex-1 flex-col p-6">
             <div className="flex flex-col gap-4 mb-6" data-aipp-slot="artifact-collections-header">

@@ -14,7 +14,7 @@ import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview } from "./butlerGroupModel";
 import { AppUpdateNotice } from "@/components/AppUpdateNotice";
-import { WindowTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
+import { WindowTitleBar, dragRegionProps, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 
 /** 待审批和头像未读标记分别展示。 */
 function ApprovalDot() {
@@ -99,6 +99,7 @@ export function ButlerAppActions({ ready, onOpenSettings, onOpenProactive, onOpe
 export default function ButlerContactList({chief, contacts, selected, focused, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onOpenSettings, onOpenProactive, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
     const titleBarLayout = useWindowTitleBarLayout();
+    const framelessTitleBar = useFramelessTitleBar();
     const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
     const pendingApprovals = usePendingApprovalConversations();
@@ -161,7 +162,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
                 </div>
                 <div className="flex items-center gap-1.5">{listActions}</div>
             </div>}
-        <div className="mb-4 flex shrink-0 justify-center">
+        <div className="mb-4 flex shrink-0 justify-center" {...dragRegionProps(framelessTitleBar)}>
             <button onClick={() => { acknowledge?.(0); onSelect(); }} aria-pressed={selected === undefined && selectedGroup === undefined}
                 className="flex max-w-full flex-col items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-medium hover:bg-muted aria-pressed:bg-muted">
                 <ButlerAvatar id={0} chief size={66} compact figure animated={state(0) !== "idle"} state={state(0)}/>

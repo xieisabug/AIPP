@@ -20,6 +20,7 @@ import {
     TITLEBAR_HEIGHT,
     FloatingWindowControls,
     WindowTitleBar,
+    dragRegionProps,
     useCustomWindowControls,
     useFramelessTitleBar,
     useMacOverlayTitleBar,
@@ -68,6 +69,7 @@ function ConfigWindow() {
     const platform = usePlatform();
     // 无系统标题栏（macOS / Windows）：菜单栏顶部留出标题栏行；Windows 另画窗口控制按钮
     const framelessTitleBar = useFramelessTitleBar();
+    const drag = dragRegionProps(framelessTitleBar);
     const macOverlayTitleBar = useMacOverlayTitleBar();
     const customWindowControls = useCustomWindowControls();
     // 窄屏顶部栏（px-4）右侧为 Windows 窗口控制按钮留位
@@ -313,9 +315,9 @@ function ConfigWindow() {
         return (
             <div className="flex flex-col h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
                 <div
-                    className={`flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
+                    className={`flex select-none items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                     style={{ ...narrowHeaderInset, ...(macOverlayTitleBar ? { paddingLeft: MAC_TRAFFIC_LIGHTS_SAFE_LEFT } : undefined) }}
-                    data-tauri-drag-region
+                    {...drag}
                     data-aipp-slot="config-mobile-header"
                 >
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
@@ -375,7 +377,7 @@ function ConfigWindow() {
                     </Sheet>
                     {!isMobilePlatform && (
                         <>
-                            <span className="font-medium text-sm truncate flex-1 text-center">设置</span>
+                            <span className="font-medium text-sm truncate flex-1 text-center select-none" {...drag} data-aipp-slot="config-mobile-title">设置</span>
                             <Button variant="ghost" size="icon" onClick={handleBackHome} aria-label="返回首页">
                                 <Home className="h-5 w-5" />
                             </Button>
@@ -413,7 +415,7 @@ function ConfigWindow() {
         <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
             <div
                 className="bg-card shadow-none w-full h-screen grid grid-cols-[1fr_3fr] md:grid-cols-[1fr_4fr] lg:grid-cols-[1fr_5fr]"
-                data-tauri-drag-region
+                {...drag}
                 data-aipp-slot="config-layout"
             >
                 {/* 侧边栏 */}
@@ -431,7 +433,7 @@ function ConfigWindow() {
                 <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
                     {/* Windows：内容区顶部与菜单标题栏行同高的拖拽条，右侧放窗口控制按钮 */}
                     {customWindowControls && (
-                        <div className="shrink-0" style={{ height: TITLEBAR_HEIGHT }} data-tauri-drag-region data-aipp-slot="config-content-titlebar">
+                        <div className="shrink-0 md:-mx-2 lg:-mx-4" style={{ height: TITLEBAR_HEIGHT }} data-tauri-drag-region data-aipp-slot="config-content-titlebar">
                             <FloatingWindowControls centerY={TITLEBAR_HEIGHT / 2} right={12} />
                         </div>
                     )}

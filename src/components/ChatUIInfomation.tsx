@@ -102,7 +102,11 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
         </div>
     );
     const actions = (
-        <div className={cn("flex flex-wrap items-center justify-end", titleBarLayout ? "gap-0.5" : "gap-1")} data-aipp-slot="chat-info-actions">
+        <div
+            className={cn("flex flex-wrap items-center justify-end", titleBarLayout ? "gap-0.5" : "gap-1")}
+            data-tauri-drag-region={titleBarLayout || undefined}
+            data-aipp-slot="chat-info-actions"
+        >
             {/* 防泄露模式眼睛图标按钮 */}
             {antiLeakageEnabled && (
                 <Button

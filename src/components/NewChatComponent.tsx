@@ -250,8 +250,8 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
         }
     };
 
-    // 移动端不需要拖动区域
-    const dragProps = isMobile ? {} : { "data-tauri-drag-region": true };
+    // 移动平台不需要拖动区域（桌面窄窗口仍保持可拖动）
+    const dragProps = isMobilePlatform ? {} : { "data-tauri-drag-region": true };
 
     return (
         <div

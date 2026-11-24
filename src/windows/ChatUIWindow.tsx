@@ -7,6 +7,7 @@ import ChatUIInfomation from "../components/ChatUIInfomation";
 import {
     MAC_TRAFFIC_LIGHTS_SAFE_LEFT,
     FloatingWindowControls,
+    dragRegionProps,
     useFramelessTitleBar,
     useMacOverlayTitleBar,
     useWindowControlsInset,
@@ -893,15 +894,16 @@ function ChatUIWindow() {
     // 移动端布局
     if (isMobile) {
         const mobileTitle = conversationTitle || "新会话";
+        const drag = dragRegionProps(framelessTitleBar);
 
         return (
             <AntiLeakageProvider enabled={antiLeakageEnabled}>
                 <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
                     <div
-                        className={`flex-none flex items-center justify-between px-2 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
+                        className={`flex-none flex select-none items-center justify-between px-2 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                         style={{ ...narrowHeaderInset, ...(macOverlayTitleBar ? { paddingLeft: MAC_TRAFFIC_LIGHTS_SAFE_LEFT } : undefined) }}
-                        data-tauri-drag-region={framelessTitleBar || undefined}
+                        {...drag}
                         data-aipp-slot="chat-mobile-header"
                     >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
@@ -929,23 +931,34 @@ function ChatUIWindow() {
                                 />
                             </SheetContent>
                         </Sheet>
-                        {/* 标题 + 助手名副标题；有会话时点击标题重命名（复用 ConversationUI 的标题编辑对话框） */}
-                        <button
-                            type="button"
-                            className="mx-1 flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center rounded-md px-1 leading-tight disabled:cursor-default"
-                            data-aipp-slot="chat-mobile-title"
-                            disabled={!selectedConversation}
-                            aria-label={selectedConversation ? `重命名会话：${mobileTitle}` : mobileTitle}
-                            onClick={() => conversationUIRef.current?.openTitleEdit()}
-                        >
-                            <span className="max-w-full truncate text-sm font-medium">{mobileTitle}</span>
-                            {selectedConversation && conversationAssistantName ? (
-                                <span className="max-w-full truncate text-xs text-muted-foreground" data-aipp-slot="chat-mobile-subtitle">
-                                    {conversationAssistantName}
-                                </span>
-                            ) : null}
-                        </button>
-                        <div className="flex items-center">
+                        {/* 标题 + 助手名副标题；有会话时点击标题重命名，两侧空白和无会话标题可拖动窗口 */}
+                        <div className="mx-1 flex min-w-0 flex-1 items-center justify-center self-stretch" {...drag}>
+                            {selectedConversation ? (
+                                <button
+                                    type="button"
+                                    className="flex min-h-11 max-w-full flex-col items-center justify-center rounded-md px-2 leading-tight"
+                                    data-aipp-slot="chat-mobile-title"
+                                    aria-label={`重命名会话：${mobileTitle}`}
+                                    onClick={() => conversationUIRef.current?.openTitleEdit()}
+                                >
+                                    <span className="max-w-full truncate text-sm font-medium">{mobileTitle}</span>
+                                    {conversationAssistantName ? (
+                                        <span className="max-w-full truncate text-xs text-muted-foreground" data-aipp-slot="chat-mobile-subtitle">
+                                            {conversationAssistantName}
+                                        </span>
+                                    ) : null}
+                                </button>
+                            ) : (
+                                <div
+                                    className="flex min-h-11 max-w-full flex-col items-center justify-center px-2 leading-tight"
+                                    data-aipp-slot="chat-mobile-title"
+                                    {...drag}
+                                >
+                                    <span className="max-w-full truncate text-sm font-medium" {...drag}>{mobileTitle}</span>
+                                </div>
+                            )}
+                        </div>
+                        <div className="flex items-center self-stretch" {...drag}>
                             {selectedConversation ? (
                                 <Button
                                     variant="ghost"

@@ -33,6 +33,7 @@ const ChatUIToolbar = memo(function ChatUIToolbar({
                 "flex flex-none items-center",
                 inline ? "ml-auto gap-1.5" : "gap-2 bg-background px-3 pb-2 pt-3 rounded-t-xl",
             )}
+            data-tauri-drag-region={inline || undefined}
             data-aipp-slot="chat-toolbar"
         >
             <Button

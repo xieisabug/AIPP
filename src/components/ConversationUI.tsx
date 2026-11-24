@@ -86,7 +86,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
-import { FloatingWindowControls, WINDOW_HEADER_HEIGHT } from "./window/WindowTitleBar";
+import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, dragRegionProps, useFramelessTitleBar } from "./window/WindowTitleBar";
 import ConversationExportDialog from "./conversation/ConversationExportDialog";
 import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail, { makeTurnPreview } from "./conversation/ConversationTurnRail";
@@ -360,6 +360,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         ref
     ) => {
         const resultOnly = windowLabel === "butler_experiment" && !showExecutionDetails;
+        const framelessTitleBar = useFramelessTitleBar();
         const rejectReadOnlyAction = useCallback(() => {
             toast.info("这是只读的历史会话，不能重新生成或编辑消息");
         }, []);
@@ -2545,6 +2546,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             }}
                             className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                             data-aipp-slot="chat-conversation-scroll"
+                            {...dragRegionProps(!viewConversationId && framelessTitleBar)}
                             style={{ overflowAnchor: "none" }}
                         >
                             <ButlerResultsOnlyContext.Provider value={resultOnly}>

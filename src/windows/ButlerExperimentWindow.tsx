@@ -15,7 +15,7 @@ import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
-import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, WindowControls, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
+import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, WindowControls, dragRegionProps, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1167,6 +1167,7 @@ function ButlerExperimentWindow() {
     const contactRail = useContactRailWidth();
     const titleBarLayout = useWindowTitleBarLayout();
     const framelessTitleBar = useFramelessTitleBar();
+    const drag = dragRegionProps(framelessTitleBar);
 
     useAppShortcuts("butler", {
         new: () => {
@@ -1192,24 +1193,24 @@ function ButlerExperimentWindow() {
     // showWindowControls：详情栏未展开时 Windows 窗口控制按钮排在头部末尾（展开时在详情栏头部）
     const renderButlerHeader = ({ showWindowControls }: { showWindowControls: boolean }) => (historyView ? (
                             <div
-                                className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3"
+                                className="grid flex-none select-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3"
                                 style={{ height: WINDOW_HEADER_HEIGHT }}
-                                data-tauri-drag-region={framelessTitleBar || undefined}
+                                {...drag}
                                 data-aipp-slot="butler-history-header"
                             >
-                                <div className="flex min-w-0 items-center">
+                                <div className="flex min-w-0 items-center self-stretch" {...drag}>
                                     <Button type="button" variant="ghost" size="sm" className="gap-1 px-2"
                                         onClick={() => setHistoryView(null)} data-aipp-slot="butler-history-back">
                                         <ChevronLeft className="h-4 w-4" />
                                         返回{contact ? activeAssistant?.name ?? "私聊" : "当前会话"}
                                     </Button>
                                 </div>
-                                <div className="flex min-w-0 max-w-[26rem] items-center gap-2">
-                                    <History className="h-4 w-4 shrink-0 text-muted-foreground" />
-                                    <span className="truncate text-sm font-medium">{historyView.title}</span>
-                                    <Badge variant="outline" className="shrink-0 text-[10px] font-normal">只读</Badge>
+                                <div className="flex min-w-0 max-w-[26rem] items-center gap-2 self-stretch" {...drag}>
+                                    <History className="pointer-events-none h-4 w-4 shrink-0 text-muted-foreground" />
+                                    <span className="truncate text-sm font-medium" {...drag}>{historyView.title}</span>
+                                    <Badge variant="outline" className="shrink-0 text-[10px] font-normal" {...drag}>只读</Badge>
                                 </div>
-                                <div className="flex min-w-0 items-center justify-end gap-1">
+                                <div className="flex min-w-0 items-center justify-end gap-1 self-stretch" {...drag}>
                                     <IconButton
                                         icon={detailsConversation === activeConversationId
                                             ? <MessageSquareText className="h-4 w-4 text-icon" />
@@ -1223,13 +1224,13 @@ function ButlerExperimentWindow() {
                             </div>
                             ) : (
                             <div
-                                className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3"
+                                className="relative grid flex-none select-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3"
                                 style={{ height: WINDOW_HEADER_HEIGHT }}
-                                data-tauri-drag-region={framelessTitleBar || undefined}
+                                {...drag}
                                 data-aipp-slot="butler-main-header"
                             >
-                                <div className="flex min-w-0 items-center">
-                                    {showFeishuStatus && <Badge variant={getFeishuStatusVariant(feishuStatus)}>
+                                <div className="flex min-w-0 items-center self-stretch" {...drag}>
+                                    {showFeishuStatus && <Badge variant={getFeishuStatusVariant(feishuStatus)} {...drag}>
                                         {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
                                     </Badge>}
                                 </div>
@@ -1242,7 +1243,7 @@ function ButlerExperimentWindow() {
                                     <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
-                                <div className="flex min-w-0 items-center justify-end gap-1">
+                                <div className="flex min-w-0 items-center justify-end gap-1 self-stretch" {...drag}>
                                     <DeepSeekBalanceBadge
                                         conversationId={Number(activeConversationId) || null}
                                         assistantId={contact?.assistantId ?? null}
@@ -1343,7 +1344,7 @@ function ButlerExperimentWindow() {
                     data-aipp-slot="butler-main-content"
                 >
                     {loadError ? (
-                        <div className="flex h-full items-center justify-center p-6">
+                        <div className="flex h-full items-center justify-center p-6" {...drag}>
                             <div className="max-w-md space-y-4 rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">
                                 <div className="space-y-1">
                                     <div className="text-base font-semibold text-foreground">
@@ -1400,7 +1401,7 @@ function ButlerExperimentWindow() {
                             </div>
                         </>
                     ) : (
-                        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                        <div className="flex h-full select-none items-center justify-center text-sm text-muted-foreground" {...drag}>
                             {loadingMain
                                 ? "正在准备总管家主会话..."
                                 : "总管家主会话尚未初始化"}

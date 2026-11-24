@@ -25,7 +25,7 @@ import ButlerGroupTranscript from "./ButlerGroupTranscript";
 import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
-import { WINDOW_HEADER_HEIGHT, WindowControls, useFramelessTitleBar } from "@/components/window/WindowTitleBar";
+import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, WindowControls, dragRegionProps, useFramelessTitleBar } from "@/components/window/WindowTitleBar";
 import { groupReadKey, mentionTargets, mergeMessages } from "./butlerGroupModel";
 
 interface Props {
@@ -52,6 +52,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const [panelOpen, setPanelOpen] = useState(false);
     // 无系统标题栏时头部空白处可拖动窗口；群聊头部贴着窗口右上角，Windows 窗口控制按钮排在末尾
     const framelessTitleBar = useFramelessTitleBar();
+    const drag = dragRegionProps(framelessTitleBar);
     const [inviteOpen, setInviteOpen] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [nameDraft, setNameDraft] = useState("");
@@ -231,7 +232,8 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     };
 
     if (!detail) {
-        return <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+        return <div className="flex h-full select-none items-center justify-center p-6 text-sm text-muted-foreground" {...drag}>
+            <FloatingWindowControls centerY={WINDOW_HEADER_HEIGHT / 2} right={12} />
             {loadError ? <div className="space-y-3 text-center"><p className="whitespace-pre-wrap text-destructive">{loadError}</p>
                 <Button variant="outline" size="sm" onClick={() => void refresh()}>重试</Button></div> : "正在打开群聊…"}
         </div>;
@@ -244,9 +246,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         : typing || `${members.length} 位成员`;
 
     return <div className="flex h-full min-h-0 flex-col" data-aipp-slot="butler-group-chat">
-        <div className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3" style={{ height: WINDOW_HEADER_HEIGHT }}
-            data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="butler-group-header">
-            <div />
+        <div className="grid flex-none select-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3" style={{ height: WINDOW_HEADER_HEIGHT }}
+            {...drag} data-aipp-slot="butler-group-header">
+            <div className="self-stretch" {...drag} />
             <button type="button" onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }}
                 className="flex min-w-0 max-w-[26rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
                 title="群聊信息">
@@ -256,7 +258,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                     <span className={`truncate text-[11px] leading-[14px] ${running.length || discussion ? "text-foreground/70" : "text-muted-foreground"}`}>{subtitle}</span>
                 </span>
             </button>
-            <div className="flex items-center justify-end gap-1">
+            <div className="flex items-center justify-end gap-1 self-stretch" {...drag}>
                 <ConversationStatsDialog groupId={groupId} />
                 <IconButton icon={<Users className="h-4 w-4 text-icon" />} ghost title="群成员"
                     onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }} />

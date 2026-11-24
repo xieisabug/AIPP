@@ -22,6 +22,8 @@ describe("ChatSidebar window controls", () => {
 
         const header = document.querySelector('[data-aipp-slot="chat-inline-sidebar-header"]') as HTMLElement;
         expect(header).toHaveAttribute("data-tauri-drag-region");
+        expect(document.querySelector('[data-aipp-slot="chat-inline-sidebar-title"]')).toHaveAttribute("data-tauri-drag-region");
+        expect(screen.getByTitle("收起")).not.toHaveAttribute("data-tauri-drag-region");
         expect(header).toContainElement(screen.getByRole("button", { name: "关闭" }));
 
         fireEvent.click(screen.getByTitle("收起"));
@@ -34,5 +36,6 @@ describe("ChatSidebar window controls", () => {
         render(<ChatSidebar todos={todos} artifacts={[]} contextItems={[]} conversationId="1" />);
         expect(screen.queryByRole("button", { name: "关闭" })).toBeNull();
         expect(document.querySelector('[data-aipp-slot="chat-inline-sidebar-header"]')).not.toHaveAttribute("data-tauri-drag-region");
+        expect(document.querySelector('[data-aipp-slot="chat-inline-sidebar-title"]')).not.toHaveAttribute("data-tauri-drag-region");
     });
 });

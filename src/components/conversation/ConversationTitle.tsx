@@ -9,7 +9,8 @@ import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
 import ConversationExportDialog from "./ConversationExportDialog";
 import DeepSeekBalanceBadge from "./DeepSeekBalanceBadge";
-import { WindowControls, useFramelessTitleBar } from "../window/WindowTitleBar";
+import { WindowControls, dragRegionProps, useFramelessTitleBar } from "../window/WindowTitleBar";
+import { cn } from "@/utils/utils";
 
 const ConversationTitle: React.FC<{
     conversation: Conversation | undefined;
@@ -40,8 +41,9 @@ const ConversationTitle: React.FC<{
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] = useState<boolean>(false);
     const { deleteConversation } = useConversationManager();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
-    // 没有系统标题栏（macOS / Windows）时，标题栏空白处承担窗口拖动
+    // 没有系统标题栏（macOS / Windows）时，标题栏空白处与非交互标签承担窗口拖动
     const framelessTitleBar = useFramelessTitleBar();
+    const drag = dragRegionProps(framelessTitleBar);
 
     // 判断是否需要脱敏
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -75,18 +77,40 @@ const ConversationTitle: React.FC<{
 
     return (
         <>
-            <div className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background z-20" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title-bar">
-                <div className="flex-1 overflow-hidden" data-tauri-drag-region={framelessTitleBar || undefined} data-aipp-slot="chat-conversation-title">
+            <div
+                className="flex justify-between flex-none h-[68px] items-center px-6 box-border border-b border-border bg-background z-20 select-none"
+                {...drag}
+                data-aipp-slot="chat-conversation-title-bar"
+            >
+                <div
+                    className="flex min-w-0 flex-1 flex-col items-start justify-center self-stretch overflow-hidden"
+                    {...drag}
+                    data-aipp-slot="chat-conversation-title"
+                >
                     <div
-                        className={`text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap text-icon ${allowRename ? "cursor-pointer" : ""}`}
+                        className={cn(
+                            "max-w-full truncate text-base font-semibold text-icon",
+                            allowRename && "cursor-pointer",
+                        )}
                         onClick={allowRename ? onEdit : undefined}
+                        {...(allowRename ? {} : drag)}
                         data-aipp-slot="chat-conversation-title-text"
                     >
                         {displayName}
                     </div>
-                    <div className="text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mt-0.5" data-aipp-slot="chat-conversation-title-subtext">{displayAssistantName}</div>
+                    <div
+                        className="mt-0.5 max-w-full truncate text-xs text-muted-foreground"
+                        {...drag}
+                        data-aipp-slot="chat-conversation-title-subtext"
+                    >
+                        {displayAssistantName}
+                    </div>
                 </div>
-                <div className="flex items-center flex-none shrink-0 justify-end gap-2 pl-4" data-aipp-slot="chat-conversation-title-actions">
+                <div
+                    className="flex items-center flex-none shrink-0 justify-end gap-2 self-stretch pl-4"
+                    {...drag}
+                    data-aipp-slot="chat-conversation-title-actions"
+                >
                     <DeepSeekBalanceBadge
                         conversationId={conversation?.id ?? null}
                         assistantId={conversation?.assistant_id ?? null}

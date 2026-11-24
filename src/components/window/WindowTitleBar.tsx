@@ -45,6 +45,17 @@ export function useFramelessTitleBar(): boolean {
     return platform === "macos" || platform === "windows";
 }
 
+/**
+ * 返回 Tauri 窗口拖拽属性。
+ *
+ * Tauri 2 的 `data-tauri-drag-region` 只校验被按下的 `event.target` 本身，不会沿 DOM 向上冒泡：
+ * 顶栏内的空白占位列、非交互标签/徽章都要直接标上该属性，非交互图标（`<svg>`）要加
+ * `pointer-events-none`，否则鼠标落在它们上面时无法拖动窗口。
+ */
+export function dragRegionProps(enabled: boolean): { "data-tauri-drag-region": true } | Record<string, never> {
+    return enabled ? { "data-tauri-drag-region": true } : {};
+}
+
 /** 桌面统一布局：侧边栏第一行是标题栏行（主操作），第二行是 Logo 与工具按钮。 */
 export function useWindowTitleBarLayout(): boolean {
     const platform = usePlatform();
@@ -170,17 +181,17 @@ export function WindowTopBar({ title, icon, children, "data-aipp-slot": slot = "
     const mac = useMacOverlayTitleBar();
     const frameless = useFramelessTitleBar();
     if (!enabled) return null;
-    const drag = frameless || undefined;
+    const drag = dragRegionProps(frameless);
     return (
         <div
-            data-tauri-drag-region={drag}
+            {...drag}
             data-aipp-slot={slot}
             className="flex shrink-0 select-none items-center gap-2 border-b border-border pr-3"
             style={{ height: WINDOW_HEADER_HEIGHT, paddingLeft: mac ? MAC_TRAFFIC_LIGHTS_SAFE_LEFT : 20 }}
         >
-            {icon && <span className="flex shrink-0 text-muted-foreground [&>svg]:size-4" data-tauri-drag-region={drag}>{icon}</span>}
-            <span className="min-w-0 truncate text-sm font-medium" data-tauri-drag-region={drag} data-aipp-slot={`${slot}-title`}>{title}</span>
-            <div className="min-w-0 flex-1 self-stretch" data-tauri-drag-region={drag} />
+            {icon && <span className="flex shrink-0 text-muted-foreground [&>svg]:pointer-events-none [&>svg]:size-4" {...drag}>{icon}</span>}
+            <span className="min-w-0 truncate text-sm font-medium" {...drag} data-aipp-slot={`${slot}-title`}>{title}</span>
+            <div className="min-w-0 flex-1 self-stretch" {...drag} />
             {children}
             <WindowControls className="ml-2" />
         </div>
