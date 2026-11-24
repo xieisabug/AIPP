@@ -96,7 +96,7 @@ export function useAssistantRuntime({
             if (onCustomUserMessage) {
                 onCustomUserMessage(question, assistantId, conversationId);
             } else if (!suppressConversationSwitch || Number(conversationId) === conversation?.id) {
-                const row = newComposerMessage(Number(conversationId) || 0, question);
+                const row = newComposerMessage(Number(conversationId) || 0, question, fileInfoListParam);
                 clientRequestId = row.clientRequestId;
                 beginComposerMessage(row);
             }

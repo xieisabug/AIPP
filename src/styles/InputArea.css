@@ -478,14 +478,20 @@
     opacity: 1;
 }
 
+/*
+ * 按钮与胶囊同以 .input-area 为定位基准（CircleButton 默认 fixed 会按窗口定位，外层布局一变就和胶囊错开）：
+ * 发送钮与胶囊底边齐平；「+」32px 落在 55px 胶囊的竖向中线（30 + (55-32)/2 ≈ 42）。right 由 InputArea 按详情栏行内给出。
+ */
 .bottom .input-area-send-button {
-    bottom: 68px;
-    right: 107px;
+    position: absolute;
+    bottom: 30px;
+    right: 99px;
 }
 
 .bottom .input-area-add-button {
-    bottom: 80px;
-    right: 190px;
+    position: absolute;
+    bottom: 42px;
+    right: 182px;
 }
 
 /*

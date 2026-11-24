@@ -111,7 +111,7 @@ interface InputAreaProps {
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
     isMobile?: boolean;
-    sidebarWidth?: number;
+    /** The right details rail is shown beside the conversation column: buttons and capsule move closer to the edge. */
     sidebarVisible?: boolean;
     sendButtonIcon?: ReactNode;
     sendButtonVisual?: ReactNode;
@@ -158,7 +158,6 @@ const InputArea = React.memo(
                 aiIsResponsing,
                 placement = "bottom",
                 isMobile = false,
-                sidebarWidth = 0,
                 sidebarVisible = false,
                 sendButtonIcon,
                 sendButtonVisual,
@@ -1432,7 +1431,9 @@ const InputArea = React.memo(
                 : planMode
                     ? "已开启：Agent 先出方案，你确认后再执行。点击关闭"
                     : "开启后 Agent 先出方案，你确认后再执行";
-            const addButtonRight = (sidebarVisible ? 150 : 190) + sidebarWidth;
+            // 三者都相对 .input-area 定位（会话列右缘），详情栏在列外，不再需要加它的宽度
+            const addButtonRight = sidebarVisible ? 142 : 182;
+            const sendButtonRight = sidebarVisible ? 62 : 99;
             const baseRight = sidebarVisible ? 130 : 170;
             const defaultSendButtonIcon = aiIsResponsing && !inputText.trim() ? (
                 <Square size={20} className="text-action-foreground" />
@@ -1582,7 +1583,7 @@ const InputArea = React.memo(
                         customVisual={Boolean(sendButtonVisual)}
                         style={
                             placement === "bottom" && !isMobile
-                                ? { right: (sidebarVisible ? 70 : 107) + sidebarWidth }
+                                ? { right: sendButtonRight }
                                 : undefined
                         }
                     />

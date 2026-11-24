@@ -26,6 +26,8 @@ export interface UseConversationOperationsProps {
     setInputText: React.Dispatch<React.SetStateAction<string>>;
     fileInfoList?: FileInfo[];
     clearFileInfoList: () => void;
+    /** Puts the files of a failed send back into an empty composer. */
+    returnFileInfoList?: (files: FileInfo[]) => void;
     aiIsResponsing: boolean;
     setAiIsResponsing: (isResponsing: boolean) => void;
     onChangeConversationId: (conversationId: string) => void;
@@ -82,6 +84,7 @@ export function useConversationOperations({
     setInputText,
     fileInfoList,
     clearFileInfoList,
+    returnFileInfoList,
     aiIsResponsing,
     setAiIsResponsing,
     onChangeConversationId,
@@ -112,9 +115,13 @@ export function useConversationOperations({
 
     const beginSend = (text: string, direct: { prompt: string } | undefined) => {
         if (direct || !onComposerMessage) return;
-        const row = newComposerMessage(conversation?.id ?? 0, text);
+        const row = newComposerMessage(conversation?.id ?? 0, text, fileInfoList);
         onComposerMessage(row);
-        if (!isMobilePlatform) setInputText("");
+        // 桌面端文字与附件一起随气泡离开输入框（附件已画在气泡里）；回执要等后端处理完附件，不能等它再清。
+        if (!isMobilePlatform) {
+            setInputText("");
+            if (fileInfoList?.length) clearFileInfoList();
+        }
         return row.clientRequestId;
     };
     const finishSend = (key: string | undefined, receipt: ComposerReceipt) => {
@@ -123,6 +130,9 @@ export function useConversationOperations({
         if (receipt.error && !accepted) {
             // setInputText is bound to the draft in which this submission was made.
             setInputText(text => text || inputText);
+            if (!isMobilePlatform && fileInfoList?.length && latestComposer.current.viewId === viewId) {
+                returnFileInfoList?.(fileInfoList);
+            }
             return accepted;
         }
         if (isMobilePlatform) setInputText(text => text === inputText ? "" : text);

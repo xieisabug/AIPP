@@ -179,6 +179,11 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         setFileInfoList(files.length ? files : null);
     }, []);
 
+    // 发送失败时放回这次带走的附件；期间用户又选了新附件就保留新的，和文字的「输入框空着才放回」一致。
+    const returnFiles = useCallback((files: FileInfo[]) => {
+        if (files.length) setFileInfoList(current => current?.length ? current : files);
+    }, []);
+
     // Draft reads can resolve after the picker, paste or removal action. A newer
     // user selection (even an empty one) wins over the stored attachment list.
     const restoreDraftFiles = useCallback((files: FileInfo[]) => {
@@ -189,6 +194,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         fileInfoList,
         clearFileInfoList,
         restoreFiles,
+        returnFiles,
         restoreDraftFiles,
         handleChooseFile,
         handleDeleteFile,

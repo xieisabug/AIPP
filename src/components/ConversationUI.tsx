@@ -509,6 +509,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             fileInfoList,
             clearFileInfoList,
             restoreFiles,
+            returnFiles,
             restoreDraftFiles,
             handleChooseFile,
             handleDeleteFile,
@@ -579,9 +580,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             conversationId: conversationId ? parseInt(conversationId) : null,
         });
 
-        // Sidebar expansion state and width
+        // Sidebar expansion state
         const [sidebarExpanded, setSidebarExpanded] = useState(false);
-        const [sidebarWidth, setSidebarWidth] = useState(0);
         const [sidebarToggleRequestVersion, setSidebarToggleRequestVersion] = useState(0);
 
         // Sidebar window state - when true, hide the inline sidebar
@@ -594,17 +594,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 详情栏展开时窗口控制按钮在详情栏头部，否则在会话头部末尾
         const headerShowsWindowControls = showWindowControls && !(sidebarExpanded && !isMobile && !hideSidebar && !sidebarWindowOpen && !!viewConversationId);
 
-        const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
+        const handleSidebarExpandChange = useCallback((isExpanded: boolean) => {
             setSidebarExpanded(isExpanded);
-            setSidebarWidth(width);
         }, []);
-
-        // Reset sidebar width when conversation changes or sidebar becomes invisible
-        useEffect(() => {
-            if (!viewConversationId || isMobile) {
-                setSidebarWidth(0);
-            }
-        }, [viewConversationId, isMobile]);
 
         // ============= 事件处理逻辑 =============
 
@@ -1277,7 +1269,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         useEffect(() => {
             const unlistenOpened = listen("sidebar-window-opened", () => {
                 setSidebarWindowOpen(true);
-                setSidebarWidth(0); // Reset sidebar width when window opens
                 // Send data immediately when window opens
                 emit("sidebar-data-sync", {
                     todos,
@@ -1420,6 +1411,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setInputText,
             fileInfoList: fileInfoList || undefined,
             clearFileInfoList,
+            returnFileInfoList: returnFiles,
             aiIsResponsing: effectiveAiIsResponsing,
             setAiIsResponsing,
             onChangeConversationId,
@@ -2639,7 +2631,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             aiIsResponsing={effectiveAiIsResponsing}
                             placement="bottom"
                             isMobile={isMobile}
-                            sidebarWidth={sidebarWidth}
                             sidebarVisible={!isMobile && !hideSidebar && Boolean(viewConversationId)}
                             sendButtonIcon={sendButtonIconSlot}
                             sendButtonVisual={sendButtonVisualSlot}

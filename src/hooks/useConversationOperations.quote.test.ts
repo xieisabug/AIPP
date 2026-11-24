@@ -83,6 +83,30 @@ describe("useConversationOperations quote reply", () => {
         }) }));
     });
 
+    it("should move attachments into the pending bubble on send and return them when the send is rejected", async () => {
+        let reject!: (error: Error) => void;
+        mockInvokeHandler("ask_ai", () => new Promise((_resolve, fail) => { reject = fail; }));
+        const files = [
+            { id: 31, name: "a.png", path: "C:/files/a.png", type: 1, thumbnail: "data:image/png;base64,AA" },
+            { id: 32, name: "b.docx", path: "C:/files/b.docx", type: 4 },
+        ];
+        const onComposerMessage = vi.fn();
+        const returnFileInfoList = vi.fn();
+        const { result, props } = setup(false, {
+            onComposerMessage, onComposerResult: vi.fn(), fileInfoList: files, returnFileInfoList, quote: null,
+        });
+        act(() => { result.current.handleSend(); });
+        // The backend extracts document text before it saves the row; the bubble and composer must not wait for it.
+        expect(onComposerMessage.mock.calls[0][0].attachment_list).toEqual([
+            { id: 31, attachment_type: "Image", attachment_url: "C:/files/a.png", attachment_content: "data:image/png;base64,AA" },
+            { id: 32, attachment_type: "Word", attachment_url: "C:/files/b.docx", attachment_content: undefined },
+        ]);
+        expect(props.clearFileInfoList).toHaveBeenCalledTimes(1);
+        expect(returnFileInfoList).not.toHaveBeenCalled();
+        await act(async () => reject(new Error("附件读取失败")));
+        expect(returnFileInfoList).toHaveBeenCalledWith(files);
+    });
+
     it("should send the stable quote identity with the message and clear the quote", async () => {
         mockInvokeHandler("ask_ai", () => ({ conversation_id: 20, request_prompt_result_with_context: "" }));
         const { result, props } = setup(false);
