@@ -610,10 +610,8 @@ pub async fn refresh_mcp_server_capabilities(
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
     let result = if server.transport_type == "stdio" && server.command.as_deref().is_some_and(crate::mcp::builtin_mcp::is_builtin_mcp_call) {
-        for tool in crate::mcp::builtin_mcp::get_builtin_tools_for_command(server.command.as_deref().unwrap_or_default()) {
-            db.upsert_mcp_server_tool(server_id, &tool.name, Some(&tool.description), Some(&tool.input_schema.to_string())).map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        let tools = super::builtin_mcp::get_builtin_tools_for_command(server.command.as_deref().unwrap_or_default());
+        super::builtin_mcp::templates::register_builtin_tools(&db, server_id, &tools).map_err(|e| format!("{e:#}"))
     } else {
         match discover_capabilities(&app_handle, &server).await {
             Ok((tools, resources, prompts)) => persist_capability_sets(&db, &server, &server.transport_type, tools, resources, prompts),

@@ -3,7 +3,7 @@ use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
-use super::builtin_mcp::templates::{get_builtin_tools_for_command, is_butler_conversation_kind};
+use super::builtin_mcp::templates::{get_builtin_tools_for_command, is_butler_conversation_kind, register_builtin_tools};
 use super::prompt::{collect_mcp_info_for_assistant, MCPInfoForAssistant};
 
 pub fn conversation_kind(app: &tauri::AppHandle, id: Option<i64>) -> Result<String, AppError> {
@@ -117,29 +117,49 @@ fn add_baseline(servers: &mut Vec<MCPServerWithTools>, baseline: Vec<MCPServerWi
     }
 }
 
+fn direct_servers(db: &MCPDatabase, kind: &str) -> Result<Vec<MCPServerWithTools>, AppError> {
+    let mut required = Vec::new();
+    let mut repaired = false;
+    let stored = db.get_mcp_servers()?;
+    for command in ["aipp:agent", "aipp:superadmin", "aipp:ui_interaction"] {
+        let server = stored.iter().filter(|s| s.is_builtin && s.command.as_deref() == Some(command))
+            .min_by_key(|s| (s.is_deletable, s.id))
+            .ok_or_else(|| AppError::UnknownError(format!("管家工具注入失败：内置工具集 {command} 未初始化")))?;
+        let definitions = get_builtin_tools_for_command(command);
+        let mut tools = db.get_mcp_server_tools(server.id)?;
+        let direct_definitions: Vec<_> = definitions.iter()
+            .filter(|d| is_direct_tool(kind, Some(command), &d.name))
+            .collect();
+        if direct_definitions.iter().any(|d| !tools.iter().any(|t| t.tool_name == d.name)) {
+            register_builtin_tools(db, server.id, &definitions)
+                .map_err(|e| AppError::DatabaseError(format!("管家补全工具失败：{command} (server_id={})：{e:#}", server.id)))?;
+            tools = db.get_mcp_server_tools(server.id)?;
+            repaired = true;
+        }
+        let mut direct = Vec::new();
+        for definition in direct_definitions {
+            let stored = tools.iter().find(|t| t.tool_name == definition.name)
+                .ok_or_else(|| AppError::UnknownError(format!("管家工具注入失败：{command}::{} 未初始化", definition.name)))?;
+            direct.push(MCPToolInfo { id: stored.id, name: definition.name.clone(),
+                description: definition.description.clone(), parameters: definition.input_schema.to_string(),
+                is_enabled: true, is_auto_run: stored.is_auto_run });
+        }
+        required.push(MCPServerWithTools { id: server.id, name: server.name.clone(), summary: String::new(),
+            command: server.command.clone(), is_enabled: true, tools: direct });
+    }
+    if repaired {
+        db.rebuild_dynamic_mcp_catalog_force()
+            .map_err(|e| AppError::DatabaseError(format!("管家补全工具后更新 MCP 目录失败：{e}")))?;
+    }
+    Ok(required)
+}
+
 pub fn inject(app: &tauri::AppHandle, servers: &mut Vec<MCPServerWithTools>, kind: &str) -> Result<(), AppError> {
     let mut required = Vec::new();
     if cfg!(desktop) && is_butler_conversation_kind(kind) {
-        // 管家模式下所有助手与总管家一致：全局启用的 MCP 服务都可用。
-        add_baseline(servers, globally_enabled_servers(&MCPDatabase::new(app)?)?);
         let db = MCPDatabase::new(app)?;
-        let stored = db.get_mcp_servers()?;
-        for command in ["aipp:agent", "aipp:superadmin", "aipp:ui_interaction"] {
-            let server = stored.iter().find(|s| s.is_builtin && s.command.as_deref() == Some(command))
-                .ok_or_else(|| AppError::UnknownError(format!("管家工具注入失败：内置工具集 {command} 未初始化")))?;
-            let definitions = get_builtin_tools_for_command(command);
-            let tools = db.get_mcp_server_tools(server.id)?;
-            let mut direct = Vec::new();
-            for definition in definitions.iter().filter(|t| is_direct_tool(kind, Some(command), &t.name)) {
-                let stored = tools.iter().find(|t| t.tool_name == definition.name)
-                    .ok_or_else(|| AppError::UnknownError(format!("管家工具注入失败：{command}::{} 未初始化", definition.name)))?;
-                direct.push(MCPToolInfo { id: stored.id, name: definition.name.clone(),
-                    description: definition.description.clone(), parameters: definition.input_schema.to_string(),
-                    is_enabled: true, is_auto_run: stored.is_auto_run });
-            }
-            required.push(MCPServerWithTools { id: server.id, name: server.name.clone(), summary: String::new(),
-                command: server.command.clone(), is_enabled: true, tools: direct });
-        }
+        required = direct_servers(&db, kind)?;
+        add_baseline(servers, globally_enabled_servers(&db)?);
     }
     merge_tools(servers, required, kind);
     crate::vault::tool::inject(app, servers);

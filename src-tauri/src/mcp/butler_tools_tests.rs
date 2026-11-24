@@ -1,5 +1,30 @@
 use super::*;
 
+#[cfg(desktop)]
+#[test]
+fn test_builtin_upgrade_repairs_missing_tool_during_butler_send() {
+    let db = MCPDatabase { conn: rusqlite::Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    for command in ["aipp:agent", "aipp:superadmin", "aipp:ui_interaction"] {
+        let id = db.upsert_mcp_server_with_builtin(command, None, "stdio", Some(command),
+            None, None, None, None, false, true, true, false, false).unwrap();
+        let mut tools = get_builtin_tools_for_command(command);
+        tools.retain(|t| t.name != "present_choices");
+        register_builtin_tools(&db, id, &tools).unwrap();
+    }
+    for kind in ["butler_main", "butler_contact"] {
+        let mut selected = Vec::new();
+        merge_tools(&mut selected, direct_servers(&db, kind).unwrap(), kind);
+        let ui = selected.iter().find(|s| s.command.as_deref() == Some("aipp:ui_interaction")).unwrap();
+        let choices = ui.tools.iter().find(|t| t.name == "present_choices").unwrap();
+        assert!(choices.is_enabled && !choices.is_auto_run);
+        assert!(db.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mcp_tool_catalog WHERE tool_id=?1 AND summary_generated_at IS NOT NULL)",
+            [choices.id], |r| r.get::<_, bool>(0),
+        ).unwrap());
+    }
+}
+
 fn server(id: i64, command: &str) -> MCPServerWithTools {
     MCPServerWithTools { id, name:command.into(),summary:String::new(),command:Some(command.into()),is_enabled:false,
         tools:get_builtin_tools_for_command(command).into_iter().enumerate().map(|(n,t)|MCPToolInfo {

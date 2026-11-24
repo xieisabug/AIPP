@@ -1,4 +1,4 @@
-use crate::db::connection::{params, OptionalExtension};
+use crate::db::connection::params;
 use crate::db::mcp_db::MCPDatabase;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,10 @@ pub(crate) fn prepare_model_schema(schema: &mut serde_json::Value) {
 #[cfg(test)]
 #[path = "templates_schema_tests.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "templates_upgrade_tests.rs"]
+mod upgrade_tests;
 
 /// Returns true if the entire builtin command (server) is butler-only.
 pub fn is_butler_only_builtin_command(command: &str) -> bool {
@@ -1541,97 +1545,85 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     }
 }
 
-/// 初始化所有内置工具集到数据库（如果不存在）
-/// 此函数应在应用启动时调用，确保内置工具集始终存在
+/// Refresh shipped definitions without replacing tool IDs or user preferences.
+pub(crate) fn register_builtin_tools(db: &MCPDatabase, server_id: i64, tools: &[BuiltinToolInfo]) -> Result<()> {
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
+    let existing = db.get_mcp_server_tools(server_id)?;
+    for tool in tools {
+        let schema = tool.input_schema.to_string();
+        if existing.iter().any(|t| t.tool_name == tool.name
+            && t.tool_description.as_ref() == Some(&tool.description)
+            && t.parameters.as_ref() == Some(&schema)) {
+            continue;
+        }
+        db.upsert_mcp_server_tool(server_id, &tool.name, Some(&tool.description), Some(&schema))
+            .with_context(|| format!("Register builtin tool {} on server {server_id}", tool.name))?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn sync_builtin_template(db: &MCPDatabase, tpl: &BuiltinTemplateInfo) -> Result<()> {
+    let mut stmt = db.conn.prepare(
+        "SELECT id, is_deletable, name FROM mcp_server WHERE command=?1 AND is_builtin=1 ORDER BY id",
+    )?;
+    let instances = stmt.query_map([&tpl.command], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, r.get::<_, String>(2)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let has_default = instances.iter().any(|(_, deletable, name)| !deletable || name == &tpl.name);
+    let mut ids: Vec<_> = instances.into_iter().map(|(id, _, _)| id).collect();
+    if !has_default {
+        // An unrelated server may already own the display name. Never overwrite its configuration.
+        db.conn.execute(
+            "INSERT INTO mcp_server(name, description, transport_type, command, timeout, is_builtin, is_deletable)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 0)",
+            params![tpl.name, tpl.description, tpl.transport_type, tpl.command,
+                if tpl.command == "aipp:search" { tpl.default_timeout } else { Some(20000) }],
+        )?;
+        ids.push(db.conn.last_insert_rowid());
+    }
+
+    let tools = get_builtin_tools_for_command(&tpl.command);
+    let keep: Vec<_> = tools.iter().map(|t| t.name.clone()).collect();
+    for id in ids {
+        register_builtin_tools(db, id, &tools)?;
+        // Only open a cross-database deletion transaction if a tool was actually retired.
+        if db.get_mcp_server_tools(id)?.iter().any(|t| !keep.contains(&t.tool_name)) {
+            db.delete_mcp_server_tools_not_in(id, &keep)
+                .with_context(|| format!("Remove retired tools from server {id}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[instrument(skip(app_handle))]
 pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
-    use tracing::info;
-
     let db = MCPDatabase::new(app_handle).context("Create MCPDatabase failed")?;
-    super::search::recovery::repair_search_servers(&db.conn).context("Repair legacy search servers failed")?;
-    let templates = builtin_templates();
-
-    for tpl in templates {
-        // 检查是否已存在该内置工具集（通过 command 匹配）
-        let exists = db.conn
-            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1 AND is_deletable = 0")?
-            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
-            .optional()?;
-
-        let server_id = if let Some(server_id) = exists {
-            server_id
-        } else {
-            info!(template_id = %tpl.id, name = %tpl.name, "Initializing builtin MCP server");
-
-            // 插入内置工具集（系统初始化的不可删除）
-            let server_id = db
-                .upsert_mcp_server_with_builtin(
-                    &tpl.name,              // name
-                    Some(&tpl.description), // description
-                    &tpl.transport_type,    // transport_type
-                    Some(&tpl.command),     // command
-                    None,                   // environment_variables (用户可以后续配置)
-                    None,                   // headers
-                    None,                   // url (builtins use stdio)
-                    if tpl.command == "aipp:search" { tpl.default_timeout } else { Some(20000) },
-                    false,                  // is_long_running
-                    true,                   // is_enabled
-                    true,                   // is_builtin
-                    false,                  // is_deletable - 系统初始化的不可删除
-                    false,                  // proxy_enabled - builtin 不使用代理
-                )
-                .context("Insert builtin server failed")?;
-            info!(template_id = %tpl.id, server_id = server_id, "Builtin MCP server initialized");
-            server_id
-        };
-
-        // 每次启动都同步工具定义，确保内置工具集升级后自动更新
-        let tools = get_builtin_tools_for_command(&tpl.command);
-        for tool in &tools {
-            db.upsert_mcp_server_tool(
-                server_id,
-                &tool.name,
-                Some(&tool.description),
-                Some(&tool.input_schema.to_string()),
-            )
-            .with_context(|| format!("Upsert server tool failed: {}", tool.name))?;
-        }
-        let keep_names = tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        let _ = db
-            .delete_mcp_server_tools_not_in(server_id, &keep_names)
-            .with_context(|| format!("Sync builtin server tools failed: {}", tpl.id))?;
-    }
-
-    let _ = db.rebuild_dynamic_mcp_catalog_force();
-
-    // Builtin tools already have human-written descriptions, so mark their
-    // summary_generated_at so they're discoverable via load_mcp_tool/load_mcp_server.
-    // (The catalog requires summary_generated_at IS NOT NULL for search.)
-    for tpl in &builtin_templates() {
-        let server_id = db
-            .conn
-            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
-            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
-            .optional()?;
-        if let Some(sid) = server_id {
-            let _ = db.conn.execute(
-                "UPDATE mcp_server_capability_epoch_catalog
-                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
-                 WHERE server_id = ?",
-                params![sid],
-            );
-            let _ = db.conn.execute(
-                "UPDATE mcp_tool_catalog
-             SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
-             WHERE server_id = ?",
-                params![sid],
-            );
-        }
-    }
-
-    // Initialize superadmin audit log table
     super::superadmin::init_superadmin_tables(app_handle);
+    sync_builtin_catalog(&db)
+}
 
+fn sync_builtin_catalog(db: &MCPDatabase) -> Result<()> {
+    let mut errors = Vec::new();
+    let search_repair = super::search::recovery::repair_search_servers(&db.conn);
+    for tpl in builtin_templates() {
+        if tpl.command == "aipp:search" || tpl.command == "aipp:artifact" {
+            if let Err(error) = &search_repair {
+                errors.push(format!("{}: legacy search repair failed: {error}", tpl.command));
+                continue;
+            }
+        }
+        if let Err(error) = sync_builtin_template(db, &tpl) {
+            errors.push(format!("{}: {error:#}", tpl.command));
+        }
+    }
+    // The rebuild uses shipped descriptions for every enabled builtin instance.
+    if let Err(error) = db.rebuild_dynamic_mcp_catalog_force() {
+        errors.push(format!("Rebuild MCP catalog: {error}"));
+    }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(())
 }
 
@@ -1694,38 +1686,8 @@ pub async fn add_or_update_aipp_builtin_server(
             &tpl.transport_type, Some(&tpl.command), None, env_str.as_deref(), None)
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        // 注册工具
-        for tool in get_builtin_tools_for_command(&tpl.command) {
-            db.upsert_mcp_server_tool(
-                server_id,
-                &tool.name,
-                Some(&tool.description),
-                Some(&tool.input_schema.to_string()),
-            )
-            .with_context(|| format!("Upsert server tool failed: {}", tool.name))?;
-        }
-
-        let _ = db.rebuild_dynamic_mcp_catalog_force();
-
-        if let Ok(Some(sid)) = db
-            .conn
-            .prepare("SELECT id FROM mcp_server WHERE command = ? AND is_builtin = 1")?
-            .query_row(params![tpl.command.clone()], |row| row.get::<_, i64>(0))
-            .optional()
-        {
-            let _ = db.conn.execute(
-                "UPDATE mcp_server_capability_epoch_catalog
-                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
-                 WHERE server_id = ?",
-                params![sid],
-            );
-            let _ = db.conn.execute(
-                "UPDATE mcp_tool_catalog
-                 SET summary_generated_at = COALESCE(summary_generated_at, CURRENT_TIMESTAMP)
-                 WHERE server_id = ?",
-                params![sid],
-            );
-        }
+        register_builtin_tools(&db, server_id, &get_builtin_tools_for_command(&tpl.command))?;
+        db.rebuild_dynamic_mcp_catalog_force().context("Rebuild MCP catalog")?;
 
         Ok(server_id)
     })()
