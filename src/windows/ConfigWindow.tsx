@@ -17,7 +17,6 @@ import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
 import {
     MAC_TRAFFIC_LIGHTS_SAFE_LEFT,
-    TITLEBAR_HEIGHT,
     FloatingWindowControls,
     WindowTitleBar,
     dragRegionProps,
@@ -56,6 +55,13 @@ const contentMap: Record<string, React.ComponentType<any>> = {
 
 // 设置页动态加载时的占位，保持黑白灰主色调
 const configPageFallback = <ConfigPageLoading />;
+
+/**
+ * Windows 宽屏设置窗口的顶部：内容区只留一条窄拖拽条，窗口控制按钮（32px 高）中线在 20，
+ * 下半部分落在页面自身的上内边距（py-6）里；页面内容顶边 = 拖拽条 + 24。
+ */
+const WINDOWS_CONTENT_DRAG_HEIGHT = 24;
+const WINDOWS_CONTROLS_CENTER_Y = 20;
 
 function ConfigWindow() {
     // 集成主题系统
@@ -406,23 +412,22 @@ function ConfigWindow() {
                 {...drag}
                 data-aipp-slot="config-layout"
             >
-                {/* 侧边栏 */}
+                {/* 侧边栏：macOS 顶部是红黄绿按钮所在的标题栏行；Windows / Linux 没有标题栏行，菜单直接从顶部开始 */}
                 <div
-                    className={`aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 ${framelessTitleBar ? "pt-0 pb-6" : "py-6"} overflow-y-auto`}
+                    className={`aipp-settings-menu-container bg-muted/30 border-r border-border px-3 md:px-4 ${macOverlayTitleBar ? "pt-0 pb-6" : customWindowControls ? "pt-6 pb-6" : "py-6"} overflow-y-auto`}
                     data-theme-slot="settings-menu-container"
                     data-aipp-slot="config-menu"
                 >
-                    {/* 标题栏行：拖拽区（macOS 左侧为红黄绿按钮），高度与管家顶栏一致 */}
-                    {framelessTitleBar && <WindowTitleBar className="-mx-3 md:-mx-4" data-aipp-slot="config-titlebar" />}
+                    {macOverlayTitleBar && <WindowTitleBar className="-mx-3 md:-mx-4" data-aipp-slot="config-titlebar" />}
                     {renderMenuItems((id) => requestConfigLeave(() => goToSection(id)))}
                 </div>
 
                 {/* 内容区域 */}
                 <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
-                    {/* Windows：内容区顶部与菜单标题栏行同高的拖拽条，右侧放窗口控制按钮 */}
+                    {/* Windows：内容区顶部的窄拖拽条；窗口控制按钮固定在右上角，下半部分落在页面的上内边距里 */}
                     {customWindowControls && (
-                        <div className="shrink-0 md:-mx-2 lg:-mx-4" style={{ height: TITLEBAR_HEIGHT }} data-tauri-drag-region data-aipp-slot="config-content-titlebar">
-                            <FloatingWindowControls centerY={TITLEBAR_HEIGHT / 2} right={12} />
+                        <div className="shrink-0 md:-mx-2 lg:-mx-4" style={{ height: WINDOWS_CONTENT_DRAG_HEIGHT }} data-tauri-drag-region data-aipp-slot="config-content-titlebar">
+                            <FloatingWindowControls centerY={WINDOWS_CONTROLS_CENTER_Y} right={12} />
                         </div>
                     )}
                     {/* 配置组件内容 */}
