@@ -74,7 +74,7 @@ export function ChoiceToggle({
             <Toggle
                 variant="outline"
                 size="sm"
-                className={cn(size, ACTIVE)}
+                className={cn("aipp-icon-button", size, ACTIVE)}
                 aria-label={label}
                 pressed={pressed}
                 onPressedChange={onPressedChange}
@@ -114,7 +114,7 @@ export function ChoiceSegmented<T extends string>({
                     <ToggleGroupItem
                         value={option.value}
                         aria-label={option.label}
-                        className={cn(size, "flex-none", ACTIVE)}
+                        className={cn("aipp-icon-button", size, "flex-none", ACTIVE)}
                     >
                         {option.icon}
                     </ToggleGroupItem>

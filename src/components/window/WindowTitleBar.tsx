@@ -101,7 +101,7 @@ export function WindowTitleBar({ className, children, "data-aipp-slot": slot = "
 }
 
 const controlButtonClass =
-    "inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring";
+    "aipp-icon-button inline-flex size-8 items-center justify-center rounded-md transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring";
 
 /** 当前窗口是否最大化（随窗口缩放同步），用于切换「最大化 / 还原」图标。 */
 function useWindowMaximized(enabled: boolean): boolean {
@@ -155,7 +155,7 @@ export function WindowControls({ className }: { className?: string }) {
                 onClick={() => void appWindow().toggleMaximize()} data-aipp-slot="window-controls-maximize">
                 {maximized ? <Copy className="size-3.5 -scale-x-100" strokeWidth={1.5} /> : <Square className="size-3.5" strokeWidth={1.5} />}
             </button>
-            <button type="button" className={cn(controlButtonClass, "hover:bg-destructive hover:text-white")} aria-label="关闭" title="关闭"
+            <button type="button" className={cn(controlButtonClass, "hover:bg-destructive hover:[--button-ink:var(--destructive-foreground)]")} aria-label="关闭" title="关闭"
                 onClick={() => void appWindow().close()} data-aipp-slot="window-controls-close">
                 <X className="size-4" strokeWidth={1.5} />
             </button>

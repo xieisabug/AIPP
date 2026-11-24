@@ -170,6 +170,7 @@ const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
                                             {ws.path}
                                         </span>
                                         <Button
+                                            iconLabel="移除工作区"
                                             type="button"
                                             variant="ghost"
                                             size="sm"

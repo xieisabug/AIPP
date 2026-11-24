@@ -606,6 +606,7 @@ function SidebarWindow() {
                             </div>
                         </div>
                         <Button
+                            iconLabel="关闭预览"
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7"

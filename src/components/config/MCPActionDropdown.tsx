@@ -62,6 +62,7 @@ const MCPActionDropdown: React.FC<MCPActionDropdownProps> = ({
         <DropdownMenu>
             <DropdownMenuTrigger asChild>
                 <Button
+                    iconLabel="添加或导入 MCP 服务"
                     variant={variant}
                     size={size}
                     className={`gap-2 ${className}`}

@@ -262,7 +262,7 @@ const LLMProviderConfig: React.FC = () => {
                 <TooltipTrigger asChild>
                     <Button
                         onClick={openNewProviderDialog}
-                        aria-label="添加提供商"
+                        iconLabel="添加提供商"
                         className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all"
                     >
                         <Plus className="h-4 w-4" />
@@ -275,6 +275,7 @@ const LLMProviderConfig: React.FC = () => {
                     <Button
                         variant="outline"
                         onClick={() => setImportDialogOpen(true)}
+                        iconLabel="导入提供商"
                         className="shadow-sm hover:shadow-md transition-all"
                     >
                         <ClipboardPaste className="h-4 w-4" />
@@ -382,6 +383,7 @@ const LLMProviderConfig: React.FC = () => {
                                                 <Button
                                                     variant="outline"
                                                     onClick={() => setImportDialogOpen(true)}
+                                                    iconLabel="导入提供商"
                                                     className="shadow-lg hover:shadow-xl transition-all"
                                                 >
                                                     <ClipboardPaste className="h-4 w-4" />

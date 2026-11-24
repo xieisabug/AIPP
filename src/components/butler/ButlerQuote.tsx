@@ -98,7 +98,7 @@ export function ButlerQuoteButton({ target, variant = "inline" }: { target: Butl
     }
     return <button type="button" title="引用回复" aria-label="引用回复" data-aipp-slot="butler-quote-reply"
         onClick={() => state.setQuote(target)}
-        className="inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground">
+        className="aipp-icon-button inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground">
         <Quote className="h-3.5 w-3.5" />
     </button>;
 }
@@ -109,7 +109,7 @@ export function ButlerQuoteChip({ quote, onClear }: { quote: ButlerQuoteTarget; 
         <Quote className="h-3 w-3 shrink-0" />
         <span className="shrink-0 font-medium text-foreground">{quote.label}</span>
         {quote.excerpt && <span className="min-w-0 truncate">{quote.excerpt}</span>}
-        <button type="button" aria-label="取消引用" onClick={onClear} className="shrink-0 rounded hover:text-foreground">
+        <button title="取消引用" type="button" aria-label="取消引用" onClick={onClear} className="aipp-icon-button shrink-0 rounded hover:text-foreground">
             <X className="h-3 w-3" />
         </button>
     </div>;

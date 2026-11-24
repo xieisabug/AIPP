@@ -45,6 +45,7 @@ export const FolderPicker: React.FC<FolderPickerProps> = ({
                 className="flex-1"
             />
             <Button
+                iconLabel="选择文件夹"
                 type="button"
                 variant="outline"
                 size="icon"

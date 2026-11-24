@@ -730,6 +730,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         <Button
                             variant="outline"
                             onClick={openImportDialog}
+                            iconLabel="导入助手"
                             className="shadow-sm hover:shadow-md transition-all"
                         >
                             <ClipboardPaste className="h-4 w-4" />
@@ -861,6 +862,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                                 <Button
                                                     variant="outline"
                                                     onClick={openImportDialog}
+                                                    iconLabel="导入助手"
                                                     className="shadow-lg hover:shadow-xl transition-all"
                                                 >
                                                     <ClipboardPaste className="h-4 w-4" />

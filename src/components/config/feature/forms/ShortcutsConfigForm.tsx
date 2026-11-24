@@ -159,7 +159,7 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({
                             <button
                                 type="button"
                                 onClick={() => handleResetAppShortcut(actionId)}
-                                className="text-muted-foreground hover:text-foreground"
+                                className="aipp-icon-button text-muted-foreground hover:text-foreground"
                                 title="恢复默认"
                             >
                                 <RotateCcw className="h-3.5 w-3.5" />

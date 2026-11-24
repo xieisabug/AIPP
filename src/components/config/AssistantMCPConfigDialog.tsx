@@ -403,6 +403,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                                 <DropdownMenu>
                                                                     <DropdownMenuTrigger asChild>
                                                                         <Button
+                                                                            iconLabel="更多工具操作"
                                                                             variant="ghost"
                                                                             size="sm"
                                                                             onClick={(e) => e.stopPropagation()}

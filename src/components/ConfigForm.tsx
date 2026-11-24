@@ -360,8 +360,8 @@ export const ConfigFormField = ({ field, name, control, data, assistantConfigApi
                                 {option.tooltip && !isMobilePlatform && (
                                     <TooltipProvider>
                                         <Tooltip>
-                                            <TooltipTrigger>
-                                                <CircleHelp size={16} className="text-muted-foreground" />
+                                            <TooltipTrigger className="aipp-icon-button" aria-label={`${option.label}说明`}>
+                                                <CircleHelp size={16} />
                                             </TooltipTrigger>
                                             <TooltipContent>{option.tooltip}</TooltipContent>
                                         </Tooltip>
@@ -433,11 +433,8 @@ export const ConfigFormField = ({ field, name, control, data, assistantConfigApi
                         {field.tooltip && !isMobilePlatform && (
                             <TooltipProvider>
                                 <Tooltip>
-                                    <TooltipTrigger className="ml-2">
-                                        <CircleHelp
-                                            size={16}
-                                            className="text-muted-foreground hover:text-foreground transition-colors"
-                                        />
+                                    <TooltipTrigger className="aipp-icon-button ml-2" aria-label={`${field.label}说明`}>
+                                        <CircleHelp size={16} />
                                     </TooltipTrigger>
                                     <TooltipContent className="max-w-sm text-left leading-relaxed">
                                         {field.tooltip}
@@ -725,6 +722,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                     ) : null}
                     {!isMobilePlatform && onCopy && (
                         <Button
+                            iconLabel="复制"
                             variant="ghost"
                             size="sm"
                             onClick={onCopy}
@@ -747,6 +745,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                     )}
                     {!isMobilePlatform && onDelete && (
                         <Button
+                            iconLabel="删除"
                             variant="ghost"
                             size="sm"
                             onClick={onDelete}

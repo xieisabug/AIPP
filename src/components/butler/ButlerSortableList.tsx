@@ -66,7 +66,7 @@ export default function ButlerSortableList({ rows }: { rows: Row[] }) {
             {ordered.length > 1 &&
             <button type="button" disabled={!loaded} aria-label={`调整顺序：${row.label}`}
                 title="拖动排序，也可用上下方向键移动"
-                className="shrink-0 touch-none cursor-grab rounded px-0.5 py-2 text-muted-foreground opacity-0 hover:bg-muted group-hover/sort:opacity-100 focus-visible:opacity-100 active:cursor-grabbing [@media(hover:none)]:opacity-100"
+                className="aipp-icon-button shrink-0 touch-none cursor-grab rounded px-0.5 py-2 text-muted-foreground opacity-0 hover:bg-muted group-hover/sort:opacity-100 focus-visible:opacity-100 active:cursor-grabbing [@media(hover:none)]:opacity-100"
                 onPointerDown={event => { if (event.button === 0 && event.isPrimary) event.currentTarget.setPointerCapture(event.pointerId); }}
                 onPointerMove={event => {
                     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;

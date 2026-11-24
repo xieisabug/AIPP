@@ -184,7 +184,7 @@ export const useFileList = (
 
         <button
           type="button"
-          className="input-area-img-delete-button"
+          className="input-area-img-delete-button aipp-icon-button"
           title={`移除 ${fileInfo.name}`}
           aria-label={`移除 ${fileInfo.name}`}
           data-aipp-slot="chat-input-attachment-remove"

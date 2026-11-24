@@ -372,6 +372,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     )}
                     {selectedSkill.source_type === 'agents' && (
                         <Button
+                            iconLabel="删除技能"
                             variant="ghost"
                             size="icon"
                             className="text-muted-foreground"
@@ -419,6 +420,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
                     <Tooltip delayDuration={300}>
                         <TooltipTrigger asChild>
                             <Button
+                                iconLabel="打开所在文件夹"
                                 variant="ghost"
                                 size="icon"
                                 className="text-muted-foreground"

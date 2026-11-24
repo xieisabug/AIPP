@@ -580,8 +580,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             size="sm"
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0 text-destructive"
-                            title="停止"
-                            aria-label="停止"
+                            iconLabel="停止"
                         >
                             <Square className="h-4 w-4 fill-current" />
                         </Button>
@@ -593,8 +592,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             size="sm"
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
-                            title={isFailed ? "重新执行" : "执行"}
-                            aria-label={isFailed ? "重新执行" : "执行"}
+                            iconLabel={isFailed ? "重新执行" : "执行"}
                         >
                             {isExecuting ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -611,8 +609,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             size="sm"
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
-                            title="以错误继续对话"
-                            aria-label="以错误继续对话"
+                            iconLabel="以错误继续对话"
                         >
                             <ArrowRight className="h-4 w-4" />
                         </Button>
@@ -624,8 +621,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             size="sm"
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
-                            title="拒绝执行"
-                            aria-label="拒绝执行"
+                            iconLabel="拒绝执行"
                         >
                             <XCircle className="h-4 w-4" />
                         </Button>
@@ -635,8 +631,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                         size="sm"
                         variant="ghost"
                         className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
-                        title={isExpanded ? "收起详情" : "展开详情"}
-                        aria-label={isExpanded ? "收起详情" : "展开详情"}
+                        iconLabel={isExpanded ? "收起详情" : "展开详情"}
                     >
                         {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                     </Button>

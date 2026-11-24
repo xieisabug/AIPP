@@ -172,6 +172,8 @@ button.input-area-attachment-name {
  * 触屏/移动端常驻并放大到 44px 热区（见 .mobile / platform 规则）。
  */
 .input-area-img-delete-button {
+    --button-ink: var(--background);
+    --button-ink-opacity: 0.75;
     position: absolute;
     top: -6px;
     right: -6px;
@@ -208,6 +210,8 @@ button.input-area-attachment-name {
 
 .input-area.mobile .input-area-img-delete-button,
 .aipp-mobile-platform .input-area-img-delete-button {
+    --button-ink: initial;
+    --button-ink-opacity: 1;
     display: flex !important;
     opacity: 1;
     pointer-events: auto;

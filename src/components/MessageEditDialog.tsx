@@ -61,10 +61,11 @@ const MessageEditDialog: React.FC<MessageEditDialogProps> = ({
                 <div className="flex shrink-0 items-center justify-between gap-2.5 border-b border-border px-4 py-2.5 sm:px-5">
                     <h2 className="truncate text-base font-semibold text-foreground">编辑消息</h2>
                     <button
+                        title="关闭编辑"
                         type="button"
                         onClick={onClose}
                         aria-label="关闭编辑"
-                        className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        className="aipp-icon-button flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                     >
                         <X className="h-4 w-4" />
                     </button>

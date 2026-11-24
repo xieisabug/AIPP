@@ -462,6 +462,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                                         {copilot.authInfo.userCode}
                                                     </code>
                                                     <Button
+                                                        iconLabel="复制授权码"
                                                         type="button"
                                                         variant="outline"
                                                         size="sm"
@@ -988,6 +989,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     <div className="flex items-center gap-1">
                         {onShare && (
                             <Button
+                                iconLabel="分享提供商"
                                 variant="ghost"
                                 size="sm"
                                 onClick={onShare}
@@ -1000,10 +1002,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 )}
 
                 <Button
+                    iconLabel="删除提供商"
                     variant="ghost"
                     size="sm"
                     onClick={onDelete}
-                    className="hover:bg-red-50 hover:border-red-300 hover:text-red-700"
+                    className="hover:bg-destructive/10"
                 >
                     <Trash2 className="h-4 w-4 mr-1" />
                 </Button>

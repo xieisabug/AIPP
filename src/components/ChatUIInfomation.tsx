@@ -112,23 +112,23 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
                 <Button
                     onClick={toggleReveal}
                     variant={"ghost"}
-                    title={isRevealed ? "隐藏原文" : "显示原文"}
+                    iconLabel={isRevealed ? "隐藏原文" : "显示原文"}
                     {...actionButtonProps} data-aipp-slot="chat-info-toggle-anti-leakage"
                 >
                     {isRevealed ? <EyeOff /> : <Eye />}
                 </Button>
             )}
-            <Button onClick={openConfig} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-config">
+            <Button iconLabel="打开设置" onClick={openConfig} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-config">
                 <Settings />
             </Button>
             <AppUpdateNotice />
             {canShowArtifacts && (
-                <Button onClick={openArtifactsCollections} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-artifacts">
+                <Button iconLabel="打开制品合集" onClick={openArtifactsCollections} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-artifacts">
                     <PackageOpen />
                 </Button>
             )}
             {canShowSchedule && (
-                <Button onClick={openScheduleWindow} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-schedule">
+                <Button iconLabel="打开定时任务" onClick={openScheduleWindow} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-schedule">
                     <CalendarClock />
                 </Button>
             )}

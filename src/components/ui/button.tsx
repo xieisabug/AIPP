@@ -36,15 +36,29 @@ function Button({
     className,
     variant,
     size,
+    iconLabel,
+    title,
+    "aria-label": ariaLabel,
     asChild = false,
     ...props
 }: React.ComponentProps<"button"> &
     VariantProps<typeof buttonVariants> & {
         asChild?: boolean;
+        /** Name and hover hint for icon-only actions with custom sizing. */
+        iconLabel?: string;
     }) {
     const Comp = asChild ? Slot : "button";
 
-    return <Comp data-slot="button" className={cn(buttonVariants({ variant, size, className }))} {...props} />;
+    const iconOnly = size === "icon" || iconLabel !== undefined;
+    const label = ariaLabel ?? iconLabel;
+    const hasTooltip = "data-slot" in props && props["data-slot"] === "tooltip-trigger";
+    return <Comp
+        data-slot="button"
+        className={cn(buttonVariants({ variant, size }), iconOnly && "aipp-icon-button", className)}
+        aria-label={label}
+        title={title ?? (iconOnly && !hasTooltip ? label : undefined)}
+        {...props}
+    />;
 }
 
 export { Button, buttonVariants };

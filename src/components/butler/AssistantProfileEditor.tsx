@@ -308,7 +308,7 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                                 aria-label={`${label}：无`} title="无"
                                 aria-pressed={appearance.accessories[slot] === null}
                                 onClick={() => selectAccessory(null)}
-                                className="flex size-11 items-center justify-center rounded-lg border aria-pressed:border-primary aria-pressed:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
+                                className="aipp-icon-button flex size-11 items-center justify-center rounded-lg border aria-pressed:border-primary aria-pressed:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
                                 <X className="size-4 text-muted-foreground" />
                             </button>
                             {builtinItems.map(renderAccessoryButton)}

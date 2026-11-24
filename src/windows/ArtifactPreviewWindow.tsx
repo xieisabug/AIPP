@@ -890,7 +890,7 @@ export default function ArtifactPreviewWindow() {
                         <div className="flex items-center gap-2">
                             <Popover>
                                 <PopoverTrigger asChild>
-                                    <Button variant="outline" size="sm" title="临时配置">
+                                    <Button variant="outline" size="sm" iconLabel="临时配置">
                                         <Settings2 className="h-4 w-4" />
                                     </Button>
                                 </PopoverTrigger>

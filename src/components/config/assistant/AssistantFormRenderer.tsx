@@ -104,6 +104,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
                 onShare ? (
                     <div className="flex gap-2">
                         <Button
+                            iconLabel="分享助手"
                             variant="ghost"
                             size="sm"
                             onClick={onShare}

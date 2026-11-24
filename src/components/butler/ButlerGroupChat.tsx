@@ -325,7 +325,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                             <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={28} figure />
                             <span className="min-w-0 flex-1 truncate text-sm">{member.name}</span>
                             {members.length > 1 && <button type="button" title={`将 ${member.name} 移出群聊`} aria-label={`将 ${member.name} 移出群聊`}
-                                className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                                className="aipp-icon-button rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                                 onClick={() => void removeMember(member)}><UserMinus className="size-3.5" /></button>}
                         </div>)}
                     </section>

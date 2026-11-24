@@ -1175,7 +1175,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const pluginActionDropdown = (
         <DropdownMenu>
             <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-2" disabled={loading}>
+                <Button iconLabel="更多插件操作" variant="outline" size="sm" className="gap-2" disabled={loading}>
                     <ChevronDown className="h-4 w-4" />
                 </Button>
             </DropdownMenuTrigger>

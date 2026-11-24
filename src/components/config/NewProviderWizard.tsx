@@ -409,9 +409,10 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                 <DialogDescription className="sr-only">选择 API 类型，填写连接信息并选择模型</DialogDescription>
                 <DialogClose asChild>
                     <button
+                        title="关闭"
                         type="button"
                         aria-label="关闭"
-                        className="ml-auto flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        className="aipp-icon-button ml-auto flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                     >
                         <X className="h-4 w-4" />
                     </button>
@@ -614,9 +615,10 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                                     <span key={code} className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-muted/60 py-0.5 pl-2 pr-1 text-xs">
                                         <span className="truncate">{code}</span>
                                         <button
+                                            title={`移除 ${code}`}
                                             type="button"
                                             aria-label={`移除 ${code}`}
-                                            className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
+                                            className="aipp-icon-button rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                                             onClick={() => setCustomCodes((prev) => prev.filter((item) => item !== code))}
                                         >
                                             <X className="h-3 w-3" />

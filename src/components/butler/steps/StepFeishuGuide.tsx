@@ -227,6 +227,7 @@ const StepFeishuGuide: React.FC<StepFeishuGuideProps> = ({
                                     </span>
                                 </div>
                                 <Button
+                                    iconLabel="刷新飞书连接状态"
                                     type="button"
                                     variant="ghost"
                                     size="sm"

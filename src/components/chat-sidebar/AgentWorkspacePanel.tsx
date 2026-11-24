@@ -321,8 +321,9 @@ const AgentWorkspacePanel: React.FC<AgentWorkspacePanelProps> = ({
                     <GitBranch className={iconClass} />
                     <span className="min-w-0 flex-1 truncate">Git 状态读取失败：{statusError}</span>
                     <button
+                        title="重试读取 Git 状态"
                         type="button"
-                        className="shrink-0 rounded p-0.5 hover:bg-muted"
+                        className="aipp-icon-button shrink-0 rounded p-0.5 hover:bg-muted"
                         onClick={() => void refreshStatus()}
                         aria-label="重试读取 Git 状态"
                     >

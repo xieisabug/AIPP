@@ -82,8 +82,8 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
                     {!isMobilePlatform && (
                         <TooltipProvider>
                             <Tooltip>
-                                <TooltipTrigger asChild>
-                                    <Info className="h-4 w-4 text-muted-foreground cursor-help" />
+                                <TooltipTrigger className="aipp-icon-button cursor-help" aria-label="原生工具调用说明">
+                                    <Info className="h-4 w-4" />
                                 </TooltipTrigger>
                                 <TooltipContent>
                                     <p className="max-w-xs text-xs">{NATIVE_TOOLCALL_HINT}</p>

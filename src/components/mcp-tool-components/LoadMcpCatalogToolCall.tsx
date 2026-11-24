@@ -289,7 +289,7 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
                                 size="sm"
                                 variant="ghost"
                                 className="h-7 w-7 p-0 flex-shrink-0 text-destructive"
-                                title="停止"
+                                iconLabel="停止"
                             >
                                 <Square className="h-3 w-3 fill-current" />
                             </Button>
@@ -300,7 +300,7 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
                                 size="sm"
                                 variant="ghost"
                                 className="h-7 w-7 p-0 flex-shrink-0"
-                                title={state === "failed" ? "重新执行" : "执行"}
+                                iconLabel={state === "failed" ? "重新执行" : "执行"}
                             >
                                 {state === "failed" ? (
                                     <RotateCcw className="h-3 w-3" />

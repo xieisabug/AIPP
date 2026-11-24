@@ -126,7 +126,7 @@ export function AgentActivityShell({
               size="sm"
               variant="ghost"
               className="h-7 w-7 p-0 flex-shrink-0"
-              title={isExpanded ? "收起详情" : "展开详情"}
+              iconLabel={isExpanded ? "收起详情" : "展开详情"}
             >
               {isExpanded ? (
                 <ChevronUp className="h-3 w-3" />

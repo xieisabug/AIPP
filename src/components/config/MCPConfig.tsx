@@ -600,7 +600,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
                                     size="sm"
                                     onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
                                     disabled={isRefreshing}
-                                    aria-label="测试连接并刷新能力"
+                                    iconLabel="测试连接并刷新能力"
                                 >
                                     <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
                                     {isMobilePlatform && <span>测试连接</span>}
@@ -615,7 +615,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
                                     variant="ghost"
                                     size="sm"
                                     onClick={() => openEditServerDialog(selectedServer)}
-                                    aria-label="编辑MCP"
+                                    iconLabel="编辑MCP"
                                 >
                                     <Edit className="h-4 w-4" />
                                 </Button>
@@ -631,7 +631,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; comp
                                         variant="ghost"
                                         size="sm"
                                         onClick={() => handleDeleteServer(selectedServer.id)}
-                                        aria-label="删除MCP"
+                                        iconLabel="删除MCP"
                                     >
                                         <Trash2 className="h-4 w-4 text-destructive" />
                                     </Button>

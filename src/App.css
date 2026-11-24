@@ -162,8 +162,8 @@ body {
         --shine-tertiary: 35 100% 74%;
         --action: 240 5.9% 10%;
         --action-foreground: 0 0% 98%;
-        --icon: 240 10% 3.9%;
-        --icon-selected: 240 10% 3.9%;
+        --icon: var(--muted-foreground);
+        --icon-selected: var(--foreground);
         --success: 142 76% 90%;
         --success-foreground: 142 72% 29%;
         --success-border: 142 69% 85%;
@@ -199,8 +199,8 @@ body {
         --shine-tertiary: 35 100% 74%;
         --action: 0 0% 98%;
         --action-foreground: 240 5.9% 10%;
-        --icon: 0 0% 98%;
-        --icon-selected: 0 0% 98%;
+        --icon: var(--muted-foreground);
+        --icon-selected: var(--foreground);
         --success: 142 76% 90%;
         --success-foreground: 142 72% 29%;
         --success-border: 142 69% 85%;
@@ -229,8 +229,8 @@ body {
         --ring: 0 78% 45%;
         --action: 40 85% 50%;
         --action-foreground: 0 0% 100%;
-        --icon: 0 78% 45%;
-        --icon-selected: 0 60% 35%;
+        --icon: var(--muted-foreground);
+        --icon-selected: var(--foreground);
         --success: 0 78% 45%;
         --success-foreground: 0 0% 100%;
         --success-border: 0 60% 35%;
@@ -257,18 +257,42 @@ body {
         --icon: var(--action-foreground);
     }
 
-    .theme-newyear:not(.dark) .bg-primary svg {
+    .theme-newyear:not(.dark) .bg-primary:not(.aipp-icon-button) svg {
         color: hsl(var(--primary-foreground));
         stroke: hsl(var(--primary-foreground));
     }
 
-    .theme-newyear:not(.dark) .bg-action svg {
+    .theme-newyear:not(.dark) .bg-action:not(.aipp-icon-button) svg {
         color: hsl(var(--action-foreground));
         stroke: hsl(var(--action-foreground));
     }
 
     .theme-newyear:not(.dark) svg.lucide:not([class*='text-']) {
         color: hsl(var(--icon));
+    }
+}
+
+/* 图标操作共用联系人栏的两档对比度，主题也可单独指定 --icon / --icon-selected。 */
+@layer utilities {
+    button.aipp-icon-button:disabled {
+        pointer-events: auto;
+    }
+
+    .aipp-icon-button > svg {
+        color: hsl(var(--button-ink, var(--icon)) / var(--button-ink-opacity, 1));
+    }
+
+    .aipp-icon-button:not(:disabled):is(:hover, :focus-visible) > svg {
+        color: hsl(var(--button-ink, var(--icon-selected)));
+    }
+
+    /* 实底按钮使用与底色配对的前景色，保持浅色和深色主题下的可读性。 */
+    .aipp-icon-button.bg-primary { --button-ink: var(--primary-foreground); }
+    .aipp-icon-button.bg-action { --button-ink: var(--action-foreground); }
+    .aipp-icon-button.bg-destructive { --button-ink: var(--destructive-foreground); }
+
+    .aipp-icon-button:is(.bg-primary, .bg-action, .bg-destructive) {
+        --button-ink-opacity: 0.75;
     }
 }
 

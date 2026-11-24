@@ -44,7 +44,7 @@ const ModelTagBadge: React.FC<ModelTagBadgeProps> = ({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    aria-label={`移除 ${model.name}`}
+                    iconLabel={`移除 ${model.name}`}
                     className="h-5 w-5 shrink-0 p-0 text-muted-foreground hover:bg-muted hover:text-foreground rounded-full"
                     onClick={onRemove}
                 >

@@ -371,17 +371,17 @@ export function useWebToolCall(props: McpToolComponentProps, logTag: string) {
     const actions = (
         <>
             {isExecuting && effectiveCallId && (
-                <Button onClick={handleStop} size="sm" variant="ghost" className="h-7 w-7 flex-shrink-0 p-0 text-destructive" title="停止">
+                <Button onClick={handleStop} size="sm" variant="ghost" className="h-7 w-7 flex-shrink-0 p-0 text-destructive" iconLabel="停止">
                     <Square className="h-3 w-3 fill-current" />
                 </Button>
             )}
             {canShowExecute && (
-                <Button onClick={handleExecute} size="sm" variant="ghost" className="h-7 w-7 flex-shrink-0 p-0" title={isFailed ? "重新执行" : "执行"}>
+                <Button onClick={handleExecute} size="sm" variant="ghost" className="h-7 w-7 flex-shrink-0 p-0" iconLabel={isFailed ? "重新执行" : "执行"}>
                     {isFailed ? <RotateCcw className="h-3 w-3" /> : <Play className="h-3 w-3" />}
                 </Button>
             )}
             {canShowContinueWithError && (
-                <Button onClick={handleContinueWithError} size="sm" variant="ghost" className="h-7 w-7 flex-shrink-0 p-0" title="以错误继续对话">
+                <Button onClick={handleContinueWithError} size="sm" variant="ghost" className="h-7 w-7 flex-shrink-0 p-0" iconLabel="以错误继续对话">
                     <ArrowRight className="h-3 w-3" />
                 </Button>
             )}

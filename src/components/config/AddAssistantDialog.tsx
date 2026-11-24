@@ -83,7 +83,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({ triggerButtonPr
     return (
         <Dialog open={open} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
             <DialogTrigger asChild>
-                <Button {...triggerButtonProps}>
+                <Button iconLabel="添加助手" {...triggerButtonProps}>
                     <Plus className="h-4 w-4" />
                 </Button>
             </DialogTrigger>
@@ -254,10 +254,11 @@ const WizardContent: React.FC<Omit<AddAssistantDialogProps, "triggerButtonProps"
                 <DialogDescription className="sr-only">填写助手的基本信息，搭配形象，再按需调整高级与扩展配置</DialogDescription>
                 <DialogClose asChild>
                     <button
+                        title="关闭"
                         type="button"
                         aria-label="关闭"
                         disabled={busy}
-                        className="ml-auto flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                        className="aipp-icon-button ml-auto flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
                     >
                         <X className="h-4 w-4" />
                     </button>

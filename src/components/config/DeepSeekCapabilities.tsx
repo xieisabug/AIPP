@@ -127,7 +127,7 @@ const DeepSeekCapabilities: React.FC<DeepSeekCapabilitiesProps> = ({
                             variant="ghost"
                             size="sm"
                             className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
-                            aria-label="刷新余额"
+                            iconLabel="刷新余额"
                             disabled={balance.state.status === "loading"}
                             onClick={() => void balance.reload()}
                         >

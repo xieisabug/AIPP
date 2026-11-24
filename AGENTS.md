@@ -153,9 +153,8 @@ let config = state.configs.lock().await;
 -   **Icon 样式规范**：
     -   使用 `lucide-react` 图标组件
     -   图标尺寸使用 `w-full h-full` 或指定尺寸如 `h-4 w-4`
-    -   **在 Button/IconButton 内**：通常不需要指定颜色类（由组件继承）
-        -   示例：`<Plus className="h-4 w-4" />`（在 Button 内）
-        -   示例：`<Edit2 size={16} className="text-icon" />`（在 IconButton 内）
+    -   纯图标操作用 `<Button iconLabel="添加助手" …>` 或带 `title` 的 `IconButton`。已有 `size="icon"` 的 Button 也可用 `aria-label` 提供悬浮说明。自定义原生按钮加 `aipp-icon-button` 与 `title`。
+    -   操作按钮的 SVG 直接放在按钮内，颜色由主题的 `--icon` 与 `--icon-selected` 控制；实底按钮使用与背景配对的前景色。独立状态图标保留状态语义。
     -   **在自定义容器内**：需要指定颜色类 `text-muted-foreground`
         -   示例：`<ServerCrash className="w-full h-full text-muted-foreground" />`（侧边栏菜单项）
 

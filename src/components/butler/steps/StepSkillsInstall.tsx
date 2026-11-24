@@ -285,6 +285,7 @@ const StepSkillsInstall: React.FC<StepSkillsInstallProps> = ({
                                     <div className="flex items-center gap-2 shrink-0">
                                         {skill.source_url && (
                                             <Button
+                                                iconLabel="打开技能来源"
                                                 variant="ghost"
                                                 size="sm"
                                                 onClick={() =>

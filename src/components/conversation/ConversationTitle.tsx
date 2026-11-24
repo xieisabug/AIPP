@@ -89,7 +89,7 @@ const ConversationTitle: React.FC<{
                 >
                     <div
                         className={cn(
-                            "max-w-full truncate text-base font-semibold text-icon",
+                            "max-w-full truncate text-base font-semibold text-foreground",
                             allowRename && "cursor-pointer",
                         )}
                         onClick={allowRename ? onEdit : undefined}

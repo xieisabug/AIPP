@@ -11,8 +11,9 @@ function PasswordInput({ className, ...props }: Omit<React.ComponentProps<"input
         <div className="relative w-full">
             <Input {...props} type={visible ? "text" : "password"} className={cn("pr-11", className)} />
             <button
+                title={visible ? "隐藏" : "显示"}
                 type="button"
-                className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none"
+                className="aipp-icon-button absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none"
                 aria-label={visible ? "隐藏" : "显示"}
                 aria-pressed={visible}
                 disabled={props.disabled}

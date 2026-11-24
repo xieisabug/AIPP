@@ -37,6 +37,7 @@ const SkillActionDropdown: React.FC<SkillActionDropdownProps> = ({
         <DropdownMenu>
             <DropdownMenuTrigger asChild>
                 <Button
+                    iconLabel="更多技能操作"
                     variant={variant}
                     size={size}
                     className={`gap-2 ${className}`}

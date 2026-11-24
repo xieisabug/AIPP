@@ -401,7 +401,7 @@ function AskWindow() {
                                 </div>
                                 <button
                                     onClick={clearError}
-                                    className="flex-shrink-0 text-destructive/60 hover:text-destructive transition-colors"
+                                    className="aipp-icon-button flex-shrink-0 text-destructive/60 hover:text-destructive transition-colors"
                                     title="清除错误信息"
                                 >
                                     <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
@@ -434,10 +434,11 @@ function AskWindow() {
                     data-aipp-slot="ask-footer-bar"
                 >
                     {messageId !== -1 && !aiIsResponsing && (
-                        <IconButton icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} dataAippSlot="ask-footer-new-conversation" />
+                        <IconButton title="新建对话" icon={<Plus size={16} className="text-icon" />} onClick={startNewConversation} dataAippSlot="ask-footer-new-conversation" />
                     )}
                     {messageId !== -1 && !aiIsResponsing ? (
                         <IconButton
+                            title="复制回答"
                             icon={
                                 copySuccess ? <Check size={16} className="text-icon" /> : <Copy size={16} className="text-icon" />
                             }
@@ -452,8 +453,8 @@ function AskWindow() {
                         />
                     ) : null}
 
-                    <IconButton icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} dataAippSlot="ask-footer-open-chat-ui" />
-                    <IconButton icon={<Settings size={16} className="text-icon" />} onClick={openConfig} dataAippSlot="ask-footer-open-config" />
+                    <IconButton title="打开聊天窗口" icon={<Expand size={16} className="text-icon" />} onClick={openChatUI} dataAippSlot="ask-footer-open-chat-ui" />
+                    <IconButton title="打开设置" icon={<Settings size={16} className="text-icon" />} onClick={openConfig} dataAippSlot="ask-footer-open-config" />
                 </div>
                 <AcpPermissionDialog
                     request={agentPermission.pendingRequest}

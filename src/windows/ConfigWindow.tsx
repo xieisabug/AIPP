@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
+import React, { Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 // 各设置页体积较大，按需动态加载，避免打开设置窗口时一次性解析全部页面代码
 const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
@@ -11,7 +11,7 @@ const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTa
 const VaultConfig = React.lazy(() => import("../components/config/VaultConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, Cloud, KeyRound, LayoutGrid, ListChecks, Puzzle, Settings, Sparkles } from "lucide-react";
+import { Bot, Cloud, KeyRound, LayoutGrid, ListChecks, Puzzle, Settings, Sparkles, type LucideIcon } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
@@ -39,8 +39,7 @@ import { backConfigSection, ConfigSectionContext, useConfigSectionDetailTitle } 
 interface MenuItem {
     id: string;
     name: string;
-    icon: ReactNode;
-    iconSelected: ReactNode;
+    icon: LucideIcon;
 }
 
 // 将 contentMap 修改为映射到组件而不是元素
@@ -82,50 +81,43 @@ function ConfigWindow() {
             {
                 id: "llm-provider-config",
                 name: "提供商",
-                icon: <Cloud className="w-full h-full text-muted-foreground" />,
-                iconSelected: <Cloud className="w-full h-full text-foreground" />,
+                icon: Cloud,
             },
             {
                 id: "assistant-config",
                 name: "助手",
-                icon: <Bot className="w-full h-full text-muted-foreground" />,
-                iconSelected: <Bot className="w-full h-full text-foreground" />,
+                icon: Bot,
             },
             {
                 id: "mcp-config",
                 name: "应用与工具",
-                icon: <LayoutGrid className="w-full h-full text-muted-foreground" />,
-                iconSelected: <LayoutGrid className="w-full h-full text-foreground" />,
+                icon: LayoutGrid,
             },
             {
                 id: "vault-config",
                 name: "凭据保险箱",
-                icon: <KeyRound className="w-full h-full text-muted-foreground" />,
-                iconSelected: <KeyRound className="w-full h-full text-foreground" />,
+                icon: KeyRound,
             },
         ];
-        if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: <ListChecks className="h-full w-full text-muted-foreground" />, iconSelected: <ListChecks className="h-full w-full text-foreground" /> });
+        if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: ListChecks });
         if (skillsAvailable) {
             items.push({
                 id: "skills-config",
                 name: "Skills",
-                icon: <Sparkles className="w-full h-full text-muted-foreground" />,
-                iconSelected: <Sparkles className="w-full h-full text-foreground" />,
+                icon: Sparkles,
             });
         }
         if (pluginsAvailable) {
             items.push({
                 id: "plugins-config",
                 name: "插件",
-                icon: <Puzzle className="w-full h-full text-muted-foreground" />,
-                iconSelected: <Puzzle className="w-full h-full text-foreground" />,
+                icon: Puzzle,
             });
         }
         items.push({
             id: "feature-assistant-config",
             name: "程序功能",
-            icon: <Settings className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Settings className="w-full h-full text-foreground" />,
+            icon: Settings,
         });
         return items;
     }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
@@ -252,13 +244,14 @@ function ConfigWindow() {
 
     const renderMenuItems = (onSelect: (id: string) => void) => (
         <div className="flex flex-col gap-1 mt-2">
-            {menuList.map((item, index) => (
+            {menuList.map((item) => (
                 <button
                     type="button"
-                    key={index}
+                    key={item.id}
+                    title={item.name}
                     aria-current={selectedMenu === item.id ? "page" : undefined}
                     className={`
-                                    relative flex w-full items-center text-left px-3 md:px-4 lg:px-5 py-3 md:py-3.5 rounded-lg cursor-pointer
+                                    aipp-icon-button relative flex w-full items-center text-left px-3 md:px-4 lg:px-5 py-3 md:py-3.5 rounded-lg cursor-pointer
                                     transition-all duration-200 ease-out font-medium ${isMobilePlatform ? "min-h-11 text-sm" : "text-xs md:text-sm"}
                                     select-none hover:translate-x-0.5
                                     ${selectedMenu === item.id
@@ -272,12 +265,8 @@ function ConfigWindow() {
                     {selectedMenu === item.id && (
                         <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-primary rounded-r-sm" />
                     )}
-                    <div className="flex items-center">
-                        <div className="w-4 h-4 md:w-5 md:h-5 flex-shrink-0 mr-2 md:mr-3 lg:mr-3.5">
-                            {selectedMenu === item.id ? item.iconSelected : item.icon}
-                        </div>
-                        <span className="truncate">{item.name}</span>
-                    </div>
+                    <item.icon className="mr-2 size-4 shrink-0 md:mr-3 md:size-5 lg:mr-3.5" />
+                    <span className="truncate">{item.name}</span>
                 </button>
             ))}
         </div>
@@ -347,7 +336,7 @@ function ConfigWindow() {
                             </>
                         ) : (
                             <SheetTrigger asChild>
-                                <Button variant="ghost" size="icon">
+                                <Button iconLabel="打开设置菜单" variant="ghost" size="icon">
                                     <Menu className="h-5 w-5" />
                                 </Button>
                             </SheetTrigger>

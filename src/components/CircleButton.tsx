@@ -44,11 +44,11 @@ const CircleButton: React.FC<CircleButtonProps> = ({
 
     return <button 
         onClick={onClick} 
-        className={`fixed border border-primary flex items-center justify-center cursor-pointer disabled:cursor-not-allowed disabled:opacity-55 ${primary && !customVisual ? 'border-0 bg-action' : ''} ${customVisual ? 'border-0 bg-transparent overflow-visible' : ''} ${sizeClasses[size || 'medium']} ${className || ''}`}
+        className={`fixed border border-primary flex items-center justify-center cursor-pointer disabled:cursor-not-allowed disabled:opacity-55 ${primary && !customVisual ? 'border-0 bg-action' : ''} ${customVisual ? 'border-0 bg-transparent overflow-visible' : 'aipp-icon-button'} ${sizeClasses[size || 'medium']} ${className || ''}`}
         type={type || 'button'}
         style={style}
         disabled={disabled}
-        title={title}
+        title={title ?? ariaLabel}
         data-theme-slot={dataThemeSlot}
         data-aipp-slot={dataAippSlot}
         data-state={dataState}

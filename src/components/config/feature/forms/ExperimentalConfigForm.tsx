@@ -1096,8 +1096,8 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                         <span className="inline-flex items-center gap-1">
                                                             小型辅助模型
                                                             <Tooltip>
-                                                                <TooltipTrigger asChild>
-                                                                    <CircleHelp aria-label="小型辅助模型说明" className="size-3.5 cursor-help text-muted-foreground" />
+                                                                <TooltipTrigger className="aipp-icon-button cursor-help" aria-label="小型辅助模型说明">
+                                                                    <CircleHelp className="size-3.5" />
                                                                 </TooltipTrigger>
                                                                 <TooltipContent className="max-w-xs text-xs">
                                                                     用于总结、唤醒自动化之类的辅助任务，例如总结当前助手实时状态、自动唤醒等。建议选择便宜、响应快的小模型。
@@ -1141,8 +1141,8 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                         <span className="inline-flex items-center gap-1">
                                                             决策模型
                                                             <Tooltip>
-                                                                <TooltipTrigger asChild>
-                                                                    <CircleHelp aria-label="决策模型说明" className="size-3.5 cursor-help text-muted-foreground" />
+                                                                <TooltipTrigger className="aipp-icon-button cursor-help" aria-label="决策模型说明">
+                                                                    <CircleHelp className="size-3.5" />
                                                                 </TooltipTrigger>
                                                                 <TooltipContent className="max-w-xs text-xs">
                                                                     用于进行工具执行的判断、群聊回复决策等场景，推荐使用决策模型。

@@ -152,6 +152,7 @@ const AssistantWorkspaceFieldDisplay: React.FC<AssistantWorkspaceFieldDisplayPro
                                                 {workspace.path}
                                             </span>
                                             <Button
+                                                iconLabel="移除工作区"
                                                 variant="ghost"
                                                 size="icon"
                                                 onClick={() =>

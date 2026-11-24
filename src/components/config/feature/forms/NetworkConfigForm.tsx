@@ -72,10 +72,11 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
                         </div>
                         {fields.length > 1 && (
                             <Button
+                                iconLabel="移除请求头"
                                 variant="ghost"
                                 size="icon"
                                 onClick={() => remove(index)}
-                                className="h-9 w-9 text-gray-500 hover:text-red-500 dark:text-gray-400"
+                                className="h-9 w-9"
                             >
                                 <Trash2 className="h-4 w-4" />
                             </Button>

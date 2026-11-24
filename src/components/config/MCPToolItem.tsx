@@ -59,7 +59,7 @@ const MCPToolItem: React.FC<MCPToolItemProps> = ({
                         <button
                             type="button"
                             onClick={() => onToggleExpansion(tool.id)}
-                            className="flex-shrink-0 min-h-11 min-w-11 inline-flex items-center justify-center p-1 hover:bg-muted-foreground/20 rounded transition-colors"
+                            className="aipp-icon-button flex-shrink-0 min-h-11 min-w-11 inline-flex items-center justify-center p-1 hover:bg-muted-foreground/20 rounded transition-colors"
                             title={isExpanded ? "收起参数" : "展开参数"}
                         >
                             {isExpanded ? (

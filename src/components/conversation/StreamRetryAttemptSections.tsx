@@ -73,8 +73,9 @@ function CopyTextButton({ text, label }: { text: string; label: string }) {
     }
     return (
         <button
+            title={label}
             type="button"
-            className="inline-flex h-11 w-11 min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="aipp-icon-button inline-flex h-11 w-11 min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label={label}
             onClick={(event) => {
                 event.preventDefault();

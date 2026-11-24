@@ -609,7 +609,7 @@ export default function ArtifactWindow() {
                                 previewType !== "md" && (
                                     <button
                                         onClick={handleRefresh}
-                                        className="fixed bottom-4 right-4 w-12 h-12 bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all rounded-full flex items-center justify-center z-50"
+                                        className="aipp-icon-button fixed bottom-4 right-4 w-12 h-12 bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all rounded-full flex items-center justify-center z-50"
                                         title="刷新预览"
                                     >
                                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

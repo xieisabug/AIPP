@@ -39,7 +39,7 @@ const ChatUIToolbar = memo(function ChatUIToolbar({
             <Button
                 variant={inline ? "ghost" : "outline"}
                 size={inline ? "icon" : "default"}
-                className={cn("select-none", inline ? "size-8 rounded-full text-muted-foreground hover:text-foreground" : "h-9 flex-1 gap-2 font-normal")}
+                className={cn("aipp-icon-button select-none", inline ? "size-8 rounded-full" : "h-9 flex-1 gap-2 font-normal")}
                 aria-label="搜索"
                 title={withShortcut("搜索", searchShortcut)}
                 onClick={onSearch}
@@ -50,12 +50,12 @@ const ChatUIToolbar = memo(function ChatUIToolbar({
             </Button>
             <Button
                 variant={inline ? "ghost" : "outline"}
-                className={cn("select-none gap-1.5 font-normal", inline ? "h-8 rounded-full px-2.5 text-muted-foreground hover:text-foreground" : "h-9 flex-1 gap-2")}
+                className={cn("select-none gap-1.5 font-normal text-icon hover:text-icon-selected focus-visible:text-icon-selected", inline ? "h-8 rounded-full px-2.5" : "h-9 flex-1 gap-2")}
                 title={withShortcut("新对话", newConversationShortcut)}
                 onClick={onNewConversation}
                 data-aipp-slot="chat-toolbar-new-conversation"
             >
-                <Plus />
+                <Plus className="text-current" />
                 <span>新对话</span>
             </Button>
         </div>

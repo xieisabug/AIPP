@@ -220,7 +220,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     };
 
     const addButton = useMemo(() => (
-        <Button aria-label="新建条目" onClick={openCreate} className="gap-2">
+        <Button iconLabel="新建条目" onClick={openCreate} className="gap-2">
             <Plus className="h-4 w-4" />
         </Button>
     ), [openCreate]);

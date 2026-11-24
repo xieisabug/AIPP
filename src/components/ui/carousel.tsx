@@ -170,6 +170,7 @@ function CarouselPrevious({
 
     return (
         <Button
+            iconLabel="上一张"
             data-slot="carousel-previous"
             variant={variant}
             size={size}
@@ -200,6 +201,7 @@ function CarouselNext({
 
     return (
         <Button
+            iconLabel="下一张"
             data-slot="carousel-next"
             variant={variant}
             size={size}

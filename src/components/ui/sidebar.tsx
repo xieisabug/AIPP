@@ -241,6 +241,7 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
 
     return (
         <Button
+            iconLabel="切换侧边栏"
             data-sidebar="trigger"
             data-slot="sidebar-trigger"
             variant="ghost"

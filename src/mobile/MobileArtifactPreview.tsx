@@ -2,7 +2,7 @@ import { archivePrefix, CollectedChoicePreview, SavedChoicePreview, readPreviewR
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, Minus, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MobilePreview } from "./navigation";
 import { staticPreviewDocument } from "./previewDocument";
@@ -70,9 +70,9 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
             {fromCollection
                 ? <span className="px-2 text-sm text-muted-foreground">已收藏</span>
                 : !isChoice && <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>}
-            <Button className="min-h-11 min-w-11" variant="outline" aria-label="缩小" onClick={() => setZoom(value => Math.max(.5, value - .25))}>−</Button>
+            <Button className="min-h-11 min-w-11" variant="outline" iconLabel="缩小" onClick={() => setZoom(value => Math.max(.5, value - .25))}><Minus /></Button>
             <span className="text-sm tabular-nums">{Math.round(zoom * 100)}%</span>
-            <Button className="min-h-11 min-w-11" variant="outline" aria-label="放大" onClick={() => setZoom(value => Math.min(3, value + .25))}>+</Button>
+            <Button className="min-h-11 min-w-11" variant="outline" iconLabel="放大" onClick={() => setZoom(value => Math.min(3, value + .25))}><Plus /></Button>
         </header>
         {error && <p role="alert" className="p-4">{error}</p>}
         <div className="flex-1 overflow-auto min-h-0">

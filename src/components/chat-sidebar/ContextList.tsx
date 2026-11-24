@@ -418,7 +418,7 @@ const ContextList: React.FC<ContextListProps> = ({
                                         <button
                                             type="button"
                                             className={cn(
-                                                "flex items-center justify-center text-muted-foreground hover:text-foreground",
+                                                "aipp-icon-button flex items-center justify-center text-muted-foreground hover:text-foreground",
                                                 mobile ? "h-11 w-11 shrink-0" : "h-6 w-6"
                                             )}
                                             onClick={(event) => {
