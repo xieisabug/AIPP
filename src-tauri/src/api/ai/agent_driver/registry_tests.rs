@@ -93,8 +93,9 @@ fn setup() -> (AgentDriverRegistry, Actions) {
 #[test]
 fn test_registry_duplicate_and_unknown_driver_fail_without_replacing_registration() {
     let (registry, actions) = setup();
+    let count = registry.drivers().unwrap().len();
     assert!(registry.register(Arc::new(FourthDriver::new(actions))).err().unwrap().to_string().contains("already registered"));
-    assert_eq!(registry.drivers().unwrap().len(), 7);
+    assert_eq!(registry.drivers().unwrap().len(), count);
     assert!(registry.driver("missing").err().unwrap().to_string().contains("no fallback"));
     assert!(registry.resolve_provider(1, "unknown", vec![]).err().unwrap().to_string().contains("unsupported provider API type 'unknown'"));
 }

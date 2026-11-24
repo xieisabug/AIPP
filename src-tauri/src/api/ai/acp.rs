@@ -6605,7 +6605,7 @@ mod tests {
         let env_vars = HashMap::new();
         let plan = build_acp_launch_plan("dsh-acp-server", file.path(), &[], &env_vars);
 
-        assert!(plan.program.ends_with("node"));
+        assert_eq!(plan.program.file_name(), Some(std::ffi::OsStr::new(if cfg!(windows) { "node.exe" } else { "node" })));
         assert!(plan.extra_env.get("NODE_USE_ENV_PROXY").is_none());
         assert_eq!(plan.proxy_strategy, "node-explicit-runtime");
         assert_eq!(plan.args.len(), 1);
@@ -6723,7 +6723,7 @@ mod tests {
             &env_vars,
         );
 
-        assert!(plan.program.ends_with("node"));
+        assert_eq!(plan.program.file_name(), Some(std::ffi::OsStr::new(if cfg!(windows) { "node.exe" } else { "node" })));
         assert_eq!(plan.extra_env.get("NODE_USE_ENV_PROXY"), Some(&"1".to_string()));
         assert!(plan.proxy_strategy.starts_with("node-use-env-proxy"));
         assert!(plan.args.iter().any(|arg| arg == "--bar"));
@@ -6739,7 +6739,7 @@ mod tests {
         let env_vars = HashMap::new();
         let plan = build_acp_launch_plan("claude-code-acp", file.path(), &[], &env_vars);
 
-        assert!(plan.program.ends_with("node"));
+        assert_eq!(plan.program.file_name(), Some(std::ffi::OsStr::new(if cfg!(windows) { "node.exe" } else { "node" })));
         assert!(plan.extra_env.get("NODE_USE_ENV_PROXY").is_none());
         assert_eq!(plan.proxy_strategy, "node-explicit-runtime");
         assert_eq!(plan.args.len(), 1);

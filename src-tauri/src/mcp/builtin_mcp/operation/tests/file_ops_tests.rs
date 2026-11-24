@@ -42,9 +42,8 @@ fn test_read_file_rejects_relative_path() {
 /// 测试绝对路径被接受
 #[test]
 fn test_absolute_path_accepted() {
-    use std::path::Path;
-    let absolute_path = "/tmp/some/file.txt";
-    assert!(Path::new(absolute_path).is_absolute());
+    let absolute_path = std::env::temp_dir().join("file.txt");
+    assert!(absolute_path.is_absolute());
 }
 
 // ============= 读取文件核心逻辑测试 =============

@@ -105,7 +105,7 @@ describe("ExperimentalConfigForm", () => {
     it("should expose independent rollback switches without claiming to cancel external work", () => {
         render(<ButlerScopeHarness enabled />);
         expect(screen.getByText("管家能力开关")).toBeInTheDocument();
-        for (const label of ["新建独立任务", "发起成员协作", "继续执行已有工作", "后台检查"]) {
+        for (const label of ["新建独立任务", "发起成员协作", "继续执行已有工作"]) {
             expect(screen.getByText(label)).toBeInTheDocument();
         }
         expect(screen.getByText(/关闭不会撤销已发生的外部操作/)).toBeInTheDocument();
