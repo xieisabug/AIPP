@@ -87,6 +87,11 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         const part = p.part;
         if (roles.get(part.messageID) !== 'assistant') return;
         sawActivity = true;
+        if (part.type === 'step-finish' && part.tokens && !partTypes.has(part.id)) {
+          const { input, output, cache, reasoning } = part.tokens;
+          emit({ type: 'usage', turn, usage: { inputTokens: input, outputTokens: output,
+            cachedReadTokens: cache?.read, cachedWriteTokens: cache?.write, thoughtTokens: reasoning } });
+        }
         partTypes.set(part.id, part.type);
         partOwners.set(part.id, part.messageID);
         if (part.type === 'text') {

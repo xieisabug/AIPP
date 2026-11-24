@@ -26,6 +26,9 @@ pub(crate) mod auth;
 pub(crate) mod catalog;
 #[path = "native_agents_env.rs"]
 pub(crate) mod env;
+#[path = "native_usage.rs"]
+mod usage;
+use usage::TurnUsage;
 pub fn is_native_agent(id: &str) -> bool { DRIVER_IDS.contains(&id) }
 fn error(detail: impl std::fmt::Display) -> AppError { AppError::ProviderError(detail.to_string()) }
 
@@ -345,7 +348,7 @@ fn is_native_output(frame: &Value) -> bool {
     }
 }
 
-struct ActiveTurn { id: i64, text: String, window: tauri::Window, activities: HashMap<String, Value>, _mcp_prompt: Option<crate::acp_mcp_bridge::provenance::NativeMcpPrompt>, questions: Vec<tauri::async_runtime::JoinHandle<()>> }
+struct ActiveTurn { id: i64, text: String, window: tauri::Window, activities: HashMap<String, Value>, usage: Option<TurnUsage>, _mcp_prompt: Option<crate::acp_mcp_bridge::provenance::NativeMcpPrompt>, questions: Vec<tauri::async_runtime::JoinHandle<()>> }
 impl Drop for ActiveTurn { fn drop(&mut self) { for task in &self.questions { task.abort(); } } }
 
 async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: Prepared, session: Option<String>,
@@ -415,7 +418,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                         Command::Prompt { id, text, attachments, window } => {
                             if active.is_some() { return Err("Native session received overlapping prompts".into()); }
                             identity.response_message_id = Some(id);
-                            active = Some(ActiveTurn { id, text: String::new(), window, activities: HashMap::new(), _mcp_prompt: None, questions: Vec::new() });
+                            active = Some(ActiveTurn { id, text: String::new(), window, activities: HashMap::new(), usage: None, _mcp_prompt: None, questions: Vec::new() });
                             // Shared acquisition has bound this run before Prompt is queued.
                             super::persistence::persist_session_id(&app, &identity, Some(&run), &native_session)?;
                             let mcp_prompt = prepared.mcp_scope.as_ref().map(|scope|scope.begin_prompt(id)).transpose()?;
@@ -501,6 +504,19 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                             .set_agent_streaming(&app, &identity, turn.id).await;
                     }
                     match frame["type"].as_str() {
+                        Some("usage") => {
+                            if let Ok(report) = serde_json::from_value(frame["usage"].clone()) {
+                                let usage = turn.usage.get_or_insert_with(TurnUsage::default);
+                                usage.add(driver.0, report);
+                                let saved = ConversationDatabase::new(&app).map_err(AppError::from).and_then(|db| {
+                                    db.message_repo()?.update_agent_usage(turn.id, usage.input, usage.output, &usage.metadata())?;
+                                    Ok(())
+                                });
+                                if let Err(error) = saved {
+                                    tracing::warn!(conversation_id = cid, message_id = turn.id, %error, "Failed to persist native token usage");
+                                }
+                            }
+                        }
                         Some("text") => { turn.text.push_str(frame["text"].as_str().ok_or("Native text frame omitted text")?); publish_text(&identity, turn, false); }
                         Some("activity") => {
                             let id = frame["id"].as_str().ok_or("Native activity omitted ID")?.to_string();
@@ -681,7 +697,9 @@ pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Resu
 }
 fn publish_text(identity: &AgentEventIdentity, turn: &ActiveTurn, done: bool) {
     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"message_update".into(),
-        data: json!({"message_id":turn.id,"message_type":"response","content":turn.text,"is_done":done}) });
+        data: json!({"message_id":turn.id,"message_type":"response","content":turn.text,"is_done":done,
+            "token_count":turn.usage.as_ref().map(TurnUsage::total), "input_token_count":turn.usage.as_ref().map(|u|u.input),
+            "output_token_count":turn.usage.as_ref().map(|u|u.output)}) });
 }
 fn persist_success(app: &tauri::AppHandle, turn: &ActiveTurn, final_text: Option<&str>) -> Result<(), String> {
     let db = ConversationDatabase::new(app).map_err(|e|e.to_string())?;

@@ -1184,6 +1184,20 @@ impl MessageRepository {
         })
     }
 
+    /// Save the active turn's cumulative counters. A later failure or cancellation retains
+    /// completed requests, and concurrent activity/Butler metadata stays on the same row.
+    pub(crate) fn update_agent_usage(&self, id: i64, input: i32, output: i32, metadata: &JsonValue) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message SET token_count=?2, input_token_count=?3, output_token_count=?4,
+                 metadata_json=json_patch(COALESCE(metadata_json, '{}'), ?5)
+                 WHERE id=?1 AND finish_time IS NULL",
+                params![id, input.saturating_add(output), input, output, metadata.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Atomically claim an unfinished response for Agent failure publication.
     /// The existing message row is the terminal authority, not a second run map.
     pub(crate) fn finish_agent_failure(

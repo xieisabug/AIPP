@@ -3,6 +3,25 @@ import assert from 'node:assert/strict';
 import { openOpenCode } from './opencode.mjs';
 import { tick, openCodeFixture } from './test-helpers.mjs';
 
+test('should count each OpenCode step once when parts precede assistant identity or are replayed', async () => {
+  const f = openCodeFixture(), events = [];
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, event => events.push(event), f);
+  try {
+    await runtime.prompt('task', 'turn');
+    const part = { messageID: 'answer', sessionID: 's1', id: 'step-1', type: 'step-finish',
+      tokens: { input: 19, output: 6, reasoning: 3, cache: { read: 50, write: 4 } } };
+    f.event('message.part.updated', { part });
+    f.event('message.updated', { info: { id: 'answer', sessionID: 's1', role: 'assistant' } });
+    f.event('message.part.updated', { part });
+    f.event('message.part.updated', { part: { ...part, sessionID: 'other' } });
+    f.event('message.part.updated', { part: { ...part, id: 'step-2' } });
+    await tick();
+    const reports = events.filter(e => e.type === 'usage');
+    assert.equal(reports.length, 2);
+    assert.deepEqual(reports[0].usage, { inputTokens: 19, outputTokens: 6, cachedReadTokens: 50, cachedWriteTokens: 4, thoughtTokens: 3 });
+  } finally { await runtime.close(); }
+});
+
 test('should retain OpenCode tool identity, actual diff and exit code for semantic activity rendering', async () => {
   const f = openCodeFixture(), events = [];
   const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, e => events.push(e), f);

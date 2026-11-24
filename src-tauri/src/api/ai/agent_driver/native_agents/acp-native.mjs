@@ -370,6 +370,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
           })));
           if (includeInstructions) prompt.push({ type: 'text', text: config.butlerInstructions });
           const result = await request('session/prompt', { sessionId: session, prompt }, 24 * 60 * 60 * 1000);
+          if (result.usage) emit({ type: 'usage', turn: id, usage: result.usage });
           if (!['end_turn', 'cancelled', 'max_tokens', 'max_turn_requests', 'refusal'].includes(result.stopReason)) throw new Error(`${driver} prompt omitted a supported stopReason: ${result.stopReason}`);
           if (result.stopReason === 'end_turn') {
             if (includeInstructions) instructionsPending = false;

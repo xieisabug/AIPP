@@ -32,7 +32,7 @@ function fixture({ respond, options = [select('model', ['auto', 'model-a']), sel
     get cleaned() { return cleaned; },
     update: update => write({ method: 'session/update', params: { sessionId: 's1', update } }),
     permission: (id, toolCall, options) => write({ id, method: 'session/request_permission', params: { sessionId: 's1', toolCall, options } }),
-    finish: (stopReason = 'end_turn') => write({ id: prompt.id, result: { stopReason } }),
+    finish: (stopReason = 'end_turn', usage) => write({ id: prompt.id, result: { stopReason, usage } }),
     open: (driver, config = {}) => openAcpNative(driver, { cwd: process.cwd(), ...config }, event => events.push(event), {
       launch: (...args) => { launches.push(args); return child; },
       antigravityLaunch: async () => ({ command: 'agy', args: ['acp'], env: {}, cleanup: async () => { cleaned = true; } }),
@@ -66,7 +66,10 @@ for (const driver of ['kiro', 'antigravity']) {
       await runtime.cancel();
       assert.equal(f.events.some(e => e.type === 'done'), false);
       assert.equal(f.commands.filter(c => c.method === 'session/cancel').length, 1);
-      f.finish('cancelled'); await prompt;
+      const usage = { totalTokens: 20, inputTokens: 14, outputTokens: 6, cachedReadTokens: 10 };
+      f.update({ sessionUpdate: 'usage_update', used: 1000, size: 10000 });
+      f.finish('cancelled', usage); await prompt;
+      assert.deepEqual(f.events.filter(e => e.type === 'usage'), [{ type: 'usage', turn: 'turn', usage }]);
       assert.equal(f.events.find(e => e.type === 'text').text, '答案\u2028next');
       assert.equal(f.events.find(e => e.status === 'failed').output, 'permission denied');
       assert.equal(f.events.at(-1).cancelled, true);

@@ -6,6 +6,22 @@ import { join } from 'node:path';
 import { openPi } from './pi.mjs';
 import { piFixture } from './test-helpers.mjs';
 
+test('should report every completed model request once when Pi repeats messages at agent_end', async () => {
+  const f = piFixture(), events = [];
+  const runtime = await openPi({ cwd: process.cwd() }, event => events.push(event), f);
+  try {
+    await runtime.prompt('task', 'turn');
+    const messages = ['toolUse', 'stop'].map(stopReason => ({ role: 'assistant', stopReason,
+      usage: { input: 10, output: 6, cacheRead: 30, cacheWrite: 4 } }));
+    for (const message of messages) f.emit({ type: 'message_end', message });
+    f.emit({ type: 'agent_end', messages });
+    const reports = events.filter(e => e.type === 'usage');
+    assert.equal(reports.length, 2);
+    assert.deepEqual(reports[0], { type: 'usage', turn: 'turn', usage: {
+      inputTokens: 10, outputTokens: 6, cachedReadTokens: 30, cachedWriteTokens: 4 } });
+  } finally { await runtime.close(); }
+});
+
 test('should supply long Butler instructions to Pi by file on actor startup', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-context-test-'));
   const role = '管家上下文'.repeat(10000);

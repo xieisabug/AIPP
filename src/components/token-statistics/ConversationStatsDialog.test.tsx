@@ -42,6 +42,7 @@ describe("ConversationStatsDialog", () => {
             cached_read_tokens: 15,
             cached_write_tokens: 5,
             estimated_message_count: 2,
+            missing_agent_usage_count: 1,
             opencode_go_allowance: 0.00000927,
             by_model: [
                 {
@@ -90,6 +91,8 @@ describe("ConversationStatsDialog", () => {
         expect(screen.getByText("OpenCode Go 订阅额度累计扣减")).toBeVisible();
         expect(screen.getByText("$0.00000927")).toBeVisible();
         expect(screen.getByText("含估算 2 条")).toBeInTheDocument();
+        expect(screen.getByText("有 1 轮智能体回复缺少 Token 用量记录")).toBeVisible();
+        expect(screen.getByText("总 Token")).toBeVisible();
         expect(screen.getAllByText("缓存命中输入").length).toBeGreaterThan(0);
         expect(screen.getByText("其中思考（含在输出里）")).toBeInTheDocument();
         expect(screen.getByText("3 次调用")).toBeInTheDocument();
@@ -118,6 +121,14 @@ describe("ConversationStatsDialog", () => {
         expect(screen.getByText("1,200 tokens")).toBeInTheDocument();
         expect(screen.getByText("其中本会话回复")).toBeInTheDocument();
         expect(screen.getByText("2,300 tokens")).toBeInTheDocument();
+    });
+
+    it("should show missing agent usage instead of a zero total when no turn has a record", async () => {
+        mockInvokeHandler("get_conversation_token_stats", () => ({ ...baseStats, missing_agent_usage_count: 2 }));
+        mockInvokeHandler("get_acp_session_state", () => null);
+        await openDialog();
+        expect(screen.getByText("有 2 轮智能体回复缺少 Token 用量记录")).toBeVisible();
+        expect(screen.queryByText("总 Token")).toBeNull();
     });
 
     it("shows a dash instead of zero when there is no performance sample", async () => {
