@@ -132,6 +132,8 @@ fn test_cascade_delete_assistant_removes_owned_config_and_keeps_history() {
     for foreign_keys in [false, true] {
         let db = assistant_db();
         db.conn.pragma_update(None, "foreign_keys", foreign_keys).unwrap();
+        // Older profiles may still contain generated summaries.
+        db.conn.execute_batch("CREATE TABLE assistant_summary(assistant_id INTEGER REFERENCES assistant(id), summary TEXT);").unwrap();
         let id = db.add_assistant("delete", "", Some(0), false).unwrap();
         let keep = db.add_assistant("keep", "", Some(0), false).unwrap();
         for assistant in [id, keep] {

@@ -64,7 +64,7 @@ fn test_butler_agent_tools_declare_string_enum_types() {
 
 #[test]
 fn test_assistant_details_validate_sections_and_bounds() {
-    assert_eq!(sections(&json!({})).unwrap(),vec!["profile","summary","runtime"]);
+    assert_eq!(sections(&json!({})).unwrap(),vec!["profile","runtime"]);
     assert!(sections(&json!({"sections":["credentials"]})).is_err());
     assert!(sections(&json!({"sections":"prompt"})).is_err());
     assert!(limit(&json!({"limit":0})).is_err());

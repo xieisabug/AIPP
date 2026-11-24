@@ -26,7 +26,6 @@ pub fn mobile_unsupported_error(feature: &str) -> String {
 pub struct ExperimentalSummaryTaskStatus {
     pub mcp_progress: Option<crate::mcp::summarizer::MCPSummaryProgressPayload>,
     pub mcp_running: bool,
-    pub assistant_running: bool,
     pub conversation_running: bool,
     pub conversation_running_count: usize,
 }
@@ -294,7 +293,6 @@ pub async fn get_experimental_summary_task_status(
     Ok(ExperimentalSummaryTaskStatus {
         mcp_progress: crate::mcp::summarizer::last_progress(&app_handle)?,
         mcp_running: crate::mcp::summarizer::is_mcp_summary_running(),
-        assistant_running: crate::api::assistant_summary_api::is_assistant_summary_running(),
         conversation_running: conversation_running_count > 0,
         conversation_running_count,
     })
@@ -316,27 +314,6 @@ pub async fn trigger_mcp_summary_generation(
             started: false,
             already_running: true,
             message: "MCP 总结任务正在进行中".to_string(),
-        }
-    })
-}
-
-#[tauri::command]
-pub async fn trigger_assistant_summary_generation(
-    app_handle: tauri::AppHandle,
-) -> Result<SummaryTriggerResult, String> {
-    let started =
-        crate::api::assistant_summary_api::start_assistant_summary_generation(app_handle).await?;
-    Ok(if started {
-        SummaryTriggerResult {
-            started: true,
-            already_running: false,
-            message: "助手画像生成任务已在后台启动".to_string(),
-        }
-    } else {
-        SummaryTriggerResult {
-            started: false,
-            already_running: true,
-            message: "助手画像生成任务正在进行中".to_string(),
         }
     })
 }

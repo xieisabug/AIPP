@@ -8,10 +8,10 @@ use crate::mcp::builtin_mcp::templates::BuiltinToolInfo;
 
 pub fn definitions() -> Vec<BuiltinToolInfo> {
     vec![
-        BuiltinToolInfo { name:"list_assistants".into(), description:"列出管家模式所有助手（含总管家），按姓名、简介或画像搜索。返回稳定 assistant_id、摘要、联系人会话和当前工作状态；不创建会话。用 ID 消歧同名助手。".into(), input_schema:json!({"type":"object","properties":{
+        BuiltinToolInfo { name:"list_assistants".into(), description:"列出管家模式所有助手（含总管家），按姓名或简介搜索。返回稳定 assistant_id、简介、联系人会话和当前工作状态；不创建会话。用 ID 消歧同名助手。".into(), input_schema:json!({"type":"object","properties":{
             "query":{"type":"string","maxLength":512},"after_id":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}}}) },
-        BuiltinToolInfo { name:"get_assistant_details".into(), description:"按需查看助手详情。默认 profile/summary/runtime；可选 tools、skills、prompt。工具状态区分直接注入和动态发现，不代表已验证外部服务可用。prompt 仅返回配置正文，非会话历史。".into(), input_schema:json!({"type":"object","required":["assistant_id"],"properties":{
-            "assistant_id":{"type":"integer","minimum":1},"sections":{"type":"array","items":{"type":"string","enum":["profile","summary","runtime","tools","skills","prompt"]}},
+        BuiltinToolInfo { name:"get_assistant_details".into(), description:"按需查看助手详情。默认 profile/runtime；可选 tools、skills、prompt。工具状态区分直接注入和动态发现，不代表已验证外部服务可用。prompt 仅返回配置正文，非会话历史。".into(), input_schema:json!({"type":"object","required":["assistant_id"],"properties":{
+            "assistant_id":{"type":"integer","minimum":1},"sections":{"type":"array","items":{"type":"string","enum":["profile","runtime","tools","skills","prompt"]}},
             "offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50},
             "prompt_offset":{"type":"integer","minimum":0},"prompt_limit":{"type":"integer","minimum":1,"maximum":12000}}}) },
         BuiltinToolInfo { name:"get_assistant_exchange".into(), description:"查看自己参与的助手协作。传 exchange_id 查看该次协作的轮次、状态和可选往来正文；省略则分页列出最近协作。答复会自动回流，不要轮询。".into(), input_schema:json!({"type":"object","properties":{
@@ -95,15 +95,19 @@ pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> an
         assistants.sort_by_key(|a|a.id);
         let mut matches=Vec::new();
         for assistant in assistants.into_iter().filter(|a|a.id>after) {
-            let summary=db.get_assistant_summary(assistant.id)?;
             let is_chief=super::butler_api::is_butler_system_assistant(&assistant);
             let name=names.get(&assistant.id).cloned().unwrap_or(assistant.name);
             let description=assistant.description.unwrap_or_default();
-            let summary_text=summary.as_ref().map(|s|s.summary.as_str()).unwrap_or(&description);
-            let tags=summary.as_ref().map(|s|s.tags_json.as_str()).unwrap_or("[]");
-            if !format!("{name}\n{description}\n{summary_text}\n{tags}").to_lowercase().contains(&query) {continue}
-            matches.push((assistant.id,json!({"assistant_id":assistant.id,"name":name,"summary":clip(summary_text,300),
-                "tags":serde_json::from_str::<Value>(tags).unwrap_or(json!([])),"assistant_type":assistant.assistant_type,"is_chief":is_chief})));
+            if !format!("{name}\n{description}").to_lowercase().contains(&query) {
+                continue;
+            }
+            matches.push((assistant.id, json!({
+                "assistant_id": assistant.id,
+                "name": name,
+                "description": clip(&description, 300),
+                "assistant_type": assistant.assistant_type,
+                "is_chief": is_chief,
+            })));
             if matches.len()>limit {break}
         }
         let more=matches.len()>limit; matches.truncate(limit);
@@ -126,7 +130,6 @@ pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> an
                     "is_chief":super::butler_api::is_butler_system_assistant(&assistant),
                     "models":models.iter().map(|m|json!({"provider_id":m.provider_id,"model_code":m.model_code,"alias":m.alias})).collect::<Vec<_>>()});
             },
-            "summary"=> {result["summary"]=db.get_assistant_summary(id)?.map(|s|json!({"text":s.summary,"tags":serde_json::from_str::<Value>(&s.tags_json).unwrap_or(json!([])),"updated_time":s.updated_time,"kind":"assistant_profile","source_hash":s.source_hash})).unwrap_or(Value::Null);},
             "runtime"=> {result["runtime"]=runtime(app,id).await?;},
             "prompt"=> {
                 let text=db.get_assistant_prompt(id)?.into_iter().map(|p|p.prompt).collect::<Vec<_>>().join("\n\n");
@@ -177,12 +180,12 @@ fn name_is_stop(operation: Option<&Value>) -> bool { operation.and_then(Value::a
 fn sections(args: &Value) -> anyhow::Result<Vec<String>> {
     let values=match args.get("sections") {
         Some(v)=>v.as_array().context("sections 必须为数组")?.clone(),
-        None=>vec![json!("profile"),json!("summary"),json!("runtime")],
+        None=>vec![json!("profile"),json!("runtime")],
     };
     let mut result=Vec::new();
     for value in values {
         let name=value.as_str().context("section 必须为字符串")?;
-        ensure!(matches!(name,"profile"|"summary"|"runtime"|"tools"|"skills"|"prompt"),"未知详情分区 {name}");
+        ensure!(matches!(name,"profile"|"runtime"|"tools"|"skills"|"prompt"),"未知详情分区 {name}");
         if !result.iter().any(|v|v==name) {result.push(name.to_owned())}
     }
     Ok(result)

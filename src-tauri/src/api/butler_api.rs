@@ -14,7 +14,6 @@ use crate::api::ai::acp::AcpPermissionState;
 use crate::api::ai::events::ConversationRuntimeState;
 use crate::api::ai::types::AiRequest;
 use crate::api::ai_api::{add_message, ask_ai};
-use crate::api::assistant_summary_api::build_butler_assistant_directory_prompt;
 use crate::db::assistant_db::{Assistant, AssistantDatabase};
 use crate::db::conversation_db::{
     ButlerTaskDefinition, ButlerTaskResult, Conversation, ConversationDatabase, Message, Repository,
@@ -105,7 +104,7 @@ pub(crate) fn is_current_butler_main_conversation(
 const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家 {BUTLER_NAME}，负责用户这支助手团队。用户交给你目标，你组织成员完成，只把用户需要的结果交回。衡量你的标准是交付质量和少打扰用户，不是过程汇报的多少。
 
 ## 团队与分工
-- 成员就是下方「可派发助手目录」中的助手，各有自己的长期会话、模型、工具和 Skills。目录不足以判断时用 `list_assistants` / `get_assistant_details` 查询，不要猜。
+- 用 `list_assistants` 按名称或简介查找成员，按需用 `get_assistant_details` 查看提示词、工具和 Skills。派工用普通助手的 assistant_id，同名时用 ID 区分。
 - 你负责判断、拆分、指派、验收和安排后续。谁接手工作，谁负责和用户沟通：成员在自己的会话里以自身名义交付结果和提问，你不是所有答复和问题的必经出口。
 - 成员处理委托时也能用 `message_bot` 请其他成员协助，答复回到该成员，由它继续完成。系统限制协作层数（最多 3 层）、整条协作链的轮数和有效期，并拒绝把链上已有的助手拉回来。
 
@@ -181,7 +180,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家 {BUTLER_NAME
 - 语气直接、有判断，不说空话套话，不做表演式热情。
 
 ## 能力与工具
-- 下方依次注入可派发助手目录、可信工作区和本地开发工具；MCP 工具、Skills 目录与「交付与展示」约定随后注入。只基于实际注入的能力做决策，不假设未注入的工具、技能或权限存在。选人时综合任务目标、能力匹配、MCP/Skills 依赖和产出风格。
+- 下方依次注入可信工作区和本地开发工具；MCP 工具、Skills 目录与「交付与展示」约定随后注入。只基于实际注入的能力做决策，不假设未注入的工具、技能或权限存在。选人时综合任务目标、能力匹配、MCP/Skills 依赖和产出风格。
 - 需要了解 AIPP 本身时，可以加载 AIPP 相关的 Skills。多位成员之间交接文件时，可使用共享目录（优先主工作区）。
 - `superadmin_execute` 等 SuperAdmin 工具用于管理 AIPP 对象（助手、会话、任务、定时任务），先用其 catalog/inspect 了解可用动作。
 - `schedule_task` 管理定时任务，用法见「定时任务」。
@@ -666,18 +665,14 @@ async fn build_butler_system_prompt(app_handle: &AppHandle) -> Result<String, St
     let butler_name = get_experimental_config_value(app_handle, "butler_display_name")
         .await
         .unwrap_or_else(|| "总管家".to_string());
-    let assistant_directory_prompt = build_butler_assistant_directory_prompt(app_handle).await?;
     let trusted_workspaces_prompt =
         build_butler_trusted_workspaces_prompt(app_handle, &workspace_config).await;
     let dev_tools_prompt = cached_butler_dev_tools_prompt(app_handle).await;
     let base = BUTLER_SYSTEM_PROMPT_BASE.replace("{BUTLER_NAME}", &butler_name);
     if dev_tools_prompt.is_empty() {
-        Ok(format!("{}\n\n{}\n\n{}", base, assistant_directory_prompt, trusted_workspaces_prompt,))
+        Ok(format!("{base}\n\n{trusted_workspaces_prompt}"))
     } else {
-        Ok(format!(
-            "{}\n\n{}\n\n{}\n\n{}",
-            base, assistant_directory_prompt, trusted_workspaces_prompt, dev_tools_prompt,
-        ))
+        Ok(format!("{base}\n\n{trusted_workspaces_prompt}\n\n{dev_tools_prompt}"))
     }
 }
 

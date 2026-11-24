@@ -9,7 +9,6 @@ pub(crate) mod agent_model_cache;
 pub(crate) mod agent_model_prewarm;
 pub mod assistant_api;
 pub mod agent_workspace_api;
-pub mod assistant_summary_api;
 pub(crate) mod approval_attention;
 pub mod attachment_api;
 pub mod butler_api;

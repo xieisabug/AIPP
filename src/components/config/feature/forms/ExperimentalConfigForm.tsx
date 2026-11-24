@@ -57,16 +57,6 @@ interface MCPSummaryProgressPayload {
     message?: string;
 }
 
-interface AssistantSummaryProgressPayload {
-    phase: "started" | "processing" | "progress" | "completed";
-    total: number;
-    completed: number;
-    succeeded: number;
-    failed: number;
-    assistant_name?: string;
-    message?: string;
-}
-
 interface FeishuRuntimeStatus {
     butler_enabled: boolean;
     enabled: boolean;
@@ -89,7 +79,6 @@ interface FeishuRuntimeStatus {
 interface ExperimentalSummaryTaskStatus {
     mcp_progress?: MCPSummaryProgressPayload;
     mcp_running: boolean;
-    assistant_running: boolean;
     conversation_running: boolean;
     conversation_running_count: number;
 }
@@ -100,17 +89,15 @@ interface SummaryTriggerResult {
     message: string;
 }
 
-type SummaryTaskKey = "mcp" | "assistant" | "conversation";
+type SummaryTaskKey = "mcp" | "conversation";
 
 interface SummaryEnabledState {
     mcp: boolean;
-    assistant: boolean;
     conversation: boolean;
 }
 
 interface SummaryActionLoadingState {
     mcp: boolean;
-    assistant: boolean;
     conversation: boolean;
 }
 
@@ -123,7 +110,6 @@ const statusPanelClassName = "space-y-2 rounded-md border bg-background p-4 shad
 
 const readSummaryEnabledState = (values?: Record<string, unknown>): SummaryEnabledState => ({
     mcp: isEnabledValue(values?.dynamic_mcp_loading_enabled),
-    assistant: isEnabledValue(values?.assistant_summary_enabled),
     conversation: isEnabledValue(values?.conversation_summary_enabled),
 });
 
@@ -138,30 +124,24 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const [isSaving, setIsSaving] = useState(false);
     const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
     const [summaryProgress, setSummaryProgress] = useState<MCPSummaryProgressPayload | null>(null);
-    const [assistantSummaryProgress, setAssistantSummaryProgress] =
-        useState<AssistantSummaryProgressPayload | null>(null);
     const [feishuStatus, setFeishuStatus] = useState<FeishuRuntimeStatus | null>(null);
     const [summaryTasks, setSummaryTasks] = useState<ExperimentalSummaryTaskStatus>({
         mcp_running: false,
-        assistant_running: false,
         conversation_running: false,
         conversation_running_count: 0,
     });
     const [summaryActionLoading, setSummaryActionLoading] = useState<SummaryActionLoadingState>({
         mcp: false,
-        assistant: false,
         conversation: false,
     });
     const defaultValues = form.formState.defaultValues as Record<string, unknown> | undefined;
     const savedSummaryEnabledRef = useRef<SummaryEnabledState>(readSummaryEnabledState(defaultValues));
 
     const dynamicEnabled = isEnabledValue(form.watch("dynamic_mcp_loading_enabled"));
-    const assistantSummaryEnabled = isEnabledValue(form.watch("assistant_summary_enabled"));
     const conversationSummaryEnabled = isEnabledValue(form.watch("conversation_summary_enabled"));
     const butlerEnabled = isEnabledValue(form.watch("butler_experiment_enabled"));
     const feishuEnabled = isEnabledValue(form.watch("butler_feishu_enabled"));
     const summarizerModelId = form.watch("mcp_summarizer_model_id") || "";
-    const assistantSummarizerModelId = form.watch("assistant_summarizer_model_id") || "";
     const conversationSummaryModel = form.watch("conversation_summary_model") || "";
     const butlerModelId = form.watch("butler_model_id") || "";
     const butlerMainWorkspacePath = String(form.watch("butler_main_workspace_path") || "");
@@ -176,10 +156,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const [newTrustedPath, setNewTrustedPath] = useState("");
     const [newTrustedDesc, setNewTrustedDesc] = useState("");
     const defaultDynamicEnabled = isEnabledValue(defaultValues?.dynamic_mcp_loading_enabled);
-    const defaultAssistantSummaryEnabled = isEnabledValue(defaultValues?.assistant_summary_enabled);
     const defaultConversationSummaryEnabled = isEnabledValue(defaultValues?.conversation_summary_enabled);
     const { models, loading: modelsLoading, error: modelsError } = useModels(
-        dynamicEnabled || assistantSummaryEnabled || conversationSummaryEnabled || butlerEnabled
+        dynamicEnabled || conversationSummaryEnabled || butlerEnabled
     );
     const {
         models: dispatchModels,
@@ -217,10 +196,9 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     useEffect(() => {
         savedSummaryEnabledRef.current = {
             mcp: defaultDynamicEnabled,
-            assistant: defaultAssistantSummaryEnabled,
             conversation: defaultConversationSummaryEnabled,
         };
-    }, [defaultAssistantSummaryEnabled, defaultConversationSummaryEnabled, defaultDynamicEnabled]);
+    }, [defaultConversationSummaryEnabled, defaultDynamicEnabled]);
 
     useEffect(() => {
         const unlistenPromise = listen<MCPSummaryProgressPayload>("mcp-summary-progress", (event) => {
@@ -233,25 +211,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                 loadSummaryTaskStatus().catch(console.warn);
             }
         });
-        return () => {
-            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
-        };
-    }, [loadSummaryTaskStatus]);
-
-    useEffect(() => {
-        const unlistenPromise = listen<AssistantSummaryProgressPayload>(
-            "assistant-summary-progress",
-            (event) => {
-                setAssistantSummaryProgress(event.payload);
-                setSummaryTasks((current) => ({
-                    ...current,
-                    assistant_running: event.payload.phase !== "completed",
-                }));
-                if (event.payload.phase === "completed") {
-                    loadSummaryTaskStatus().catch(console.warn);
-                }
-            }
-        );
         return () => {
             unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
         };
@@ -290,24 +249,10 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         const { showToast = false } = options;
         setSummaryActionLoading((current) => ({ ...current, [taskKey]: true }));
 
-        if (taskKey === "assistant") {
-            setAssistantSummaryProgress({
-                phase: "started",
-                total: 0,
-                completed: 0,
-                succeeded: 0,
-                failed: 0,
-                assistant_name: undefined,
-                message: "正在启动助手画像生成...",
-            });
-        }
-
         const command =
             taskKey === "mcp"
                 ? "trigger_mcp_summary_generation"
-                : taskKey === "assistant"
-                    ? "trigger_assistant_summary_generation"
-                    : "trigger_conversation_summary_generation";
+                : "trigger_conversation_summary_generation";
 
         try {
             const result = await invoke<SummaryTriggerResult>(command);
@@ -330,13 +275,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
 
         if (summarizerModelId && nextEnabledState.mcp && !previousEnabledState.mcp && !summaryTasks.mcp_running) {
             tasksToTrigger.push("mcp");
-        }
-        if (
-            nextEnabledState.assistant
-            && !previousEnabledState.assistant
-            && !summaryTasks.assistant_running
-        ) {
-            tasksToTrigger.push("assistant");
         }
         if (
             nextEnabledState.conversation
@@ -364,7 +302,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         });
     }, [
         summarizerModelId,
-        summaryTasks.assistant_running,
         summaryTasks.conversation_running,
         summaryTasks.mcp_running,
         triggerSummaryTask,
@@ -447,10 +384,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const showSummarySection = scope === "all";
 
     const handleSave = useCallback(async () => {
-        if (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId) {
-            toast.error("请先选择助手总结 AI 模型后再保存");
-            return;
-        }
         if (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel) {
             toast.error("请先选择对话总结模型后再保存");
             return;
@@ -480,7 +413,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         const previousEnabledState = savedSummaryEnabledRef.current;
         const nextEnabledState: SummaryEnabledState = {
             mcp: dynamicEnabled,
-            assistant: assistantSummaryEnabled,
             conversation: conversationSummaryEnabled,
         };
 
@@ -507,8 +439,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
             setIsSaving(false);
         }
     }, [
-        assistantSummarizerModelId,
-        assistantSummaryEnabled,
         autoTriggerSummaryTasks,
         butlerEnabled,
         butlerModelId,
@@ -538,19 +468,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         }
     }, [summarizerModelId, triggerSummaryTask]);
 
-    const handleRunAssistantSummary = useCallback(async () => {
-        if (!assistantSummarizerModelId) {
-            toast.error("请先选择助手总结 AI 模型");
-            return;
-        }
-
-        try {
-            await triggerSummaryTask("assistant", { showToast: true });
-        } catch (error) {
-            toast.error("启动助手画像生成失败: " + getErrorMessage(error));
-        }
-    }, [assistantSummarizerModelId, triggerSummaryTask]);
-
     const handleRunConversationSummary = useCallback(async () => {
         if (!conversationSummaryModel) {
             toast.error("请先选择对话总结模型");
@@ -568,12 +485,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         summaryProgress && summaryProgress.total > 0
             ? Math.round((summaryProgress.completed / summaryProgress.total) * 100)
             : 0;
-    const assistantSummaryProgressValue =
-        assistantSummaryProgress && assistantSummaryProgress.total > 0
-            ? Math.round((assistantSummaryProgress.completed / assistantSummaryProgress.total) * 100)
-            : 0;
     const mcpSummaryRunning = summaryTasks.mcp_running || summaryActionLoading.mcp;
-    const assistantSummaryRunning = summaryTasks.assistant_running || summaryActionLoading.assistant;
     const conversationSummaryRunning =
         summaryTasks.conversation_running || summaryActionLoading.conversation;
     const handleRefreshFeishu = useCallback(async () => {
@@ -606,7 +518,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
 
     const saveDisabled =
         isSaving
-        || (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId)
         || (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel)
         || (butlerEnabled && !butlerModelId)
         || (butlerEnabled && !butlerMainWorkspacePath.trim())
@@ -780,122 +691,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                     <ul>{summaryProgress.failures.map((reason, index) => <li key={index}>{reason}</li>)}</ul>
                                                 </details>
                                             )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            <Controller
-                                control={form.control}
-                                name="assistant_summary_enabled"
-                                render={({ field }) => (
-                                    <FormItem className={toggleCardClassName}>
-                                        <div>
-                                            <FormLabel className="text-base">助手总结（实验）</FormLabel>
-                                            <p className="mt-1 text-sm text-muted-foreground">
-                                                根据助手名称、提示词、MCP 和 Skills 生成执行画像，并注入到总管家 prompt。
-                                            </p>
-                                        </div>
-                                        <FormControl>
-                                            <Switch
-                                                checked={isEnabledValue(field.value)}
-                                                onCheckedChange={field.onChange}
-                                            />
-                                        </FormControl>
-                                    </FormItem>
-                                )}
-                            />
-
-                            {assistantSummaryEnabled && (
-                                <div className={nestedGroupClassName}>
-                                    <Controller
-                                        control={form.control}
-                                        name="assistant_summarizer_model_id"
-                                        render={({ field }) => (
-                                            <FormItem>
-                                                <FormLabel>助手总结 AI</FormLabel>
-                                                <FormControl>
-                                                    <Select
-                                                        value={field.value || ""}
-                                                        onValueChange={field.onChange}
-                                                        disabled={modelsLoading}
-                                                    >
-                                                        <SelectTrigger>
-                                                            <SelectValue
-                                                                placeholder={
-                                                                    modelsLoading
-                                                                        ? "加载中..."
-                                                                        : modelsError
-                                                                            ? "加载失败"
-                                                                            : "选择助手总结模型"
-                                                                }
-                                                            />
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            {modelOptions.map((option) => (
-                                                                <SelectItem key={option.value} value={option.value}>
-                                                                    {option.label}
-                                                                </SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
-                                                </FormControl>
-                                                <p className="mt-1 text-sm text-muted-foreground">
-                                                    首次启用后保存会自动补跑；后续可以在不重新保存配置的情况下单独触发。
-                                                </p>
-                                                <FormMessage />
-                                            </FormItem>
-                                        )}
-                                    />
-
-                                    <div className={actionPanelClassName}>
-                                        <div>
-                                            <p className="text-sm font-medium">助手画像任务</p>
-                                            <p className="mt-1 text-xs text-muted-foreground">
-                                                会在后台按顺序刷新普通助手画像，并实时同步到进度条。
-                                            </p>
-                                        </div>
-                                        <Button
-                                            type="button"
-                                            variant="outline"
-                                            onClick={handleRunAssistantSummary}
-                                            disabled={
-                                                isSaving
-                                                || summaryActionLoading.assistant
-                                                || summaryTasks.assistant_running
-                                                || !assistantSummarizerModelId
-                                            }
-                                        >
-                                            {summaryActionLoading.assistant
-                                                ? "启动中..."
-                                                : summaryTasks.assistant_running
-                                                    ? "助手画像生成中"
-                                                    : "立即生成助手画像"}
-                                        </Button>
-                                    </div>
-
-                                    {(assistantSummaryProgress || assistantSummaryRunning) && (
-                                        <div className={statusPanelClassName}>
-                                            <div className="flex items-center justify-between text-sm">
-                                                <span className="font-medium">助手画像进度</span>
-                                                <span>
-                                                    {assistantSummaryProgress && assistantSummaryProgress.total > 0
-                                                        ? `${assistantSummaryProgress.completed}/${assistantSummaryProgress.total}`
-                                                        : assistantSummaryRunning
-                                                            ? "启动中"
-                                                            : "空闲"}
-                                                </span>
-                                            </div>
-                                            <Progress value={assistantSummaryProgress ? assistantSummaryProgressValue : 0} />
-                                            <p className="text-xs text-muted-foreground">
-                                                {assistantSummaryProgress
-                                                    ? assistantSummaryProgress.phase === "processing"
-                                                        ? `当前: ${assistantSummaryProgress.assistant_name || "处理中"}`
-                                                        : assistantSummaryProgress.phase === "completed"
-                                                            ? `完成: 成功 ${assistantSummaryProgress.succeeded}，失败 ${assistantSummaryProgress.failed}`
-                                                            : assistantSummaryProgress.message || "准备中..."
-                                                    : "后台任务正在启动，请稍候..."}
-                                            </p>
                                         </div>
                                     )}
                                 </div>
@@ -1529,9 +1324,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                         >
                             {isSaving ? "保存中..." : "保存配置"}
                         </Button>
-                        {showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId && (
-                            <p className="text-sm text-destructive mt-2">请先选择助手总结 AI 模型</p>
-                        )}
                         {showSummarySection && conversationSummaryEnabled && !conversationSummaryModel && (
                             <p className="text-sm text-destructive mt-2">请先选择对话总结模型</p>
                         )}

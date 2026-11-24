@@ -8,8 +8,6 @@ import {
 export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     dynamic_mcp_loading_enabled: "false",
     mcp_summarizer_model_id: "",
-    assistant_summary_enabled: "false",
-    assistant_summarizer_model_id: "",
     conversation_summary_enabled: "false",
     conversation_summary_model: "",
     butler_experiment_enabled: "false",
@@ -87,10 +85,6 @@ export function buildExperimentalConfigFormValues(
         dynamic_mcp_loading_enabled:
             experimentalConfig?.get("dynamic_mcp_loading_enabled") || "false",
         mcp_summarizer_model_id: experimentalConfig?.get("mcp_summarizer_model_id") || "",
-        assistant_summary_enabled:
-            experimentalConfig?.get("assistant_summary_enabled") || "false",
-        assistant_summarizer_model_id:
-            experimentalConfig?.get("assistant_summarizer_model_id") || "",
         conversation_summary_enabled: summary?.get("conversation_summary_enabled") || "false",
         conversation_summary_model: parseModelValue(selection).provider_id ? selection : "",
         butler_experiment_enabled:
@@ -187,8 +181,6 @@ export async function saveExperimentalConfigValues(
         ...butler,
         dynamic_mcp_loading_enabled: String(values.dynamic_mcp_loading_enabled),
         mcp_summarizer_model_id: String(values.mcp_summarizer_model_id || ""),
-        assistant_summary_enabled: String(values.assistant_summary_enabled),
-        assistant_summarizer_model_id: String(values.assistant_summarizer_model_id || ""),
         conversation_summary_enabled: String(values.conversation_summary_enabled),
         conversation_summary_model: conversationSummaryModel.model_code,
         conversation_summary_provider_id: conversationSummaryModel.provider_id,

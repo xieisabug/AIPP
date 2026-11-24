@@ -8,6 +8,7 @@ import { ExperimentalConfigForm } from "./ExperimentalConfigForm";
 import {
     EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
     ExperimentalConfigFormState,
+    buildExperimentalConfigFormValues,
 } from "./experimentalConfigShared";
 
 vi.mock("@/hooks/useModels", () => ({
@@ -54,7 +55,6 @@ describe("ExperimentalConfigForm", () => {
     beforeEach(() => {
         mockInvokeHandler("get_experimental_summary_task_status", () => ({
             mcp_running: false,
-            assistant_running: false,
             conversation_running: false,
             conversation_running_count: 0,
         }));
@@ -75,6 +75,22 @@ describe("ExperimentalConfigForm", () => {
     afterEach(() => {
         clearAllMockHandlers();
         vi.clearAllMocks();
+    });
+
+    it("should allow saving when a legacy profile enabled assistant summaries without a model", async () => {
+        function Harness() {
+            const form = useForm<ExperimentalConfigFormState>({
+                defaultValues: buildExperimentalConfigFormValues(new Map([
+                    ["experimental", new Map([["assistant_summary_enabled", "true"]])],
+                ])),
+            });
+            return <ExperimentalConfigForm form={form} onSave={async () => undefined} />;
+        }
+        render(<Harness />);
+        expect(await screen.findByText("对话总结（实验）")).toBeInTheDocument();
+        expect(screen.getByText("MCP 动态加载（实验）")).toBeInTheDocument();
+        expect(screen.queryByText("助手总结（实验）")).toBeNull();
+        expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
     });
 
     it("should restore the previous MCP summary when settings reopen", async () => {

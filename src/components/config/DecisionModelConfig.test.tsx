@@ -172,7 +172,6 @@ describe("Decision model UI configuration (#340)", () => {
         });
         mockInvokeHandler("get_experimental_summary_task_status", () => ({
             mcp_running: false,
-            assistant_running: false,
             conversation_running: false,
             conversation_running_count: 0,
         }));

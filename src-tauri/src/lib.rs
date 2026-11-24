@@ -53,7 +53,6 @@ use crate::api::assistant_api::{
     save_assistant, update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
 };
-use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, list_butler_tasks_paginated,
@@ -130,7 +129,7 @@ use crate::api::system_api::{
     get_selected_text_api,
     open_data_folder, open_image, refresh_butler_feishu_runtime_command, resume_global_shortcut,
     save_butler_feishu_secret, save_feature_config, set_autostart, set_shortcut_recording,
-    suspend_global_shortcut, trigger_assistant_summary_generation,
+    suspend_global_shortcut,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
 use crate::sync::{
@@ -1103,7 +1102,6 @@ pub fn run() {
             refresh_butler_feishu_runtime_command,
             get_experimental_summary_task_status,
             trigger_mcp_summary_generation,
-            trigger_assistant_summary_generation,
             trigger_conversation_summary_generation,
             debug_resend_message_to_feishu,
             conversation_has_feishu_target,
@@ -1370,7 +1368,6 @@ pub fn run() {
             update_assistant_mcp_tool_config,
             bulk_update_assistant_mcp_tools,
             update_assistant_model_config_value,
-            summarize_all_assistant_summaries,
             start_github_copilot_device_flow,
             poll_github_copilot_token,
             // Copilot LSP commands
