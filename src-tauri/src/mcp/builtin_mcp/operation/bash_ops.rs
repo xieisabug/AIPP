@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::process::Stdio;
 use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use crate::utils::background_process::background_command;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
@@ -118,7 +119,7 @@ impl BashOperations {
         timeout_ms: u64,
         vault: &VaultEnv,
     ) -> Result<ExecuteBashResponse, String> {
-        let mut cmd = Command::new(&shell_command.program);
+        let mut cmd = Command::from(background_command(&shell_command.program));
         cmd.args(&shell_command.args).stdout(Stdio::piped()).stderr(Stdio::piped());
         Self::apply_vault(&mut cmd, vault);
 
@@ -197,7 +198,7 @@ impl BashOperations {
             "Spawning background command"
         );
 
-        let mut cmd = Command::new(&shell_command.program);
+        let mut cmd = Command::from(background_command(&shell_command.program));
         cmd.args(&shell_command.args).stdout(Stdio::piped()).stderr(Stdio::piped());
         Self::apply_vault(&mut cmd, vault);
 

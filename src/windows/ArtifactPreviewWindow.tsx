@@ -1004,7 +1004,7 @@ export default function ArtifactPreviewWindow() {
                         /* 日志视图 - 全屏显示 */
                         <div className="flex-1 flex flex-col p-4">
                             <h2 className="text-lg font-semibold mb-2 text-foreground">Artifact Preview Logs</h2>
-                            <div className="flex-1 overflow-y-auto rounded border border-border p-2 bg-muted text-sm font-mono">
+                            <div className="flex-1 overflow-y-auto rounded border border-border p-2 bg-muted text-sm font-mono whitespace-pre-wrap">
                                 {artifactEvents.logs.map((log, idx) => (
                                     <div
                                         key={idx}

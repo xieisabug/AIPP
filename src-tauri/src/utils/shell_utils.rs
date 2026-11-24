@@ -52,14 +52,9 @@ pub fn resolve_shell(preferred: Option<&str>) -> Result<ShellKind, String> {
     }
 }
 
-pub fn resolve_powershell_shell() -> Result<ShellKind, String> {
-    if which::which("pwsh").is_ok() {
-        return Ok(ShellKind::Pwsh);
-    }
-    if which::which("powershell").is_ok() {
-        return Ok(ShellKind::WindowsPowerShell);
-    }
-    Err("Neither pwsh nor powershell was found in PATH".to_string())
+pub fn resolve_powershell_executable() -> Result<std::path::PathBuf, String> {
+    which::which("pwsh").or_else(|_| which::which("powershell"))
+        .map_err(|e| format!("Neither pwsh nor powershell was found in PATH: {e}"))
 }
 
 pub fn wrap_powershell_command(command: &str) -> String {
@@ -184,7 +179,7 @@ unsafe extern "system" {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_process_output, resolve_powershell_shell, resolve_shell, ShellKind};
+    use super::{decode_process_output, resolve_powershell_executable, resolve_shell, ShellKind};
 
     #[test]
     fn test_decode_utf8_output() {
@@ -199,13 +194,8 @@ mod tests {
 
     #[test]
     fn test_resolve_powershell_shell() {
-        let shell = resolve_powershell_shell();
-        if which::which("pwsh").is_ok() || which::which("powershell").is_ok() {
-            let shell = shell.expect("PowerShell should be available for tests");
-            assert!(matches!(shell, ShellKind::Pwsh | ShellKind::WindowsPowerShell));
-        } else {
-            assert!(shell.is_err());
-        }
+        let expected = which::which("pwsh").or_else(|_| which::which("powershell")).ok();
+        assert_eq!(resolve_powershell_executable().ok(), expected);
     }
 
     #[cfg(target_os = "windows")]

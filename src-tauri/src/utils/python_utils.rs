@@ -1,5 +1,5 @@
 use crate::utils::uv_utils::UvUtils;
-use std::process::Command;
+use crate::utils::background_process::background_command;
 use tauri::AppHandle;
 
 /// Python 版本信息
@@ -17,7 +17,7 @@ pub struct PythonUtils;
 impl PythonUtils {
     /// 运行命令获取 Python 版本
     fn get_version_from_command(exe: &str, version_flag: &str) -> Option<String> {
-        match Command::new(exe).arg(version_flag).output() {
+        match background_command(exe).arg(version_flag).output() {
             Ok(output) if output.status.success() => {
                 let version_info = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 // 解析版本号，如 "Python 3.11.0" -> "3.11.0"
@@ -33,17 +33,13 @@ impl PythonUtils {
     }
 
     /// 检查 Python 2 是否安装
-    pub fn check_python2(_app_handle: &AppHandle) -> Option<String> {
+    fn check_python2(installed_pythons: &[String]) -> Option<String> {
         tracing::info!("检查 Python 2 版本");
 
         // 先尝试从 uv 管理的 Python 中查找
-        if let Some(versions) = Self::get_uv_python_list() {
-            for version in versions {
-                if version.starts_with("2.") {
-                    tracing::info!("通过 uv 找到 Python 2: {}", version);
-                    return Some(version);
-                }
-            }
+        if let Some(version) = installed_pythons.iter().find(|v| v.starts_with("2.")) {
+            tracing::info!("通过 uv 找到 Python 2: {}", version);
+            return Some(version.clone());
         }
 
         // 回退到系统 PATH 检查
@@ -68,17 +64,13 @@ impl PythonUtils {
     }
 
     /// 检查 Python 3 是否安装
-    pub fn check_python3(_app_handle: &AppHandle) -> Option<String> {
+    fn check_python3(installed_pythons: &[String]) -> Option<String> {
         tracing::info!("检查 Python 3 版本");
 
         // 先尝试从 uv 管理的 Python 中查找
-        if let Some(versions) = Self::get_uv_python_list() {
-            for version in versions {
-                if version.starts_with("3.") {
-                    tracing::info!("通过 uv 找到 Python 3: {}", version);
-                    return Some(version);
-                }
-            }
+        if let Some(version) = installed_pythons.iter().find(|v| v.starts_with("3.")) {
+            tracing::info!("通过 uv 找到 Python 3: {}", version);
+            return Some(version.clone());
         }
 
         // 回退到系统 PATH 检查
@@ -106,7 +98,7 @@ impl PythonUtils {
     fn get_uv_python_list() -> Option<Vec<String>> {
         let uv_exe = UvUtils::find_uv_executable()?;
 
-        match Command::new(&uv_exe).arg("python").arg("list").output() {
+        match background_command(&uv_exe).arg("python").arg("list").output() {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let mut versions = Vec::new();
@@ -166,13 +158,12 @@ impl PythonUtils {
     }
 
     /// 获取完整的 Python 信息
-    pub fn get_python_info(app_handle: &AppHandle) -> PythonInfo {
+    pub fn get_python_info(_app_handle: &AppHandle) -> PythonInfo {
         tracing::info!("开始获取 Python 版本信息");
 
-        let python2_version = Self::check_python2(app_handle);
-        let python3_version = Self::check_python3(app_handle);
-
         let installed_pythons = Self::get_uv_python_list().unwrap_or_default();
+        let python2_version = Self::check_python2(&installed_pythons);
+        let python3_version = Self::check_python3(&installed_pythons);
 
         // 如果没有 Python 3，则需要安装
         let need_install_python3 = python3_version.is_none();

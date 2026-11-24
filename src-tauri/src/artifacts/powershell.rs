@@ -1,29 +1,21 @@
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 
-use crate::utils::shell_utils::{
-    decode_process_output_line, resolve_powershell_shell, wrap_powershell_command, ShellCommand,
-};
+use crate::utils::background_process::background_command;
+use crate::utils::shell_utils::{decode_process_output_line, resolve_powershell_executable, wrap_powershell_command};
 
-pub fn run_powershell(script: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let shell = resolve_powershell_shell()
-        .map(|shell| shell.into_command(script))
-        .unwrap_or_else(|_| ShellCommand {
-            program: "powershell".to_string(),
-            args: vec!["-Command".to_string(), wrap_powershell_command(script)],
-        });
-
-    let mut command_args = Vec::with_capacity(shell.args.len() + 1);
-    command_args.push("-NoExit".to_string());
-    command_args.extend(shell.args);
-
-    let mut child = Command::new(shell.program)
-        .args(command_args)
+pub fn run_powershell(script: &str) -> Result<String, String> {
+    let shell = resolve_powershell_executable()?;
+    let mut child = background_command(&shell)
+        .args(["-NonInteractive", "-Command"])
+        .arg(wrap_powershell_command(script))
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| format!("启动 {} 失败：{e}", shell.display()))?;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -73,31 +65,26 @@ pub fn run_powershell(script: &str) -> Result<String, Box<dyn std::error::Error>
 
     let mut output = String::new();
 
-    // 持续读取输出，直到进程结束
-    loop {
-        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(line) => {
-                println!("{}", line); // 实时打印输出
-                output.push_str(&line);
-                output.push('\n');
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // 检查进程是否仍在运行
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        output.push_str(&format!("PowerShell 执行完成，退出状态: {}", status));
-                        break;
-                    }
-                    Ok(None) => continue, // 进程仍在运行
-                    Err(e) => return Err(Box::new(e)),
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
+    for line in rx {
+        output.push_str(&line);
+        output.push('\n');
     }
-
-    // 确保子进程已经完全退出
-    let _ = child.wait_with_output()?;
-
-    Ok(output)
+    let status = child.wait().map_err(|e| format!("等待 {} 退出失败：{e}", shell.display()))?;
+    if status.success() {
+        Ok(output)
+    } else {
+        Err(format!("{} 退出状态 {status}\n{output}", shell.display()))
+    }
 }
+
+/// The code block toolbar opens a regular shell for user input. No script is passed to it.
+#[cfg(windows)]
+#[tauri::command]
+pub fn open_interactive_powershell() -> Result<(), String> {
+    let path = resolve_powershell_executable()?;
+    open::that(&path).map_err(|e| format!("打开 {} 失败：{e}", path.display()))
+}
+
+#[cfg(all(test, windows))]
+#[path = "powershell_tests.rs"]
+mod tests;

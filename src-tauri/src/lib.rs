@@ -1260,6 +1260,8 @@ pub fn run() {
             update_conversation,
             update_message_content,
             run_artifacts,
+            #[cfg(windows)]
+            artifacts::powershell::open_interactive_powershell,
             list_conversation_artifacts,
             restore_artifact_preview,
             save_artifact_to_collection,

@@ -306,7 +306,12 @@ pub async fn run_artifacts(
                     serde_json::json!({ "message": "执行 PowerShell 脚本...", "request_id": request_id }),
                 );
             }
-            return Ok(run_powershell(input_str).map_err(|e| {
+            let script = input_str.to_owned();
+            let result = tokio::task::spawn_blocking(move || run_powershell(&script))
+                .await
+                .map_err(|e| format!("PowerShell 预览任务中断：{e}"))
+                .and_then(|result| result);
+            let output = result.map_err(|e| {
                 let error_msg = "PowerShell 脚本执行失败:".to_owned() + &e.to_string();
                 if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
@@ -315,7 +320,18 @@ pub async fn run_artifacts(
                     );
                 }
                 AppError::RunCodeError(error_msg)
-            })?);
+            })?;
+            if let Some(window) = app_handle.get_webview_window(target_window) {
+                if !output.is_empty() {
+                    let _ = window.emit("artifact-preview-log", serde_json::json!({
+                        "message": output, "request_id": request_id
+                    }));
+                }
+                let _ = window.emit("artifact-preview-success", serde_json::json!({
+                    "message": "PowerShell 执行完成", "request_id": request_id
+                }));
+            }
+            return Ok(output);
         }
         "applescript" => {
             if let Some(window) = app_handle.get_webview_window(target_window) {

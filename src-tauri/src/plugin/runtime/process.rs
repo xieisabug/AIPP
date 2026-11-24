@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
+use crate::utils::background_process::background_command;
 use tokio::process::Command;
 
 const PROCESS_PROTOCOL_JSONRPC_STDIO: &str = "jsonrpc-stdio";
@@ -86,7 +87,7 @@ pub(crate) async fn execute_process_hook(
     let request_json = serde_json::to_vec(&request)
         .map_err(|error| format!("Failed to serialize process hook input: {}", error))?;
 
-    let mut child = Command::new(&entry_path)
+    let mut child = Command::from(background_command(&entry_path))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

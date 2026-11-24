@@ -1,5 +1,5 @@
 use dirs;
-use std::process::Command;
+use crate::utils::background_process::background_command;
 use tauri::AppHandle;
 
 /// Uv 可执行文件工具函数
@@ -21,7 +21,7 @@ impl UvUtils {
 
         let get_version = |exe: &std::path::Path| -> Option<String> {
             if exe.exists() {
-                match Command::new(exe).arg("--version").output() {
+                match background_command(exe).arg("--version").output() {
                     Ok(output) if output.status.success() => {
                         let version_info =
                             String::from_utf8_lossy(&output.stdout).trim().to_string();

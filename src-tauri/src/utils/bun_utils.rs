@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::process::Command;
+use crate::utils::background_process::background_command;
 use tauri::{AppHandle, Manager};
 
 /// Bun 可执行文件工具函数
@@ -18,7 +18,7 @@ impl BunUtils {
     /// 测试指定路径的 Bun 可执行文件是否可用
     fn test_bun_executable(exe: &std::path::Path) -> bool {
         if exe.exists() {
-            match Command::new(exe).arg("--version").output() {
+            match background_command(exe).arg("--version").output() {
                 Ok(output) if output.status.success() => true,
                 _ => false,
             }
@@ -70,7 +70,7 @@ impl BunUtils {
         // 定义一个闭包，尝试执行指定路径的 Bun --version
         let get_version = |exe: &std::path::Path| -> Option<String> {
             if exe.exists() {
-                match Command::new(exe).arg("--version").output() {
+                match background_command(exe).arg("--version").output() {
                     Ok(output) if output.status.success() => {
                         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
                     }

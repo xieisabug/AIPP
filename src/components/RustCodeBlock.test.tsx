@@ -1,11 +1,15 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import RustCodeBlock from "./RustCodeBlock";
 
 const platform = vi.hoisted(() => ({ mobile: false }));
-vi.mock("@/hooks/use-platform", () => ({ useIsMobilePlatform: () => platform.mobile }));
+vi.mock("@/hooks/use-platform", () => ({
+    useIsMobilePlatform: () => platform.mobile,
+    usePlatform: () => platform.mobile ? "android" : "windows",
+}));
 vi.mock("@/lib/mobileUnsupported", () => ({ useFeatureAvailableOnPlatform: () => !platform.mobile }));
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
@@ -75,6 +79,20 @@ describe("RustCodeBlock", () => {
         bounds = { top: -800, bottom: -300 };
         act(() => notifyIntersection([[root, false]]));
         expect(toolbar).not.toHaveClass("fixed");
+    });
+
+    it("should copy the script and open a terminal only when interactive PowerShell is selected", async () => {
+        const source = "Read-Host '请输入名字'";
+        const run = vi.fn();
+        mockInvokeHandler("open_interactive_powershell", () => undefined);
+        render(<RustCodeBlock language="powershell" onCodeRun={run}>{source}</RustCodeBlock>);
+        await userEvent.click(screen.getByRole("button", { name: "运行代码" }));
+        expect(run).toHaveBeenCalledExactlyOnceWith("powershell", source);
+        expect(invoke).not.toHaveBeenCalledWith("open_interactive_powershell");
+        await userEvent.click(screen.getByRole("button", { name: "复制脚本并打开 PowerShell" }));
+        expect(writeText).toHaveBeenCalledWith(source);
+        expect(invoke).toHaveBeenCalledWith("open_interactive_powershell");
+        expect(run).toHaveBeenCalledTimes(1);
     });
 
     it("should open the in-app preview with full source when the platform is mobile", async () => {

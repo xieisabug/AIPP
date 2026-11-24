@@ -4,6 +4,7 @@ use crate::api::ai::acp::{
     AcpConfig, AcpSessionConfigOptionPayload,
 };
 use crate::api::agent_model_cache::ProbeCache;
+use crate::utils::background_process::background_command;
 use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, probe_codex_model_options, CodexAppServerConfig,
     CodexModelProbe, CODEX_APP_SERVER_API_TYPE,
@@ -1166,7 +1167,7 @@ pub async fn get_acp_launch_diagnostics(
         let working_directory = acp_config.working_directory.clone();
         let env_vars: HashMap<String, String> = acp_config.env_vars.clone();
         tokio::task::spawn_blocking(move || {
-            match std::process::Command::new(&resolved_cli_path)
+            match background_command(&resolved_cli_path)
                 .arg("--version")
                 .current_dir(&working_directory)
                 .envs(&env_vars)

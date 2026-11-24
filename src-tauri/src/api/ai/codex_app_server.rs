@@ -25,6 +25,7 @@ use crate::mcp::builtin_mcp::interaction::{
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
 };
 use crate::state::activity_state::ConversationActivityManager;
+use crate::utils::background_process::background_command;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -2223,7 +2224,7 @@ async fn spawn_process(
     #[cfg(not(target_os = "windows"))]
     let (program, prefix_args): (PathBuf, Vec<String>) = (resolved_cli, Vec::new());
 
-    let mut command = Command::new(&program);
+    let mut command = Command::from(background_command(&program));
     command
         .args(prefix_args)
         .arg("app-server")

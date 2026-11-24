@@ -1,4 +1,5 @@
 pub mod async_thread;
+pub(crate) mod background_process;
 pub mod bun_utils;
 pub mod db_utils;
 pub mod path_utils;
@@ -13,6 +14,8 @@ pub mod window_utils;
 
 #[cfg(test)]
 mod async_thread_tests;
+#[cfg(all(test, windows))]
+mod background_process_tests;
 #[cfg(test)]
 mod prompt_image_tests;
 #[cfg(test)]

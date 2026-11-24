@@ -4,6 +4,7 @@ use tauri::{Emitter, Manager, State};
 
 use crate::api::ai::acp::resolve_acp_cli_path;
 use crate::api::ai::config::{build_proxy_env_vars, get_network_proxy_from_config};
+use crate::utils::background_process::background_command;
 use crate::FeatureConfigState;
 
 #[tauri::command]
@@ -637,7 +638,7 @@ fn update_uv_impl(
             )
         };
 
-        let mut cmd = Command::new(command);
+        let mut cmd = background_command(command);
         cmd.args(args);
 
         // 设置代理环境变量
@@ -924,7 +925,7 @@ pub fn install_uv(
                 )
             };
 
-            let mut child = match Command::new(command)
+            let mut child = match background_command(command)
                 .args(args)
                 .env("UV_INSTALLER_GHE_BASE_URL", "https://ghfast.top/https://github.com")
                 .stdout(Stdio::piped())
@@ -1084,7 +1085,7 @@ pub fn install_python3(
         let uv_exe = if cfg!(target_os = "windows") { "uv.exe" } else { "uv" };
 
         // 检查 uv 是否安装
-        match Command::new(uv_exe).arg("--version").output() {
+        match background_command(uv_exe).arg("--version").output() {
             Ok(output) if output.status.success() => {
                 let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 tracing::info!("检测到 uv 版本: {}", version);
@@ -1114,7 +1115,7 @@ pub fn install_python3(
 
         tracing::info!("执行命令: {} {:?}", command, args);
 
-        let mut cmd = Command::new(command);
+        let mut cmd = background_command(command);
         cmd.args(args);
 
         // 设置加速镜像环境变量
@@ -1285,19 +1286,19 @@ fn command_for_cli(resolved: &std::path::Path) -> Command {
             resolved.extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase);
         match extension.as_deref() {
             Some("cmd" | "bat") => {
-                let mut command = Command::new("cmd.exe");
+                let mut command = background_command("cmd.exe");
                 command.args(["/D", "/S", "/C", &resolved.display().to_string()]);
                 return command;
             }
             Some("ps1") => {
-                let mut command = Command::new("pwsh.exe");
+                let mut command = background_command("pwsh.exe");
                 command.args(["-NoProfile", "-File", &resolved.display().to_string()]);
                 return command;
             }
             _ => {}
         }
     }
-    Command::new(resolved)
+    background_command(resolved)
 }
 
 /// 运行 CLI `--version` 检测官方 CLI 是否可用，返回 (版本号, 解析路径)
@@ -1379,7 +1380,7 @@ fn detect_acp_installation(app: &tauri::AppHandle, cli_command: &str) -> AcpLibr
     }
 
     if requires_external {
-        let output = std::process::Command::new(cli_command).arg("--version").output();
+        let output = background_command(cli_command).arg("--version").output();
 
         return match output {
             Ok(out) if out.status.success() => {
@@ -1424,7 +1425,7 @@ fn detect_acp_installation(app: &tauri::AppHandle, cli_command: &str) -> AcpLibr
         }
     };
 
-    let output = std::process::Command::new(&bun_path).args(["pm", "ls", "-g"]).output();
+    let output = background_command(&bun_path).args(["pm", "ls", "-g"]).output();
 
     match output {
         Ok(out) if out.status.success() => {
@@ -1570,7 +1571,7 @@ pub async fn install_acp_library(app: tauri::AppHandle, cli_command: String) -> 
 
         emit_log(&format!("执行: bun add -g {}", package_name_clone));
 
-        let mut command = std::process::Command::new(&bun_path);
+        let mut command = background_command(&bun_path);
         command
             .args(["add", "-g", &package_name_clone])
             .stdout(std::process::Stdio::piped())
@@ -1648,7 +1649,7 @@ pub async fn update_acp_library(
             let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
                 .map_err(|e| format!("获取 Bun 路径失败: {}", e))?;
             let package = format!("{}@latest", info.package_name);
-            let mut command = Command::new(&bun_path);
+            let mut command = background_command(&bun_path);
             command.args(["add", "-g", &package]);
             (command, format!("bun add -g {}", package))
         }

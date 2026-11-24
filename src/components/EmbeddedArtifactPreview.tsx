@@ -493,7 +493,7 @@ export default function EmbeddedArtifactPreview({ className, previewOnly = false
                 {activeView === 'logs' ? (
                     /* 日志视图 */
                     <div className="h-full overflow-y-auto p-3">
-                        <div className="text-xs font-mono space-y-1">
+                        <div className="text-xs font-mono whitespace-pre-wrap space-y-1">
                             {artifactEvents.logs.map((log, idx) => (
                                 <div
                                     key={idx}

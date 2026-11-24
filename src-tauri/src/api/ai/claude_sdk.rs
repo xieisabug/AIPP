@@ -1,4 +1,5 @@
 use crate::api::ai::acp::resolve_acp_cli_path;
+use crate::utils::background_process::background_command;
 use crate::api::ai::acp::{
     AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
     AcpPermissionState, AcpPlanEntryPayload, AcpSessionConfigChoicePayload,
@@ -1294,7 +1295,7 @@ fn build_claude_command(
     };
     #[cfg(not(target_os = "windows"))]
     let (program, prefix_args): (PathBuf, Vec<String>) = (resolved.clone(), Vec::new());
-    let mut command = Command::new(program);
+    let mut command = Command::from(background_command(program));
     command.args(prefix_args).args([
         "--print",
         "--verbose",

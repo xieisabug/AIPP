@@ -2,7 +2,10 @@ use hex;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Command;
+#[cfg(windows)]
+use crate::utils::background_process::background_command;
 use tauri::{AppHandle, Manager};
 
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
@@ -498,7 +501,7 @@ pub fn kill_process_by_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     {
         println!("🔧 [Windows] 尝试终止进程 PID: {}", pid);
-        let output = Command::new("taskkill").args(&["/F", "/PID", &pid.to_string()]).output()?;
+        let output = background_command("taskkill").args(&["/F", "/PID", &pid.to_string()]).output()?;
 
         if output.status.success() {
             println!("✅ [Windows] taskkill 成功");
@@ -579,7 +582,7 @@ pub fn kill_process_group_by_pid(pid: u32) -> Result<(), Box<dyn std::error::Err
     {
         println!("🔧 [Windows] 尝试终止进程树 PID: {}", pid);
         let output =
-            Command::new("taskkill").args(&["/F", "/T", "/PID", &pid.to_string()]).output()?;
+            background_command("taskkill").args(&["/F", "/T", "/PID", &pid.to_string()]).output()?;
 
         if output.status.success() {
             println!("✅ [Windows] taskkill 进程树成功");
@@ -650,7 +653,7 @@ pub fn kill_processes_by_port(port: u16) -> Result<(), Box<dyn std::error::Error
         println!("🔧 [Windows] 查找端口 {} 上的进程", port);
 
         // 使用 netstat 查找占用端口的进程
-        let output = Command::new("netstat").args(&["-ano"]).output()?;
+        let output = background_command("netstat").args(&["-ano"]).output()?;
 
         if !output.status.success() {
             return Err("netstat 命令失败".into());

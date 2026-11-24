@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use crate::utils::background_process::{background_command, background_group_command};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
@@ -243,7 +244,7 @@ impl ReactArtifactRunner {
         // 安装依赖（如果需要的话）
         if force_install || !project_path.join("node_modules").exists() {
             println!("🔧 [ReactRunner] 开始安装依赖...");
-            let install_result = Command::new(&bun_executable)
+            let install_result = background_command(&bun_executable)
                 .args(&["install", "--force"])
                 .current_dir(project_path)
                 .output();
@@ -272,26 +273,12 @@ impl ReactArtifactRunner {
         // 启动 Vite 开发服务器
         println!("🔧 [ReactRunner] 启动 Vite 服务器...");
 
-        let mut vite_command = Command::new(&bun_executable);
+        let mut vite_command = background_group_command(&bun_executable);
         vite_command
             .args(&["x", "vite", "--port", &port.to_string(), "--host", "127.0.0.1"])
             .current_dir(project_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-
-        // 为 Unix 系统创建新的进程组
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            vite_command.process_group(0);
-        }
-
-        // 为 Windows 系统创建新的进程组
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            vite_command.creation_flags(0x00000200);
-        }
 
         let child = vite_command.spawn()?;
         let pid = child.id();

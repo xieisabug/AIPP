@@ -41,6 +41,7 @@ use crate::mcp::builtin_mcp::operation::{
 };
 use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
+use crate::utils::background_process::background_command;
 use crate::utils::window_utils::{
     emit_conversation_list_activity,
 };
@@ -1401,7 +1402,7 @@ pub async fn probe_acp_session_config_options(
         &config.additional_args,
         &config.env_vars,
     );
-    let mut command = Command::new(&launch_plan.program);
+    let mut command = Command::from(background_command(&launch_plan.program));
     command
         .current_dir(&config.working_directory)
         .stdin(Stdio::piped())
@@ -1787,7 +1788,7 @@ pub fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     let which_cmd = "which";
 
-    if let Ok(output) = std::process::Command::new(which_cmd).arg(cli_command).output() {
+    if let Ok(output) = background_command(which_cmd).arg(cli_command).output() {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
             // On Windows, `where` may return multiple lines, take the first one
@@ -1821,7 +1822,7 @@ fn is_node_shebang_script(path: &Path) -> bool {
 
 fn test_node_executable(path: &Path) -> bool {
     path.exists()
-        && std::process::Command::new(path)
+        && background_command(path)
             .arg("--version")
             .output()
             .is_ok_and(|output| output.status.success())
@@ -1862,7 +1863,7 @@ fn resolve_node_runtime_path() -> Option<PathBuf> {
             continue;
         }
 
-        let Ok(output) = std::process::Command::new(&shell_path)
+        let Ok(output) = background_command(&shell_path)
             .args(["-lc", "command -v node"])
             .output()
         else {
@@ -1919,7 +1920,7 @@ fn resolve_node_runtime_path() -> Option<PathBuf> {
 }
 
 fn node_supports_use_env_proxy(node_path: &Path) -> bool {
-    let Ok(output) = std::process::Command::new(node_path).arg("--help").output() else {
+    let Ok(output) = background_command(node_path).arg("--help").output() else {
         return false;
     };
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains("--use-env-proxy")
@@ -3256,7 +3257,7 @@ impl AcpTauriClient {
         args: acp::CreateTerminalRequest,
     ) -> Result<String, String> {
         let bash_id = uuid::Uuid::new_v4().to_string();
-        let mut cmd = Command::new(&args.command);
+        let mut cmd = Command::from(background_command(&args.command));
         cmd.args(&args.args).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(cwd) = args.cwd.as_ref() {
             cmd.current_dir(cwd);
@@ -4932,7 +4933,7 @@ async fn run_acp_session(
         )
         .await;
 
-    let mut cmd = Command::new(&launch_plan.program);
+    let mut cmd = Command::from(background_command(&launch_plan.program));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -5912,7 +5913,7 @@ async fn run_acp_session_delete(
         &acp_config.env_vars,
     );
 
-    let mut cmd = Command::new(&launch_plan.program);
+    let mut cmd = Command::from(background_command(&launch_plan.program));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use crate::utils::background_process::{background_command, background_group_command};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -392,7 +393,7 @@ impl ReactPreviewManager {
         println!("🔧 [DevServer] Bun 可执行文件: {:?}", bun_executable);
 
         // 检查 bun 版本
-        match Command::new(&bun_executable).arg("--version").output() {
+        match background_command(&bun_executable).arg("--version").output() {
             Ok(output) => {
                 let version = String::from_utf8_lossy(&output.stdout);
                 println!("🔧 [DevServer] Bun 版本: {}", version.trim());
@@ -419,7 +420,7 @@ impl ReactPreviewManager {
         // 先安装依赖（如果需要的话）
         if force_install || !project_path.join("node_modules").exists() {
             println!("🔧 [DevServer] 开始安装依赖...");
-            let install_result = Command::new(&bun_executable)
+            let install_result = background_command(&bun_executable)
                 .args(&["install", "--force"])
                 .current_dir(project_path)
                 .output();
@@ -455,28 +456,12 @@ impl ReactPreviewManager {
         println!("🔧 [DevServer] 启动 Vite 开发服务器...");
 
         // 首先尝试使用 bunx vite
-        let mut vite_command = Command::new(&bun_executable);
+        let mut vite_command = background_group_command(&bun_executable);
         vite_command
             .args(&["x", "vite", "--port", &port.to_string(), "--host", "127.0.0.1"])
             .current_dir(project_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-
-        // 为 Unix 系统创建新的进程组
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            vite_command.process_group(0); // 创建新的进程组
-            println!("🔧 [DevServer] 为 Unix 系统创建新进程组");
-        }
-
-        // 为 Windows 系统创建新的进程组
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            vite_command.creation_flags(0x00000200); // CREATE_NEW_PROCESS_GROUP
-            println!("🔧 [DevServer] 为 Windows 系统创建新进程组");
-        }
 
         let child = vite_command.spawn();
 

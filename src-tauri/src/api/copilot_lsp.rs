@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Child;
+#[cfg(target_os = "macos")]
+use std::process::Command;
+use crate::utils::background_process::background_command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
@@ -462,7 +465,7 @@ fn try_read_token_from_legacy_apps_json() -> Result<Vec<CopilotOauthTokenCandida
 }
 
 fn try_read_token_from_github_cli() -> Result<Vec<CopilotOauthTokenCandidate>, String> {
-    let output = match Command::new("gh").args(["auth", "token"]).output() {
+    let output = match background_command("gh").args(["auth", "token"]).output() {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("调用 gh auth token 失败: {}", e)),

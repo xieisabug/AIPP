@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import IconButton from "./IconButton";
+import InteractivePowerShellButton from "./InteractivePowerShellButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
 import { buildHighlightCacheKey, getCachedRustHighlight, useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
@@ -317,6 +318,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 {codeRunAvailable && (
                     <IconButton title="运行代码" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
                 )}
+                {codeRunAvailable && onCodeRun && language === "powershell" && <InteractivePowerShellButton code={code} />}
             </div>
 
             {metaLabel && (

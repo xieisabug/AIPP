@@ -82,8 +82,6 @@ pub fn command(spec: Launch) -> Result<Command,String> {
     }
     let mut command = Command::new(&program);
     command.args(args).current_dir(spec.cwd).envs(spec.env).kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
     Ok(command)
 }
 
@@ -195,7 +193,8 @@ impl Drop for Diagnostics { fn drop(&mut self) { self.task.abort(); if let Some(
 pub async fn spawn(app: &tauri::AppHandle, server: &MCPServer, fallback: Command, extra_secrets: Vec<String>) -> Result<(rmcp::transport::TokioChildProcess,Diagnostics),String> {
     let key = binding(server.command.as_deref())?.map(|b|b.key);
     let _guard = if key.is_some() { Some(super::api::INSTALL_LOCK.lock().await) } else { None };
-    let (command,mut secrets) = prepare(app,server).await?.unwrap_or((fallback,vec![]));
+    let (mut command,mut secrets) = prepare(app,server).await?.unwrap_or((fallback,vec![]));
+    crate::utils::background_process::hide_console(command.as_std_mut());
     secrets.extend(extra_secrets);
     let context_redactor = crate::vault::placeholder::current_redactor();
     let redactor = Arc::new(crate::vault::executor::redactor_for(secrets).merged(context_redactor.as_deref()));

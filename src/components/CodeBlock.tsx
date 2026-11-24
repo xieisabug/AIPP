@@ -1,6 +1,7 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import IconButton from "./IconButton";
+import InteractivePowerShellButton from "./InteractivePowerShellButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
 import { useCodeTheme } from "../hooks/useCodeTheme";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
@@ -117,6 +118,7 @@ const CodeBlock = React.memo(
                 {codeRunAvailable && (
                     <IconButton title="运行代码" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun(language, getCodeString())} />
                 )}
+                {codeRunAvailable && language === "powershell" && <InteractivePowerShellButton code={codeString} />}
             </div>
         );
 

@@ -321,16 +321,19 @@ async fn test_execute_bash_background_chinese_output() {
         BashOperations::execute_bash(None, &state, request).await.expect("command should succeed");
     let bash_id = response.bash_id.expect("background command should have bash_id");
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    let output = BashOperations::get_bash_output(
-        &state,
-        GetBashOutputRequest { bash_id, filter: None },
-    )
-    .await
-    .expect("should read background output");
-
-    assert!(output.output.contains("后台中文输出"));
+    let output = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut output = String::new();
+        loop {
+            let request = GetBashOutputRequest { bash_id: bash_id.clone(), filter: None };
+            let part = BashOperations::get_bash_output(&state, request).await.unwrap();
+            output.push_str(&part.output);
+            if part.status != BashProcessStatus::Running {
+                return output;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("background PowerShell should finish within 10 seconds");
+    assert!(output.contains("后台中文输出"), "{output}");
 }
 
 /// 测试获取不存在的 bash 进程输出
