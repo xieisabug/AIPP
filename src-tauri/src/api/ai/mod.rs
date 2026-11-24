@@ -21,3 +21,6 @@ pub mod title;
 pub mod types;
 pub(crate) mod unattended_loop;
 pub(crate) mod working_directory;
+pub(crate) mod official_cli;
+#[cfg(test)]
+mod official_cli_tests;

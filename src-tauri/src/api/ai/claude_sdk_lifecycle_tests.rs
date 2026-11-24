@@ -22,7 +22,7 @@ fn test_claude_effort_uses_reported_model_levels_and_passes_assistant_choice_to_
     assert_eq!(selector.current_value, "xhigh");
     assert_eq!(selector.options.iter().map(|o|o.value.as_str()).collect::<Vec<_>>(), ["default","low","xhigh","max"]);
     for session in [None, Some("existing")] {
-        let (command, _) = build_claude_command(&config, session);
+        let command = build_claude_command(&config, session, std::path::Path::new("claude"));
         let args: Vec<_> = command.as_std().get_args().map(|v|v.to_str().unwrap()).collect();
         assert!(args.windows(2).any(|pair|pair == ["--effort", "xhigh"]));
     }
@@ -40,7 +40,7 @@ fn test_claude_native_auto_for_new_and_resumed_sessions() {
     assert_eq!(mode.current_value, "auto");
     assert!(mode.options.iter().any(|choice| choice.value == "auto"));
     for session_id in [None, Some("existing-session")] {
-        let (command, _) = build_claude_command(&config, session_id);
+        let command = build_claude_command(&config, session_id, std::path::Path::new("claude"));
         let args: Vec<_> = command.as_std().get_args().collect();
         assert_eq!(args.iter().filter(|arg| **arg == "--permission-mode").count(), 1);
         assert!(args.windows(2).any(|pair| pair == ["--permission-mode", "auto"]));
@@ -334,7 +334,7 @@ fn test_model_catalog_merges_native_configured_and_reported_models_for_one_provi
         let mut selected = config.clone();
         selected.model = Some(choice.value.clone());
         for session in [None, Some("existing")] {
-            let (command, _) = build_claude_command(&selected, session);
+            let command = build_claude_command(&selected, session, std::path::Path::new("claude"));
             let args: Vec<_> = command.as_std().get_args().map(|arg|arg.to_str().unwrap()).collect();
             assert!(args.windows(2).any(|pair|pair == ["--model", &choice.value]));
         }

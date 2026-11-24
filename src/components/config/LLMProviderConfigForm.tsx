@@ -207,9 +207,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // ACP 环境检测 Hook
     const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
-    // 官方 Codex CLI 环境检测 Hook（codex_app_server 提供商固定检测 codex 命令）
-    const codexEnv = useAcpEnvironment(isCodexAppServerProvider ? "codex" : "");
-    const claudeEnv = useAcpEnvironment(isClaudeSdkProvider ? "claude" : "");
+    const codexEnv = useAcpEnvironment(isCodexAppServerProvider && loadedId === id ? "codex" : "",
+        form.watch("codex_cli_command")?.trim() || "codex");
+    const claudeEnv = useAcpEnvironment(isClaudeSdkProvider && loadedId === id ? "claude" : "",
+        form.watch("claude_cli_command")?.trim() || acpCliCommand?.trim() || "claude");
 
     const saves = useMemo(() => {
         type Field = { value: string; revision: number; pending: boolean; timer?: ReturnType<typeof setTimeout>; running: boolean };
@@ -246,6 +247,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             snapshot: () => new Map(Array.from(fields, ([key, field]) => [key, { revision: field.revision, pending: field.pending }])),
             merge(config: Record<string, string>, snapshot?: Map<string, { revision: number; pending: boolean }>) {
                 const merged = { ...defaultValues, ...config };
+                if (isClaudeSdkProvider && !config.claude_cli_command?.trim() && config.acp_cli_command?.trim()) {
+                    merged.claude_cli_command = config.acp_cli_command;
+                }
                 for (const [key, field] of fields) {
                     const previous = snapshot?.get(key);
                     if (field.pending || previous?.pending || (snapshot && field.revision !== previous?.revision)) {
@@ -256,7 +260,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             },
             flushAll() { for (const [key, field] of fields) if (field.timer) flush(key); },
         };
-    }, [id, defaultValues]);
+    }, [id, defaultValues, isClaudeSdkProvider]);
     const updateField = useCallback((key: string, value: string) => saves.update(key, value), [saves]);
     useEffect(() => () => saves.flushAll(), [saves]);
 

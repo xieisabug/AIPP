@@ -5,7 +5,7 @@ use crate::api::ai::agent_driver::events::{AgentEventIdentity, emit_to_window, e
 use crate::api::ai::agent_driver::failure::{AgentFailure, AgentFailureStage, AgentProcessDiagnostics, emit_normalized_failure_to_window};
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::api::ai::acp::{
-    resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
+    AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
     AcpPermissionState, AcpPlanEntryPayload,
 };
 use crate::api::operation_api::{
@@ -25,7 +25,7 @@ use crate::mcp::builtin_mcp::interaction::{
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
 };
 use crate::state::activity_state::ConversationActivityManager;
-use crate::utils::background_process::background_command;
+use super::official_cli;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -2196,37 +2196,9 @@ async fn spawn_process(
     config: &CodexAppServerConfig,
     stderr_buffer: CodexStderrBuffer,
 ) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
-    let resolved_cli = resolve_acp_cli_path(&config.cli_command);
-    #[cfg(target_os = "windows")]
-    let resolved_cli = if resolved_cli.extension().is_none() {
-        let cmd_shim = resolved_cli.with_extension("cmd");
-        if cmd_shim.exists() { cmd_shim } else { resolved_cli }
-    } else {
-        resolved_cli
-    };
-    #[cfg(target_os = "windows")]
-    let (program, prefix_args): (PathBuf, Vec<String>) = match resolved_cli
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("cmd" | "bat") => (
-            PathBuf::from("cmd.exe"),
-            vec!["/D".to_string(), "/S".to_string(), "/C".to_string(), resolved_cli.display().to_string()],
-        ),
-        Some("ps1") => (
-            PathBuf::from("pwsh.exe"),
-            vec!["-NoProfile".to_string(), "-File".to_string(), resolved_cli.display().to_string()],
-        ),
-        _ => (resolved_cli.clone(), Vec::new()),
-    };
-    #[cfg(not(target_os = "windows"))]
-    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved_cli, Vec::new());
-
-    let mut command = Command::from(background_command(&program));
+    let resolved_cli = official_cli::resolve(&config.cli_command).await?;
+    let mut command = Command::from(official_cli::command(&resolved_cli));
     command
-        .args(prefix_args)
         .arg("app-server")
         .arg("--listen")
         .arg("stdio://")
@@ -2238,7 +2210,7 @@ async fn spawn_process(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
-        format!("启动 Codex app-server 失败（{}）：{error}", program.display())
+        format!("启动 Codex app-server 失败（{}）：{error}", resolved_cli.display())
     })?;
     let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;

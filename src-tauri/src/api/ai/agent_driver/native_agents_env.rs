@@ -137,7 +137,7 @@ fn effective_path(env: &HashMap<String, String>) -> OsString {
 }
 
 /// Every Node.js installation we know how to find: PATH first, then version managers.
-fn node_locations(path: &OsString) -> Vec<(PathBuf, String)> {
+pub(crate) fn node_locations(path: &OsString) -> Vec<(PathBuf, String)> {
     let mut found: Vec<(PathBuf, String)> = std::env::split_paths(path).map(|dir| (dir.join(NODE_EXE), "PATH".to_string())).collect();
     let mut add = |paths: Vec<PathBuf>, label: &str| found.extend(paths.into_iter().map(|path| (path, label.to_string())));
     let home = dirs::home_dir();
@@ -189,7 +189,7 @@ pub(crate) fn command_in(dir: &Path, command: &str, windows: bool, exists: impl 
 }
 
 /// Install locations used by each agent's official installer and common package managers.
-fn tool_dirs(driver: &str) -> Vec<PathBuf> {
+pub(crate) fn tool_dirs(driver: &str) -> Vec<PathBuf> {
     let home = dirs::home_dir();
     let mut dirs = Vec::new();
     if let Some(home) = &home {

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { emit } from "@tauri-apps/api/event";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), refresh: null as null | ((current: () => boolean) => Promise<void>), error: vi.fn(), proxy: "" }));
+const mocks = vi.hoisted(() => ({ cliEnvironment: vi.fn(() => ({})), invoke: vi.fn(), refresh: null as null | ((current: () => boolean) => Promise<void>), error: vi.fn(), proxy: "" }));
 vi.mock("@/hooks/feature/useFeatureConfig", () => ({
     useFeatureConfig: () => ({ getConfigValue: () => mocks.proxy, loading: false }),
 }));
@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("sonner", () => ({ toast: { error: mocks.error, success: vi.fn() } }));
 vi.mock("@/hooks/useDataRefresh", () => ({ useDataRefresh: (options: { refresh: typeof mocks.refresh }) => { mocks.refresh = options.refresh; } }));
 vi.mock("@/hooks/useCopilot", () => ({ useCopilot: () => ({ authInfo: {} }) }));
-vi.mock("@/hooks/feature/useAcpEnvironment", () => ({ useAcpEnvironment: () => ({}) }));
+vi.mock("@/hooks/feature/useAcpEnvironment", () => ({ useAcpEnvironment: mocks.cliEnvironment }));
 vi.mock("./TagInputContainer", () => ({ default: () => null }));
 vi.mock("./ModelSelectionDialog", () => ({ default: () => null }));
 vi.mock("./ReadOnlyModelList", () => ({ default: () => null }));
@@ -41,6 +41,21 @@ describe("LLM provider field autosave", () => {
             if (command === "get_llm_models") return Promise.resolve([]);
             return Promise.resolve();
         });
+    });
+    it.each([
+        ["codex_app_server", "codex", "codex_cli_command"],
+        ["claude_sdk", "claude", "claude_cli_command"],
+        ["claude_sdk", "claude", "acp_cli_command"],
+    ])("should detect the configured executable when %s loads %s from %s", async (apiType, command, key) => {
+        mocks.cliEnvironment.mockClear();
+        const path = `C:/Tools/Local Agent/${command}.exe`;
+        mocks.invoke.mockImplementation(async (op: string) =>
+            op === "get_llm_provider_config" ? [{ name: key, value: path }] : []);
+        render(<LLMProviderConfigForm id="1" index={0} apiType={apiType} name="Agent" description=""
+            isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
+        await refresh();
+        expect(mocks.cliEnvironment).toHaveBeenCalledWith(command, path);
+        expect(mocks.cliEnvironment).not.toHaveBeenCalledWith(command, command);
     });
     it.each(["pi", "cursor", "opencode", "kiro", "antigravity", "codex_app_server", "claude_sdk"])(
         "should persist the proxy switch when editing a %s provider", async apiType => {

@@ -119,6 +119,15 @@ describe("CliEnvironmentStatus", () => {
         expect(screen.queryByRole("button", { name: "一键安装" })).not.toBeInTheDocument();
     });
 
+    it("should show the failed executable and underlying reason when its version probe fails", () => {
+        const reason = "C:/tools/claude.cmd --version 失败（退出码 1）：node.exe 找不到";
+        render(<CliEnvironmentStatus env={env({ status: "probe-failed", libraryInfo: null, probeError: reason })}
+            cliCommand="claude" displayName="Claude Code" />);
+        expect(screen.getByText(reason)).toBeInTheDocument();
+        expect(screen.queryByText(/手动安装|安装 Bun/)).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "重新检测" })).toBeInTheDocument();
+    });
+
     it("should not show another CLI's result while the newly selected CLI is being detected", () => {
         render(<CliEnvironmentStatus env={env({ status: "checking" })} cliCommand="kimi" displayName="Kimi Code CLI" />);
         expect(screen.queryByText("v0.63.0")).not.toBeInTheDocument();

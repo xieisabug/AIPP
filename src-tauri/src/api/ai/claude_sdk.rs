@@ -1,5 +1,4 @@
-use crate::api::ai::acp::resolve_acp_cli_path;
-use crate::utils::background_process::background_command;
+use super::official_cli;
 use crate::api::ai::acp::{
     AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
     AcpPermissionState, AcpPlanEntryPayload, AcpSessionConfigChoicePayload,
@@ -222,9 +221,10 @@ pub(crate) async fn discover_claude_models(mut config: ClaudeSdkConfig, provider
     PROBES.get_or_probe(key.clone(), move || async move {
         // Discovery asks for the entire catalog, including when the stored selection is a CLI-default sentinel.
         config.model = None;
-        let (mut command, _) = build_claude_command(&config, None);
+        let resolved = official_cli::resolve(&config.cli_command).await?;
+        let mut command = build_claude_command(&config, None, &resolved);
         command.args(["--no-session-persistence", "--strict-mcp-config"]);
-        let mut child = command.spawn().map_err(|e|format!("启动 Claude Code 模型探测失败：{e}"))?;
+        let mut child = command.spawn().map_err(|e|format!("启动 Claude Code 模型探测失败（{}）：{e}", resolved.display()))?;
         let mut stdin = child.stdin.take().ok_or("Claude model probe stdin missing")?;
         stdin.write_all(claude_catalog_request().as_bytes()).await.map_err(|e|e.to_string())?;
         drop(stdin);
@@ -1220,7 +1220,8 @@ async fn spawn_claude_process_with_diagnostics(
     tokio::process::ChildStdin,
     tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ), String> {
-    let (mut command, resolved) = build_claude_command(config, session_id);
+    let resolved = official_cli::resolve(&config.cli_command).await?;
+    let mut command = build_claude_command(config, session_id, &resolved);
     tracing::info!(
         cli = %resolved.display(),
         model = ?config.model,
@@ -1228,7 +1229,7 @@ async fn spawn_claude_process_with_diagnostics(
         has_anthropic_base_url = config.env_vars.contains_key("ANTHROPIC_BASE_URL"),
         "Starting Claude Code stream-json process"
     );
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut child = command.spawn().map_err(|e| format!("启动 Claude Code 失败（{}）：{e}", resolved.display()))?;
     let mut stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
     if config.instance_id.is_some() {
         stdin.write_all(claude_catalog_request().as_bytes()).await.map_err(|e|format!("Claude Code initialize: {e}"))?;
@@ -1285,18 +1286,10 @@ pub(super) async fn claude_user_input(prompt: String, attachments: Vec<MessageAt
 fn build_claude_command(
     config: &ClaudeSdkConfig,
     session_id: Option<&str>,
-) -> (Command, PathBuf) {
-    let resolved = resolve_acp_cli_path(&config.cli_command);
-    #[cfg(target_os = "windows")]
-    let (program, prefix_args): (PathBuf, Vec<String>) = match resolved.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-        Some("cmd" | "bat") => (PathBuf::from("cmd.exe"), vec!["/D".into(), "/S".into(), "/C".into(), resolved.display().to_string()]),
-        Some("ps1") => (PathBuf::from("pwsh.exe"), vec!["-NoProfile".into(), "-File".into(), resolved.display().to_string()]),
-        _ => (resolved.clone(), Vec::new()),
-    };
-    #[cfg(not(target_os = "windows"))]
-    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved.clone(), Vec::new());
-    let mut command = Command::from(background_command(program));
-    command.args(prefix_args).args([
+    resolved: &std::path::Path,
+) -> Command {
+    let mut command = Command::from(official_cli::command(resolved));
+    command.args([
         "--print",
         "--verbose",
         "--input-format",
@@ -1316,7 +1309,7 @@ fn build_claude_command(
     if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
     if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
     command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    (command, resolved)
+    command
 }
 
 fn claude_result_error(frame: &Value) -> Option<String> {
@@ -2045,7 +2038,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let (command, _) = build_claude_command(&config, None);
+        let command = build_claude_command(&config, None, std::path::Path::new("claude"));
         let command = command.as_std();
         let args = command
             .get_args()
@@ -2066,7 +2059,7 @@ mod tests {
     fn claude_command_contains_selected_permission_mode() {
         let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
         config.permission_mode = Some("plan".into());
-        let (command, _) = build_claude_command(&config, Some("session-1"));
+        let command = build_claude_command(&config, Some("session-1"), std::path::Path::new("claude"));
         let args = command
             .as_std()
             .get_args()
@@ -2123,7 +2116,7 @@ mod tests {
         let config_file = write_claude_input_file("mcp.json", &mcp_config).unwrap();
         let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
         config.mcp_config_file = Some(config_file.clone());
-        let (command, _) = build_claude_command(&config, None);
+        let command = build_claude_command(&config, None, std::path::Path::new("claude"));
         let args = command
             .as_std()
             .get_args()

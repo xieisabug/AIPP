@@ -119,7 +119,7 @@ export const CliEnvironmentStatus: React.FC<CliEnvironmentStatusProps> = ({ env,
         version: null,
         ok: false,
         warning: null,
-        error: `未找到 ${displayName}`,
+        error: env.probeError || `未找到 ${displayName}`,
     };
 
     return (

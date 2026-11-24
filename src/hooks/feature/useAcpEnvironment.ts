@@ -21,6 +21,7 @@ export interface AcpLibraryInfo {
     can_update: boolean;
     /** 安装说明 */
     install_hint: string;
+    detection_error?: string | null;
 }
 
 /** ACP 安装完成事件 payload */
@@ -34,6 +35,7 @@ interface AcpInstallFinishedPayload {
 
 /** ACP 环境状态 */
 export type AcpEnvironmentStatus =
+    | "probe-failed"
     | "checking"           // 正在检测
     | "bun-not-installed"  // Bun 未安装
     | "not-installed"      // ACP 库未安装
@@ -46,9 +48,11 @@ export type AcpEnvironmentStatus =
  * ACP 环境管理 Hook
  * 用于检测和安装 ACP CLI 工具
  */
-export const useAcpEnvironment = (cliCommand: string) => {
+export const useAcpEnvironment = (cliCommand: string, configuredCommand?: string) => {
     const [status, setStatus] = useState<AcpEnvironmentStatus>("checking");
     const [libraryInfo, setLibraryInfo] = useState<AcpLibraryInfo | null>(null);
+    const [probeError, setProbeError] = useState<string | null>(null);
+    const probeRevision = useRef(0);
     const [installLog, setInstallLog] = useState<string>("");
     const [bunVersion, setBunVersion] = useState<string>("");
     const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -79,25 +83,30 @@ export const useAcpEnvironment = (cliCommand: string) => {
             return null;
         }
 
+        const revision = ++probeRevision.current;
         setStatus("checking");
 
         try {
             const info = await invoke<AcpLibraryInfo>("check_acp_library", {
-                cliCommand,
+                cliCommand, configuredCommand,
             });
+            if (revision !== probeRevision.current) return null;
             setLibraryInfo(info);
+            setProbeError(info.detection_error ?? null);
 
-            if (info.requires_external_install) {
-                if (info.installed) {
-                    setStatus("installed");
-                } else {
-                    setStatus("external-required");
-                }
-            } else if (info.installed) {
+            const customCommand = configuredCommand && configuredCommand !== cliCommand;
+            if (info.installed) {
                 setStatus("installed");
+            } else if (info.detection_error && (info.installed_path || customCommand)) {
+                setStatus("probe-failed");
+            } else if (info.requires_external_install) {
+                setStatus("external-required");
+            } else if (cliCommand === "codex") {
+                setStatus("not-installed");
             } else {
                 // 检查 Bun 是否可用
                 const bunAvailable = await checkBunVersion();
+                if (revision !== probeRevision.current) return null;
                 if (!bunAvailable) {
                     setStatus("bun-not-installed");
                 } else {
@@ -106,11 +115,13 @@ export const useAcpEnvironment = (cliCommand: string) => {
             }
             return info;
         } catch (err) {
-            console.error("检查 ACP 库失败:", err);
-            setStatus("not-installed");
+            if (revision !== probeRevision.current) return null;
+            setLibraryInfo(null);
+            setProbeError(String(err));
+            setStatus("probe-failed");
             return null;
         }
-    }, [cliCommand, checkBunVersion]);
+    }, [cliCommand, configuredCommand, checkBunVersion]);
 
     const refreshAcpLibraryAfterSuccess = useCallback((action: "install" | "update") => {
         if (refreshTimerRef.current) {
@@ -143,6 +154,10 @@ export const useAcpEnvironment = (cliCommand: string) => {
     const installAcpLibrary = useCallback(async () => {
         if (!cliCommand) return;
 
+        if (cliCommand === "codex" && !(await checkBunVersion())) {
+            setStatus("bun-not-installed");
+            return;
+        }
         setStatus("installing");
         setInstallLog("开始安装...");
 
@@ -153,7 +168,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
             toast.error(`安装失败: ${err}`);
             setStatus("not-installed");
         }
-    }, [cliCommand]);
+    }, [cliCommand, checkBunVersion]);
 
     const checkAcpLibraryUpdate = useCallback(async (useProxy = false) => {
         if (!cliCommand) return;
@@ -166,7 +181,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
 
         try {
             const version = await invoke<string | null>("check_acp_library_update", {
-                cliCommand,
+                cliCommand, configuredCommand,
                 useProxy,
             });
             setLatestVersion(version);
@@ -189,7 +204,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
         } finally {
             setIsCheckingUpdate(false);
         }
-    }, [cliCommand]);
+    }, [cliCommand, configuredCommand]);
 
     const updateAcpLibrary = useCallback(async (useProxy = false) => {
         if (!cliCommand) return;
@@ -202,7 +217,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
         }
 
         try {
-            await invoke("update_acp_library", { cliCommand, useProxy });
+            await invoke("update_acp_library", { cliCommand, configuredCommand, useProxy });
         } catch (err) {
             console.error("更新 ACP 库失败:", err);
             const message = String(err);
@@ -213,7 +228,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
             toast.error(`更新失败: ${err}`);
             setStatus(libraryInfo?.installed ? "installed" : "not-installed");
         }
-    }, [cliCommand, libraryInfo?.installed]);
+    }, [cliCommand, configuredCommand, libraryInfo?.installed]);
 
     // 监听安装事件
     useEffect(() => {
@@ -267,9 +282,15 @@ export const useAcpEnvironment = (cliCommand: string) => {
         setCanRetryCheckWithProxy(false);
         setCanRetryUpdateWithProxy(false);
         setInstallLog("");
-        if (cliCommand) {
-            void checkAcpLibrary();
-        }
+        setStatus("checking");
+        setLibraryInfo(null);
+        setProbeError(null);
+        const timer = cliCommand ? setTimeout(() => void checkAcpLibrary(), 300) : undefined;
+        return () => {
+            clearTimeout(timer);
+            clearTimeout(refreshTimerRef.current ?? undefined);
+            ++probeRevision.current;
+        };
     }, [cliCommand, checkAcpLibrary]);
 
     useEffect(() => {
@@ -283,6 +304,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
     return {
         /** 当前状态 */
         status,
+        probeError,
         /** 库信息 */
         libraryInfo,
         /** 安装日志 */

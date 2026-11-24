@@ -35,9 +35,9 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 
 ### Codex、Claude Code 与 ACP 的环境状态
 
-这几类提供商表单的「环境状态」与原生智能体使用同样的展示：一行「版本 · 路径」，下方是「检查更新」「重新检测」。检测按固定命令名运行 `--version`（`codex`、`claude`，ACP 为所选 CLI），不跟随「CLI 命令」字段里的自定义路径。
+这几类提供商表单的「环境状态」与原生智能体使用同样的展示：一行「版本 · 路径」，下方是「检查更新」「重新检测」。提供商设置里的「CLI 命令」同时用于环境检测、模型探测和会话启动。安装了多份 CLI 时，可以直接填写目标程序的绝对路径，点击「重新检测」查看实际路径和版本。Windows 会按 PATH 顺序查找可执行文件或启动脚本，并检查用户目录下的常用安装位置。探测失败时会显示搜索目录或版本命令的具体错误。已安装的 Codex 可以直接使用，选择通过 AIPP 一键安装时才需要 Bun。 ACP 适配器仍检测所选命令。
 
-- **Codex**：未安装时可通过 Bun 一键安装 `@openai/codex`；检查更新查 npm，更新使用 `bun add -g`。
+- **Codex**：未安装时可通过 Bun 一键安装 `@openai/codex`；默认命令的检查更新查 npm，更新使用 `bun add -g`。指定其他命令或路径时，通过相应安装方式更新。
 - **Claude Code**：按官方说明自行安装；检查更新查 npm 上的 `@anthropic-ai/claude-code`，更新运行 Claude Code 自带的 `claude update`，更新的是实际检测到的那份安装（原生安装或 npm 安装）。失败时保留输出，可使用全局代理重试。
 - **Gemini、Kimi Code、DeepSeek Harness**：由用户自行安装和更新，只提供重新检测。
 
