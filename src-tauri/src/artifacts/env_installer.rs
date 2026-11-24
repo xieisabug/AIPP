@@ -1265,44 +1265,6 @@ fn resolve_installed_cli_path(cli_command: &str) -> Option<String> {
     }
 }
 
-async fn official_cli_version(path: &std::path::Path) -> Result<String, String> {
-    let mut command = tokio::process::Command::from(official_cli::command(path));
-    command.arg("--version").kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await
-        .map_err(|_| format!("{} --version 超过 10 秒未返回", path.display()))?
-        .map_err(|error| format!("无法运行 {} --version：{error}", path.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let detail = [stderr.trim(), stdout.trim()].into_iter().find(|s| !s.is_empty())
-            .unwrap_or("没有诊断输出").chars().take(1024).collect::<String>();
-        return Err(format!("{} --version 失败（{}）：{detail}", path.display(), output.status));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    extract_semver_token(&stdout).or_else(|| {
-        let trimmed = stdout.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    }).ok_or_else(|| format!("{} --version 没有返回版本信息", path.display()))
-}
-
-/// 从 `--version` 输出中提取第一个 x.y.z 形式的语义化版本号
-/// （例如 "codex-cli 0.148.0" -> "0.148.0"）
-fn extract_semver_token(text: &str) -> Option<String> {
-    text.split_whitespace().find_map(|token| {
-        let token = token.trim_matches(|c: char| !(c.is_ascii_digit() || c == '.'));
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() == 3
-            && parts
-                .iter()
-                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-        {
-            Some(token.to_string())
-        } else {
-            None
-        }
-    })
-}
-
 fn extract_bun_global_package_version(stdout: &str, package_name: &str) -> Option<String> {
     let marker = format!("{}@", package_name);
     stdout.lines().find_map(|line| {
@@ -1320,11 +1282,9 @@ async fn detect_acp_library(app: tauri::AppHandle, cli_command: &str, configured
     let (package_name, requires_external, install_hint) = get_acp_library_config(cli_command);
     if matches!(cli_command, "codex" | "claude") {
         let name = configured_command.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(cli_command);
-        let path = official_cli::resolve(name).await;
-        let installed_path = path.as_ref().ok().map(|p| p.display().to_string());
-        let version = match path {
-            Ok(path) => official_cli_version(&path).await,
-            Err(error) => Err(error),
+        let (installed_path, version) = match official_cli::detect(cli_command, name).await {
+            Ok((program, version)) => (Some(program.path.display().to_string()), Ok(version)),
+            Err(error) => (error.path.map(|path| path.display().to_string()), Err(error.message)),
         };
         return Ok(AcpLibraryInfo {
             cli_command: cli_command.to_string(),
@@ -1694,7 +1654,8 @@ pub async fn update_acp_library(
 
 #[cfg(test)]
 mod tests {
-    use super::{acp_self_update_args, extract_semver_token, get_acp_library_config};
+    use super::{acp_self_update_args, get_acp_library_config};
+    use crate::api::ai::agent_driver::native_agents::env::version_token as extract_semver_token;
 
     /// 从各种 `--version` 输出格式中提取语义化版本号
     ///

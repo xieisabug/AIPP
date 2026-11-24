@@ -2196,8 +2196,8 @@ async fn spawn_process(
     config: &CodexAppServerConfig,
     stderr_buffer: CodexStderrBuffer,
 ) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
-    let resolved_cli = official_cli::resolve(&config.cli_command).await?;
-    let mut command = Command::from(official_cli::command(&resolved_cli));
+    let resolved_cli = official_cli::codex_for_session(&config.cli_command).await?;
+    let mut command = Command::from(resolved_cli.command());
     command
         .arg("app-server")
         .arg("--listen")
@@ -2210,7 +2210,7 @@ async fn spawn_process(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
-        format!("启动 Codex app-server 失败（{}）：{error}", resolved_cli.display())
+        format!("启动 Codex app-server 失败（{}）：{error}", resolved_cli.path.display())
     })?;
     let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;
