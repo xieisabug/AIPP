@@ -17,9 +17,35 @@
     display: flex;
     flex-direction: row;
     justify-content: flex-start;
-    align-items: stretch;
+    align-items: center;
     flex-wrap: wrap;
     gap: 8px;
+}
+
+/*
+ * 桌面胶囊内的附件行：单行横向滚动，高度写死并与 InputArea 的 IMAGE_AREA_HEIGHT 保持一致
+ * （胶囊高度 = 文本高度 + 该值，由 JS 内联写入）。换行会被胶囊 overflow 裁掉，所以不换行。
+ * 上/右留白给卡片右上角的移除按钮（滚动容器按 padding 边界裁切）；两端渐隐，滚出去的卡片不会被硬切。
+ */
+.input-area-textarea-container > .input-area-img-container {
+    flex-wrap: nowrap;
+    height: 62px;
+    padding: 10px 18px 4px 20px;
+    box-sizing: border-box;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+    mask-image: linear-gradient(to right, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+}
+
+.input-area-textarea-container > .input-area-img-container::-webkit-scrollbar {
+    display: none;
+}
+
+/* 胶囊左右内边距是给正文和「+」留的，附件行在第一行，向两侧铺到圆角内侧 */
+.bottom .input-area-textarea-container > .input-area-img-container {
+    margin: 0 -36px 0 -16px;
 }
 
 .input-area-attachment-tray {
@@ -45,100 +71,146 @@
     justify-content: flex-start;
     min-width: 0;
     flex: 1;
-    gap: 4px;
+    gap: 8px;
     height: 100%;
 }
 
+/* 图片：48px 方形缩略图 */
 .input-area-img-wrapper {
     position: relative;
     border: 1px solid hsl(var(--border));
     border-radius: 10px;
-    overflow: hidden;
-    cursor: pointer;
-    height: 64px;
-    width: 64px;
+    height: 48px;
+    width: 48px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    box-sizing: border-box;
+    background-color: hsl(var(--muted));
 }
 
+/* 文件：图标块 + 文件名/类型两行，与消息气泡里的文件卡片同一套样式 */
 .input-area-text-wrapper {
     position: relative;
-    min-width: 132px;
-    max-width: 200px;
-    min-height: 44px;
-    height: auto;
+    height: 48px;
+    flex-shrink: 0;
     font-size: 12px;
     background-color: hsl(var(--background));
-    border: 1px solid hsl(var(--primary));
+    border: 1px solid hsl(var(--border));
     border-radius: 10px;
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    padding: 6px 36px 6px 8px;
-    cursor: pointer;
+    padding: 0 12px 0 7px;
     box-sizing: border-box;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.input-area-text-wrapper:hover {
+    background-color: hsl(var(--muted) / 0.5);
+}
+
+.input-area-attachment-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 7px;
+    background-color: hsl(var(--muted));
+    color: hsl(var(--muted-foreground));
+}
+
+.input-area-attachment-meta {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 1px;
+    min-width: 0;
 }
 
 .input-area-attachment-name {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 96px;
-    display: inline-block;
-    padding: 0 0 0 2px;
+    max-width: 200px;
+    display: block;
+    padding: 0;
     margin: 0;
     border: 0;
     background: transparent;
     font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 17px;
     text-align: left;
     color: hsl(var(--foreground));
 }
 
+button.input-area-attachment-name {
+    cursor: pointer;
+}
+
+/* 桌面：展开后单行显示全名，卡片随之加宽，附件行横向滚动 */
 .input-area-attachment-name[aria-expanded="true"] {
-    white-space: normal;
+    max-width: none;
     overflow: visible;
     text-overflow: unset;
-    max-width: none;
-    word-break: break-all;
 }
 
 .input-area-attachment-type {
-    flex-shrink: 0;
-    font-size: 10px;
-    font-weight: 600;
+    font-size: 11px;
+    line-height: 14px;
     letter-spacing: 0.02em;
     color: hsl(var(--muted-foreground));
-    background: hsl(var(--muted));
-    border-radius: 999px;
-    padding: 1px 6px;
 }
 
-.input-area-attachment-icon {
-    flex-shrink: 0;
-    width: 16px;
-    height: 16px;
-    color: hsl(var(--foreground));
-}
-
-/* Desktop: remove stays hover-revealed. Touch/mobile: always visible (see .mobile / platform rules). */
+/*
+ * 移除按钮：桌面贴在卡片右上角，悬停/键盘聚焦时出现（用 opacity 而非 display，保证 Tab 能聚焦到）。
+ * 触屏/移动端常驻并放大到 44px 热区（见 .mobile / platform 规则）。
+ */
 .input-area-img-delete-button {
     position: absolute;
-    top: 0;
-    right: 0;
-    display: none;
+    top: -6px;
+    right: -6px;
     z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background-color: hsl(var(--foreground));
+    color: hsl(var(--background));
+    box-shadow: 0 0 0 2px hsl(var(--background));
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
 }
 
 .input-area-img-wrapper:hover > .input-area-img-delete-button,
-.input-area-text-wrapper:hover > .input-area-img-delete-button {
-    display: flex;
+.input-area-text-wrapper:hover > .input-area-img-delete-button,
+.input-area-img-wrapper:focus-within > .input-area-img-delete-button,
+.input-area-text-wrapper:focus-within > .input-area-img-delete-button {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.input-area-img-delete-button:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 1px;
 }
 
 .input-area.mobile .input-area-img-delete-button,
 .aipp-mobile-platform .input-area-img-delete-button {
     display: flex !important;
+    opacity: 1;
+    pointer-events: auto;
     min-width: 44px;
     min-height: 44px;
     width: 44px;
@@ -150,11 +222,19 @@
     align-items: center;
     justify-content: center;
     background: hsl(var(--background) / 0.92);
+    color: hsl(var(--muted-foreground));
+    box-shadow: none;
     border-radius: 999px;
 }
 
-.input-area-img-wrapper .input-area-attachment-name,
-.input-area-img-wrapper .input-area-attachment-type {
+.input-area.mobile .input-area-img-delete-button svg,
+.aipp-mobile-platform .input-area-img-delete-button svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* 桌面图片卡片只显示缩略图，文件名走预览按钮的无障碍名称 */
+.input-area-img-wrapper .input-area-attachment-meta {
     display: none;
 }
 
@@ -163,6 +243,8 @@
     inset: 0;
     padding: 0;
     border: 0;
+    border-radius: 9px;
+    overflow: hidden;
     background: transparent;
     cursor: pointer;
 }
@@ -183,6 +265,8 @@
     height: 44px;
     min-width: 44px;
     min-height: 44px;
+    /* 44px 热区，视觉上与 32px 文件图标块左对齐 */
+    margin: 0 -6px;
     border-radius: 6px;
 }
 
@@ -270,6 +354,7 @@
 .aipp-mobile-platform .input-area-img-wrapper,
 .aipp-mobile-platform .input-area-text-wrapper {
     border-color: hsl(var(--border));
+    background-color: hsl(var(--background));
     overflow: visible;
     width: 100%;
     max-width: none;
@@ -281,18 +366,26 @@
     box-sizing: border-box;
 }
 
-.input-area.mobile .input-area-img-wrapper .input-area-attachment-name,
-.input-area.mobile .input-area-img-wrapper .input-area-attachment-type,
-.aipp-mobile-platform .input-area-img-wrapper .input-area-attachment-name,
-.aipp-mobile-platform .input-area-img-wrapper .input-area-attachment-type {
-    display: inline-block;
+.input-area.mobile .input-area-img-wrapper .input-area-attachment-meta,
+.aipp-mobile-platform .input-area-img-wrapper .input-area-attachment-meta {
+    display: flex;
+}
+
+/* 移动端整行铺满：文件名占满剩余宽度，展开后折行显示全名 */
+.input-area.mobile .input-area-attachment-meta,
+.aipp-mobile-platform .input-area-attachment-meta {
+    flex: 1;
 }
 
 .input-area.mobile .input-area-attachment-name,
 .aipp-mobile-platform .input-area-attachment-name {
-    flex: 1;
     max-width: none;
-    min-width: 0;
+}
+
+.input-area.mobile .input-area-attachment-name[aria-expanded="true"],
+.aipp-mobile-platform .input-area-attachment-name[aria-expanded="true"] {
+    white-space: normal;
+    word-break: break-all;
 }
 
 .input-area.mobile .input-area-img,

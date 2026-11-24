@@ -81,4 +81,19 @@ describe("useFileList attachment tray chips", () => {
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
+  it("should budget CJK characters as double width when shortening names", () => {
+    expect(middleEllipsis("2026年度产品规划-最终版-v3-评审意见汇总.pdf")).toBe("2026年度…审意见汇总.pdf");
+    expect(middleEllipsis("季度复盘.docx")).toBe("季度复盘.docx");
+  });
+
+  it("should label generic files by extension when the type is not specific", () => {
+    render(<Harness files={[
+      { id: 4, name: "archive.zip", path: "/archive.zip", type: AttachmentType.File },
+      { id: 5, name: "README", path: "/README", type: AttachmentType.File },
+    ]} />);
+    expect(screen.getByText("ZIP")).toBeTruthy();
+    expect(screen.getByText("FILE")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "移除 archive.zip" })).toBeTruthy();
+  });
+
 });

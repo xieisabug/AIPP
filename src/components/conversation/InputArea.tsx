@@ -136,7 +136,8 @@ interface InputAreaProps {
     /** 输入框的无障碍名称 */
     ariaLabel?: string;
 }
-const IMAGE_AREA_HEIGHT = 80;
+// 桌面胶囊内附件行的高度，必须与 InputArea.css 里附件行的 height 一致
+const IMAGE_AREA_HEIGHT = 62;
 const TOP_CHIP_HEIGHT = 30;
 export const COMPOSER_GROW_VAR = "--aipp-composer-grow";
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
@@ -1424,6 +1425,14 @@ const InputArea = React.memo(
                 textareaRef.current?.focus();
             }, [textareaRef]);
 
+            // 桌面附件行单行横向滚动：普通鼠标只有竖向滚轮，换算成横向滚动
+            const handleAttachmentRowWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+                const row = event.currentTarget;
+                if (row.scrollWidth <= row.clientWidth) return;
+                if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+                row.scrollLeft += event.deltaY;
+            }, []);
+
             const showPlanModeToggle = Boolean(onPlanModeToggle) && placement === "bottom";
             const planToggleDisabled = planModeSwitching || aiIsResponsing;
             const planToggleTitle = aiIsResponsing
@@ -1480,8 +1489,13 @@ const InputArea = React.memo(
                                 {topChip}
                             </div>
                         ) : null}
-                        {!isMobile ? (
-                            <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
+                        {!isMobile && hasAttachments ? (
+                            <div
+                                className="input-area-img-container"
+                                onClick={handleImageContainerClick}
+                                onWheel={handleAttachmentRowWheel}
+                                data-aipp-slot="chat-input-attachments"
+                            >
                                 {renderFiles()}
                             </div>
                         ) : null}

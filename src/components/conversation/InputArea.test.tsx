@@ -499,7 +499,7 @@ describe("InputArea desktop capsule height", () => {
         // 点发送钮：先失焦（按有附件的高度收起），随后发送清空附件
         fireEvent.focus(textarea);
         fireEvent.blur(textarea);
-        expect(capsule.style.height).toBe(`${LINE_HEIGHT + 80}px`);
+        expect(capsule.style.height).toBe(`${LINE_HEIGHT + 62}px`);
 
         rerender(<InputAreaHarness fileInfoList={null} />);
         expect(capsule.style.height).toBe(`${LINE_HEIGHT}px`);
