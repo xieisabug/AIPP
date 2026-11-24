@@ -26,7 +26,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
-import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, AlertTriangle } from "lucide-react";
+import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, CheckCircle2 } from "lucide-react";
 import { useCopilot, type CopilotTokenScanResult } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
 import CliEnvironmentStatus from "./CliEnvironmentStatus";
@@ -428,15 +428,18 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         label: "授权状态",
                         value: "",
                         customRender: () => (
-                            <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-2">
                                 {hasApiKey ? (
                                     <>
-                                        <div className="text-sm text-green-600 dark:text-green-400">
-                                            ✓ 已授权 GitHub Copilot
-                                        </div>
+                                        <p className="flex items-center gap-1.5 text-sm">
+                                            <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+                                            已授权 GitHub Copilot
+                                        </p>
                                         <Button
                                             type="button"
-                                            variant="destructive"
+                                            size="sm"
+                                            variant="outline"
+                                            className="w-fit"
                                             onClick={() => {
                                                 copilot.cancelAuthorization();
                                                 setHasApiKey(false);
@@ -447,15 +450,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                     </>
                                 ) : (
                                     <>
-                                        <div className="text-sm text-muted-foreground mb-2">
-                                            选择一种授权方式来接入 GitHub Copilot：
-                                        </div>
-
                                         {/* 授权码显示区域 */}
                                         {copilot.authInfo.userCode && (
-                                            <div className="p-3 border border-border rounded-lg bg-muted">
-                                                <div className="text-xs text-muted-foreground mb-2">
-                                                    授权码 (User Code):
+                                            <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-3">
+                                                <div className="text-xs text-muted-foreground">
+                                                    授权码 (User Code)
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     <code className="flex-1 text-lg font-mono font-bold bg-background px-3 py-2 rounded border border-border">
@@ -476,19 +475,29 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                                         <Copy className="h-4 w-4" />
                                                     </Button>
                                                 </div>
-                                                <div className="text-xs text-muted-foreground mt-2">
+                                                <div className="text-xs text-muted-foreground">
                                                     请在浏览器中打开的页面输入此授权码
                                                 </div>
                                             </div>
                                         )}
 
-                                        {/* 三种授权方式按钮 */}
-                                        <div className="flex flex-col gap-2">
-                                            {/* 方式1: 扫描已有配置 */}
+                                        {/* 三种授权方式：OAuth 为主，其余为备选 */}
+                                        <div className="flex flex-wrap gap-2">
                                             <Button
                                                 type="button"
+                                                size="sm"
+                                                disabled={copilot.isAuthorizing}
+                                                onClick={() => {
+                                                    copilot.oauthFlowAuth();
+                                                }}
+                                            >
+                                                <KeyRound className="mr-1 h-4 w-4" />
+                                                {copilot.isAuthorizing ? "授权中…" : "OAuth 授权"}
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                size="sm"
                                                 variant="outline"
-                                                className="justify-start gap-2"
                                                 disabled={copilot.isAuthorizing}
                                                 onClick={async () => {
                                                     const candidates = await copilot.scanConfigAuth();
@@ -501,50 +510,27 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                                     setScanTokenDialogOpen(true);
                                                 }}
                                             >
-                                                <Search className="h-4 w-4" />
-                                                <div className="flex flex-col items-start">
-                                                    <span>扫描已有授权</span>
-                                                </div>
+                                                <Search className="mr-1 h-4 w-4" />
+                                                扫描已有授权
                                             </Button>
-
-                                            {/* 方式2: OAuth 授权 */}
                                             <Button
                                                 type="button"
+                                                size="sm"
                                                 variant="outline"
-                                                className="justify-start gap-2"
-                                                disabled={copilot.isAuthorizing}
-                                                onClick={() => {
-                                                    copilot.oauthFlowAuth();
-                                                }}
-                                            >
-                                                <KeyRound className="h-4 w-4" />
-                                                <div className="flex flex-col items-start">
-                                                    <span>{copilot.isAuthorizing ? "授权中..." : "OAuth 授权"}</span>
-                                                </div>
-                                            </Button>
-
-                                            {/* 方式3: 手动输入 Token */}
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                className="justify-start gap-2"
                                                 disabled={copilot.isAuthorizing}
                                                 onClick={() => {
                                                     setManualToken("");
                                                     setManualTokenDialogOpen(true);
                                                 }}
                                             >
-                                                <Edit className="h-4 w-4" />
-                                                <div className="flex flex-col items-start">
-                                                    <span>手动输入 Token</span>
-                                                </div>
+                                                <Edit className="mr-1 h-4 w-4" />
+                                                手动输入 Token
                                             </Button>
                                         </div>
 
-                                        <div className="text-xs text-muted-foreground mt-2">
-                                            <p>OAuth 授权将通过浏览器进行 GitHub Device Flow 授权。</p>
-                                            <p className="mt-1">授权成功后，Token 会自动保存并用于 Copilot API 调用。</p>
-                                        </div>
+                                        <p className="text-xs text-muted-foreground">
+                                            OAuth 授权通过浏览器完成 GitHub Device Flow；授权成功后 Token 自动保存，用于 Copilot API 调用。
+                                        </p>
                                     </>
                                 )}
                             </div>
@@ -749,21 +735,18 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             const renderAcpEnvironmentStatus = () => {
                 // 未选择 CLI 命令时不显示环境状态
                 if (!acpCliCommand) {
-                    return (
-                        <div className="p-3 border border-border rounded-lg bg-muted/50">
-                            <div className="flex items-center gap-2 text-muted-foreground">
-                                <AlertTriangle className="h-4 w-4" />
-                                <span className="text-sm">请先选择 CLI 命令</span>
-                            </div>
-                        </div>
-                    );
+                    return <p className="text-xs text-muted-foreground">请先选择 CLI 命令</p>;
                 }
 
+                // 选项标签去掉括号说明，例如 "Kimi Code CLI (原生支持)" → "Kimi Code CLI"
+                const acpCliName = acpCliOptions
+                    .find((option) => option.value === acpCliCommand)
+                    ?.label.replace(/\s*\(.*\)$/, "") ?? acpCliCommand;
                 return (
                     <CliEnvironmentStatus
                         env={acpEnv}
                         cliCommand={acpCliCommand}
-                        displayName="ACP 库"
+                        displayName={acpCliName}
                     />
                 );
             };

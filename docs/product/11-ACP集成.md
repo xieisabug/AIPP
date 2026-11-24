@@ -33,6 +33,14 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 - **更新**：检测到版本后自动对照最新发布（Pi / OpenCode / Cursor SDK 查 npm，Kiro 查官方 manifest，Antigravity 查官方 CHANGELOG，结果缓存 30 分钟），有新版本时显示「更新」。更新使用智能体自带的更新命令（`pi update self`、`opencode upgrade`、`kiro-cli update`、`agy update`），输出实时显示；失败时保留退出码与输出，可使用全局代理重试。有会话正在回复时拒绝更新；空闲会话会先关闭，下次发送消息时按原会话恢复。Antigravity「独立 ACP 程序」由用户自行管理，不提供一键更新。
 - **工作目录**使用文件夹选择器（也可手动输入），目录不存在时直接提示。
 
+### Codex、Claude Code 与 ACP 的环境状态
+
+这几类提供商表单的「环境状态」与原生智能体使用同样的展示：一行「版本 · 路径」，下方是「检查更新」「重新检测」。检测按固定命令名运行 `--version`（`codex`、`claude`，ACP 为所选 CLI），不跟随「CLI 命令」字段里的自定义路径。
+
+- **Codex**：未安装时可通过 Bun 一键安装 `@openai/codex`；检查更新查 npm，更新使用 `bun add -g`。
+- **Claude Code**：按官方说明自行安装；检查更新查 npm 上的 `@anthropic-ai/claude-code`，更新运行 Claude Code 自带的 `claude update`，更新的是实际检测到的那份安装（原生安装或 npm 安装）。失败时保留输出，可使用全局代理重试。
+- **Gemini、Kimi Code、DeepSeek Harness**：由用户自行安装和更新，只提供重新检测。
+
 ### 原生智能体的审批
 
 审批设置在「智能体助手」中（与 Codex 的审批策略同一位置），每个助手可以不同：

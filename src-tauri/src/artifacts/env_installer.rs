@@ -1197,13 +1197,31 @@ pub struct AcpLibraryInfo {
     pub installed_path: Option<String>,
     /// 是否需要外部安装（如 gemini 需要用户自行安装）
     pub requires_external_install: bool,
+    /// 已安装且 AIPP 能检查并执行更新（Bun 管理的包，或 CLI 自带更新命令，见 `acp_self_update_args`）
+    pub can_update: bool,
     /// 安装说明
     pub install_hint: String,
+}
+
+/// CLI 自带的更新命令参数。有自带更新命令的 CLI 即使需要手动安装，也能检查和执行更新，
+/// 且更新时用它而不是 Bun，保证更新的就是实际启动的那份安装（原生版或 npm 版均可）。
+fn acp_self_update_args(cli_command: &str) -> Option<&'static [&'static str]> {
+    match cli_command {
+        "claude" => Some(&["update"]),
+        _ => None,
+    }
 }
 
 /// 获取 ACP 库的配置信息
 fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
     match cli_command {
+        // 官方 Claude Code CLI：推荐官方安装脚本（原生版），npm 版也可；检测以 `claude --version`
+        // 实际运行为准，最新版本查 npm 上的 @anthropic-ai/claude-code，更新走 `claude update`
+        "claude" => (
+            "@anthropic-ai/claude-code".to_string(),
+            true,
+            "请按 Claude Code 官方说明安装：Windows 在 PowerShell 中运行 irm https://claude.ai/install.ps1 | iex，macOS/Linux 运行 curl -fsSL https://claude.ai/install.sh | bash；安装后运行 claude 完成登录".to_string(),
+        ),
         "claude-code-acp" => (
             "@zed-industries/claude-code-acp".to_string(),
             false,
@@ -1259,32 +1277,36 @@ fn resolve_cli_executable(cli_command: &str) -> std::path::PathBuf {
     resolved
 }
 
+/// 启动解析后的 CLI：Windows 上 .cmd/.bat 经 cmd.exe、.ps1 经 pwsh 执行（其余直接运行）
+fn command_for_cli(resolved: &std::path::Path) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let extension =
+            resolved.extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("cmd" | "bat") => {
+                let mut command = Command::new("cmd.exe");
+                command.args(["/D", "/S", "/C", &resolved.display().to_string()]);
+                return command;
+            }
+            Some("ps1") => {
+                let mut command = Command::new("pwsh.exe");
+                command.args(["-NoProfile", "-File", &resolved.display().to_string()]);
+                return command;
+            }
+            _ => {}
+        }
+    }
+    Command::new(resolved)
+}
+
 /// 运行 CLI `--version` 检测官方 CLI 是否可用，返回 (版本号, 解析路径)
 ///
 /// 官方 CLI（如 codex）可能通过 npm/brew/bun 等任意方式安装，
 /// 检测以实际运行结果为准，不依赖 bun 的全局包列表。
 fn detect_official_cli_version(cli_command: &str) -> Option<(String, String)> {
     let resolved = resolve_cli_executable(cli_command);
-
-    #[cfg(target_os = "windows")]
-    let output = match resolved
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("cmd" | "bat") => Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", &resolved.display().to_string()])
-            .arg("--version")
-            .output(),
-        Some("ps1") => Command::new("pwsh.exe")
-            .args(["-NoProfile", "-File", &resolved.display().to_string()])
-            .arg("--version")
-            .output(),
-        _ => Command::new(&resolved).arg("--version").output(),
-    };
-    #[cfg(not(target_os = "windows"))]
-    let output = Command::new(&resolved).arg("--version").output();
+    let output = command_for_cli(&resolved).arg("--version").output();
 
     let out = output.ok()?;
     if !out.status.success() {
@@ -1330,11 +1352,18 @@ fn extract_bun_global_package_version(stdout: &str, package_name: &str) -> Optio
 }
 
 fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryInfo {
+    let mut info = detect_acp_installation(app, cli_command);
+    info.can_update = info.installed
+        && (!info.requires_external_install || acp_self_update_args(cli_command).is_some());
+    info
+}
+
+fn detect_acp_installation(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryInfo {
     let (package_name, requires_external, install_hint) = get_acp_library_config(cli_command);
 
-    // 官方 CLI（codex）：以实际运行 `--version` 为检测标准，兼容 npm/brew/bun 任意安装方式；
-    // 未检测到时继续走下方 Bun 流程，由前端决定展示"一键安装"还是"需要先安装 Bun"
-    if cli_command == "codex" {
+    // 官方 CLI（codex、claude）：以实际运行 `--version` 为检测标准，兼容原生安装器/npm/brew/bun 任意安装方式；
+    // codex 未检测到时继续走下方 Bun 流程，由前端决定展示"一键安装"还是"需要先安装 Bun"
+    if matches!(cli_command, "codex" | "claude") {
         if let Some((version, path)) = detect_official_cli_version(cli_command) {
             return AcpLibraryInfo {
                 cli_command: cli_command.to_string(),
@@ -1342,7 +1371,8 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
                 installed: true,
                 version: Some(version),
                 installed_path: Some(path),
-                requires_external_install: false,
+                requires_external_install: requires_external,
+                can_update: false,
                 install_hint,
             };
         }
@@ -1361,6 +1391,7 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
                     version: Some(version),
                     installed_path: resolve_installed_cli_path(cli_command),
                     requires_external_install: true,
+                    can_update: false,
                     install_hint,
                 }
             }
@@ -1371,6 +1402,7 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
                 version: None,
                 installed_path: None,
                 requires_external_install: true,
+                can_update: false,
                 install_hint,
             },
         };
@@ -1386,6 +1418,7 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
                 version: None,
                 installed_path: None,
                 requires_external_install: false,
+                can_update: false,
                 install_hint: "需要先安装 Bun 运行时".to_string(),
             };
         }
@@ -1414,6 +1447,7 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
                 version,
                 installed_path,
                 requires_external_install: false,
+                can_update: false,
                 install_hint,
             }
         }
@@ -1424,6 +1458,7 @@ fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryIn
             version: None,
             installed_path: None,
             requires_external_install: false,
+            can_update: false,
             install_hint,
         },
     }
@@ -1462,7 +1497,7 @@ pub async fn check_acp_library_update(
         return Err(format!("{} 尚未安装，无法检查更新", cli_command));
     }
 
-    if info.requires_external_install {
+    if !info.can_update {
         return Err(format!("{} 需要手动安装/更新，暂不支持自动检查更新", cli_command));
     }
 
@@ -1597,12 +1632,29 @@ pub async fn update_acp_library(
         return Err(format!("{} 尚未安装，无法更新", cli_command));
     }
 
-    if info.requires_external_install {
+    if !info.can_update {
         return Err(format!("{} 需要手动更新，无法自动更新", cli_command));
     }
 
-    let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
-        .map_err(|e| format!("获取 Bun 路径失败: {}", e))?;
+    // 有自带更新命令的 CLI（claude）运行它来更新实际启动的那份安装；其余用 Bun 更新全局包
+    let (mut command, command_label) = match acp_self_update_args(&cli_command) {
+        Some(args) => {
+            let program = info.installed_path.clone().unwrap_or_else(|| cli_command.clone());
+            let mut command = command_for_cli(std::path::Path::new(&program));
+            command.args(args);
+            (command, format!("{} {}", program, args.join(" ")))
+        }
+        None => {
+            let bun_path = crate::utils::bun_utils::BunUtils::get_bun_executable(&app)
+                .map_err(|e| format!("获取 Bun 路径失败: {}", e))?;
+            let package = format!("{}@latest", info.package_name);
+            let mut command = Command::new(&bun_path);
+            command.args(["add", "-g", &package]);
+            (command, format!("bun add -g {}", package))
+        }
+    };
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
     let use_proxy = use_proxy.unwrap_or(false);
     let network_proxy = if use_proxy {
         let config_map = feature_config_state.config_feature_map.lock().await.clone();
@@ -1610,6 +1662,9 @@ pub async fn update_acp_library(
     } else {
         None
     };
+    if let Some(proxy_url) = network_proxy.as_deref() {
+        command.envs(build_proxy_env_vars(proxy_url));
+    }
 
     tracing::info!("开始更新 ACP 库: {}", info.package_name);
     let _ = app.emit("acp-install-log", format!("开始更新 {}...", info.package_name));
@@ -1617,7 +1672,6 @@ pub async fn update_acp_library(
     let app_clone = app.clone();
     let package_name_clone = info.package_name.clone();
     let cli_command_clone = cli_command.clone();
-    let network_proxy_clone = network_proxy.clone();
 
     tokio::task::spawn_blocking(move || {
         let emit_log = |msg: &str| {
@@ -1638,15 +1692,8 @@ pub async fn update_acp_library(
             );
         };
 
-        emit_log(&format!("执行: bun add -g {}@latest", package_name_clone));
-
-        let mut command = std::process::Command::new(&bun_path);
-        command
-            .args(["add", "-g", &format!("{}@latest", package_name_clone)])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if let Some(proxy_url) = network_proxy_clone.as_deref() {
-            command.envs(build_proxy_env_vars(proxy_url));
+        emit_log(&format!("执行: {}", command_label));
+        if let Some(proxy_url) = network_proxy.as_deref() {
             emit_log(&format!("检测到全局网络代理，已为更新命令注入代理环境变量: {}", proxy_url));
         }
 
@@ -1685,7 +1732,7 @@ pub async fn update_acp_library(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_semver_token;
+    use super::{acp_self_update_args, extract_semver_token, get_acp_library_config};
 
     /// 从各种 `--version` 输出格式中提取语义化版本号
     ///
@@ -1707,5 +1754,18 @@ mod tests {
         assert_eq!(extract_semver_token(""), None);
         assert_eq!(extract_semver_token("codex-cli"), None);
         assert_eq!(extract_semver_token("1.2"), None);
+    }
+
+    /// Claude Code 需手动安装，但能按 npm 包查最新版本并用自带的 `claude update` 更新；
+    /// 其余需手动安装的 CLI 没有自带更新命令
+    #[test]
+    fn test_acp_update_claude_uses_self_updater() {
+        let (package, requires_external, _) = get_acp_library_config("claude");
+        assert_eq!(package, "@anthropic-ai/claude-code");
+        assert!(requires_external);
+        assert_eq!(acp_self_update_args("claude"), Some(&["update"][..]));
+        for cli in ["kimi", "gemini", "dsh-acp-server", "codex", "claude-code-acp"] {
+            assert_eq!(acp_self_update_args(cli), None, "{cli}");
+        }
     }
 }

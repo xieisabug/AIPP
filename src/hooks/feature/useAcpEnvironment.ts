@@ -17,6 +17,8 @@ export interface AcpLibraryInfo {
     installed_path: string | null;
     /** 是否需要外部安装（如 gemini 需要用户自行安装） */
     requires_external_install: boolean;
+    /** 已安装且能检查、执行更新（Bun 管理的包，或 CLI 自带更新命令，如 claude update） */
+    can_update: boolean;
     /** 安装说明 */
     install_hint: string;
 }
@@ -174,7 +176,7 @@ export const useAcpEnvironment = (cliCommand: string) => {
             if (version) {
                 toast.success(`发现新版本: ${version}`);
             } else {
-                toast.info("当前 ACP 库已是最新版本");
+                toast.info("当前已是最新版本");
             }
         } catch (err) {
             console.error("检查 ACP 库更新失败:", err);
