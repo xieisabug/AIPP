@@ -3350,7 +3350,7 @@ fn apply_change_to_db(
         if change.device_id != local_device_id && butler::legacy_appearance(change) {
             return upsert_shadow_from_remote(sync_conn,change);
         }
-        apply_change_to_db_inner(sync_conn, conn, spec, change, before_message_insert)
+        apply_change_to_db_inner(sync_conn, conn, spec, change, local_device_id, before_message_insert)
     })
 }
 
@@ -3374,8 +3374,16 @@ fn acknowledge_pulled_outbox_event(sync: &Connection, change: &PullChange) -> Re
     Ok(true)
 }
 
+fn remote_attachment_name(url: &str) -> Option<&str> {
+    if url.is_empty() || url.starts_with("data:") ||
+        (url.contains("://") && !url.starts_with("file://")) {
+        return None;
+    }
+    Some(url.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or("附件"))
+}
+
 fn apply_change_to_db_inner(
-    sync_conn: &Connection, conn: &Connection, spec: &SyncTableSpec, change: &PullChange,
+    sync_conn: &Connection, conn: &Connection, spec: &SyncTableSpec, change: &PullChange, local_device_id: &str,
     mut before_message_insert: impl FnMut(&mut Map<String, JsonValue>) -> Result<(), String>,
 ) -> Result<(), String> {
     if remote_change_already_applied(sync_conn, change)? {
@@ -3467,6 +3475,24 @@ fn apply_change_to_db_inner(
         }
     }
     let mapped_id = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?;
+    if spec.object_type == "conversation.message_attachment" && change.device_id != local_device_id
+        && field_values.get("attachment_type").and_then(JsonValue::as_i64) != Some(7) {
+        if let Some(remote) = field_values.get("attachment_url").and_then(JsonValue::as_str) {
+            if let Some(name) = remote_attachment_name(remote) {
+                // A local registration of the same object retains its original file.
+                let local: Option<(String, Option<String>)> = match mapped_id {
+                    Some(id) => conn.query_row("SELECT attachment_url,attachment_hash FROM message_attachment WHERE id=?1 AND attachment_url IS NOT NULL",
+                        [id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?,
+                    None => None,
+                };
+                let hash = field_values.get("attachment_hash").and_then(JsonValue::as_str);
+                let resolved = local.filter(|(path, digest)| hash.is_some() && digest.as_deref() == hash &&
+                    std::path::Path::new(path).is_absolute() && remote_attachment_name(path) == Some(name))
+                    .map(|(path, _)| path).unwrap_or_else(|| format!("aipp-remote:/{name}"));
+                field_values.insert("attachment_url".into(), json!(resolved));
+            }
+        }
+    }
     // A same-named provider created independently on this device is the same
     // provider for the user: link instead of inserting a keyless duplicate.
     let provider_link = if mapped_id.is_none() {

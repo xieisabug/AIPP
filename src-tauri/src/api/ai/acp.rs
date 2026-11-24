@@ -2114,6 +2114,10 @@ fn attachment_uri(attachment: &MessageAttachment) -> String {
 fn acp_image_block_from_attachment(
     attachment: &MessageAttachment,
 ) -> Result<acp::ContentBlock, AppError> {
+    if attachment.attachment_url.as_deref().is_some_and(|p| std::path::Path::new(p).is_absolute()) {
+        let image = crate::utils::prompt_image::from_attachment(attachment)?;
+        return Ok(acp::ContentBlock::Image(acp::ImageContent::new(image.base64, image.mime).uri(Some(attachment_uri(attachment)))));
+    }
     if let Some(content) = attachment.attachment_content.as_deref() {
         if let Some((mime, b64)) = parse_data_url(content) {
             return Ok(acp::ContentBlock::Image(
@@ -2212,6 +2216,7 @@ fn build_acp_prompt_blocks(
         match attachment.attachment_type {
             AttachmentType::Image => {
                 if !prompt_capabilities.image {
+                    if attachment.attachment_url.as_deref().is_some_and(|p| std::path::Path::new(p).is_file() && std::path::Path::new(p).is_absolute()) { continue; }
                     return Err(AppError::UnknownError(format!(
                         "该 ACP Agent 不支持图片输入，无法发送附件：{}",
                         attachment_display_name(attachment)
@@ -2224,6 +2229,13 @@ fn build_acp_prompt_blocks(
             | AttachmentType::Word
             | AttachmentType::PowerPoint
             | AttachmentType::Excel => {
+                if let Some(path) = attachment.attachment_url.as_deref().map(std::path::Path::new).filter(|p| p.is_absolute()) {
+                    if attachment.attachment_type == AttachmentType::PDF && prompt_capabilities.embedded_context {
+                        let uri = tauri::Url::from_file_path(path).map_err(|_| AppError::ProviderError(format!("PDF 附件路径无效：{}", path.display())))?;
+                        blocks.push(acp::ContentBlock::ResourceLink(acp::ResourceLink::new(attachment_display_name(attachment), uri.to_string()).mime_type("application/pdf".to_owned())));
+                    }
+                    continue;
+                }
                 if let Some(content) = attachment.attachment_content.as_deref() {
                     if prompt_capabilities.embedded_context {
                         blocks.push(text_resource_block_from_attachment(attachment, content));
@@ -2232,7 +2244,7 @@ fn build_acp_prompt_blocks(
                     }
                 }
             }
-            AttachmentType::Skill | AttachmentType::DeepSeekReplay => {}
+            AttachmentType::File | AttachmentType::Skill | AttachmentType::DeepSeekReplay => {}
         }
     }
 

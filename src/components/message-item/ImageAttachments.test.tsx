@@ -176,3 +176,15 @@ describe('ImageAttachments', () => {
         expect(screen.getAllByRole('img')[0]).toHaveClass('object-contain');
     });
 });
+
+it('shows file names for a path-only turn and leaves embedded text to the message body', () => {
+    const attachments = [
+        { attachment_type: 'Text', attachment_url: 'C:\\tmp\\说明.txt' },
+        { attachment_type: 'PDF', attachment_url: '/tmp/报告.pdf' },
+        { attachment_type: 'File', attachment_url: '/tmp/archive.zip' },
+    ];
+    const view = render(<ImageAttachments attachments={attachments} messageContent="" />);
+    for (const name of ['说明.txt', '报告.pdf', 'archive.zip']) expect(screen.getByText(name)).toBeInTheDocument();
+    view.rerender(<ImageAttachments attachments={attachments} messageContent={'<fileattachment name="C:\\tmp\\说明.txt">正文</fileattachment>'} />);
+    expect(screen.queryByText('说明.txt')).toBeNull();
+});

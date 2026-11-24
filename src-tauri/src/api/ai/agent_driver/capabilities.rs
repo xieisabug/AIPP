@@ -33,7 +33,7 @@ impl Capability {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AttachmentInput { Structured, PromptText, PromptTextWithImages }
+pub enum AttachmentInput { Structured, PromptText, PromptTextWithImages, PromptTextWithImagesAndPdf }
 
 /// Registered adapter contract, never a claim about an unconnected server.
 /// Optional fields are deliberately unknown for third-party driver declarations.
@@ -73,9 +73,9 @@ impl AgentCapabilityDeclaration {
 
     pub fn codex() -> Self {
         Self {
-            respond_permission: Some(true), image_input: Some(false), audio_input: Some(false),
+            respond_permission: Some(true), image_input: Some(true), audio_input: Some(false),
             embedded_context_input: Some(false), load_session: Some(false), resume_session: Some(true),
-            config_catalog_complete: true, ..Self::unknown(true, true, AttachmentInput::PromptText)
+            config_catalog_complete: true, ..Self::unknown(true, true, AttachmentInput::PromptTextWithImages)
         }
     }
 
@@ -83,7 +83,7 @@ impl AgentCapabilityDeclaration {
         Self {
             respond_permission: Some(true), image_input: Some(true), audio_input: Some(false),
             embedded_context_input: Some(false), load_session: Some(false), resume_session: Some(true),
-            config_catalog_complete: true, ..Self::unknown(true, true, AttachmentInput::PromptTextWithImages)
+            config_catalog_complete: true, ..Self::unknown(true, true, AttachmentInput::PromptTextWithImagesAndPdf)
         }
     }
 }

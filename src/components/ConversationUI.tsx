@@ -509,7 +509,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleChooseFile,
             handleDeleteFile,
             handlePaste,
-            handleDropFiles,
+            handleDropFiles, addLocalPaths,
         } = useFileManagement();
 
         // Readiness belongs to a conversation, not the previous render. On a key
@@ -544,7 +544,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         // 文件拖拽
-        const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleDropFiles);
+        const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleDropFiles, addLocalPaths);
 
         useEffect(() => {
             if (!draftReady) return;

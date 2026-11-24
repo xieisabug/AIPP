@@ -592,6 +592,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     {messageBodyContent}
                     <ImageAttachments
                         attachments={message.attachment_list}
+                        messageContent={message.content}
                         conversationId={message.conversation_id}
                         messageId={message.id}
                     />
@@ -678,6 +679,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
                 <ImageAttachments
                     attachments={message.attachment_list}
+                    messageContent={message.content}
                     conversationId={message.conversation_id}
                     messageId={message.id}
                 />

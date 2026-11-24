@@ -428,8 +428,7 @@ fn create_chat_ui_window_with_visibility(app: &AppHandle, visible: bool) {
                         _ => {}
                     }
                     true
-                })
-                .disable_drag_drop_handler();
+                });
 
         // macOS 若仍有偏差可考虑额外使用 parent(&window) 方案
 

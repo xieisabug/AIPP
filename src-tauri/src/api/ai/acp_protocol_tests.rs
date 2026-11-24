@@ -283,3 +283,24 @@ fn test_butler_context_acp_sends_separate_text_block() {
     assert_eq!(value[0]["text"], "用户原话");
     assert_eq!(value[1]["text"], "角色");
 }
+
+#[test]
+fn test_attachment_acp_adds_pdf_link_only_after_capability_negotiation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a b.pdf");
+    std::fs::write(&path, b"%PDF-1.7").unwrap();
+    let file = MessageAttachment { id: 1, message_id: 1, attachment_type: AttachmentType::PDF,
+        attachment_url: Some(path.display().to_string()), attachment_content: None, attachment_hash: None, use_vector: false, token_count: None };
+    let mut caps = acp::PromptCapabilities::default();
+    for negotiated in [false, true] {
+        caps.embedded_context = negotiated;
+        let blocks = build_acp_prompt_blocks(path.display().to_string(), std::slice::from_ref(&file), &caps, None, None).unwrap();
+        let value = serde_json::to_value(blocks).unwrap();
+        assert_eq!(value.as_array().unwrap().len(), if negotiated { 2 } else { 1 });
+        assert_eq!(value[0]["text"], path.display().to_string());
+        if negotiated {
+            assert_eq!(value[1]["uri"], tauri::Url::from_file_path(&path).unwrap().as_str());
+            assert_eq!(value[1]["mimeType"], "application/pdf");
+        }
+    }
+}

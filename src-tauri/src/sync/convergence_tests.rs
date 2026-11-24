@@ -714,3 +714,23 @@ mod quick_assistant_tests;
 
 #[path = "secrets_tests.rs"]
 mod secrets_tests;
+
+#[test]
+fn test_attachment_synced_path_cannot_open_an_unrelated_local_file_or_echo_on_scan() {
+    let source = Device::new("device-a");
+    let receiver = Device::new("device-b");
+    source.seed(2);
+    for device in [&source, &receiver] {
+        device.data.execute_batch("ALTER TABLE message_attachment ADD COLUMN attachment_url TEXT;
+            ALTER TABLE message_attachment ADD COLUMN attachment_hash TEXT;").unwrap();
+    }
+    source.data.execute("UPDATE message_attachment SET attachment_url=?1, attachment_hash='abc'", [r"C:\work\report.zip"]).unwrap();
+    let changes = history(&source);
+    receiver.receive(&changes);
+    assert_eq!(receiver.replay().1, 0);
+    let path: String = receiver.data.query_row("SELECT attachment_url FROM message_attachment", [], |r| r.get(0)).unwrap();
+    assert_eq!(path, "aipp-remote:/report.zip");
+    receiver.scan();
+    let queued: i64 = receiver.sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE object_type='conversation.message_attachment'", [], |r| r.get(0)).unwrap();
+    assert_eq!(queued, 0);
+}

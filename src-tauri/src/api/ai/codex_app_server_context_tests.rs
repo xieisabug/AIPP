@@ -76,3 +76,15 @@ async fn test_butler_context_codex_manual_compact_without_item_only_restores_on_
     }
     assert_eq!(rpc, 1);
 }
+
+#[tokio::test]
+async fn test_codex_attachment_images_keep_bytes_and_order() {
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jvLkAAAAASUVORK5CYII=";
+    let gif = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    let inputs = [format!("data:image/png;base64,{png}"), format!("data:image/gif;base64,{gif}")];
+    let attachments = inputs.iter().enumerate().map(|(id, url)| MessageAttachment {
+        id: id as i64, message_id: 1, attachment_type: crate::db::conversation_db::AttachmentType::Image,
+        attachment_url: None, attachment_hash: None, attachment_content: Some(url.clone()), use_vector: false, token_count: None,
+    }).collect();
+    assert_eq!(codex_image_items(attachments).await.unwrap(), inputs.map(|url| json!({"type":"image","url":url})));
+}

@@ -49,7 +49,7 @@ export function launch(command, args, options = {}) {
   return spawn(plan.file, plan.args, { ...options, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
-export function jsonLines(stream, receive, fail) {
+export function jsonLines(stream, receive, fail, maxMiB = 16) {
   // Only LF delimits protocol frames. Node readline also splits U+2028/U+2029.
   const decoder = new StringDecoder('utf8');
   let buffer = '';
@@ -63,7 +63,7 @@ export function jsonLines(stream, receive, fail) {
     while ((end = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, end).replace(/\r$/, ''); buffer = buffer.slice(end + 1); parse(line);
     }
-    if (buffer.length > 16 * 1024 * 1024) { buffer = ''; fail(new Error('Native JSON frame exceeds 16 MiB')); }
+    if (buffer.length > maxMiB * 1024 * 1024) { buffer = ''; fail(new Error(`Native JSON frame exceeds ${maxMiB} MiB`)); }
   });
   stream.on('end', () => { buffer += decoder.end(); if (buffer) parse(buffer); });
   stream.on('error', fail);

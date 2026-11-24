@@ -1246,32 +1246,6 @@ async fn spawn_claude_process_with_diagnostics(
     Ok((child, stdin, BufReader::new(stdout).lines()))
 }
 
-fn claude_attachment_image(attachment: &MessageAttachment) -> anyhow::Result<crate::utils::prompt_image::PromptImage> {
-    use crate::utils::prompt_image::{prepare, prepare_data_url};
-    use anyhow::{anyhow, Context};
-
-    if attachment.attachment_type != AttachmentType::Image {
-        return Err(anyhow!("不支持的附件类型 {:?}", attachment.attachment_type));
-    }
-    let url = attachment.attachment_url.as_deref().unwrap_or_default();
-    if let Some(data) = attachment.attachment_content.as_deref().filter(|s| s.starts_with("data:")) {
-        return prepare_data_url(data);
-    }
-    if url.starts_with("data:") {
-        return prepare_data_url(url);
-    }
-    let path = if url.starts_with("file://") {
-        tauri::Url::parse(url)?.to_file_path().map_err(|_| anyhow!("无效的本机文件 URI"))?
-    } else {
-        PathBuf::from(url)
-    };
-    if !path.is_absolute() {
-        return Err(anyhow!("缺少图片数据或有效的本机绝对路径"));
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("读取图片文件失败 ({})", path.display()))?;
-    prepare(&bytes)
-}
-
 pub(super) async fn claude_user_input(prompt: String, attachments: Vec<MessageAttachment>, session_id: Option<String>) -> Result<Value, String> {
     let mut content = Vec::new();
     if !prompt.is_empty() || attachments.is_empty() {
@@ -1279,8 +1253,23 @@ pub(super) async fn claude_user_input(prompt: String, attachments: Vec<MessageAt
     }
     if !attachments.is_empty() {
         content = tokio::task::spawn_blocking(move || {
+            let mut pdf_bytes_left = 20 * 1024 * 1024;
             for attachment in attachments {
-                let image = claude_attachment_image(&attachment).map_err(|error|
+                if attachment.attachment_type == AttachmentType::PDF {
+                    use std::io::Read;
+                    let path = attachment.attachment_url.as_deref().ok_or_else(|| format!("PDF 附件 {} 缺少路径", attachment.id))?;
+                    let file = std::fs::File::open(path).map_err(|e| format!("读取 PDF 附件 {path} 失败：{e}"))?;
+                    if file.metadata().map_err(|e| e.to_string())?.len() > pdf_bytes_left { continue; }
+                    let mut bytes = Vec::new();
+                    file.take(pdf_bytes_left + 1).read_to_end(&mut bytes).map_err(|e| format!("读取 PDF 附件 {path} 失败：{e}"))?;
+                    if bytes.len() as u64 > pdf_bytes_left { continue; }
+                    if !bytes.starts_with(b"%PDF-") { return Err(format!("附件 {path} 缺少 PDF 文件头")); }
+                    pdf_bytes_left -= bytes.len() as u64;
+                    use base64::Engine;
+                    content.push(json!({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":base64::engine::general_purpose::STANDARD.encode(bytes)}}));
+                    continue;
+                }
+                let image = crate::utils::prompt_image::from_attachment(&attachment).map_err(|error|
                     format!("Claude Code 图片附件准备失败 [attachment_id={}]: {error:#}", attachment.id))?;
                 content.push(json!({"type": "image", "source": {
                     "type": "base64", "media_type": image.mime, "data": image.base64,

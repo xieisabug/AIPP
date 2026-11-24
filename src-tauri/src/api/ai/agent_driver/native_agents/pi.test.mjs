@@ -250,3 +250,12 @@ test('should steer only the intended active Pi turn without aborting or starting
       .map(c => [c.type, c.message]), [['prompt', 'original'], ['steer', 'new guidance']]);
   } finally { await runtime.close(); }
 });
+
+test('should deliver both native images in attachment order with the file prompt', async () => {
+  const f = piFixture(); const runtime = await openPi({ cwd: process.cwd() }, () => {}, f);
+  const images = [{ mimeType: 'image/png', data: 'AQ==' }, { mimeType: 'image/jpeg', data: 'Ag==' }];
+  try {
+    await runtime.prompt('review report.zip', 'turn', images);
+    assert.deepEqual(f.commands.find(c => c.type === 'prompt').images, images.map(image => ({ type: 'image', ...image })));
+  } finally { await runtime.close(); }
+});

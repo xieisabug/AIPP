@@ -473,6 +473,22 @@ fn select_tool_call_strategy(has_available_tools: bool) -> ToolCallStrategy {
     }
 }
 
+fn supports_pdf_input(model: &str, provider: &str, mode: &str) -> bool {
+    use genai::adapter::AdapterKind;
+    matches!(genai_client::infer_adapter_kind(model, provider, Some(mode)), AdapterKind::Anthropic | AdapterKind::Gemini | AdapterKind::OpenAIResp)
+}
+
+fn validate_request_documents(messages: &[(String, String, Vec<MessageAttachment>)], model: &str, provider: &str, mode: &str) -> Result<(), AppError> {
+    if let Some(file) = messages.iter().flat_map(|(_, _, files)| files).find(|file|
+        file.attachment_type == AttachmentType::PDF && file.attachment_content.as_deref().is_some_and(|s| s.starts_with("data:application/pdf;base64,"))) {
+        if !supports_pdf_input(model, provider, mode) {
+            return Err(AppError::ProviderError(format!("模型 {model} 的当前协议不支持历史中的 PDF 附件 {}，请选择支持 PDF 的模型或在新会话中发送所需内容",
+                file.attachment_url.as_deref().unwrap_or("文档"))));
+        }
+    }
+    Ok(())
+}
+
 async fn backfill_request_message_list(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
@@ -1805,6 +1821,7 @@ pub async fn ask_ai(
         turn_context_block.as_deref(),
         override_prompt.clone(),
         active_skill_attachments,
+        &mcp_info,
         relay_origin.as_deref(),
         user_metadata.as_ref().map(|value| value.to_string()),
     )
@@ -2208,6 +2225,7 @@ pub async fn ask_ai(
         )
         .await?;
 
+        validate_request_documents(&request_message_list, &model_code, &provider_api_type, &model_request_mode)?;
         let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
         deepseek_web::configure(web_enabled, &search_servers, provider_api_type == "deepseek" && model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
@@ -2753,6 +2771,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     )
     .await?;
 
+    validate_request_documents(&request_message_list, &model_code, &provider_api_type, &model_request_mode)?;
     let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
     deepseek_web::configure(web_enabled, &search_servers, provider_api_type == "deepseek" && model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
@@ -3149,6 +3168,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let request_message_list =
         backfill_request_message_list(&app_handle, conversation_id, request_message_list, false).await?;
 
+    validate_request_documents(&request_message_list, &model_code, &provider_api_type, &model_request_mode)?;
     let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
     deepseek_web::configure(web_enabled, &search_servers, provider_api_type == "deepseek" && model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
@@ -3390,11 +3410,16 @@ pub async fn regenerate_ai(
     let assistant_detail = get_assistant(app_handle.clone(), assistant_id).map_err(|reason|
         AppError::UnknownError(format!("regenerate_preflight: conversation_id={conversation_id}; message_id={message_id}; {reason}")))?;
     if assistant_detail.assistant.assistant_type == Some(4) {
-        let prompt = agent_recheck_prompt(&db.get_connection()?, &message)?;
+        let conn = db.get_connection()?;
+        let prompt = agent_recheck_prompt(&conn, &message)?;
+        let attachment_ids = conn.prepare("SELECT id FROM message_attachment WHERE attachment_type != 7 AND message_id=(
+            SELECT id FROM message WHERE conversation_id=?1 AND message_type='user' AND id<=?2 ORDER BY id DESC LIMIT 1) ORDER BY id")?
+            .query_map((conversation_id, message.id), |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
+        drop(conn);
         let request = AiRequest {
             conversation_id: conversation_id.to_string(), assistant_id, prompt,
             model: None, override_model_id: None, temperature: None, top_p: None, max_tokens: None,
-            stream: None, attachment_list: None, quote: None, butler_intent: None, client_request_id: None, butler_goal_revision: None,
+            stream: None, attachment_list: Some(attachment_ids), quote: None, butler_intent: None, client_request_id: None, butler_goal_revision: None,
         };
         return ask_ai(app_handle.clone(), app_handle.state(), app_handle.state(), feature_config_state,
             message_token_manager, activity_manager, window, request, None, None, None, None, None).await;
@@ -3721,6 +3746,7 @@ pub async fn regenerate_ai(
             true,
         )
         .await?;
+        validate_request_documents(&request_message_list, &regenerate_model_code, &regenerate_provider_api_type, &regenerate_model_request_mode)?;
         let ChatRequestBuildResult { mut chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
         deepseek_web::configure(web_enabled, &search_servers, regenerate_provider_api_type == "deepseek" && regenerate_model_code == "deepseek-flash", &mut chat_request, &mut chat_config.chat_options);
@@ -3991,6 +4017,7 @@ async fn initialize_conversation(
     turn_context: Option<&str>,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
+    mcp_info: &crate::mcp::prompt::MCPInfoForAssistant,
     origin: Option<&str>,
     user_metadata: Option<String>,
 ) -> Result<
@@ -4013,8 +4040,36 @@ async fn initialize_conversation(
     if let Some(missing) = attachment_ids.iter().find(|id| !message_attachment_list.iter().any(|a| a.id == **id)) {
         return Err(AppError::ProviderError(format!("准备消息附件失败 [attachment_id={missing}]：附件记录不存在")));
     }
+    let agent = assistant_detail.assistant.assistant_type == Some(4);
+    for attachment in &mut message_attachment_list {
+        if let Some(uri) = attachment.attachment_url.as_deref().filter(|s| s.starts_with("file://")) {
+            let path = tauri::Url::parse(uri).ok().and_then(|u| u.to_file_path().ok())
+                .ok_or_else(|| AppError::ProviderError(format!("附件 {} 的文件地址无效，请重新选择", attachment.id)))?;
+            attachment.attachment_url = Some(path.to_string_lossy().into_owned());
+        }
+    }
+    message_attachment_list = super::attachment_api::resolve_received_files(app_handle, message_attachment_list, agent).await?;
+    if !agent && message_attachment_list.iter().any(|file| !matches!(file.attachment_type,
+        AttachmentType::Image | AttachmentType::Skill) && (file.attachment_type != AttachmentType::Text || super::attachment_api::needs_text_reader(file))) {
+        let has_tool = |name: &str| mcp_info.enabled_servers.iter().any(|server|
+            server.command.as_deref() == Some("aipp:operation") && server.tools.iter().any(|t| t.name == name && t.is_enabled));
+        let mut pdf = false;
+        if message_attachment_list.iter().any(|f| f.attachment_type == AttachmentType::PDF) {
+            let llm = LLMDatabase::new(app_handle)?;
+            let model = resolve_ask_model_detail(&llm, request.override_model_id.as_deref(), assistant_detail)
+                .map_err(AppError::ProviderError)?;
+            pdf = supports_pdf_input(&model.model.code, &model.provider.api_type, &model.model.request_mode);
+        }
+        message_attachment_list = super::attachment_api::prepare_chat_files(message_attachment_list, pdf, has_tool("read_file"), cfg!(desktop) && has_tool("execute_bash")).await?;
+    }
     message_attachment_list.extend(extra_user_attachments);
 
+    let context = message_attachment_list.iter()
+        .filter(|a| a.attachment_type == AttachmentType::Text)
+        .filter(|a| !agent || !a.attachment_url.as_deref().is_some_and(|p| std::path::Path::new(p).is_absolute()))
+        .filter_map(|a| Some(format!(r#"<fileattachment name="{}">{}</fileattachment>"#,
+            a.attachment_url.as_deref().unwrap_or("附件"), a.attachment_content.as_deref()?)))
+        .collect::<Vec<_>>().join("\n");
     let system_prompt = override_prompt.unwrap_or(assistant_prompt_result);
 
     let (
@@ -4027,18 +4082,7 @@ async fn initialize_conversation(
         db_token_counts,
     ) = if request.conversation_id.is_empty() {
         // 新对话逻辑
-        let text_attachments: Vec<String> = message_attachment_list
-            .iter()
-            .filter(|a| matches!(a.attachment_type, AttachmentType::Text))
-            .filter_map(|a| {
-                Some(format!(
-                    r#"<fileattachment name="{}">{}</fileattachment>"#,
-                    a.attachment_url.clone().unwrap(),
-                    a.attachment_content.clone().unwrap().as_str()
-                ))
-            })
-            .collect();
-        let context = text_attachments.join("\n");
+
         // 本轮附加上下文接在附件之后、存进正文；发送内容与存储内容一致。
         let display_user_prompt_with_context = crate::utils::turn_context::append(
             &build_prompt_with_attachment_context(&display_user_prompt, &context), turn_context);
@@ -4062,7 +4106,7 @@ async fn initialize_conversation(
         ];
         debug!(
             assistant_id = request.assistant_id,
-            ?runtime_init_message_list,
+            attachment_count = attachment_ids.len(),
             "initialize new conversation"
         );
         let (conversation, created_messages) = init_conversation(
@@ -4135,21 +4179,6 @@ async fn initialize_conversation(
             );
         }
 
-        // 获取到消息的附件列表
-        // 过滤出文本附件
-        let text_attachments: Vec<String> = message_attachment_list
-            .iter()
-            .filter(|a| matches!(a.attachment_type, AttachmentType::Text))
-            .filter_map(|a| {
-                Some(format!(
-                    r#"<fileattachment name="{}">{}</fileattachment>"#,
-                    a.attachment_url.clone().unwrap(),
-                    a.attachment_content.clone().unwrap().as_str()
-                ))
-            })
-            .collect();
-        let context = text_attachments.join("\n");
-
         // 本轮附加上下文接在附件之后、存进正文；之后的回放（下一轮、工具续写、重新生成）与本次发送逐字一致。
         let display_user_prompt_with_context = crate::utils::turn_context::append(
             &build_prompt_with_attachment_context(&display_user_prompt, &context), turn_context);
@@ -4174,11 +4203,10 @@ async fn initialize_conversation(
                     .map_err(|e| AppError::ProviderError(e.to_string()))?;
                 Ok((target.session.handle.clone(), target.turn.clone()))
             })?;
-            crate::api::ai::agent_driver::validate_prompt_attachments(
-                handle.metadata(), crate::api::ai::agent_driver::capabilities::AttachmentInput::PromptText,
-                conversation_id, &message_attachment_list,
-            )?;
-            handle.steer(turn, runtime_user_prompt_with_context.clone()).await?;
+            let prompt = crate::api::ai::agent_driver::prompt_with_file_paths(handle.metadata(), conversation_id,
+                &runtime_user_prompt_with_context, &message_attachment_list)?;
+            let images = message_attachment_list.iter().filter(|a| a.attachment_type == AttachmentType::Image).cloned().collect();
+            handle.steer(turn, prompt, images).await?;
         }
         // 添加用户消息
         let user_message = if let Ok(key) = crate::proactive::proposal::ACCEPTANCE.try_with(Clone::clone) {
@@ -4225,10 +4253,10 @@ async fn initialize_conversation(
 
         // 更新 attachment 的 message_id，关联到新创建的用户消息
         // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）
-        for attachment in message_attachment_list.iter() {
-            let mut updated_attachment = attachment.clone();
-            updated_attachment.message_id = user_message.id;
-            db.attachment_repo().unwrap().update(&updated_attachment).map_err(AppError::from)?;
+        let repo = db.attachment_repo()?;
+        for row in &mut message_attachment_list {
+            row.id = repo.bind_to_message(row, user_message.id)?;
+            row.message_id = user_message.id;
         }
 
         // 发送消息添加事件

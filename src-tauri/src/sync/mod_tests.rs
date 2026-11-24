@@ -918,3 +918,13 @@ fn test_outbox_readiness_unavailable_vault_keeps_ordinary_sync_available() {
         assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE event_id='credential' AND sent_once=0", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 }
+
+#[test]
+fn test_attachment_remote_paths_keep_only_the_file_name() {
+    for value in [r"C:\docs\预算.xlsx", "/home/预算.xlsx", "file:///data/预算.xlsx", "../secret/预算.xlsx", "aipp-remote:/预算.xlsx", "预算.xlsx"] {
+        assert_eq!(super::remote_attachment_name(value), Some("预算.xlsx"));
+    }
+    for url in ["https://example.com/image.png", "data:image/png;base64,AAAA", "aipp://image-generation/pending/1"] {
+        assert_eq!(super::remote_attachment_name(url), None);
+    }
+}

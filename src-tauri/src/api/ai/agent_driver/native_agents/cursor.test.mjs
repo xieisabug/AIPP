@@ -272,3 +272,12 @@ test('should append Butler context once after Cursor completes a normal turn', a
     }
   } finally { await runtime.close(); }
 });
+
+test('should deliver both native images in attachment order with the file prompt', async () => {
+  const f = cursorFixture(); const runtime = await openCursor({ cwd: process.cwd() }, () => {}, f);
+  const images = [{ mimeType: 'image/png', data: 'AQ==' }, { mimeType: 'image/jpeg', data: 'Ag==' }];
+  try {
+    await runtime.prompt('review report.zip', 'turn', images);
+    assert.deepEqual(f.turns[0].text, { text: 'review report.zip', images }); f.turns[0].finish({});
+  } finally { await runtime.close(); }
+});

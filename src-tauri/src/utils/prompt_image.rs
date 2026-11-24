@@ -290,3 +290,49 @@ fn cache_put(key: [u8; 32], image: Arc<PromptImage>) {
     cache.push_front((key, image));
     cache.truncate(SEND_CACHE_CAPACITY);
 }
+
+pub fn from_attachment(attachment: &crate::db::conversation_db::MessageAttachment) -> anyhow::Result<crate::utils::prompt_image::PromptImage> {
+    use crate::db::conversation_db::AttachmentType;
+    use std::path::PathBuf;
+    use anyhow::{anyhow, Context};
+
+    if attachment.attachment_type != AttachmentType::Image {
+        return Err(anyhow!("不支持的附件类型 {:?}", attachment.attachment_type));
+    }
+    let url = attachment.attachment_url.as_deref().unwrap_or_default();
+    if std::path::Path::new(url).is_absolute() {
+        let bytes = std::fs::read(url).with_context(|| format!("读取图片附件失败 ({url})"))?;
+        return prepare(&bytes);
+    }
+    if let Some(data) = attachment.attachment_content.as_deref().filter(|s| s.starts_with("data:")) {
+        return prepare_data_url(data);
+    }
+    if url.starts_with("data:") {
+        return prepare_data_url(url);
+    }
+    let path = if url.starts_with("file://") {
+        tauri::Url::parse(url)?.to_file_path().map_err(|_| anyhow!("无效的本机文件 URI"))?
+    } else {
+        PathBuf::from(url)
+    };
+    if !path.is_absolute() {
+        return Err(anyhow!("缺少图片数据或有效的本机绝对路径"));
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("读取图片文件失败 ({})", path.display()))?;
+    prepare(&bytes)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentImage {
+    pub mime_type: &'static str,
+    pub data: String,
+}
+
+pub async fn agent_images(attachments: Vec<crate::db::conversation_db::MessageAttachment>) -> Result<Vec<AgentImage>, String> {
+    if attachments.is_empty() { return Ok(Vec::new()); }
+    tokio::task::spawn_blocking(move || attachments.iter().map(|file| {
+        let image = from_attachment(file).map_err(|e| format!("准备图片失败 [attachment_id={}]: {e:#}", file.id))?;
+        Ok(AgentImage { mime_type: image.mime, data: image.base64 })
+    }).collect()).await.map_err(|e| format!("图片处理任务失败：{e}"))?
+}

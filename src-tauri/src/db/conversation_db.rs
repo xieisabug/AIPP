@@ -27,6 +27,7 @@ pub enum AttachmentType {
     /// In-memory assistant context part. Persisted in message metadata, never in the files table.
     #[serde(skip)]
     DeepSeekReplay,
+    File = 9,
 }
 
 impl TryFrom<i64> for AttachmentType {
@@ -41,6 +42,7 @@ impl TryFrom<i64> for AttachmentType {
             5 => Ok(AttachmentType::PowerPoint),
             6 => Ok(AttachmentType::Excel),
             7 => Ok(AttachmentType::Skill),
+            9 => Ok(AttachmentType::File),
             _ => Err(rusqlite::Error::FromSqlConversionFailure(
                 2,
                 rusqlite::types::Type::Integer,
@@ -1470,6 +1472,20 @@ impl MessageAttachmentRepository {
         f(&self.conn)
     }
 
+    /// A saved draft, resend or concurrent sender can reuse an attachment ID. Keep both messages' rows.
+    pub fn bind_to_message(&self, attachment: &MessageAttachment, message_id: i64) -> Result<i64> {
+        self.with_serialized_write(|conn| {
+            let changed = conn.execute("UPDATE message_attachment SET message_id=?1, attachment_content=?2, attachment_url=?4
+                WHERE id=?3 AND (message_id=-1 OR message_id=?1)", params![message_id, attachment.attachment_content, attachment.id, attachment.attachment_url])?;
+            if changed == 1 { return Ok(attachment.id); }
+            let copied = conn.execute("INSERT INTO message_attachment(message_id,attachment_type,attachment_url,attachment_content,attachment_hash,use_vector,token_count)
+                SELECT ?1,attachment_type,?4,?2,attachment_hash,use_vector,token_count FROM message_attachment WHERE id=?3",
+                params![message_id, attachment.attachment_content, attachment.id, attachment.attachment_url])?;
+            if copied == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
     #[instrument(level = "debug", skip(self, id_list), fields(id_count = id_list.len()))]
     pub fn list_by_id(&self, id_list: &[i64]) -> Result<Vec<MessageAttachment>> {
         let id_list_str: Vec<String> = id_list.iter().map(|id| id.to_string()).collect();
@@ -1546,7 +1562,7 @@ impl Repository<MessageAttachment> for MessageAttachmentRepository {
                 attachment_type: attachment.attachment_type,
                 attachment_url: attachment.attachment_url.clone(),
                 attachment_content: attachment.attachment_content.clone(),
-                attachment_hash: None,
+                attachment_hash: attachment.attachment_hash.clone(),
                 use_vector: attachment.use_vector,
                 token_count: attachment.token_count,
             })

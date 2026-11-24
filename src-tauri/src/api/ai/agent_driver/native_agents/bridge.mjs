@@ -48,12 +48,12 @@ jsonLines(process.stdin, request => {
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);
       runtime = await open(request.config, emit);
       data = { session: runtime.session, config_options: runtime.configOptions,
-        load_session_supported: runtime.canLoad, session_resume_supported: runtime.canResume };
+        prompt_capabilities: runtime.promptCapabilities, load_session_supported: runtime.canLoad, session_resume_supported: runtime.canResume };
     } else {
       if (!runtime) throw new Error('Native agent bridge is not initialized');
       switch (request.type) {
-        case 'prompt': await runtime.prompt(request.text, request.turn); break;
-        case 'steer': await runtime.steer(request.turn, request.text); break;
+        case 'prompt': await runtime.prompt(request.text, request.turn, request.images, request.documents, request.hasImagePaths); break;
+        case 'steer': await runtime.steer(request.turn, request.text, request.images); break;
         case 'cancel': await runtime.cancel(); break;
         case 'config': await runtime.configure(request.key, request.value); break;
         case 'reply': await runtime.reply(request.request_id, request.value); break;
@@ -65,7 +65,7 @@ jsonLines(process.stdin, request => {
     }
     emit({ type: 'response', id: request.id, ok: true, data });
   })().catch(error => emit({ type: 'response', id: request.id, ok: false, error: error.message }));
-}, fail);
+}, fail, 64);
 process.stdin.on('end', () => { void runtime?.close().finally(() => process.exit(0)); });
 process.on('uncaughtException', fail);
 process.on('unhandledRejection', fail);

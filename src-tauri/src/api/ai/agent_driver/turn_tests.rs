@@ -76,20 +76,22 @@ fn test_turn_text_drivers_receive_initialized_attachment_context_once() {
 }
 
 #[test]
-fn test_turn_text_drivers_reject_non_text_attachments_instead_of_dropping_them() {
+fn test_turn_rejects_image_without_bytes_or_local_path() {
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
     let messages = vec![("user".into(), "question".into(), vec![attachment(AttachmentType::Image)])];
     let request = AgentTurnRequest { source_message_id: None, native_butler_role: None, assistant: &assistant, conversation_id: 42, prompt: "question".into(), display_prompt: "question".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &messages };
     let error = prompt_for_driver(AgentSessionKind::Codex.into(), &request).err().unwrap().to_string();
-    assert!(error.contains("attachment_id=12")); assert!(error.contains("without losing user input"));
+    assert!(error.contains("attachment_id=12")); assert!(error.contains("重新选择"));
 }
 
 #[test]
-fn test_claude_images_keep_text_context_and_reject_other_files() {
+fn test_claude_images_keep_text_context_and_missing_pdf_reports_its_id() {
     let assistant = assistant();
     let features = HashMap::new();
     for (kind, accepted) in [(AttachmentType::Image, true), (AttachmentType::PDF, false)] {
-        let messages = vec![("user".into(), "question + notes + turn context".into(), vec![attachment(AttachmentType::Text), attachment(kind)])];
+        let mut file = attachment(kind);
+        if kind == AttachmentType::Image { file.attachment_content = Some("data:image/png;base64,AAAA".into()); }
+        let messages = vec![("user".into(), "question + notes + turn context".into(), vec![attachment(AttachmentType::Text), file])];
         let request = AgentTurnRequest { source_message_id: None, native_butler_role: None, assistant: &assistant, conversation_id: 42,
             prompt: "question".into(), display_prompt: "question".into(), override_model_id: None, overrides: &None,
             feature_configs: &features, messages: &messages };
@@ -101,4 +103,52 @@ fn test_claude_images_keep_text_context_and_reject_other_files() {
             assert!(error.contains("attachment_id=12") && error.contains("PDF"));
         }
     }
+}
+
+
+// T3 attachmentPrompt.test.ts keeps every path at the text budget and identifies missing inputs.
+#[test]
+fn test_attachment_paths_survive_long_prompts_across_every_driver() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files: Vec<_> = ["Cargo.toml", "Cargo.lock"].iter().map(|name| MessageAttachment {
+        attachment_url: Some(root.join(name).to_str().unwrap().into()), attachment_content: None,
+        ..attachment(AttachmentType::File)
+    }).collect();
+    let long = "x".repeat(120_000);
+    let registry = registry();
+    for id in ["acp", "codex_app_server", "claude_sdk", "pi", "cursor", "opencode", "kiro", "antigravity"] {
+        let metadata = registry.driver(id).unwrap().metadata();
+        let prompt = prompt_with_file_paths(metadata, 42, &long, &files).unwrap();
+        assert!(prompt.starts_with(&long));
+        for file in &files { assert!(prompt.contains(file.attachment_url.as_deref().unwrap()), "{id}"); }
+        let mut missing = files[0].clone();
+        missing.attachment_url = Some(root.join("missing-attachment-fixture.zip").display().to_string());
+        let error = prompt_with_file_paths(metadata, 42, "", &[missing]).unwrap_err().to_string();
+        assert!(error.contains("missing-attachment-fixture.zip") && error.contains("attachment_id=12"), "{id}: {error}");
+    }
+}
+
+#[test]
+fn test_attachment_agent_can_reopen_the_original_zip_and_reports_a_later_move() {
+    use std::io::{Read, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("工作 资料.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    zip.start_file("notes/answer.txt", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.write_all(b"archive evidence 813").unwrap();
+    drop(zip.finish().unwrap());
+    let file = MessageAttachment { attachment_url: Some(path.display().to_string()), attachment_content: None,
+        ..attachment(AttachmentType::File) };
+    let metadata = registry().driver("codex_app_server").unwrap().metadata();
+    let input = || prompt_with_file_paths(metadata, 42, "", std::slice::from_ref(&file));
+    {
+        let prompt = input().unwrap();
+        let delivered_path = prompt.strip_prefix("附件路径 ").unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(delivered_path).unwrap()).unwrap();
+        let mut evidence = String::new();
+        archive.by_name("notes/answer.txt").unwrap().read_to_string(&mut evidence).unwrap();
+        assert_eq!(evidence, "archive evidence 813");
+    }
+    std::fs::rename(&path, dir.path().join("移动后.zip")).unwrap();
+    assert!(input().unwrap_err().to_string().contains("重新选择"));
 }

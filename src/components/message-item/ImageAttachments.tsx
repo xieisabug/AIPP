@@ -25,12 +25,14 @@ interface ImageAttachmentsProps {
     attachments?: Attachment[];
     conversationId?: number | null;
     messageId?: number;
+    messageContent?: string;
 }
 
 const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
     attachments,
     conversationId,
     messageId,
+    messageContent,
 }) => {
     const isMobilePlatform = useIsMobilePlatform();
 
@@ -91,7 +93,13 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
             Boolean(attachment.id || attachment.attachment_url),
     );
 
-    if (!imageAttachments.length && !officeAttachments.length) {
+    const fileAttachments = attachments.filter(attachment => {
+        if (attachment.attachment_type === 'Text' && messageContent !== undefined) {
+            return !messageContent.includes(`<fileattachment name="${attachment.attachment_url ?? '附件'}">`);
+        }
+        return attachment.attachment_type === 'File' || attachment.attachment_type === 'PDF';
+    });
+    if (!imageAttachments.length && !officeAttachments.length && !fileAttachments.length) {
         return null;
     }
 
@@ -159,6 +167,11 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
                     })}
                 </div>
             )}
+            {fileAttachments.map((a, index) => (
+                <span key={a.id ?? index} className="w-fit max-w-full truncate rounded-md border px-2 py-1 text-sm" title={a.attachment_url}>
+                    {a.attachment_url?.split(/[\\\\/]/).pop() || '文件附件'}
+                </span>
+            ))}
             {officeAttachments.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-2">
                     {officeAttachments.map((attachment, index) => {

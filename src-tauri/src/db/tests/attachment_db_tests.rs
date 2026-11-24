@@ -519,3 +519,19 @@ fn test_list_by_conversation_id_returns_real_attachment_id() {
     assert_eq!(attachment.id, attachment_id);
     assert_eq!(attachment.attachment_url.as_deref(), Some("C:/docs/报告.docx"));
 }
+
+#[test]
+fn test_attachment_resend_keeps_the_previous_message_and_content() {
+    let (repo, message) = create_attachment_test_db();
+    let original = create_test_attachment(-1, AttachmentType::File);
+    let mut draft = repo.create(&original).unwrap();
+    assert_eq!(repo.bind_to_message(&draft, message).unwrap(), draft.id);
+    draft.attachment_content = Some("second turn".into());
+    let copied_id = repo.bind_to_message(&draft, message + 1).unwrap();
+    assert_ne!(draft.id, copied_id);
+    let first = repo.read(draft.id).unwrap().unwrap();
+    let second = repo.read(copied_id).unwrap().unwrap();
+    assert_eq!((first.message_id, first.attachment_content), (message, original.attachment_content));
+    assert_eq!((second.message_id, second.attachment_content), (message + 1, draft.attachment_content));
+    assert_eq!(first.attachment_hash, second.attachment_hash);
+}

@@ -84,6 +84,7 @@ dependencies = [
  "webview2-com",
  "which 6.0.3",
  "windows-core 0.61.2",
+ "xml-rs",
  "yaml-rust2",
  "zip 2.4.2",
  "zip-extract",

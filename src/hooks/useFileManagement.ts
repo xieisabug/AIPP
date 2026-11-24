@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { readFile } from "@tauri-apps/plugin-fs";
 import { toast } from "sonner";
 import { isAndroid, mobileFileAction, fileErrorMessage } from "@/services/mobileFileService";
 import {
@@ -38,36 +37,10 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         return null;
     }, []);
 
-    const isSupportedFile = useCallback(
-        (file: File) => {
-            return (
-                file.type.startsWith("image/") ||
-                file.type === "text/plain" ||
-                getOfficeAttachmentTypeByName(file.name) !== null ||
-                getOfficeAttachmentTypeByName(file.type) !== null
-            );
-        },
-        [getOfficeAttachmentTypeByName],
-    );
-
-    const getAttachmentType = useCallback(
-        (fileType: string, fileName?: string) => {
-            const officeByMime = getOfficeAttachmentTypeByName(fileType);
-            if (officeByMime !== null) return officeByMime;
-            if (fileName) {
-                const officeByName = getOfficeAttachmentTypeByName(fileName);
-                if (officeByName !== null) return officeByName;
-            }
-            if (fileType.startsWith("image/")) {
-                return AttachmentType.Image;
-            } else if (fileType === "text/plain") {
-                return AttachmentType.Text;
-            } else {
-                return AttachmentType.Text;
-            }
-        },
-        [getOfficeAttachmentTypeByName],
-    );
+    const getAttachmentType = useCallback((mime: string, name: string) =>
+        getOfficeAttachmentTypeByName(name) ?? getOfficeAttachmentTypeByName(mime) ??
+        (mime.startsWith("image/") ? AttachmentType.Image : mime === "application/pdf" ? AttachmentType.PDF :
+            mime.startsWith("text/") ? AttachmentType.Text : AttachmentType.File), [getOfficeAttachmentTypeByName]);
 
     const processFiles = useCallback(
         async (files: File[]) => {
@@ -76,53 +49,24 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                 toast.error("附件超过移动端限制：最多 10 个、单文件 20 MiB、总计 50 MiB");
                 return;
             }
-            const filePromises = files.map(
-                (file) =>
-                    new Promise<FileInfo>((resolve, reject) => {
+            const filePromises = files.map(async (file): Promise<FileInfo> => {
+                const path = (file as File & { path?: string }).path;
+                let dataUrl: string | undefined;
+                if (!path) {
+                    dataUrl = await new Promise<string>((resolve, reject) => {
                         const reader = new FileReader();
-                        reader.onload = async (event) => {
-                            const fileContent = event.target?.result;
-                            if (typeof fileContent !== "string") {
-                                reject(new Error("Failed to read file content"));
-                                return;
-                            }
-
-                            let newFile: FileInfo = {
-                                id: -1,
-                                name: file.name,
-                                path: file.name,
-                                type: getAttachmentType(file.type),
-                                thumbnail:
-                                    file.type.startsWith("image/") ? fileContent : undefined,
-                            };
-
-                            try {
-                                const res = await invoke<AddAttachmentResponse>(
-                                    "add_attachment",
-                                    {
-                                        fileContent,
-                                        fileName: file.name,
-                                        attachmentType: newFile.type,
-                                    },
-                                );
-                                newFile.id = res.attachment_id;
-                                if (newFile.id <= 0) throw new Error("附件登记未返回有效 ID");
-                            } catch (error) {
-                                reject(error);
-                                return;
-                            }
-
-                            resolve(newFile);
-                        };
-                        reader.onerror = reject;
-
-                        if (file.type.startsWith("image/")) {
-                            reader.readAsDataURL(file);
-                        } else {
-                            reader.readAsText(file);
-                        }
-                    }),
-            );
+                        reader.onerror = () => reject(reader.error);
+                        reader.onload = () => resolve(String(reader.result));
+                        reader.readAsDataURL(file);
+                    });
+                }
+                const res = await invoke<AddAttachmentResponse>("add_attachment",
+                    path ? { fileUrl: path } : { fileName: file.name, fileDataUrl: dataUrl });
+                if (res.attachment_id <= 0) throw new Error("附件登记未返回有效 ID");
+                return { id: res.attachment_id, name: file.name, path: res.path ?? path ?? file.name,
+                    type: res.attachment_type ?? getAttachmentType(file.type, file.name),
+                    thumbnail: res.thumbnail ?? (file.type.startsWith("image/") ? dataUrl : undefined) };
+            });
 
             try {
                 const results = await Promise.allSettled(filePromises);
@@ -139,6 +83,31 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         },
         [getAttachmentType, onFileSelect],
     );
+
+    const addLocalPaths = useCallback(async (paths: string[]) => {
+        const filePromises = paths.map(async (path) => {
+            const name = path.split(/[\\/]/).pop() || path;
+
+            const result = await invoke<AddAttachmentResponse>("add_attachment", { fileUrl: path });
+            if (result.attachment_id <= 0) throw new Error("附件登记未返回有效 ID");
+            return {
+                id: result.attachment_id,
+                name,
+                path,
+                thumbnail: result.thumbnail,
+                type: result.attachment_type ?? getAttachmentType("", name),
+            };
+        });
+
+        const results = await Promise.allSettled(filePromises);
+        const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + fileErrorMessage(result.reason)); });
+        if (newFiles.length) editedSinceRestore.current = true;
+        setFileInfoList((prev) => [...(prev || []), ...newFiles]);
+        if (onFileSelect) {
+            onFileSelect(newFiles);
+        }
+    }, [getAttachmentType, onFileSelect]);
 
     const handleChooseFile = useCallback(async () => {
         console.log("trigger handleChooseFile");
@@ -157,7 +126,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                             id: res.attachment_id,
                             name: file.name,
                             path: file.path,
-                            type: getAttachmentType(file.mime, file.name),
+                            type: res.attachment_type ?? getAttachmentType(file.mime, file.name),
                             thumbnail: file.thumbnail,
                         });
                     } catch (error) {
@@ -173,60 +142,11 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                 multiple: true,
             });
 
-            if (selected) {
-                const paths = Array.isArray(selected) ? selected : [selected];
-                const filePromises = paths.map(async (path) => {
-                    const name =
-                        path.split("\\").pop() || path.split("/").pop() || "";
-                    const contents = await readFile(path);
-
-                    let thumbnail = undefined;
-                    let type = getAttachmentType("", name);
-
-                    if (name.match(/\.(jpg|jpeg|png|gif)$/i)) {
-                        const blob = new Blob([contents]);
-                        thumbnail = URL.createObjectURL(blob);
-                        type = AttachmentType.Image;
-                    }
-
-                    const newFile: FileInfo = {
-                        id: -1,
-                        name,
-                        path,
-                        thumbnail,
-                        type,
-                    };
-
-                    try {
-                        const res = await invoke<AddAttachmentResponse>(
-                            "add_attachment",
-                            {
-                                fileUrl: path,
-                            },
-                        );
-                        newFile.id = res.attachment_id;
-                        if (newFile.id <= 0) throw new Error("附件登记未返回有效 ID");
-                    } catch (error) {
-                        if (thumbnail) URL.revokeObjectURL(thumbnail);
-                        throw error;
-                    }
-
-                    return newFile;
-                });
-
-                const results = await Promise.allSettled(filePromises);
-                const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-                results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + fileErrorMessage(result.reason)); });
-                if (newFiles.length) editedSinceRestore.current = true;
-                setFileInfoList((prev) => [...(prev || []), ...newFiles]);
-                if (onFileSelect) {
-                    onFileSelect(newFiles);
-                }
-            }
+            if (selected) await addLocalPaths(Array.isArray(selected) ? selected : [selected]);
         } catch (error) {
             toast.error("文件选择失败: " + fileErrorMessage(error));
         }
-    }, [onFileSelect]);
+    }, [onFileSelect, getAttachmentType, addLocalPaths]);
 
     const handleDeleteFile = useCallback((fileId: number) => {
         editedSinceRestore.current = true;
@@ -240,33 +160,18 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
             console.log("trigger handlePaste", e);
             if (e.clipboardData.files.length > 0) {
                 e.preventDefault(); // Prevent default paste behavior
-                const files = Array.from(e.clipboardData.files).filter(
-                    (file) => isSupportedFile(file),
-                );
-
-                console.log("paste files", files);
-                if (files.length === 0) {
-                    toast.error("暂不支持该文件类型");
-                    return;
-                }
-
+                const files = Array.from(e.clipboardData.files);
                 await processFiles(files);
             }
         },
-        [isSupportedFile, processFiles],
+        [processFiles],
     );
 
     const handleDropFiles = useCallback(
         (files: File[]) => {
-            const supportedFiles = files.filter((file) => isSupportedFile(file));
-            if (supportedFiles.length === 0) {
-                toast.error("暂不支持该文件类型");
-                return;
-            }
-
-            void processFiles(supportedFiles);
+            void processFiles(files);
         },
-        [isSupportedFile, processFiles],
+        [processFiles],
     );
 
     const restoreFiles = useCallback((files: FileInfo[]) => {
@@ -289,6 +194,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         handleDeleteFile,
         handlePaste,
         handleDropFiles,
+        addLocalPaths,
     };
 };
 

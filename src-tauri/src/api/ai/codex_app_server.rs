@@ -1,3 +1,4 @@
+use crate::db::conversation_db::MessageAttachment;
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::agent_plan::AgentPlanMessage;
 use crate::api::ai::agent_driver::events::{AgentEventIdentity, emit_to_window, emit_to_chat_windows};
@@ -123,8 +124,8 @@ pub struct AgentActivityEvent {
 }
 
 enum CodexSessionCommand {
-    Steer { turn: String, text: String, response: oneshot::Sender<Result<(), String>> },
-    Prompt { message_id: i64, prompt: String, window: tauri::Window, cancellation_generation: u64 },
+    Steer { turn: String, text: String, images: Vec<MessageAttachment>, response: oneshot::Sender<Result<(), String>> },
+    Prompt { message_id: i64, prompt: String, images: Vec<MessageAttachment>, window: tauri::Window, cancellation_generation: u64 },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
     SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
     Shutdown { reason: String },
@@ -242,13 +243,14 @@ impl CodexSessionHandle {
         &self,
         message_id: i64,
         prompt: String,
+        images: Vec<MessageAttachment>,
         window: tauri::Window,
     ) -> Result<(), AppError> {
         *self.failure_context.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             Some((message_id, window.clone()));
         if self
             .sender
-            .send(CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation: *self.cancellation.borrow() })
+            .send(CodexSessionCommand::Prompt { message_id, prompt, images, window, cancellation_generation: *self.cancellation.borrow() })
             .is_err()
         {
             self.failure_context
@@ -265,9 +267,9 @@ impl CodexSessionHandle {
         Ok(())
     }
 
-    pub async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
+    pub async fn steer(&self, turn: String, text: String, images: Vec<MessageAttachment>) -> Result<(), AppError> {
         let (response, receipt) = oneshot::channel();
-        self.sender.send(CodexSessionCommand::Steer { turn, text, response })
+        self.sender.send(CodexSessionCommand::Steer { turn, text, images, response })
             .map_err(|_| AppError::ProviderError(format!("Codex steer channel closed [run={}]", self.run_id)))?;
         tokio::time::timeout(std::time::Duration::from_secs(35), receipt).await
             .map_err(|_| AppError::ProviderError(format!("Codex turn/steer acknowledgement timed out [run={}]", self.run_id)))?
@@ -1373,6 +1375,12 @@ impl CodexContextRestore {
         }
         Ok(())
     }
+}
+
+async fn codex_image_items(images: Vec<MessageAttachment>) -> Result<Vec<Value>, String> {
+    Ok(crate::utils::prompt_image::agent_images(images).await?.into_iter().map(|image| {
+        json!({"type":"image", "url": format!("data:{};base64,{}", image.mime_type, image.data)})
+    }).collect())
 }
 
 fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str, context: &serde_json::Map<String, Value>) -> Value {
@@ -2582,7 +2590,7 @@ async fn run_session(
                 info!(conversation_id, run_id, reason, "Codex session shutdown requested");
                 return Ok(());
             }
-            CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation } => {
+            CodexSessionCommand::Prompt { message_id, prompt, images, window, cancellation_generation } => {
                 let _mcp_prompt = mcp_scope.begin_prompt(message_id)?
                     .watch_cancellation(request_cancellation.signal.subscribe(), cancellation_generation);
                 event_identity.response_message_id = Some(message_id);
@@ -2599,11 +2607,13 @@ async fn run_session(
                 request_cancellation.source_message_id = Some(message_id);
                 let turn_start_time = chrono::Utc::now();
                 // 手动压缩：改发 thread/compact/start（立即返回 {}，压缩作为一轮 turn 以通知推进）
-                let manual_compact = super::agent_driver::manual_compact::is_manual_compact_prompt(&prompt);
+                let manual_compact = images.is_empty() && super::agent_driver::manual_compact::is_manual_compact_prompt(&prompt);
                 let (turn_method, turn_params) = if manual_compact {
                     ("thread/compact/start", json!({ "threadId": thread_id }))
                 } else {
-                    ("turn/start", codex_turn_start_params(&thread_id, &snapshot, &prompt, &application_context))
+                    let mut params = codex_turn_start_params(&thread_id, &snapshot, &prompt, &application_context);
+                    params["input"].as_array_mut().unwrap().extend(codex_image_items(images).await?);
+                    ("turn/start", params)
                 };
                 request_id += 1;
                 write_frame(
@@ -2665,13 +2675,18 @@ async fn run_session(
                                         let _ = response.send(Ok(()));
                                     }
                                 }
-                                Some(CodexSessionCommand::Steer { turn, text, response }) => {
+                                Some(CodexSessionCommand::Steer { turn, text, images, response }) => {
                                     if response.is_closed() { continue; }
                                     if turn_id.as_deref() != Some(turn.as_str()) || turn_completed {
                                         let _ = response.send(Err("Codex steering target already finished".into()));
                                     } else {
                                         request_id += 1;
-                                        let params = json!({"threadId":thread_id,"expectedTurnId":turn,"input":[{"type":"text","text":text}]});
+                                        let mut items = vec![json!({"type":"text","text":text})];
+                                        match codex_image_items(images).await {
+                                            Ok(images) => items.extend(images),
+                                            Err(error) => { let _ = response.send(Err(error)); continue; }
+                                        }
+                                        let params = json!({"threadId":thread_id,"expectedTurnId":turn,"input":items});
                                         match write_frame(&mut stdin, &json_rpc_request(request_id, "turn/steer", params)).await {
                                             Ok(()) => { steer_receipts.insert(request_id, response); }
                                             Err(error) => { let _ = response.send(Err(error)); }

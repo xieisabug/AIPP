@@ -19,6 +19,7 @@ embed-resource = "3"
 
 [dependencies]
 zip = "2.2"
+xml-rs = "0.8"
 zip-extract = "0.1.2"
 dirs = "5.0.1"
 dunce = "1.0.5"

@@ -170,19 +170,19 @@ export async function openPi(config, emit, dependencies = {}) {
     }
     return {
       session,
-      async prompt(text, id) {
+      async prompt(text, id, images = []) {
         if (turn) throw new Error('Pi already has an active turn');
         turn = id; failure = undefined; modelError = undefined; finalText = undefined;
         tools.clear(); thinkingId = undefined; thinkingSequence = 0;
-        const receipt = await request({ type: 'prompt', message: text });
+        const receipt = await request({ type: 'prompt', message: text, ...(images.length ? { images: images.map(image => ({ type: 'image', ...image })) } : {}) });
         if (turn === id && receipt?.disposition === 'handled') {
           const state = await request({ type: 'get_state' });
           if (turn === id && !awaitingSettlement && state.isStreaming === false) finishTurn();
         }
       },
-      async steer(expectedTurn, text) {
+      async steer(expectedTurn, text, images = []) {
         if (!turn || turn !== expectedTurn) throw new Error('Pi steering target is no longer the active turn');
-        await request({ type: 'steer', message: text });
+        await request({ type: 'steer', message: text, ...(images.length ? { images: images.map(image => ({ type: 'image', ...image })) } : {}) });
       },
       async cancel() { await request({ type: 'abort' }); },
       async reply(id, value) { send({ type: 'extension_ui_response', id, confirmed: value === 'allow' }); },

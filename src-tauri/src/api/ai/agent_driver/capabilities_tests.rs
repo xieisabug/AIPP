@@ -128,13 +128,13 @@ fn test_capabilities_native_prompt_and_image_input() {
     for (driver, declaration) in [("codex_app_server", AgentCapabilityDeclaration::codex()), ("claude_sdk", AgentCapabilityDeclaration::claude())] {
         let baseline = AgentCapabilities::baseline(driver, declaration);
         let supports_images = declaration.image_input == Some(true);
-        assert_eq!(supports_images, driver == "claude_sdk");
+        assert!(supports_images, "{driver}");
         assert_eq!(baseline.attachments.image.support, if supports_images { CapabilitySupport::Unknown } else { CapabilitySupport::Unsupported });
         let capabilities = baseline.with_session(&json!({
             "session_id": "s", "prompt_capabilities": {"image": true, "audio": true, "embedded_context": true},
             "load_session_supported": false, "session_resume_supported": true,
         })).unwrap();
-        assert_eq!(capabilities.attachments.input, if supports_images { AttachmentInput::PromptTextWithImages } else { AttachmentInput::PromptText });
+        assert_eq!(capabilities.attachments.input, declaration.attachment_input);
         let support = if supports_images { CapabilitySupport::Supported } else { CapabilitySupport::Unsupported };
         assert_eq!(capabilities.attachments.structured.support, support);
         assert_eq!(capabilities.attachments.image.support, support);

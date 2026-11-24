@@ -1,3 +1,5 @@
+import { pathToFileURL } from 'node:url';
+import { basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { deadline, launch, splitModel, stopChild } from './common.mjs';
 
@@ -163,13 +165,15 @@ export async function openOpenCode(config, emit, dependencies = {}) {
     void consume().catch(error => { if (!closing) emit({ type: 'fatal', error: error.message }); });
     return {
       session,
-      async prompt(text, id) {
+      async prompt(text, id, images = [], documents = []) {
         if (turn) throw new Error('OpenCode already has an active turn');
         turn = id; cancelling = false; errorMessage = undefined; sawActivity = false; pendingIdle = false;
         parts.clear(); partTypes.clear(); partOwners.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
         await api(`/session/${session}/prompt_async`, 'POST', {
           ...(config.butlerInstructions ? { system: config.butlerInstructions } : {}),
-          ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text }],
+          ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text },
+            ...images.map(({ mimeType, data }) => ({ type: 'file', mime: mimeType, url: `data:${mimeType};base64,${data}` })),
+            ...documents.map(path => ({ type: 'file', mime: 'application/pdf', filename: basename(path), url: pathToFileURL(path).href }))],
         });
       },
       async cancel() {

@@ -205,3 +205,26 @@ test('should accept a new prompt in the same OpenCode session after the requeste
     ]);
   } finally { await runtime.close(); }
 });
+
+test('should deliver both native images in attachment order with the file prompt', async () => {
+  const f = openCodeFixture(); const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, () => {}, f);
+  const images = [{ mimeType: 'image/png', data: 'AQ==' }, { mimeType: 'image/jpeg', data: 'Ag==' }];
+  try {
+    await runtime.prompt('review report.zip', 'turn', images);
+    assert.deepEqual(f.requests.find(r => r.path.includes('prompt_async')).body.parts, [{ type: 'text', text: 'review report.zip' }, ...images.map(i => ({ type: 'file', mime: i.mimeType, url: 'data:' + i.mimeType + ';base64,' + i.data }))]);
+  } finally { await runtime.close(); }
+});
+
+test('should deliver an original PDF file URI with its display name', async () => {
+  const f = openCodeFixture();
+  const runtime = await openOpenCode({ cwd: process.cwd(), session: 's1' }, () => {}, f);
+  try {
+    const path = process.cwd() + '/报表 1.pdf';
+    await runtime.prompt(path, 'turn', [], [path]);
+    const parts = f.requests.at(-1).body.parts;
+    assert.deepEqual(parts[0], { type: 'text', text: path });
+    assert.equal(parts[1].mime, 'application/pdf');
+    assert.equal(parts[1].filename, '报表 1.pdf');
+    assert.match(parts[1].url, /^file:.*%201\.pdf$/);
+  } finally { await runtime.close(); }
+});

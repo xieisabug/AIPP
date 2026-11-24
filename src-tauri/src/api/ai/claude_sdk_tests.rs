@@ -132,3 +132,20 @@ async fn test_claude_images_live_cli_reads_the_generated_frame() {
     let expected = format!("{} {}", palette[first].0, palette[second].0);
     assert_eq!(result["result"].as_str().unwrap().trim(), expected);
 }
+
+#[tokio::test]
+async fn test_claude_attachment_pdf_uses_native_document_and_preserves_prompt() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("工作材料.pdf");
+    let bytes = b"%PDF-1.7\nexample";
+    std::fs::write(&path, bytes).unwrap();
+    let mut pdf = image_attachment(3, "");
+    pdf.attachment_type = crate::db::conversation_db::AttachmentType::PDF;
+    pdf.attachment_url = Some(path.display().to_string());
+    let input = super::claude_sdk::claude_user_input("summary".into(), vec![pdf], None).await.unwrap();
+    assert_eq!(input["message"]["content"], serde_json::json!([
+        {"type":"text","text":"summary"},
+        {"type":"document","source":{"media_type":"application/pdf","type":"base64","data":base64::engine::general_purpose::STANDARD.encode(bytes)}}
+    ]));
+}

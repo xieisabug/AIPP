@@ -57,4 +57,24 @@ describe("desktop attachment registration", () => {
         expect(toast.error).toHaveBeenCalledTimes(2);
         expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("有效 ID"));
     });
+
+    it("should register a dropped ZIP by original path without reading its bytes", async () => {
+        const { result } = renderHook(() => useFileManagement());
+        vi.mocked(invoke).mockResolvedValue({ attachment_id: 12, attachment_type: 9 });
+        await act(async () => result.current.addLocalPaths(["/repo/资料包.zip"]));
+        expect(invoke).toHaveBeenCalledWith("add_attachment", { fileUrl: "/repo/资料包.zip" });
+        expect(readFile).not.toHaveBeenCalled();
+        expect(result.current.fileInfoList?.[0].name).toBe("资料包.zip");
+    });
+
+    it("should preserve original bytes when a pasted Office file has no local path", async () => {
+        vi.mocked(invoke).mockImplementation(async command => command === "get_platform" ? "windows" :
+            { attachment_id: 13, attachment_type: 6, path: "/imports/表.xlsx" });
+        const { result } = renderHook(() => useFileManagement());
+        const file = new File([new Uint8Array([0x50, 0x4b, 0xff, 0])], "表.xlsx");
+        const event = { preventDefault: vi.fn(), clipboardData: { files: [file] } } as unknown as React.ClipboardEvent<HTMLTextAreaElement>;
+        await act(async () => result.current.handlePaste(event));
+        expect(invoke).toHaveBeenCalledWith("add_attachment", { fileName: "表.xlsx", fileDataUrl: expect.stringMatching(/;base64,UEv\/AA==$/) });
+        expect(result.current.fileInfoList?.[0]).toMatchObject({ id: 13, type: 6, path: "/imports/表.xlsx" });
+    });
 });

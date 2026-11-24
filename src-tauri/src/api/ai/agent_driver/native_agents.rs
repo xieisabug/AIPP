@@ -32,11 +32,16 @@ fn error(detail: impl std::fmt::Display) -> AppError { AppError::ProviderError(d
 #[derive(Clone, Copy)]
 pub(super) struct NativeDriver(pub &'static str);
 impl NativeDriver {
+    fn attachment_input(self) -> AttachmentInput {
+        if matches!(self.0, "opencode" | "antigravity" | "kiro") { AttachmentInput::PromptTextWithImagesAndPdf }
+        else { AttachmentInput::PromptTextWithImages }
+    }
+
     fn declaration(self) -> AgentCapabilityDeclaration {
         AgentCapabilityDeclaration { respond_permission: Some(self.0 != "cursor"),
-            image_input: Some(false), audio_input: Some(false), embedded_context_input: Some(false),
+            image_input: Some(true), audio_input: Some(false), embedded_context_input: Some(matches!(self.0, "kiro" | "antigravity")),
             resume_session: (self.0 != "kiro").then_some(true), load_session: (self.0 != "kiro").then_some(false),
-            ..AgentCapabilityDeclaration::unknown(true, true, AttachmentInput::PromptText) }
+            ..AgentCapabilityDeclaration::unknown(true, true, self.attachment_input()) }
     }
 }
 
@@ -45,7 +50,7 @@ impl AgentDriver for NativeDriver {
     fn metadata(&self) -> AgentDriverMetadata {
         AgentDriverMetadata { id: self.0, display_name: match self.0 { "pi" => "Pi", "cursor" => "Cursor", "kiro" => "Kiro", "antigravity" => "Antigravity", _ => "OpenCode" },
             message_model_name: self.0,
-            operations: AgentSessionCapabilities { attachment_input: AttachmentInput::PromptText, cancel_prompt: true, set_config_option: true } }
+            operations: AgentSessionCapabilities { attachment_input: self.attachment_input(), cancel_prompt: true, set_config_option: true } }
     }
     fn matches_provider(&self, api_type: &str, _: &[LLMProviderConfig]) -> bool { api_type == self.0 }
     fn config_schema(&self) -> Vec<AgentConfigField> {
@@ -280,7 +285,7 @@ pub(crate) async fn release_conversation(conversation_id: i64) {
 }
 enum Command {
     Shutdown,
-    Prompt { id: i64, text: String, window: tauri::Window },
+    Prompt { id: i64, text: String, attachments: Vec<MessageAttachment>, window: tauri::Window },
     Request { wire: Value, reply: oneshot::Sender<Result<Value, String>> },
     Reply { turn: i64, request_id: String, value: String },
     Answer { turn: i64, request_id: String, answers: Value },
@@ -299,13 +304,14 @@ impl NativeControl {
 #[async_trait::async_trait]
 impl AgentSessionControl for NativeControl {
     fn metadata(&self) -> AgentDriverMetadata { self.driver.metadata() }
-    fn send_prompt(&self, id: i64, text: String, _: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
+    fn send_prompt(&self, id: i64, text: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
         let window = context.window()?;
         self.busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).map_err(|_|error("Native agent already has an active prompt"))?;
-        self.tx.send(Command::Prompt { id, text, window }).map_err(|e| { self.busy.store(false, Ordering::SeqCst); error(e) })
+        self.tx.send(Command::Prompt { id, text, attachments, window }).map_err(|e| { self.busy.store(false, Ordering::SeqCst); error(e) })
     }
-    async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
-        self.request(json!({"type":"steer","turn":turn,"text":text})).await.map(|_| ())
+    async fn steer(&self, turn: String, text: String, images: Vec<MessageAttachment>) -> Result<(), AppError> {
+        let images = crate::utils::prompt_image::agent_images(images).await.map_err(error)?;
+        self.request(json!({"type":"steer","turn":turn,"text":text,"images":images})).await.map(|_| ())
     }
     async fn cancel_current_prompt(&self) -> Result<(), AppError> { self.request(json!({"type":"cancel"})).await.map(|_| ()) }
     async fn set_config_option(&self, key: String, value: String) -> Result<(), AppError> { self.request(json!({"type":"config", "key":key,"value":value})).await.map(|_| ()) }
@@ -387,6 +393,9 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
             for key in ["load_session_supported", "session_resume_supported"] {
                 if let Some(value) = frame["data"][key].as_bool() { state[key] = json!(value); }
             }
+            if let Some(capabilities) = frame["data"]["prompt_capabilities"].as_object() {
+                state["prompt_capabilities"] = json!(capabilities);
+            }
             state["session_id"] = json!(native_session);
         }
         if let Some(options) = frame["data"]["config_options"].as_array() {
@@ -403,7 +412,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     let Some(command) = command else { break; };
                     let mut wire = match command {
                         Command::Shutdown => break,
-                        Command::Prompt { id, text, window } => {
+                        Command::Prompt { id, text, attachments, window } => {
                             if active.is_some() { return Err("Native session received overlapping prompts".into()); }
                             identity.response_message_id = Some(id);
                             active = Some(ActiveTurn { id, text: String::new(), window, activities: HashMap::new(), _mcp_prompt: None, questions: Vec::new() });
@@ -414,7 +423,12 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                             snapshot.lock().unwrap()["current_turn_id"] = json!(id.to_string());
                             snapshot.lock().unwrap()["is_busy"] = json!(true);
                             publish_snapshot(&app, &identity, driver, &snapshot)?;
-                            json!({"type":"prompt","text":text,"turn":id.to_string()})
+                            let (pdfs, images): (Vec<_>, Vec<_>) = attachments.into_iter().partition(|a|
+                                a.attachment_type == crate::db::conversation_db::AttachmentType::PDF);
+                            let documents: Vec<_> = pdfs.iter().filter_map(|a| a.attachment_url.as_ref()).collect();
+                            let has_image_paths = images.iter().all(|a| a.attachment_url.as_deref().is_some_and(|p| std::path::Path::new(p).is_absolute()));
+                            let images = crate::utils::prompt_image::agent_images(images).await?;
+                            json!({"type":"prompt","text":text,"turn":id.to_string(),"images":images,"documents":documents,"hasImagePaths":has_image_paths})
                         }
                         Command::Request { mut wire, reply } => {
                             if wire["type"] == "cancel" {

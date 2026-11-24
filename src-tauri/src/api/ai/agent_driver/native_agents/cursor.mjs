@@ -110,7 +110,7 @@ export async function openCursor(config, emit, dependencies = {}) {
   return {
     session: agent.agentId,
     models,
-    async prompt(text, turn) {
+    async prompt(text, turn, images = []) {
       if (active) throw new Error('Cursor already has an active turn');
       const current = { cancelled: false };
       active = current;
@@ -120,7 +120,7 @@ export async function openCursor(config, emit, dependencies = {}) {
         const command = /^\/[\w-]+(?:\s|$)/.test(text.trimStart());
         const includeInstructions = instructionsPending && !command;
         const input = includeInstructions ? text + '\n\n' + config.butlerInstructions : text;
-        admission = Promise.resolve(agent.send(input, { ...(model ? { model: { id: model } } : {}), onDelta(update) {
+        admission = Promise.resolve(agent.send(images.length ? { text: input, images } : input, { ...(model ? { model: { id: model } } : {}), onDelta(update) {
           if (active !== current) return;
           if (update.type === 'text-delta') {
             thinking.end(turn);

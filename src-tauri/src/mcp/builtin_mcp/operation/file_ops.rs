@@ -16,6 +16,15 @@ impl FileOperations {
     /// 每行最大字符数
     const MAX_LINE_LENGTH: usize = 2000;
 
+    pub(super) fn append_line(output: &mut String, line: &str) {
+        if let Some((end, _)) = line.char_indices().nth(Self::MAX_LINE_LENGTH) {
+            output.push_str(&line[..end]);
+            output.push_str("...[truncated]");
+        } else {
+            output.push_str(line);
+        }
+    }
+
     /// 读取文件内容
     pub async fn read_file(
         state: &OperationState,
@@ -51,28 +60,20 @@ impl FileOperations {
         // 读取文件
         let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
         let reader = BufReader::new(file);
-        let lines: Vec<String> = reader.lines().map(|l| l.unwrap_or_default()).collect();
-
-        let total_lines = lines.len();
-        let offset = request.offset.unwrap_or(1).max(1);
+        let offset = request.offset.unwrap_or(1).max(1) - 1;
         let limit = request.limit.unwrap_or(Self::DEFAULT_LINE_LIMIT);
-
-        // 计算实际范围（1-indexed）
-        let start_idx = (offset - 1).min(total_lines);
-        let end_idx = (start_idx + limit).min(total_lines);
-
-        // 构建原始内容输出，保留 offset/limit 范围与长行截断逻辑。
+        let mut total_lines = 0;
         let mut content = String::new();
-        for line in &lines[start_idx..end_idx] {
-            // 截断过长的行
-            let truncated_line = if line.len() > Self::MAX_LINE_LENGTH {
-                format!("{}...[truncated]", &line[..Self::MAX_LINE_LENGTH])
-            } else {
-                line.clone()
-            };
-            content.push_str(&truncated_line);
-            content.push('\n');
+        for line in reader.lines() {
+            let line = line.map_err(|e| format!("Failed to read file {path}: {e}"))?;
+            if total_lines >= offset && total_lines - offset < limit {
+                Self::append_line(&mut content, &line);
+                content.push('\n');
+            }
+            total_lines += 1;
         }
+        let start_idx = offset.min(total_lines);
+        let end_idx = start_idx.saturating_add(limit).min(total_lines);
 
         // 记录文件已读取
         state.record_file_read_for_conversation(path, conversation_id).await;

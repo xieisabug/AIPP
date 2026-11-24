@@ -540,6 +540,9 @@ pub(crate) fn resolve_authorized_office_path(
         let raw_url = attachment.attachment_url.ok_or_else(|| {
             OfficePreviewError::new("file_not_found", "附件记录缺少文件路径")
         })?;
+        if raw_url.starts_with("aipp-remote:/") {
+            return Err(OfficePreviewError::new("file_not_found", "原 Office 文件未传到本设备，请重新选择文件"));
+        }
         let candidate = PathBuf::from(&raw_url);
         let resolved = if candidate.is_file() {
             candidate

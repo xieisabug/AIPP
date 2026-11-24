@@ -407,3 +407,44 @@ test('should preserve a modern model option advertised while a legacy switch is 
     assert.equal(runtime.configOptions.find(option => option.id === 'model').current_value, 'c');
   } finally { await runtime.close(); }
 });
+
+for (const driver of ['kiro', 'antigravity']) {
+  test(`should send native images after ${driver} negotiates image inputs`, async () => {
+    const f = fixture({ capabilities: { promptCapabilities: { image: true } } });
+    const runtime = await f.open(driver);
+    const image = { mimeType: 'image/png', data: 'AQ==' };
+    try {
+      const done = runtime.prompt('report.zip', 'turn', [image]);
+      const blocks = f.commands.find(c => c.method === 'session/prompt').params.prompt;
+      assert.deepEqual(blocks, [{ type: 'text', text: 'report.zip' }, { type: 'image', ...image }]);
+      f.finish(); await done;
+    } finally { await runtime.close(); }
+  });
+}
+
+test('should send a PDF resource link when Antigravity advertises embedded context', async () => {
+  const f = fixture({ capabilities: { promptCapabilities: { embeddedContext: true } } });
+  const runtime = await f.open('antigravity');
+  const path = process.cwd() + '/预算 2026.pdf';
+  try {
+    const done = runtime.prompt(path, 'turn', [], [path]);
+    const blocks = f.commands.find(c => c.method === 'session/prompt').params.prompt;
+    assert.equal(blocks[1].type, 'resource_link');
+    assert.equal(blocks[1].name, '预算 2026.pdf');
+    assert.equal(blocks[1].mimeType, 'application/pdf');
+    assert.match(blocks[1].uri, /^file:.*%20/);
+    f.finish(); await done;
+  } finally { await runtime.close(); }
+});
+
+test('should retain a readable image path when Kiro has no image input and reject unresolved bytes', async () => {
+  const f = fixture();
+  const runtime = await f.open('kiro');
+  const images = [{ mimeType: 'image/png', data: 'AQ==' }];
+  try {
+    await assert.rejects(runtime.prompt('image', 'first', images), /图片输入能力/);
+    const done = runtime.prompt('local-image.png', 'second', images, [], true);
+    assert.deepEqual(f.commands.at(-1).params.prompt, [{ type: 'text', text: 'local-image.png' }]);
+    f.finish(); await done;
+  } finally { await runtime.close(); }
+});

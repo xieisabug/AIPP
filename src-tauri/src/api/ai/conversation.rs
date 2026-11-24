@@ -137,6 +137,10 @@ fn image_part(mime: String, b64: String) -> ContentPart {
     }
 }
 
+#[cfg(test)]
+#[path = "conversation_attachment_tests.rs"]
+mod attachment_tests;
+
 fn build_user_message_with_attachments(
     content: &str,
     attachment_list: &[MessageAttachment],
@@ -220,8 +224,20 @@ fn build_user_message_with_attachments(
                     | AttachmentType::Word
                     | AttachmentType::PowerPoint
                     | AttachmentType::Excel
+                    | AttachmentType::File
             ) {
                 let file_name = attachment.attachment_url.as_deref().unwrap_or("未知文档");
+                if attachment.attachment_type == AttachmentType::PDF {
+                    if let Some(data) = attachment_content.strip_prefix("data:application/pdf;base64,") {
+                        let name = file_name.rsplit(['/', '\\']).next().unwrap_or("document.pdf");
+                        parts.push(ContentPart::from_binary_base64("application/pdf", data, Some(name.to_owned())));
+                        continue;
+                    }
+                }
+                if attachment.attachment_type == AttachmentType::Text &&
+                    content.contains(&format!(r#"<fileattachment name="{}">{}</fileattachment>"#, file_name, attachment_content)) {
+                    continue;
+                }
                 let file_type = match attachment.attachment_type {
                     AttachmentType::PDF => "PDF文档",
                     AttachmentType::Word => "Word文档",
@@ -1346,9 +1362,7 @@ pub fn init_conversation(
             })
             .map_err(AppError::from)?;
         for attachment in attachment_list {
-            let mut updated_attachment = attachment.clone();
-            updated_attachment.message_id = message.id;
-            db.attachment_repo().unwrap().update(&updated_attachment).map_err(AppError::from)?;
+            db.attachment_repo()?.bind_to_message(attachment, message.id)?;
         }
         message_result_array.push(message.clone());
     }

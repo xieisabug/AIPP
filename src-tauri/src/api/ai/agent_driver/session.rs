@@ -62,24 +62,15 @@ impl AgentSessionKind {
         AgentSessionCapabilities {
             attachment_input: match self {
                 Self::Acp => AttachmentInput::Structured,
-                Self::Claude => AttachmentInput::PromptTextWithImages,
-                Self::Codex => AttachmentInput::PromptText,
+                Self::Claude => AttachmentInput::PromptTextWithImagesAndPdf,
+                Self::Codex => AttachmentInput::PromptTextWithImages,
             },
             cancel_prompt: true,
             set_config_option: true,
         }
     }
 
-    #[cfg(test)]
-    fn validate_attachments(self, attachment_count: usize, message_id: i64) -> Result<(), AppError> {
-        if attachment_count > 0 && self.capabilities().attachment_input == AttachmentInput::PromptText {
-            return Err(AppError::ProviderError(format!(
-                "{} send_prompt failed [message_id={}]: the native session handle does not accept structured attachments (received {}); attachments must be prepared in the runtime prompt before dispatch",
-                self.api_type(), message_id, attachment_count
-            )));
-        }
-        Ok(())
-    }
+
 }
 
 /// Native controls obtain a desktop window only when their transport needs it.
@@ -97,7 +88,7 @@ impl AgentPromptContext for tauri::Window {
 pub trait AgentSessionControl: Send + Sync {
     fn metadata(&self) -> super::registry::AgentDriverMetadata;
     fn send_prompt(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError>;
-    async fn steer(&self, _turn: String, _text: String) -> Result<(), AppError> {
+    async fn steer(&self, _turn: String, _text: String, _images: Vec<MessageAttachment>) -> Result<(), AppError> {
         Err(AppError::ProviderError(format!("{} has no active-turn steering interface", self.metadata().id)))
     }
     async fn cancel_current_prompt(&self) -> Result<(), AppError>;
@@ -133,8 +124,8 @@ impl AgentSessionHandle {
         self.control.send_prompt(message_id, prompt, attachments, context)
     }
 
-    pub async fn steer(&self, turn: String, text: String) -> Result<(), AppError> {
-        self.control.steer(turn, text).await
+    pub async fn steer(&self, turn: String, text: String, images: Vec<MessageAttachment>) -> Result<(), AppError> {
+        self.control.steer(turn, text, images).await
     }
 
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
@@ -175,10 +166,10 @@ impl AgentSessionControl for ClaudeSessionHandle {
 #[async_trait::async_trait]
 impl AgentSessionControl for CodexSessionHandle {
     fn metadata(&self) -> super::registry::AgentDriverMetadata { AgentSessionKind::Codex.into() }
-    fn send_prompt(&self, message_id: i64, prompt: String, _attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
-        CodexSessionHandle::send_prompt(self, message_id, prompt, context.window()?)
+    fn send_prompt(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
+        CodexSessionHandle::send_prompt(self, message_id, prompt, attachments, context.window()?)
     }
-    async fn steer(&self, turn: String, text: String) -> Result<(), AppError> { CodexSessionHandle::steer(self, turn, text).await }
+    async fn steer(&self, turn: String, text: String, images: Vec<MessageAttachment>) -> Result<(), AppError> { CodexSessionHandle::steer(self, turn, text, images).await }
     async fn cancel_current_prompt(&self) -> Result<(), AppError> { CodexSessionHandle::cancel_current_prompt(self).await }
     async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> { CodexSessionHandle::set_config_option(self, config_id, value).await }
 }

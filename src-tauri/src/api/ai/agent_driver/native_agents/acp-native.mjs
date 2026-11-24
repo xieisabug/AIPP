@@ -3,8 +3,8 @@
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, isAbsolute, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deadline, jsonLines, launch, stopChild, thinkingStream, readableResult } from './common.mjs';
 
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: ';
@@ -349,15 +349,25 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     if (config.probe && driver === 'kiro') await waitOption('model');
     ready = true;
     return {
+      promptCapabilities: { image: Boolean(init.agentCapabilities?.promptCapabilities?.image),
+        audio: false, embedded_context: Boolean(init.agentCapabilities?.promptCapabilities?.embeddedContext) },
       session, canLoad, canResume, get configOptions() { return snapshotOptions(options); },
       async models() { return sessionModels(options); },
       configure,
-      async prompt(text, id) {
+      async prompt(text, id, images = [], documents = [], hasImagePaths = false) {
         if (turn !== null) throw new Error(`${driver} already has an active prompt`);
         turn = id; started = false; cancelling = false; cancelSent = false;
         try {
           const includeInstructions = instructionsPending && !/^\/[\w-]+(?:\s|$)/.test(text.trimStart());
+          const capabilities = init.agentCapabilities?.promptCapabilities;
+          if (images.length && !capabilities?.image && !hasImagePaths) {
+            throw new Error(`${driver} 未声明 ACP 图片输入能力，无法发送这组图片`);
+          }
           const prompt = [{ type: 'text', text }];
+          if (capabilities?.image) prompt.push(...images.map(image => ({ type: 'image', ...image })));
+          if (capabilities?.embeddedContext) prompt.push(...documents.map(path => ({
+            type: 'resource_link', name: basename(path), uri: pathToFileURL(path).href, mimeType: 'application/pdf'
+          })));
           if (includeInstructions) prompt.push({ type: 'text', text: config.butlerInstructions });
           const result = await request('session/prompt', { sessionId: session, prompt }, 24 * 60 * 60 * 1000);
           if (!['end_turn', 'cancelled', 'max_tokens', 'max_turn_requests', 'refusal'].includes(result.stopReason)) throw new Error(`${driver} prompt omitted a supported stopReason: ${result.stopReason}`);

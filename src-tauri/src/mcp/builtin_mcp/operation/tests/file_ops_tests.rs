@@ -128,17 +128,9 @@ fn test_read_file_offset_beyond_file() {
 /// 测试长行截断
 #[test]
 fn test_read_file_long_line_truncation() {
-    let max_line_length = 2000;
-    let long_line = "x".repeat(3000);
-
-    let truncated = if long_line.len() > max_line_length {
-        format!("{}...[truncated]", &long_line[..max_line_length])
-    } else {
-        long_line.clone()
-    };
-
-    assert!(truncated.len() < long_line.len());
-    assert!(truncated.ends_with("...[truncated]"));
+    let mut text = String::new();
+    FileOperations::append_line(&mut text, &"数".repeat(3000));
+    assert_eq!(text, format!("{}...[truncated]", "数".repeat(2000)));
 }
 
 // ============= 写入文件核心逻辑测试 =============

@@ -334,7 +334,7 @@ export interface AgentCapabilityDeclaration {
     cancel_prompt: boolean;
     set_config_option: boolean;
     respond_permission: boolean | null;
-    attachment_input: "structured" | "prompt_text" | "prompt_text_with_images";
+    attachment_input: "structured" | "prompt_text" | "prompt_text_with_images" | "prompt_text_with_images_and_pdf";
     image_input: boolean | null;
     audio_input: boolean | null;
     embedded_context_input: boolean | null;
@@ -355,7 +355,7 @@ export interface AgentCapabilities {
         respond_permission: AgentCapability;
     };
     attachments: {
-        input: "structured" | "prompt_text" | "prompt_text_with_images";
+        input: "structured" | "prompt_text" | "prompt_text_with_images" | "prompt_text_with_images_and_pdf";
         structured: AgentCapability;
         image: AgentCapability;
         audio: AgentCapability;
@@ -408,6 +408,9 @@ export type MessageType = 'system' | 'user' | 'assistant' | 'reasoning' | 'respo
 
 export interface AddAttachmentResponse {
     attachment_id: number;
+    attachment_type?: AttachmentType;
+    path?: string;
+    thumbnail?: string;
 }
 
 export interface FileInfo {
@@ -426,6 +429,7 @@ export enum AttachmentType { // 添加AttachmentType枚举
     PowerPoint = 5,
     Excel = 6,
     Skill = 7,
+    File = 9,
 }
 
 // Token统计相关类型

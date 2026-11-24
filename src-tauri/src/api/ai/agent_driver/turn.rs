@@ -65,27 +65,46 @@ fn read_turn_provider(
 /// runtime user message. Text-only transports must receive that exact prompt;
 /// structured transports receive raw text plus attachments once, not twice.
 pub(super) fn prompt_for_driver(metadata: AgentDriverMetadata, request: &AgentTurnRequest<'_>) -> Result<String, AppError> {
-    if metadata.operations.attachment_input == AttachmentInput::Structured { return Ok(request.prompt.clone()); }
     let Some((_, contextual_prompt, attachments)) = request.messages.iter().rev().find(|(kind, _, _)| kind == "user") else {
         return Ok(request.prompt.clone());
     };
-    validate_prompt_attachments(metadata, metadata.operations.attachment_input, request.conversation_id, attachments)?;
-    Ok(contextual_prompt.clone())
+    let prompt = if metadata.operations.attachment_input == AttachmentInput::Structured { &request.prompt } else { contextual_prompt };
+    prompt_with_file_paths(metadata, request.conversation_id, prompt, attachments)
 }
 
-pub(crate) fn validate_prompt_attachments(metadata: AgentDriverMetadata, input: AttachmentInput, conversation_id: i64, attachments: &[MessageAttachment]) -> Result<(), AppError> {
-    for attachment in attachments {
-        let accepted = match attachment.attachment_type {
-            AttachmentType::Text | AttachmentType::Skill => true,
-            AttachmentType::Image => input != AttachmentInput::PromptText,
-            _ => input == AttachmentInput::Structured,
+/// Keep path resolution at dispatch so regenerating a turn checks the execution machine again.
+pub(crate) fn prompt_with_file_paths(metadata: AgentDriverMetadata, conversation_id: i64, prompt: &str, attachments: &[MessageAttachment]) -> Result<String, AppError> {
+    let mut result = prompt.to_owned();
+    for file in attachments {
+        let kind = file.attachment_type;
+        if matches!(kind, AttachmentType::Skill | AttachmentType::DeepSeekReplay) { continue; }
+        let path = std::path::Path::new(file.attachment_url.as_deref().unwrap_or(""));
+        let native_content = match kind {
+            AttachmentType::Image => metadata.operations.attachment_input != AttachmentInput::PromptText
+                && [file.attachment_content.as_deref(), file.attachment_url.as_deref()].into_iter().flatten().any(|data| data.starts_with("data:image/")),
+            AttachmentType::Text => file.attachment_content.is_some(),
+            _ => false,
         };
-        if !accepted {
-            return Err(AppError::ProviderError(format!("{} prompt preparation failed [conversation_id={}, attachment_id={}]: the {:?} attachment cannot be sent without losing user input (input mode: {:?})",
-                metadata.id, conversation_id, attachment.id, attachment.attachment_type, input)));
+        if !path.is_absolute() {
+            if native_content { continue; }
+            return Err(AppError::ProviderError(format!("{} 准备 {:?} 附件失败 [conversation_id={conversation_id}, attachment_id={}]：{} 在执行机上没有可读文件，请重新选择", metadata.id, kind, file.id, path.display())));
+        }
+        std::fs::metadata(path).and_then(|m| if m.is_file() { Ok(()) } else {
+            Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "附件不是文件"))
+        }).map_err(|e| AppError::ProviderError(format!("{} 准备附件失败 [conversation_id={conversation_id}, attachment_id={}]：{}（{e}），请重新选择文件", metadata.id, file.id, path.display())))?;
+        if !result.is_empty() { result.push('\n'); }
+        result.push_str("附件路径 ");
+        let name = path.to_string_lossy();
+        if name.chars().any(char::is_control) {
+            result.push_str(&serde_json::json!(name).to_string());
+        } else {
+            result.push_str(&name);
         }
     }
-    Ok(())
+    if attachments.iter().any(|file| matches!(file.attachment_type, AttachmentType::Word | AttachmentType::Excel | AttachmentType::PowerPoint)) {
+        result.push_str("\nOffice 原文件供读取。编辑时使用查看器选区的会话引用，经 office_edit 生成新副本。");
+    }
+    Ok(result)
 }
 
 struct RegisteredPreparedSession {

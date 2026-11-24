@@ -70,9 +70,12 @@ pub(super) async fn dispatch_prepared<E: TurnEffects>(
     let latest = input.messages.iter().rev().find(|(role, _, _)| role == "user");
     let attachments = match (metadata.operations.attachment_input, latest) {
         (AttachmentInput::Structured, Some((_, _, attachments))) => attachments.clone(),
-        (AttachmentInput::PromptTextWithImages, Some((_, _, attachments))) => attachments.iter()
-            .filter(|a| a.attachment_type == crate::db::conversation_db::AttachmentType::Image)
-            .cloned().collect(),
+        (mode @ (AttachmentInput::PromptTextWithImages | AttachmentInput::PromptTextWithImagesAndPdf), Some((_, _, attachments))) => {
+            use crate::db::conversation_db::AttachmentType;
+            attachments.iter().filter(|a| a.attachment_type == AttachmentType::Image ||
+                (mode == AttachmentInput::PromptTextWithImagesAndPdf && a.attachment_type == AttachmentType::PDF))
+                .cloned().collect()
+        }
         _ => Vec::new(),
     };
     if let Err(error) = effects.submit(&handle, message.id, input.prompt, attachments) {
