@@ -107,6 +107,7 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
         catalog::models(app, provider_id, config, true).await?;
         return Ok(Value::Null);
     }
+    let node = env::resolve_launch_node(&config.node, &mut config.env).await?;
     let account_lock = catalog::gate(provider_id);
     let _account_guard = if driver == "antigravity" {
         let guard = account_lock.lock().await;
@@ -117,7 +118,7 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
     config.wire["logout"] = json!(action == "logout");
     let files = bridge_files().await?;
     config.wire["temp_root"] = json!(files.0);
-    let mut command = tokio::process::Command::new(&config.node);
+    let mut command = tokio::process::Command::new(&node);
     command.arg(files.0.join("bridge.mjs")).current_dir(&config.cwd).envs(&config.env)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)] { command.creation_flags(0x08000000); }

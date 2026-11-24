@@ -30,7 +30,7 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 首次返回正文、推理或工具
 
 Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动检测运行环境，不需要手动填写命令：
 
-- **Node.js 运行时**：列出 PATH 以及 nvm / nvm-windows、fnm、Volta、Homebrew、asdf、mise、Scoop、官方安装包中找到的 Node.js 及版本，低于 22.19.0 的会标注。默认「自动」按 PATH 查找；也可以固定为某个检测到的安装或自定义路径（可浏览选择文件）。当前选择不满足要求时会提示可改用的版本。固定为某个安装后，它的目录会在会话 PATH 中优先（已在 PATH 中的目录不改变顺序），让智能体及其子进程使用同一个 Node 和该版本的全局命令。
+- **Node.js 运行时**：默认「自动」从 PATH、版本管理器（如 nvm、fnm、Volta）及常见安装目录中选择本机可运行的最高版本，最低要求为 22.19.0。同版本优先采用 PATH 中的安装。新启动的桥接进程使用该可执行文件，其目录排在子进程 PATH 首位。需要固定版本时，可以选择列表中的安装或填写自定义路径。固定版本低于要求时，设置页会标注并提示可改用的版本。
 - **智能体程序**：在所选 Node 目录、PATH 以及各官方安装器和 npm / pnpm / Bun 全局目录中查找 `pi`、`opencode`、`kiro-cli`、`agy`，显示实际会启动的文件和版本（通过与会话相同的启动解析运行 `--version`，例如 Windows 上会显示解析到的 `.ps1` shim）。可选择自动、某个检测到的安装或自定义路径。未安装时显示官方安装命令（可复制）和文档链接。
 - **更新**：检测到版本后自动对照最新发布（Pi / OpenCode / Cursor SDK 查 npm，Kiro 查官方 manifest，Antigravity 查官方 CHANGELOG，结果缓存 30 分钟），有新版本时显示「更新」。更新使用智能体自带的更新命令（`pi update self`、`opencode upgrade`、`kiro-cli update`、`agy update`），输出实时显示；失败时保留退出码与输出，可使用全局代理重试。有会话正在回复时拒绝更新；空闲会话会先关闭，下次发送消息时按原会话恢复。Antigravity「独立 ACP 程序」由用户自行管理，不提供一键更新。
 - **工作目录**使用文件夹选择器（也可手动输入），目录不存在时直接提示。

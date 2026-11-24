@@ -41,8 +41,8 @@ export const NodeRuntimeField: React.FC<{
             <ProgramPicker
                 value={value}
                 autoValues={["", "node"]}
-                autoLabel="自动（PATH 中的 node）"
-                selected={state.environment ? selected ?? { path: "node", source: "PATH", version: null, ok: false, warning: null, error: "PATH 中没有找到 node" } : null}
+                autoLabel="自动（本机最新可用版本）"
+                selected={selected}
                 candidates={node?.candidates ?? []}
                 detecting={state.detecting}
                 onChange={onChange}
@@ -61,7 +61,7 @@ export const NodeRuntimeField: React.FC<{
             )}
             {state.environment && !suggestion && !usable && (
                 <InstallGuide
-                    intro={`未找到 Node.js ${node?.required ?? ""} 或更新版本。安装后点击「重新检测」，或选择自定义路径。`}
+                    intro={`未检测到可运行的 Node.js ${node?.required ?? ""} 或更新版本。安装后点击「重新检测」，或选择自定义路径。`}
                     commands={[]}
                     docsUrl="https://nodejs.org/"
                 />

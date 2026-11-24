@@ -139,13 +139,12 @@ pub(crate) fn agent_environment(models: &[AssistantModelConfig], providers: &[LL
         .chain(models.iter().filter(|c|c.name == "acp_env_vars").filter_map(|c|c.value.as_deref())) {
         env.extend(parse_environment(raw)?);
     }
-    with_node_on_path(node, &mut env, std::env::var_os("PATH"));
+    with_node_on_path(node, &mut env, std::env::var_os("PATH"), false);
     Ok(env)
 }
-/// An explicitly chosen Node (e.g. an nvm version directory) must also be the `node`
-/// and global-CLI directory the agent's own child processes find. Directories already
-/// on PATH are left in place so selecting a system Node never reorders the user's PATH.
-pub(crate) fn with_node_on_path(node: &str, env: &mut HashMap<String, String>, inherited: Option<std::ffi::OsString>) {
+/// Auto mode puts its chosen runtime first even if an older Node occurs earlier on PATH.
+/// Explicit paths keep the existing directory order when already present.
+pub(crate) fn with_node_on_path(node: &str, env: &mut HashMap<String, String>, inherited: Option<std::ffi::OsString>, prefer_first: bool) {
     let node = std::path::Path::new(node);
     let Some(directory) = node.is_absolute().then(|| node.parent()).flatten() else { return; };
     let key = env.keys().find(|key| if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key.as_str() == "PATH" }).cloned();
@@ -154,8 +153,11 @@ pub(crate) fn with_node_on_path(node: &str, env: &mut HashMap<String, String>, i
         let text = path.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
         if cfg!(windows) { text.to_lowercase() } else { text }
     };
-    if std::env::split_paths(&current).any(|entry| normalize(&entry) == normalize(directory)) { return; }
-    let Ok(joined) = std::env::join_paths(std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&current))) else { return; };
+    let directory_key = normalize(directory);
+    let mut entries = std::env::split_paths(&current);
+    if !prefer_first && entries.any(|entry| normalize(&entry) == directory_key) { return; }
+    let remaining = std::env::split_paths(&current).filter(|entry| !current.is_empty() && normalize(entry) != directory_key);
+    let Ok(joined) = std::env::join_paths(std::iter::once(directory.to_path_buf()).chain(remaining)) else { return; };
     env.insert(key.unwrap_or_else(|| "PATH".into()), joined.to_string_lossy().into_owned());
 }
 pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>) -> Result<NativeConfig, AppError> {
@@ -166,7 +168,7 @@ fn configuration_with_review_default(models: &[AssistantModelConfig], providers:
     let get = |key: &str| setting(models, providers, key);
     let cwd = crate::api::ai::working_directory::from_configs(models, providers, true)?;
     if !cwd.is_dir() { return Err(error(format!("Agent working directory does not exist: {}", cwd.display()))); }
-    let node = get("agent_node_command").unwrap_or_else(|| "node".into());
+    let node = get("agent_node_command").map(|value| value.trim().to_string()).unwrap_or_else(|| "node".into());
     let mut env = agent_environment(models, providers, &node)?;
     if get("acp_additional_args").is_some() { return Err(error("Dedicated native agent adapters do not accept generic ACP additional arguments; remove acp_additional_args")); }
     if let Some(key) = get("antigravity_api_key") { env.insert("AIPP_ANTIGRAVITY_API_KEY".into(), key); }
@@ -369,7 +371,8 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
         } else { None };
         let files = bridge.as_ref().map_err(Clone::clone)?;
         prepared.config.wire["temp_root"] = json!(files.0);
-        let mut command = tokio::process::Command::new(&prepared.config.node);
+        let node = env::resolve_launch_node(&prepared.config.node, &mut prepared.config.env).await?;
+        let mut command = tokio::process::Command::new(&node);
         command.arg(files.0.join("bridge.mjs")).current_dir(&prepared.config.cwd).envs(&prepared.config.env)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(windows)] { command.creation_flags(0x08000000); }
@@ -658,7 +661,8 @@ pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Resu
     if !is_native_agent(driver) { return Err(format!("Unknown native agent driver: {driver}")); }
     let files = bridge_files().await?;
     config.wire["temp_root"] = json!(files.0);
-    let mut command = tokio::process::Command::new(&config.node);
+    let node = env::resolve_launch_node(&config.node, &mut config.env).await?;
+    let mut command = tokio::process::Command::new(&node);
     command.arg(files.0.join("bridge.mjs")).current_dir(&config.cwd).envs(&config.env)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)] { command.creation_flags(0x08000000); }

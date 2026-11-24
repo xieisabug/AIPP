@@ -93,7 +93,7 @@ export const PathInput: React.FC<{
 );
 
 interface ProgramPickerProps {
-    /** Stored configuration; empty (or one of autoValues) means "find it on PATH". */
+    /** Empty or one of autoValues uses the program's automatic selection policy. */
     value: string;
     autoValues?: string[];
     autoLabel: string;
@@ -108,7 +108,7 @@ interface ProgramPickerProps {
 }
 
 /**
- * Choose between automatic PATH lookup, a detected installation, or a custom path.
+ * Choose between automatic selection, a detected installation, or a custom path.
  * The stored value stays a plain command/path string, so existing configs keep working.
  */
 export const ProgramPicker: React.FC<ProgramPickerProps> = ({
@@ -156,9 +156,11 @@ export const ProgramPicker: React.FC<ProgramPickerProps> = ({
                     <SelectItem value={AUTO}>
                         <span className="flex min-w-0 flex-col items-start">
                             <span>{autoLabel}</span>
-                            <span className="max-w-[28rem] truncate text-xs text-muted-foreground">
-                                {isAuto && selected ? (selected.ok ? `${selected.version ? `v${selected.version} · ` : ""}${selected.path}` : selected.error) : "按 PATH 查找"}
-                            </span>
+                            {isAuto && selected && (
+                                <span className="max-w-[28rem] truncate text-xs text-muted-foreground">
+                                    {selected.ok ? `${selected.version ? `v${selected.version} · ` : ""}${selected.path}` : selected.error}
+                                </span>
+                            )}
                         </span>
                     </SelectItem>
                     {candidates.map((candidate, index) => (

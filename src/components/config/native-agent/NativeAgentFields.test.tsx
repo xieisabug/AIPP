@@ -75,7 +75,7 @@ describe("native agent provider fields", () => {
         expect(screen.getByRole("combobox")).toHaveTextContent("自动 · v25.9.0");
         fireEvent.click(screen.getByRole("option", { name: /v22.14.0 · nvm/ }));
         expect(onChange).toHaveBeenCalledWith("D:\\nvm\\v22.14.0\\node.exe");
-        fireEvent.click(screen.getByRole("option", { name: /自动（PATH 中的 node）/ }));
+        fireEvent.click(screen.getByRole("option", { name: /自动（本机最新可用版本）/ }));
         expect(onChange).toHaveBeenLastCalledWith("");
     });
 
@@ -88,6 +88,15 @@ describe("native agent provider fields", () => {
         expect(screen.getByText("低于要求的 Node.js 22.19.0")).toBeInTheDocument();
         fireEvent.click(screen.getByRole("button", { name: "改用此版本" }));
         expect(onChange).toHaveBeenCalledWith("D:\\nvm\\v25.9.0\\node.exe");
+    });
+
+    it("should explain the minimum version when automatic selection finds only an old installation", () => {
+        const env = environment();
+        env.node.selected = null;
+        env.node.candidates = [env.node.candidates[1]];
+        render(<NodeRuntimeField state={state({ environment: env })} value="" onChange={vi.fn()} />);
+        expect(screen.getByText(/未检测到可运行的 Node.js 22.19.0 或更新版本/)).toBeInTheDocument();
+        expect(screen.queryByText(/PATH 中没有找到 node/)).not.toBeInTheDocument();
     });
 
     it("should show the custom path editor and browse for a file when the stored path is not a detected install", async () => {

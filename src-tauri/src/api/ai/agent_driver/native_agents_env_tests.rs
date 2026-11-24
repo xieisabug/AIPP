@@ -45,25 +45,55 @@ fn test_native_agent_env_command_in_follows_bridge_launch_order() {
 }
 
 #[test]
+fn test_native_agent_env_auto_node_chooses_highest_supported_version_across_sources() {
+    let node = |source: &str, version: &str| node_program(Path::new(source), source.into(), Ok(version.into()));
+    let old = node("PATH", "22.18.0");
+    let broken = node_program(Path::new("broken"), "fnm".into(), Err("无法运行".into()));
+    let mut nodes = vec![old.clone(), node("PATH", "24.9.0"), broken.clone(), node("nvm", "24.10.0")];
+    assert_eq!(rank_nodes(&mut nodes).unwrap().source, "nvm");
+    assert_eq!(rank_nodes(&mut [node("fnm", "22.19.0")]).unwrap().source, "fnm");
+    assert_eq!(rank_nodes(&mut [node("PATH", "24.0.0"), node("nvm", "24.0.0")]).unwrap().source, "PATH");
+    assert!(rank_nodes(&mut [old, broken]).is_none());
+}
+
+#[test]
 fn test_native_agent_env_selected_node_directory_is_prepended_once() {
     let (node, node_dir, other) = if cfg!(windows) { (r"C:\nvm\v22.19.0\node.exe", r"C:\nvm\v22.19.0", r"C:\Windows") } else { ("/opt/nvm/v22.19.0/bin/node", "/opt/nvm/v22.19.0/bin", "/usr/bin") };
     let joined = |parts: &[&str]| std::env::join_paths(parts).unwrap().to_string_lossy().into_owned();
 
     let mut env = HashMap::new();
-    with_node_on_path(node, &mut env, Some(other.into()));
+    with_node_on_path(node, &mut env, Some(other.into()), false);
     assert_eq!(env.get("PATH"), Some(&joined(&[node_dir, other])));
 
     let mut already = HashMap::new();
-    with_node_on_path(node, &mut already, Some(std::env::join_paths([other, node_dir]).unwrap()));
+    with_node_on_path(node, &mut already, Some(std::env::join_paths([other, node_dir]).unwrap()), false);
     assert!(already.is_empty(), "a directory already on PATH keeps its position");
+    with_node_on_path(node, &mut already, Some(std::env::join_paths([other, node_dir]).unwrap()), true);
+    assert_eq!(already.get("PATH"), Some(&joined(&[node_dir, other])));
 
     let mut bare = HashMap::new();
-    with_node_on_path("node", &mut bare, Some(other.into()));
+    with_node_on_path("node", &mut bare, Some(other.into()), false);
     assert!(bare.is_empty(), "PATH lookup keeps the inherited PATH untouched");
 
     let mut configured = HashMap::from([("PATH".to_string(), "custom".to_string())]);
-    with_node_on_path(node, &mut configured, Some(other.into()));
+    with_node_on_path(node, &mut configured, Some(other.into()), false);
     assert_eq!(configured.get("PATH"), Some(&joined(&[node_dir, "custom"])), "configured PATH is extended, not replaced");
+}
+
+#[tokio::test]
+#[ignore = "requires a supported Node installed in a discovered location outside PATH"]
+async fn test_native_agent_env_launch_with_empty_path_uses_discovered_node_for_children() {
+    let mut env = HashMap::from([("PATH".to_string(), String::new())]);
+    let status = detect_node("node", &effective_path(&env)).await;
+    let selected = status.selected.expect("install a supported Node in a version manager or installer directory");
+    let command = resolve_launch_node("node", &mut env).await.unwrap();
+    assert_eq!(command, selected.path);
+    assert_eq!(Path::new(&env["PATH"]), Path::new(&command).parent().unwrap());
+    let output = tokio::process::Command::new(command).envs(env)
+        .args(["-p", "require('node:child_process').execFileSync('node',['--version'],{encoding:'utf8'}).trim()"])
+        .output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), format!("v{}", selected.version.unwrap()));
 }
 
 fn provider(name: &str, value: &str) -> LLMProviderConfig {

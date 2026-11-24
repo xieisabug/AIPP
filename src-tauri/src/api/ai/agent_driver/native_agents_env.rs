@@ -138,7 +138,10 @@ fn effective_path(env: &HashMap<String, String>) -> OsString {
 
 /// Every Node.js installation we know how to find: PATH first, then version managers.
 pub(crate) fn node_locations(path: &OsString) -> Vec<(PathBuf, String)> {
-    let mut found: Vec<(PathBuf, String)> = std::env::split_paths(path).map(|dir| (dir.join(NODE_EXE), "PATH".to_string())).collect();
+    let mut found: Vec<(PathBuf, String)> = std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .filter_map(|dir| std::path::absolute(dir.join(NODE_EXE)).ok())
+        .map(|path| (path, "PATH".to_string())).collect();
     let mut add = |paths: Vec<PathBuf>, label: &str| found.extend(paths.into_iter().map(|path| (path, label.to_string())));
     let home = dirs::home_dir();
     #[cfg(windows)]
@@ -252,19 +255,23 @@ fn node_program(path: &Path, source: String, result: Result<String, String>) -> 
     DetectedProgram { path: path.display().to_string(), source, ok: version.is_some(), version, warning, error }
 }
 
+/// Stable sorting preserves discovery order (PATH first) for equal versions.
+fn rank_nodes(candidates: &mut [DetectedProgram]) -> Option<DetectedProgram> {
+    candidates.sort_by_cached_key(|candidate| std::cmp::Reverse(candidate.version.as_deref().and_then(parse_version)));
+    candidates.iter().find(|candidate| candidate.ok && candidate.warning.is_none()).cloned()
+}
+
 async fn detect_node(command: &str, search_path: &OsString) -> NodeStatus {
     let locations = dedupe(node_locations(search_path));
     let mut candidates = futures::future::join_all(locations.into_iter().map(|(path, source)| async move {
         let result = program_version(&path).await;
         node_program(&path, source, result)
     })).await;
-    // PATH entries keep PATH order; the rest newest first.
-    candidates.sort_by(|a, b| (b.source == "PATH").cmp(&(a.source == "PATH"))
-        .then_with(|| if a.source == "PATH" { std::cmp::Ordering::Equal } else {
-            parse_version(b.version.as_deref().unwrap_or_default()).cmp(&parse_version(a.version.as_deref().unwrap_or_default()))
-        }));
+    let newest = rank_nodes(&mut candidates);
     let configured = Path::new(command);
-    let selected = if configured.is_absolute() {
+    let selected = if command == "node" {
+        newest
+    } else if configured.is_absolute() {
         let found = candidates.iter().find(|candidate| identity(Path::new(&candidate.path)) == identity(configured)).cloned();
         Some(match found { Some(found) => found, None => node_program(configured, "自定义".into(), if configured.is_file() { program_version(configured).await } else { Err("文件不存在".into()) }) })
     } else {
@@ -273,10 +280,31 @@ async fn detect_node(command: &str, search_path: &OsString) -> NodeStatus {
                 let found = candidates.iter().find(|candidate| identity(Path::new(&candidate.path)) == identity(&path)).cloned();
                 Some(match found { Some(found) => found, None => node_program(&path, "PATH".into(), program_version(&path).await) })
             }
-            Err(_) => None,
+            Err(error) => Some(node_program(configured, "自定义".into(), Err(format!("无法定位 {command}：{error}")))),
         }
     };
     NodeStatus { configured: if command == "node" { String::new() } else { command.to_string() }, required: NODE_MINIMUM.into(), selected, candidates }
+}
+
+impl NodeStatus {
+    fn auto_command(&self, env: &mut HashMap<String, String>) -> Result<String, String> {
+        if let Some(node) = &self.selected {
+            with_node_on_path(&node.path, env, std::env::var_os("PATH"), true);
+            return Ok(node.path.clone());
+        }
+        let mut message = format!("未检测到可运行的 Node.js {NODE_MINIMUM} 或更新版本");
+        for candidate in &self.candidates {
+            let reason = candidate.error.as_deref().or(candidate.version.as_deref()).unwrap_or("版本未知");
+            message.push_str(&format!("\n{}：{reason}", candidate.path));
+        }
+        Err(message)
+    }
+}
+
+/// Only resolve on a new bridge launch. Live sessions keep their running Node.
+pub(super) async fn resolve_launch_node(command: &str, env: &mut HashMap<String, String>) -> Result<String, String> {
+    if command != "node" { return Ok(command.to_string()); }
+    detect_node(command, &effective_path(env)).await.auto_command(env)
 }
 
 fn cli_program(result: &Value, source: String, recommended: Option<&str>) -> DetectedProgram {
@@ -490,8 +518,11 @@ async fn detect_cli(driver: &str, context: &Context, spec: &ToolSpec, node: &Nod
 
 pub(crate) async fn detect_environment(app: &tauri::AppHandle, driver: &str, settings: &HashMap<String, String>, provider_id: Option<i64>) -> Result<NativeAgentEnvironment, String> {
     let spec = spec(driver).ok_or_else(|| format!("Unknown native agent driver: {driver}"))?;
-    let context = Context::new(settings)?;
+    let mut context = Context::new(settings)?;
     let node = detect_node(&context.node, &effective_path(&context.env)).await;
+    if context.node == "node" && node.selected.is_some() {
+        context.node = node.auto_command(&mut context.env)?;
+    }
     let tool = if driver == "cursor" { detect_cursor(app, &context, &spec, &node, provider_id) } else { detect_cli(driver, &context, &spec, &node).await };
     Ok(NativeAgentEnvironment { driver: driver.into(), node, tool, working_directory: context.working_directory })
 }
@@ -584,8 +615,9 @@ pub async fn run_native_agent_update(app: tauri::AppHandle, feature_config_state
     return Err("MOBILE_UNSUPPORTED: native agents require a local desktop runtime".into());
 
     let spec = spec(&driver).ok_or_else(|| format!("Unknown native agent driver: {driver}"))?;
-    let context = Context::new(&settings)?;
+    let mut context = Context::new(&settings)?;
     if context.standalone_antigravity(&driver) { return Err("独立 ACP 程序由你自行安装和管理，AIPP 不提供一键更新".into()); }
+    context.node = resolve_launch_node(&context.node, &mut context.env).await?;
     {
         let mut set = updating().lock().map_err(|_| "update state lock poisoned")?;
         if !set.insert(driver.clone()) { return Err(format!("{} 正在更新中", spec.display_name)); }
