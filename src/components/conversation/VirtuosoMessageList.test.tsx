@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import VirtuosoMessageList, { getVirtuosoRowMinHeight, retainedSliceStart, retainedTailStart } from "./VirtuosoMessageList";
+import VirtuosoMessageList, { getVirtuosoRowMinHeight, retainedReleaseSliceStart, retainedSliceStart, retainedTailStart } from "./VirtuosoMessageList";
 import * as sendSlide from "./sendScrollSequence";
 import * as sentBubble from "./sentBubbleAnimation";
 import type { Message } from "@/data/Conversation";
@@ -188,6 +188,34 @@ describe("VirtuosoMessageList row height reservation", () => {
             makeMessage({ id: 2 }),
             makeMessage({ id: 3, message_type: "user" }),
         ])} />);
+        expect(screen.getByTestId("virtuoso")).toBeInTheDocument();
+    });
+
+    it("should keep an open transcript mounted when a reply grows it past the budget", () => {
+        const turns = (conversationId: number, count: number) => Array.from({ length: count }, (_, i) => makeMessage({
+            id: conversationId * 1000 + i,
+            conversation_id: conversationId,
+            message_type: i % 2 === 0 ? "user" : "response",
+        }));
+        const opened = turns(1, 80);
+        const props = makeProps(opened);
+        const view = render(<VirtuosoMessageList {...props} />);
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        const earlierReply = screen.getByTestId("message-1077");
+
+        // Send, then the first reply rows arrive: 82 rows, over the 80-row budget.
+        view.rerender(<VirtuosoMessageList {...props} allDisplayMessages={[
+            ...opened,
+            makeMessage({ id: 1080, message_type: "user" }),
+            makeMessage({ id: 1081, message_type: "reasoning", content: "思考" }),
+        ]} />);
+
+        // Switching paths here would remount every row and rerun Virtuoso's opening position.
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        expect(screen.getByTestId("message-1077")).toBe(earlierReply);
+
+        // Reopening chooses the path for the transcript's size again.
+        view.rerender(<VirtuosoMessageList {...props} conversationId="2" allDisplayMessages={turns(2, 82)} />);
         expect(screen.getByTestId("virtuoso")).toBeInTheDocument();
     });
 
@@ -1258,5 +1286,51 @@ describe("retained history tail-first mounting", () => {
 
         expect(screen.getByTestId("message-1")).toBeInTheDocument();
         expect(document.querySelector("[data-aipp-slot='chat-history-pending']")).toBeNull();
+    });
+
+    it("should release at most one slice per step and never past the kept tail", () => {
+        expect(retainedReleaseSliceStart(rows(Array(40).fill(100)), 0, 26)).toBe(8);
+        expect(retainedReleaseSliceStart(rows(Array(40).fill(100)), 24, 26)).toBe(26);
+        // Rows 7..9 are one bubble: the slice takes all of it, never stopping inside.
+        expect(retainedReleaseSliceStart(rows(Array(40).fill(100), [7, 8]), 0, 26)).toBe(10);
+    });
+
+    it("should release rows above a reader who stays at the bottom and restore them on scroll up", async () => {
+        vi.useFakeTimers();
+        try {
+            const turns = (from: number, count: number) => Array.from({ length: count }, (_, i) => makeMessage({
+                id: from + i,
+                message_type: (from + i) % 2 === 1 ? "user" : "response",
+                content: `message ${from + i}`,
+            }));
+            const opened = turns(1, 80);
+            const scrollContainer = document.createElement("div");
+            document.body.appendChild(scrollContainer);
+            const props = { ...makeProps(opened), scrollContainerRef: { current: scrollContainer } };
+            const view = render(<VirtuosoMessageList {...props} />);
+            await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+            // The transcript grows past the budget during the session but stays on the retained path.
+            view.rerender(<VirtuosoMessageList {...props} allDisplayMessages={[...opened, ...turns(81, 40)]} />);
+            await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+            expect(screen.getByTestId("message-1")).toBeInTheDocument();
+
+            // A reader who stays at the bottom: rows far above are released.
+            await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+            expect(screen.queryByTestId("message-1")).not.toBeInTheDocument();
+            expect(screen.getByTestId("message-120")).toBeInTheDocument();
+
+            // Scrolling up brings them back.
+            Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 9000 });
+            Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 600 });
+            scrollContainer.scrollTop = 6000;
+            act(() => { scrollContainer.dispatchEvent(new Event("scroll")); });
+            await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+            expect(screen.getByTestId("message-1")).toBeInTheDocument();
+            expect(document.querySelector("[data-aipp-slot='chat-history-pending']")).toBeNull();
+            scrollContainer.remove();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

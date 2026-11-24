@@ -76,6 +76,9 @@ const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 2500;
 const INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS = 15_000;
 /** 流式输出期间持续贴底；实际结束由 streamingMessages 清空时的 effect cleanup 负责 */
 const STREAM_FOLLOW_MAX_DURATION_MS = 10 * 60_000;
+/** Transcripts within this budget keep every row mounted instead of virtualizing history. */
+const RETAINED_HISTORY_MAX_MESSAGES = 80;
+const RETAINED_HISTORY_MAX_CHARS = 500_000;
 /**
  * Retained transcripts open tail-first: the first commit only lays out about two
  * viewports of rows, older rows are prepended in idle-time slices afterwards.
@@ -86,6 +89,17 @@ const RETAINED_INITIAL_MIN_PX = 1200;
 const RETAINED_INITIAL_MIN_ROWS = 8;
 const RETAINED_SLICE_PX = 600;
 const RETAINED_SLICE_MAX_ROWS = 4;
+/**
+ * A transcript that grew past the retained budget while open (the path is kept per
+ * open) releases rows far above a reader who has stayed at the bottom this long. It
+ * keeps the same tail as a first open, and the rows come back when the reader scrolls up.
+ */
+const RETAINED_RELEASE_AFTER_MS = 90_000;
+const RETAINED_RELEASE_CHECK_MS = 5_000;
+const RETAINED_RELEASE_MIN_ROWS = 8;
+const RETAINED_RELEASE_SLICE_ROWS = 8;
+/** Same "still at the bottom" distance as the back-to-bottom button. */
+const RETAINED_AT_BOTTOM_PX = 96;
 
 function rowSpan(item: RenderableConversationItem): number {
     return item.estimatedHeight + (item.joinsNext ? 0 : VIRTUAL_ROW_GAP_PX);
@@ -114,6 +128,14 @@ export function retainedSliceStart(items: RenderableConversationItem[], start: n
         height += rowSpan(items[next]);
     }
     while (next > 0 && items[next - 1].joinsNext) next -= 1;
+    return next;
+}
+
+/** First row after releasing one more slice from the top; never passes `target`. */
+export function retainedReleaseSliceStart(items: RenderableConversationItem[], start: number, target: number): number {
+    let next = Math.min(target, start + RETAINED_RELEASE_SLICE_ROWS);
+    // Never start inside a bubble split across joined rows.
+    while (next < target && items[next - 1].joinsNext) next += 1;
     return next;
 }
 
@@ -380,12 +402,6 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 }) => {
     useButlerReplyEntry(scrollContainerRef, conversationId, historyLoaded, butlerBubbleMotion, messageListProps.allDisplayMessages);
     const [listWidth, setListWidth] = useState<number | null>(null);
-    // Keep bounded rich transcripts mounted: viewport crossings must not
-    // repeatedly recreate code blocks and change the reader's scroll anchor.
-    const retainHistory = messageListProps.allDisplayMessages.length <= 80
-        && messageListProps.allDisplayMessages.reduce(
-            (total, message) => total + (message.content?.length ?? 0), 0,
-        ) <= 500_000;
     const { renderItems } = useMessageListElements({
         ...messageListProps,
         listWidthPx: listWidth || undefined,
@@ -503,6 +519,24 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const dataConversationKey = transcriptKey ?? String(
         messageListProps.allDisplayMessages[0]?.conversation_id ?? conversationId,
     );
+    const transcriptViewKey = `${conversationId}:${dataConversationKey}`;
+
+    // Keep bounded rich transcripts mounted: viewport crossings must not
+    // repeatedly recreate code blocks and change the reader's scroll anchor.
+    // The path is chosen once when a transcript opens and kept while it stays open.
+    // Re-deciding when a reply grows it past the budget would remount every row under
+    // the reader and rerun Virtuoso's opening position, jumping the view after a send.
+    const fitsRetainedBudget = messageListProps.allDisplayMessages.length <= RETAINED_HISTORY_MAX_MESSAGES
+        && messageListProps.allDisplayMessages.reduce(
+            (total, message) => total + (message.content?.length ?? 0), 0,
+        ) <= RETAINED_HISTORY_MAX_CHARS;
+    const [retainChoice, setRetainChoice] = useState<{ key: string; retain: boolean } | null>(null);
+    if (historyLoaded && hasCurrentConversationMessages && retainChoice?.key !== transcriptViewKey) {
+        setRetainChoice({ key: transcriptViewKey, retain: fitsRetainedBudget });
+    }
+    const retainHistory = retainChoice?.key === transcriptViewKey
+        ? retainChoice.retain
+        : fitsRetainedBudget;
 
     // scrollParent 解析不能只依赖 ref 对象 identity：Butler 等场景下首帧
     // ref.current 偶发仍为 null，若不再重试会永久停在 minHeight:1 占位，气泡全无。
@@ -973,8 +1007,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         : undefined;
 
     // ---- Tail-first mounting of retained history ----
-    const retainedKey = `${conversationId}:${dataConversationKey}`;
-    const [retainedWindow, setRetainedWindow] = useState<{ key: string; firstKey: string | null }>(
+    const retainedKey = transcriptViewKey;
+    const [retainedWindow, setRetainedWindow] = useState<{
+        key: string;
+        firstKey: string | null;
+        /** Rows were released under a reader at the bottom; backfill waits until they scroll up. */
+        parked?: boolean;
+        /** Placeholder height taken from the DOM when rows were released (estimates otherwise). */
+        heldPx?: number;
+    }>(
         { key: "", firstKey: null },
     );
     const retainedActive = retainHistory && historyItems.length > 0;
@@ -1000,25 +1041,42 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         [renderItems, retainedStart],
     );
     const retainedPendingPx = useMemo(() => {
+        if (retainedStart > 0 && retainedWindow.heldPx !== undefined) return retainedWindow.heldPx;
         let height = 0;
         for (let index = 0; index < retainedStart; index += 1) height += rowSpan(renderItems[index]);
         return height;
-    }, [renderItems, retainedStart]);
-    const retainedStateRef = useRef({ items: renderItems, start: retainedStart, pendingPx: retainedPendingPx });
-    retainedStateRef.current = { items: renderItems, start: retainedStart, pendingPx: retainedPendingPx };
-    const mountRetainedFrom = useCallback((firstKey: string | null) => {
+    }, [renderItems, retainedStart, retainedWindow.heldPx]);
+    const retainedStateRef = useRef({ items: renderItems, start: retainedStart, pendingPx: retainedPendingPx, window: retainedWindow });
+    retainedStateRef.current = { items: renderItems, start: retainedStart, pendingPx: retainedPendingPx, window: retainedWindow };
+    const moveRetainedWindow = useCallback((firstKey: string | null, parked = false) => {
         const container = scrollContainerRef.current;
+        const footer = listWrapperRef.current?.firstElementChild;
         const fromBottom = container ? container.scrollHeight - container.scrollTop : null;
-        flushSync(() => setRetainedWindow((current) => ({ ...current, firstKey })));
-        // Rows are prepended above the reader; keep what is on screen where it is.
+        // Released rows leave a placeholder of exactly their laid-out height, so the
+        // scrollbar and the turn rail's remembered positions do not move. A measured
+        // placeholder stays exact while rows come back; a first open only has estimates.
+        const keepHeight = footer instanceof HTMLElement && firstKey !== null
+            && (parked || retainedStateRef.current.window.heldPx !== undefined);
+        const heightBefore = keepHeight ? footer.getBoundingClientRect().height : 0;
+        flushSync(() => setRetainedWindow((current) => ({ key: current.key, firstKey, parked })));
+        if (keepHeight) {
+            const pending = footer.querySelector<HTMLElement>("[data-aipp-slot='chat-history-pending']");
+            const pendingHeight = pending?.getBoundingClientRect().height ?? 0;
+            const heldPx = Math.max(0, heightBefore - (footer.getBoundingClientRect().height - pendingHeight));
+            flushSync(() => setRetainedWindow((current) => (
+                current.firstKey === firstKey ? { ...current, heldPx } : current
+            )));
+        }
+        // Rows change above the reader; keep what is on screen where it is.
         if (container && fromBottom !== null) {
             container.scrollTop = container.scrollHeight - fromBottom;
         }
     }, [scrollContainerRef]);
-    // Backfill after the tail has been shown at the bottom, one idle slice at a time.
-    const retainedBackfillReady = retainedStart > 0
+    const retainedHasPending = retainedStart > 0
         && initialBottomVisibleConversationId === conversationId
         && !!effectiveScrollParent;
+    // Backfill after the tail has been shown at the bottom, one idle slice at a time.
+    const retainedBackfillReady = retainedHasPending && !retainedWindow.parked;
     useEffect(() => {
         if (!retainedBackfillReady) return;
         const container = effectiveScrollParent;
@@ -1033,25 +1091,84 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             const { items, start } = retainedStateRef.current;
             if (start <= 0) return;
             const next = retainedSliceStart(items, start);
-            mountRetainedFrom(next > 0 ? items[next].key : null);
+            moveRetainedWindow(next > 0 ? items[next].key : null);
         };
         handle = scheduleIdle(run);
         return () => handle?.cancel();
-    }, [retainedBackfillReady, retainedStart, effectiveScrollParent, isSendScrollAnimating, mountRetainedFrom]);
+    }, [retainedBackfillReady, retainedStart, effectiveScrollParent, isSendScrollAnimating, moveRetainedWindow]);
     // Scrolling toward rows that are not mounted yet mounts the rest at once.
     useEffect(() => {
         const container = effectiveScrollParent;
-        if (!retainedBackfillReady || !container) return;
+        if (!retainedHasPending || !container) return;
         const onScroll = () => {
             const { start, pendingPx } = retainedStateRef.current;
             if (start > 0 && !container.dataset.sendPhase
                 && container.scrollTop < pendingPx + container.clientHeight * 0.5) {
-                mountRetainedFrom(null);
+                moveRetainedWindow(null);
             }
         };
         container.addEventListener("scroll", onScroll, { passive: true });
         return () => container.removeEventListener("scroll", onScroll);
-    }, [retainedBackfillReady, effectiveScrollParent, mountRetainedFrom]);
+    }, [retainedHasPending, effectiveScrollParent, moveRetainedWindow]);
+    // Release rows far above a reader who keeps chatting at the bottom. Only for a
+    // transcript that grew past the retained budget while open; smaller ones stay mounted.
+    const retainedReleaseEnabled = retainedActive
+        && !fitsRetainedBudget
+        && initialBottomVisibleConversationId === conversationId
+        && pendingScrollMessageId === null
+        && !!effectiveScrollParent;
+    useEffect(() => {
+        const container = effectiveScrollParent;
+        if (!retainedReleaseEnabled || !container) return;
+        const atBottom = () => container.scrollHeight - container.scrollTop - container.clientHeight
+            <= RETAINED_AT_BOTTOM_PX;
+        const busy = () => !!container.dataset.sendPhase || isSendScrollAnimating();
+        let bottomSince: number | null = atBottom() ? performance.now() : null;
+        let handle: IdleHandle | null = null;
+        const setParked = (parked: boolean) => setRetainedWindow((current) => (
+            !!current.parked === parked ? current : { ...current, parked }
+        ));
+        const onScroll = () => {
+            if (busy()) return;
+            const { start } = retainedStateRef.current;
+            if (atBottom()) {
+                bottomSince ??= performance.now();
+                // Back at the bottom: rows still above can wait for the next scroll up.
+                if (start > 0) setParked(true);
+                return;
+            }
+            bottomSince = null;
+            handle?.cancel();
+            handle = null;
+            // The reader went up: bring released rows back ahead of them.
+            if (start > 0) setParked(false);
+        };
+        const release = () => {
+            handle = null;
+            if (busy() || bottomSince === null || !atBottom()) return;
+            const { items, start } = retainedStateRef.current;
+            const target = retainedTailStart(items, container.clientHeight);
+            if (target - start < RETAINED_RELEASE_MIN_ROWS) return;
+            moveRetainedWindow(items[retainedReleaseSliceStart(items, start, target)].key, true);
+            handle = scheduleIdle(release);
+        };
+        const timer = window.setInterval(() => {
+            if (handle || busy()) return;
+            // Content can grow while the reader is up without any scroll event.
+            if (!atBottom()) {
+                bottomSince = null;
+                return;
+            }
+            bottomSince ??= performance.now();
+            if (performance.now() - bottomSince >= RETAINED_RELEASE_AFTER_MS) handle = scheduleIdle(release);
+        }, RETAINED_RELEASE_CHECK_MS);
+        container.addEventListener("scroll", onScroll, { passive: true });
+        return () => {
+            window.clearInterval(timer);
+            handle?.cancel();
+            container.removeEventListener("scroll", onScroll);
+        };
+    }, [retainedReleaseEnabled, effectiveScrollParent, isSendScrollAnimating, moveRetainedWindow]);
 
     const itemContent = useCallback(
         (index: number, item: RenderableConversationItem) => (
