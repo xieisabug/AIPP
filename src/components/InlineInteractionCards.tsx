@@ -4,6 +4,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Button } from "@/components/ui/button";
+import { CompactDialogHeader, Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import { cn } from "@/utils/utils";
 import { Check, ChevronDown, CircleCheck, FileText, Files, Globe, ImageIcon, Maximize2, MessageCircleQuestion } from "lucide-react";
@@ -502,13 +503,14 @@ const fileTypeIcon = (type: string, title?: string) => {
     }
 };
 
+const webviewPreviewUrl = (url: string): string => {
+    const token = extractPreviewRelayToken(url);
+    return token ? convertFileSrc(token, "aipp-preview") : url;
+};
+
 const resolveImageSrc = (file: PreviewFileItem): string | null => {
     const url = file.url?.trim();
-    if (url) {
-        // WebView2 serves custom protocols through a virtual localhost origin.
-        const relay = /^aipp-preview:\/\/localhost\/([\w-]+)$/.exec(url);
-        return relay ? convertFileSrc(relay[1], "aipp-preview") : url;
-    }
+    if (url) return webviewPreviewUrl(url);
     if (!file.content?.trim()) return null;
     if (file.content.startsWith("data:")) return file.content;
     return `data:image/png;base64,${file.content}`;
@@ -570,10 +572,16 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
     }
 
     if (file.type === "html") {
-        if (file.url?.trim()) {
-            return <iframe src={file.url} title={file.title} className={FRAME_CLASS} />;
+        if (file.content?.trim()) {
+            return <iframe srcDoc={file.content} title={file.title} className={FRAME_CLASS} />;
         }
-        return <iframe srcDoc={file.content ?? ""} title={file.title} className={FRAME_CLASS} />;
+        const url = file.url?.trim();
+        if (url && url !== "about:blank") {
+            return <iframe src={webviewPreviewUrl(url)} title={file.title} className={FRAME_CLASS} />;
+        }
+        return <div className="px-3 py-2 text-sm text-muted-foreground">
+            {url ? "HTML 文件尚未加载。" : "没有可预览的 HTML 内容。"}
+        </div>;
     }
 
     if (isOfficePreviewFile(file)) {
@@ -591,6 +599,45 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
 
 const FileDescription: React.FC<{ text?: string }> = ({ text }) =>
     text ? <div className="px-3 pt-2 text-xs leading-5 text-muted-foreground">{text}</div> : null;
+
+function FileWindowPreviewButton({ file, conversationId }: { file: PreviewFileItem; conversationId?: number }) {
+    const office = file.type !== "html" && isOfficePreviewFile(file);
+    if (!office && file.type !== "html") return null;
+    const button = (
+        <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 gap-1 px-2 text-xs has-[>svg]:px-2"
+            onClick={office ? () => openOfficePreviewModal({
+                title: file.title,
+                source: getOfficeSourceFromPreviewFile(file),
+                conversationId: conversationId ?? null,
+            }) : undefined}
+        >
+            <Maximize2 className="size-3.5" />
+            窗口预览
+        </Button>
+    );
+    if (office) return button;
+    const url = file.url?.trim();
+    if (!file.content?.trim() && (!url || url === "about:blank")) return null;
+    return (
+        <Dialog>
+            <DialogTrigger asChild>{button}</DialogTrigger>
+            <DialogContent
+                aria-describedby={undefined}
+                showCloseButton={false}
+                className="flex h-[94dvh] w-[96vw] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none"
+            >
+                <CompactDialogHeader title={file.title} />
+                <div className="min-h-0 flex-1 [&>iframe]:h-full">
+                    <PreviewFileContent file={file} />
+                </div>
+            </DialogContent>
+        </Dialog>
+    );
+}
 
 export function PreviewFileCard({
     request,
@@ -622,6 +669,7 @@ export function PreviewFileCard({
     const useTabs = viewMode === "tabs" && files.length > 1;
     const activeIndex = Math.min(activeTab, Math.max(files.length - 1, 0));
     const activeFile = useTabs ? files[activeIndex] : undefined;
+    const headerFile = activeFile ?? (files.length === 1 ? files[0] : undefined);
     const showExternalResourceButton =
         hasActionablePreviewResources(currentRequest.externalResources);
     const origin = currentRequest.metadata?.origin;
@@ -699,6 +747,9 @@ export function PreviewFileCard({
                         <div className="flex min-w-0 items-center gap-1.5 px-3 pt-2 text-xs text-muted-foreground">
                             {fileTypeIcon(file.type)}
                             <span className="truncate font-medium text-foreground">{file.title}</span>
+                            {file.type === "html" && (
+                                <div className="ml-auto shrink-0"><FileWindowPreviewButton file={file} /></div>
+                            )}
                         </div>
                         <FileDescription text={file.description} />
                         <div className="pt-1">
@@ -726,25 +777,8 @@ export function PreviewFileCard({
                         </span>
                     )}
                     <div className="ml-auto flex shrink-0 items-center gap-0.5">
-                        {((activeFile && isOfficePreviewFile(activeFile)) ||
-                            (files.length === 1 && isOfficePreviewFile(files[0]))) && (
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 gap-1 px-2 text-xs has-[>svg]:px-2"
-                                onClick={() => {
-                                    const targetFile = activeFile ?? files[0];
-                                    openOfficePreviewModal({
-                                        title: targetFile.title,
-                                        source: getOfficeSourceFromPreviewFile(targetFile),
-                                        conversationId: request?.conversation_id ?? null,
-                                    });
-                                }}
-                            >
-                                <Maximize2 className="size-3.5" />
-                                窗口预览
-                            </Button>
+                        {headerFile && (
+                            <FileWindowPreviewButton file={headerFile} conversationId={currentRequest.conversation_id} />
                         )}
                         {showExternalResourceButton && (
                             <Button
