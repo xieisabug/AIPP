@@ -106,6 +106,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
     // 只有真实活动（任务、回复、审批、完成/失败反馈）才驱动动画；空闲时头像保持静止。
     const state = (id: number) => visuals.get(id)?.state ?? "idle";
     const {assistantTypes} = useAssistantTypePlugin(plugins);
+    const AVATAR_SIZE = 36;
     const groupRows = groups.map(group => {
         const active = selectedGroup === group.id;
         const unread = groupUnread(group, !!focused && active);
@@ -114,7 +115,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
         return { id: `group:${group.id}`, label: group.name, content: <ContextMenu>
             <ContextMenuTrigger asChild><div className="w-full">
                 <button onClick={() => onSelectGroup(group)} disabled={!ready} aria-pressed={active} className="butler-contact" data-aipp-slot="butler-group-contact">
-                    <ButlerGroupAvatar members={group.members} size={48} unreadMember={unread ? speaker : null} />
+                    <ButlerGroupAvatar members={group.members} size={AVATAR_SIZE} unreadMember={unread ? speaker : null} />
                     <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium">{group.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">
@@ -134,7 +135,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
         const preview = previews.find(p => p.assistantId === assistant.id);
         return { id: `assistant:${assistant.id}`, label: assistant.name, content: <AssistantItemContextMenu assistant={assistant} onAction={onAssistantAction} canReset><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
             aria-pressed={selected === assistant.id} className="butler-contact">
-            <ButlerAvatar id={assistant.id} size={48} compact figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
+            <ButlerAvatar id={assistant.id} size={AVATAR_SIZE} compact figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
             <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-medium">{assistant.name}</span>
                 <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
@@ -165,7 +166,7 @@ export default function ButlerContactList({chief, contacts, selected, focused, r
         <div className="mb-4 flex shrink-0 justify-center" {...dragRegionProps(framelessTitleBar)}>
             <button onClick={() => { acknowledge?.(0); onSelect(); }} aria-pressed={selected === undefined && selectedGroup === undefined}
                 className="flex max-w-full flex-col items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-medium hover:bg-muted aria-pressed:bg-muted">
-                <ButlerAvatar id={0} chief size={66} compact figure animated={state(0) !== "idle"} state={state(0)}/>
+                <ButlerAvatar id={0} chief size={50} compact figure animated={state(0) !== "idle"} state={state(0)}/>
                 <span className="inline-flex max-w-full items-center gap-1.5">{chief}{approvals.has(0) ? <ApprovalDot/> : null}</span>
                 {visuals.get(0)?.label && <span className="max-w-full truncate text-xs text-muted-foreground">{visuals.get(0)?.label}</span>}
             </button>
