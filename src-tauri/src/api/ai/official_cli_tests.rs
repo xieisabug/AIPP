@@ -2,6 +2,46 @@ use super::official_cli::resolve;
 #[cfg(windows)]
 use super::official_cli::find_in_dirs;
 
+#[test]
+fn test_kimi_discovery_includes_the_user_installer_directory() {
+    let home = dirs::home_dir().unwrap();
+    let installer_dir = home.join(".kimi-code").join("bin");
+    assert!(super::agent_driver::native_agents::env::tool_dirs("kimi").contains(&installer_dir));
+}
+
+#[tokio::test]
+#[ignore = "requires a local Kimi Code installation"]
+async fn test_installed_kimi_acp_initialize() {
+    use serde_json::{json, Value};
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (detected, version) = super::official_cli::detect("kimi", "kimi").await.unwrap();
+    let path = super::acp::resolve_acp_cli_path("kimi").await.unwrap();
+    assert_eq!(detected.path, path);
+    let plan = super::acp::build_acp_launch_plan("kimi", &path, &[], &Default::default());
+    let mut child = tokio::process::Command::from(super::official_cli::command(&plan.program))
+        .args(plan.args).envs(plan.extra_env).stdin(Stdio::piped()).stdout(Stdio::piped())
+        .kill_on_drop(true).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let request = json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+        "protocolVersion":1, "clientCapabilities":{}, "clientInfo":{"name":"aipp", "version":"1"}
+    }});
+    stdin.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            if frame.get("id") == Some(&json!(1)) { return frame; }
+        }
+        panic!("Kimi exited before replying to initialize");
+    }).await.expect("Kimi initialize timed out");
+    assert_eq!(response.pointer("/result/protocolVersion"), Some(&json!(1)), "{response}");
+    println!("Kimi {version} ACP initialize OK ({})", path.display());
+    drop(stdin);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
+}
+
 #[tokio::test]
 async fn test_explicit_cli_path_is_strict() {
     let file = std::env::current_exe().unwrap();

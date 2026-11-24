@@ -290,7 +290,7 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 ### 支持的 ACP CLI
 - `claude-code-acp`：Claude Code 的 ACP 适配器（`@zed-industries/claude-code-acp`），支持 Bun 一键安装
 - `gemini`：Gemini CLI 原生支持 ACP，需用户自行安装
-- `kimi`：Kimi Code CLI 原生支持 ACP，启动时自动附加 `acp` 子命令（即 `kimi acp`），需用户按官方文档安装并先 `/login`；Kimi 在 `session/new` 返回的模型与 Thinking 选项可直接用于助手默认值和新对话选择
+- `kimi`：在「ACP」中选择 Kimi Code CLI。检测和会话启动按相同顺序查找程序，先查 PATH，再查用户安装目录（含 `~/.kimi-code/bin`）。首次使用需在 Kimi 中完成 `/login`。AIPP 自动运行 `kimi acp`，可在助手或新对话中选择 Kimi 通过 `session/new` 返回的模型与 Thinking 选项。
 - `dsh-acp-server`：DeepSeek Harness 的 ACP 插件，需 Node.js >= 22 并手动安装 `@deepseek-ai/dsh` 与 `dsh-acp-server`，模型与密钥在 dsh 中配置
 - node-shebang 脚本类 CLI（如 npm/bun 全局 bin）统一通过显式 node 运行时启动，保证 Windows 可用
 - 启动失败时会按 CLI 给出对应的安装提示

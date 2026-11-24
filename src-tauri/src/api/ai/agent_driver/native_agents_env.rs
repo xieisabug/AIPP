@@ -196,6 +196,7 @@ pub(crate) fn tool_dirs(driver: &str) -> Vec<PathBuf> {
         dirs.push(home.join(".local").join("bin"));
         dirs.push(home.join(".bun").join("bin"));
         match driver {
+            "kimi" => dirs.push(home.join(".kimi-code").join("bin")),
             "pi" => dirs.push(home.join(".pi").join("agent").join("bin")),
             "opencode" => dirs.push(home.join(".opencode").join("bin")),
             _ => {}

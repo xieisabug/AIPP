@@ -1395,14 +1395,14 @@ pub async fn probe_acp_session_config_options(
         ));
     }
 
-    let resolved_cli_command = resolve_acp_cli_path(&config.cli_command);
+    let resolved_cli_command = resolve_acp_cli_path(&config.cli_command).await?;
     let launch_plan = build_acp_launch_plan(
         &config.cli_command,
         &resolved_cli_command,
         &config.additional_args,
         &config.env_vars,
     );
-    let mut command = Command::from(background_command(&launch_plan.program));
+    let mut command = Command::from(super::official_cli::command(&launch_plan.program));
     command
         .current_dir(&config.working_directory)
         .stdin(Stdio::piped())
@@ -1740,14 +1740,23 @@ pub fn spawn_agent_idle_reaper_once(app_handle: tauri::AppHandle) {
     });
 }
 
-/// Resolve ACP CLI command to its full path
+pub async fn resolve_acp_cli_path(cli_command: &str) -> Result<PathBuf, String> {
+    if cli_command == "kimi" {
+        return super::official_cli::resolve(cli_command).await;
+    }
+    let name = cli_command.to_owned();
+    tokio::task::spawn_blocking(move || resolve_generic_acp_cli_path(&name)).await
+        .map_err(|error| format!("查找 ACP 命令 {cli_command} 失败：{error}"))
+}
+
+/// Resolve a generic ACP CLI command to its full path
 ///
 /// This function tries to find the CLI executable in the following order:
 /// 1. If the command is already an absolute path, use it directly
 /// 2. Check ~/.bun/bin/ for bun-installed global packages
 /// 3. Check system PATH
 /// 4. Fall back to the original command (let the system handle it)
-pub fn resolve_acp_cli_path(cli_command: &str) -> PathBuf {
+pub(crate) fn resolve_generic_acp_cli_path(cli_command: &str) -> PathBuf {
     let cli_path = PathBuf::from(cli_command);
 
     // If it's already an absolute path, use it directly
@@ -1811,13 +1820,14 @@ fn has_proxy_env_vars(env_vars: &HashMap<String, String>) -> bool {
 }
 
 fn is_node_shebang_script(path: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(path) else {
+    use std::io::{BufRead, BufReader, Read};
+    let Ok(file) = fs::File::open(path) else {
         return false;
     };
-    let Some(first_line) = content.lines().next() else {
-        return false;
-    };
-    first_line.contains("env node") || first_line.contains("/node")
+    let mut first_line = String::new();
+    BufReader::new(file.take(4096)).read_line(&mut first_line).is_ok()
+        && first_line.starts_with("#!")
+        && (first_line.contains("env node") || first_line.contains("/node"))
 }
 
 fn test_node_executable(path: &Path) -> bool {
@@ -4887,7 +4897,10 @@ async fn run_acp_session(
     );
     let permission_manager = Arc::new(PermissionManager::new(app_handle.clone()));
 
-    let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command);
+    let resolved_cli_command = match resolve_acp_cli_path(&acp_config.cli_command).await {
+        Ok(path) => path,
+        Err(error) => fail_startup!(error),
+    };
     info!("ACP: Original CLI command: {}", acp_config.cli_command);
     info!("ACP: Resolved CLI path: {}", resolved_cli_command.display());
 
@@ -4933,7 +4946,7 @@ async fn run_acp_session(
         )
         .await;
 
-    let mut cmd = Command::from(background_command(&launch_plan.program));
+    let mut cmd = Command::from(super::official_cli::command(&launch_plan.program));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -5905,7 +5918,8 @@ async fn run_acp_session_delete(
     session_id: &str,
     acp_config: AcpConfig,
 ) -> Result<(), AppError> {
-    let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command);
+    let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command).await
+        .map_err(AppError::UnknownError)?;
     let launch_plan = build_acp_launch_plan(
         &acp_config.cli_command,
         &resolved_cli_command,
@@ -5913,7 +5927,7 @@ async fn run_acp_session_delete(
         &acp_config.env_vars,
     );
 
-    let mut cmd = Command::from(background_command(&launch_plan.program));
+    let mut cmd = Command::from(super::official_cli::command(&launch_plan.program));
     cmd.current_dir(&acp_config.working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

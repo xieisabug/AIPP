@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use tauri::{Emitter, Manager, State};
 
-use crate::api::ai::{acp::resolve_acp_cli_path, official_cli};
+use crate::api::ai::{acp::resolve_generic_acp_cli_path, official_cli};
 use crate::api::ai::config::{build_proxy_env_vars, get_network_proxy_from_config};
 use crate::utils::background_process::background_command;
 use crate::FeatureConfigState;
@@ -1257,7 +1257,7 @@ fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
 }
 
 fn resolve_installed_cli_path(cli_command: &str) -> Option<String> {
-    let resolved_path = resolve_acp_cli_path(cli_command);
+    let resolved_path = resolve_generic_acp_cli_path(cli_command);
     if resolved_path.exists() {
         Some(resolved_path.display().to_string())
     } else {
@@ -1280,7 +1280,7 @@ fn extract_bun_global_package_version(stdout: &str, package_name: &str) -> Optio
 
 async fn detect_acp_library(app: tauri::AppHandle, cli_command: &str, configured_command: Option<&str>) -> Result<AcpLibraryInfo, String> {
     let (package_name, requires_external, install_hint) = get_acp_library_config(cli_command);
-    if matches!(cli_command, "codex" | "claude") {
+    if matches!(cli_command, "codex" | "claude" | "kimi") {
         let name = configured_command.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(cli_command);
         let (installed_path, version) = match official_cli::detect(cli_command, name).await {
             Ok((program, version)) => (Some(program.path.display().to_string()), Ok(version)),
@@ -1290,7 +1290,7 @@ async fn detect_acp_library(app: tauri::AppHandle, cli_command: &str, configured
             cli_command: cli_command.to_string(),
             package_name,
             installed: version.is_ok(),
-            can_update: version.is_ok() && (cli_command == "claude" || name == cli_command),
+            can_update: version.is_ok() && (acp_self_update_args(cli_command).is_some() || (!requires_external && name == cli_command)),
             installed_path,
             version: version.as_ref().ok().cloned(),
             detection_error: version.err(),
