@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { antigravityLaunch, authorizationUrl } from './acp-native.mjs';
+import { antigravityLaunch, antigravitySignedIn, authorizationUrl } from './acp-native.mjs';
 import { RequestRejected } from './common.mjs';
 import { tick } from './test-helpers.mjs';
 
@@ -225,6 +225,23 @@ test('should fail ambiguous Antigravity interaction IDs instead of consuming a d
 });
 
 const url = 'https://accounts.google.com/o/oauth2/v2/auth?state=synthetic&response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A3456%2F';
+test('should check sign-in without creating a session and distinguish an auth challenge from a runtime failure', async () => {
+  for (const outcome of ['ok', 'challenge', 'auth_required', 'failure']) {
+    const f = fixture({ respond(frame, { child }) {
+      if (frame.method !== 'authenticate' || outcome === 'ok') return;
+      if (outcome === 'challenge') {
+        child.stdout.write(`Open the following link to authenticate the ACP server: ${url}\n`);
+        return false;
+      }
+      return { error: { code: outcome === 'auth_required' ? -32000 : -32603, message: 'native diagnostic' } };
+    } });
+    const check = antigravitySignedIn({ cwd: process.cwd() }, f);
+    if (outcome === 'failure') await assert.rejects(check, /native diagnostic/);
+    else assert.equal(await check, outcome === 'ok');
+    assert.deepEqual(f.commands.map(cmd => cmd.method), ['initialize', 'authenticate']);
+    assert.equal(f.cleaned, true);
+  }
+});
 test('should validate Antigravity OAuth origin, callback and state', () => {
   assert.equal(authorizationUrl(url), url);
   for (const value of [url.replace('accounts.google.com', 'example.org'), url.replace('3456', '80'), `${url}&state=duplicate`, url.replace('127.0.0.1', 'example.org'), url.replace('synthetic', '')]) assert.throws(() => authorizationUrl(value));

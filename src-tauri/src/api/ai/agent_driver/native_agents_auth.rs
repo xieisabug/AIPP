@@ -104,7 +104,7 @@ pub async fn logout_cursor(app: tauri::AppHandle, provider_id: i64) -> Result<()
     Ok(())
 }
 
-async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'static str, display: &str, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>, action: &str) -> Result<Value, String> {
+async fn account_configuration(app: &tauri::AppHandle, provider_id: i64, driver: &str, display: &str, settings: HashMap<String, String>) -> Result<(NativeConfig, String), String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     return Err(format!("MOBILE_UNSUPPORTED: {display} requires a local desktop runtime"));
 
@@ -125,6 +125,22 @@ async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'stati
     let proxy = crate::api::ai::config::agent_network_proxy(&configs, &*state.config_feature_map.lock().await);
     config.apply_proxy(driver, proxy.as_deref());
     configure_instance(app, provider_id, driver, &mut config).map_err(|e|e.to_string())?;
+    Ok((config, provider_name))
+}
+
+#[tauri::command]
+pub async fn get_antigravity_login_status(app: tauri::AppHandle, provider_id: i64, settings: HashMap<String, String>) -> Result<bool, String> {
+    let (mut config, _) = account_configuration(&app, provider_id, "antigravity", "Antigravity", settings).await?;
+    let gate = catalog::gate(provider_id);
+    let _guard = gate.lock().await;
+    let node = env::prepare_bridge_launch("antigravity", &mut config).await?;
+    let result = env::bridge_call(&node, &config.cwd, &config.env,
+        json!({"type":"antigravity_login_status","id":"status","config":config.wire}), Duration::from_secs(65), |_| {}).await?;
+    result.as_bool().ok_or_else(|| format!("Antigravity 登录状态响应缺少布尔值 [provider_id={provider_id}]"))
+}
+
+async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'static str, display: &str, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>, action: &str) -> Result<Value, String> {
+    let (mut config, provider_name) = account_configuration(app, provider_id, driver, display, settings).await?;
     if driver == "cursor" {
         if config.env.contains_key("CURSOR_API_KEY") { return Err("已配置 Cursor API Key（或 CURSOR_API_KEY 环境变量），会优先使用它；如需浏览器登录请先清除".into()); }
         config.wire["key_name"] = json!(format!("AIPP - {provider_name}"));

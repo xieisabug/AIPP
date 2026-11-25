@@ -1154,6 +1154,7 @@ pub fn run() {
             get_assistant,
             get_agent_model_options,
             api::ai::agent_driver::native_agents::auth::login_antigravity,
+            api::ai::agent_driver::native_agents::auth::get_antigravity_login_status,
             api::ai::agent_driver::native_agents::auth::cancel_antigravity_login,
             api::ai::agent_driver::native_agents::auth::cancel_native_agent_login,
             api::ai::agent_driver::native_agents::auth::login_cursor,

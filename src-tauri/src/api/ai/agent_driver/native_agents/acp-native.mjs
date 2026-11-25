@@ -9,6 +9,7 @@ import { RequestRejected, deadline, jsonLines, launch, permissionOption, stopChi
 
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: ';
 const AUTH_MARKER = '__AIPP_ANTIGRAVITY_AUTH_URL__';
+class AuthenticationRequired extends Error {}
 const AUTH_KEYS = new Set(['AIPP_ANTIGRAVITY_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS',
   'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_QUOTA_PROJECT',
   'GOOGLE_GENAI_USE_VERTEXAI', 'GCLOUD_PROJECT', 'CLOUDSDK_CORE_PROJECT', 'AGY_ACP_CCPA_PROJECT',
@@ -172,7 +173,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
   };
   const onAuth = raw => {
     const url = authorizationUrl(raw);
-    if (!config.login) throw new Error('Antigravity 尚未登录或登录已过期，请在提供商设置中点击“登录 Antigravity”');
+    if (!config.login) throw new AuthenticationRequired('Antigravity 尚未登录或登录已过期，请在提供商设置中点击“登录 Antigravity”');
     emit({ type: 'auth_url', url });
   };
   // Antigravity emits a non-JSON sign-in line on stdout and a browser helper
@@ -267,7 +268,9 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     const waiter = pending.get(String(frame.id));
     if (!waiter) return;
     pending.delete(String(frame.id));
-    if (typeof frame.error?.message === 'string') waiter.reject(new RequestRejected(`${driver} ${waiter.method}: ${frame.error.message} (code=${frame.error.code}, data=${JSON.stringify(frame.error.data ?? null)})`));
+    if (driver === 'antigravity' && waiter.method === 'authenticate' && frame.error?.code === -32000) {
+      waiter.reject(new AuthenticationRequired(`Antigravity 需要登录：${frame.error.message} (code=-32000)`));
+    } else if (typeof frame.error?.message === 'string') waiter.reject(new RequestRejected(`${driver} ${waiter.method}: ${frame.error.message} (code=${frame.error.code}, data=${JSON.stringify(frame.error.data ?? null)})`));
     else if ('result' in frame) waiter.resolve(frame.result);
     else waiter.reject(new Error(`${driver} ${waiter.method} response omitted result/error`));
   }, fail);
@@ -453,4 +456,16 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       }, close,
     };
   } catch (error) { await close(); throw error; }
+}
+
+// Check the configured runtime's existing sign-in without opening a session.
+export async function antigravitySignedIn(config, dependencies) {
+  try {
+    const agent = await openAcpNative('antigravity', { ...config, probe: true, login: false }, () => {}, dependencies);
+    await agent.close();
+    return true;
+  } catch (error) {
+    if (error instanceof AuthenticationRequired) return false;
+    throw error;
+  }
 }

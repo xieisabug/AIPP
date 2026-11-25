@@ -16,7 +16,7 @@ import { CursorLogin } from "./CursorLogin";
 import { PathInput, ProgramPicker, ProgramStatus, samePath } from "./ProgramPicker";
 
 export const NATIVE_AGENT_API_TYPES = ["pi", "cursor", "opencode", "kiro", "antigravity"];
-const WATCHED_KEYS = [...NATIVE_AGENT_DETECTION_KEYS, "antigravity_auth_method"] as const;
+const WATCHED_KEYS = [...NATIVE_AGENT_DETECTION_KEYS, "antigravity_auth_method", "antigravity_api_key", "antigravity_harness", "proxy_enabled"] as const;
 
 type FieldRenderData = { value?: unknown; onChange: (value: string) => void };
 const text = (value: unknown) => (typeof value === "string" ? value : "");

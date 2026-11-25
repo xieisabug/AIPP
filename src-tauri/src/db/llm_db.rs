@@ -208,6 +208,12 @@ impl LLMDatabase {
             DELETE FROM antigravity_model_catalog WHERE provider_id=OLD.id;
         END;")?;
         self.create_model_request_mode_preference_table()?;
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS provider_quota_cache (
+            owner INTEGER PRIMARY KEY, identity TEXT NOT NULL, checked_at INTEGER NOT NULL, windows TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS remove_provider_quota_cache AFTER DELETE ON llm_provider BEGIN
+            DELETE FROM provider_quota_cache WHERE owner=OLD.id;
+        END;")?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS llm_provider_init_state (id INTEGER PRIMARY KEY CHECK (id = 1))",

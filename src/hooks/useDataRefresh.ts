@@ -8,7 +8,7 @@ interface DataRefreshOptions {
     identity?: string | number;
     paused?: boolean;
     initial?: boolean;
-    onInvalidate?: () => void;
+    onInvalidate?: (fromEvent: boolean) => void;
     onError?: (error: unknown) => void;
 }
 
@@ -46,8 +46,8 @@ export function useDataRefresh({ events, refresh, identity, paused = false, init
                 if (!disposed && dirty && !latest.current.paused) timer = setTimeout(run, 100);
             }
         };
-        const request = () => {
-            latest.current.onInvalidate?.();
+        const request = (fromEvent = false) => {
+            latest.current.onInvalidate?.(fromEvent);
             revision += 1;
             dirty = true;
             if (timer) clearTimeout(timer);
@@ -62,12 +62,12 @@ export function useDataRefresh({ events, refresh, identity, paused = false, init
             }
         };
         const subscriptions = (JSON.parse(eventsKey) as string[]).map((event) =>
-            listen(event, request).then((unlisten) => {
+            listen(event, () => request(true)).then((unlisten) => {
                 if (disposed) { unlisten(); return; }
                 return unlisten;
             }).catch((error) => { if (!disposed) report(`订阅 ${event} 失败: ${String(error)}`); }),
         );
-        if (initial) { revision += 1; dirty = true; latest.current.onInvalidate?.(); void run(); }
+        if (initial) { revision += 1; dirty = true; latest.current.onInvalidate?.(false); void run(); }
         return () => {
             disposed = true;
             revision += 1;

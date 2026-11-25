@@ -44,13 +44,13 @@ describe("LLM provider field autosave", () => {
         });
     });
     it.each([
-        ["codex_app_server", true], ["opencode_go", true], ["cursor", true],
-        ["opencode", false], ["antigravity", false],
+        ["codex_app_server", "订阅额度"], ["opencode_go", "订阅额度"], ["cursor", "订阅额度"],
+        ["opencode", null], ["antigravity", "本机 Antigravity CLI 额度"],
     ] as const)("should show the subscription quota field only for supported providers when opening %s", async (apiType, expected) => {
         render(<LLMProviderConfigForm id="1" index={0} apiType={apiType} name="test" description=""
             isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
         await refresh();
-        expect(Boolean(screen.queryByText("订阅额度"))).toBe(expected);
+        expect(screen.queryByText(/^(订阅额度|本机 Antigravity CLI 额度)$/)?.textContent ?? null).toBe(expected);
     });
     it.each([
         ["codex_app_server", "codex", "codex_cli_command"],

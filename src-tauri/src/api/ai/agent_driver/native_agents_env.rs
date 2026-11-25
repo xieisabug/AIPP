@@ -236,7 +236,7 @@ pub(crate) fn source_label(path: &Path, path_dirs: &[PathBuf]) -> String {
     if path_dirs.iter().any(|dir| Some(identity(dir)) == parent) { "PATH".into() } else { "其他位置".into() }
 }
 
-async fn program_version(path: &Path) -> Result<String, String> {
+pub(crate) async fn program_version(path: &Path) -> Result<String, String> {
     let mut command = tokio::process::Command::new(path);
     command.arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)] { command.creation_flags(0x08000000); }
@@ -336,7 +336,7 @@ fn cli_program(result: &Value, source: String, recommended: Option<&str>) -> Det
 }
 
 /// One-shot bridge call (detect/exec). `log` frames are forwarded to `on_log`.
-async fn bridge_call(node: &str, cwd: &Path, env: &HashMap<String, String>, request: Value, limit: Duration, mut on_log: impl FnMut(&str)) -> Result<Value, String> {
+pub(super) async fn bridge_call(node: &str, cwd: &Path, env: &HashMap<String, String>, request: Value, limit: Duration, mut on_log: impl FnMut(&str)) -> Result<Value, String> {
     let files = bridge_files().await?;
     let mut command = tokio::process::Command::new(node);
     command.arg(files.0.join("bridge.mjs")).current_dir(cwd).envs(env)
@@ -496,7 +496,7 @@ fn detect_cursor(app: &tauri::AppHandle, context: &Context, spec: &ToolSpec, nod
         docs_url: spec.docs_url.into(), managed_directory: managed.map(|dir| dir.display().to_string()), warnings, account, uses_api_key }
 }
 
-fn cli_candidates(driver: &str, standalone: bool, default_command: &str, env: &HashMap<String, String>, cwd: &Path) -> Vec<(PathBuf, String)> {
+pub(crate) fn cli_candidates(driver: &str, standalone: bool, default_command: &str, env: &HashMap<String, String>, cwd: &Path) -> Vec<(PathBuf, String)> {
     let path = effective_path(env);
     let path_dirs: Vec<_> = std::env::split_paths(&path).filter(|dir| !dir.as_os_str().is_empty()).map(|dir| cwd.join(dir)).collect();
     let mut scan = path_dirs.clone();

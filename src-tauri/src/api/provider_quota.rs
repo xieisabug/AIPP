@@ -4,26 +4,34 @@ use crate::db::llm_db::LLMDatabase;
 use crate::vault::config_ref;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::Manager;
+
+mod antigravity;
+mod cache;
+use cache::{QuotaCache, QuotaReading};
 
 const GO_USAGE: &str = "https://opencode.ai/inference/go/v1/usage";
 const CURSOR_KEYS: &str = "https://api2.cursor.sh/auth/exchange_user_api_key";
 const CURSOR_USAGE: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuotaWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
     label: String,
-    remaining_percent: f64,
+    remaining_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remaining_amount: Option<f64>,
     resets_at: Option<DateTime<Utc>>,
 }
 
 impl QuotaWindow {
     fn new(label: impl Into<String>, used: f64, resets_at: Option<DateTime<Utc>>) -> Self {
-        Self { label: label.into(), remaining_percent: (100.0 - used).clamp(0.0, 100.0), resets_at }
+        Self { group: None, label: label.into(), remaining_percent: Some((100.0 - used).clamp(0.0, 100.0)), remaining_amount: None, resets_at }
     }
 }
 
@@ -47,8 +55,10 @@ fn codex_windows(body: &Value) -> Vec<QuotaWindow> {
         let individual = &bucket["individualLimit"];
         if let Some(remaining) = individual["remainingPercent"].as_f64() {
             windows.push(QuotaWindow {
+                group: None,
                 label: format!("{name} · 个人月度额度"),
-                remaining_percent: remaining.clamp(0.0, 100.0),
+                remaining_percent: Some(remaining.clamp(0.0, 100.0)),
+                remaining_amount: None,
                 resets_at: codex_reset(individual),
             });
         }
@@ -111,45 +121,50 @@ async fn fetch(request: RequestBuilder, operation: &str) -> Result<Value, String
 }
 
 #[tauri::command]
-pub(crate) async fn get_provider_quota(app: tauri::AppHandle, provider_id: i64) -> Result<Vec<QuotaWindow>, String> {
-    let (provider, configs) = {
-        let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
-        (db.get_llm_provider(provider_id).map_err(|e| e.to_string())?,
-         db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?)
-    };
+pub(crate) async fn get_provider_quota(app: tauri::AppHandle, provider_id: i64, force: Option<bool>) -> Result<QuotaReading, String> {
+    let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
+    let provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+    let configs = db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    let kind = provider.api_type.as_str();
+    let mut cache = QuotaCache { conn: db.conn, owner: if kind == "antigravity" { 0 } else { provider_id }, force: force.unwrap_or(false) };
     let state = app.state::<crate::FeatureConfigState>();
     let proxy = agent_network_proxy(&configs, &*state.config_feature_map.lock().await);
-    let windows = match provider.api_type.as_str() {
+    match kind {
+        "antigravity" => cache.read(kind, "", antigravity::local_quota(proxy.as_deref())).await,
         "codex_app_server" => {
             let mut config = codex_app_server::extract_codex_app_server_config(&[], &configs, None)
                 .map_err(|e| e.to_string())?;
             if let Some(proxy) = proxy.as_deref() { apply_network_proxy_to_env_vars(&mut config.env_vars, proxy); }
-            codex_windows(&codex_app_server::probe_account_limits(&app, &config).await?)
+            let env = config.env_vars.iter().collect::<std::collections::BTreeMap<_, _>>();
+            let account = json!([config.cli_command, config.working_directory, config.additional_args, env]).to_string();
+            cache.read(kind, &account, async {
+                Ok(codex_windows(&codex_app_server::probe_account_limits(&app, &config).await?))
+            }).await
         }
         "opencode_go" => {
             let configs = config_ref::prepare_provider_configs(&app, configs).await?;
             let key = configs.iter().find(|c| c.name == "api_key").map(|c| c.value.trim())
                 .filter(|s| !s.is_empty()).ok_or("请先填写 OpenCode Go API Key")?;
             config_ref::check_provider_destination(&configs, key, GO_USAGE)?;
-            let client = http_client(proxy.as_deref())?;
-            go_windows(&fetch(client.get(GO_USAGE).bearer_auth(key), "OpenCode Go 用量查询").await?)?
+            cache.read(kind, key, async {
+                let client = http_client(proxy.as_deref())?;
+                go_windows(&fetch(client.get(GO_USAGE).bearer_auth(key), "OpenCode Go 用量查询").await?)
+            }).await
         }
         "cursor" => {
             let key = auth::cursor_quota_key(&app, provider_id, &configs)?;
             config_ref::check_provider_destination(&configs, &key, CURSOR_KEYS)?;
-            let client = http_client(proxy.as_deref())?;
-            let exchange = fetch(client.post(CURSOR_KEYS).bearer_auth(key).json(&json!({})), "Cursor 账号认证").await?;
-            let token = exchange["accessToken"].as_str().filter(|s| !s.is_empty()).ok_or("Cursor 认证响应缺少 accessToken")?;
-            let result = fetch(client.post(CURSOR_USAGE).bearer_auth(token)
-                .header("connect-protocol-version", "1").json(&json!({})), "Cursor 账期查询").await?;
-            cursor_windows(&result)
+            cache.read(kind, &key, async {
+                let client = http_client(proxy.as_deref())?;
+                let exchange = fetch(client.post(CURSOR_KEYS).bearer_auth(&key).json(&json!({})), "Cursor 账号认证").await?;
+                let token = exchange["accessToken"].as_str().filter(|s| !s.is_empty()).ok_or("Cursor 认证响应缺少 accessToken")?;
+                let result = fetch(client.post(CURSOR_USAGE).bearer_auth(token)
+                    .header("connect-protocol-version", "1").json(&json!({})), "Cursor 账期查询").await?;
+                Ok(cursor_windows(&result))
+            }).await
         }
-        _ => return Err("该提供商未接入订阅额度查询".into()),
-    };
-    if windows.is_empty() {
-        return Err(format!("{} 未返回可显示的订阅额度窗口，请检查当前账号和套餐", provider.name));
+        _ => Err("该提供商未接入订阅额度查询".into()),
     }
-    Ok(windows)
 }
 
 #[cfg(test)]

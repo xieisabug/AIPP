@@ -95,7 +95,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [loadedId, setLoadedId] = useState<string | null>(null);
     const [quotaRevision, setQuotaRevision] = useState(0);
     const quotaSettings = React.useRef<string | undefined>(undefined);
-    const supportsQuota = ["opencode_go", "codex_app_server", "cursor"].includes(apiType);
+    const supportsQuota = ["opencode_go", "codex_app_server", "cursor", "antigravity"].includes(apiType);
+    const quotaLabel = apiType === "antigravity" ? "本机 Antigravity CLI 额度" : "订阅额度";
     const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
     const [manualToken, setManualToken] = useState<string>("");
     const [scanTokenDialogOpen, setScanTokenDialogOpen] = useState<boolean>(false);
@@ -313,8 +314,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             if (!isCurrent()) return;
             const config = Object.fromEntries(configArray.map((item) => [item.name, item.value]));
             if (supportsQuota) {
-                const identity = JSON.stringify([id, config.api_key, config.cursor_api_key, config.codex_cli_command,
-                    config.codex_additional_args, config.acp_env_vars, config.acp_working_directory, config.proxy_enabled]);
+                const identity = apiType === "antigravity" ? JSON.stringify([id, config.proxy_enabled])
+                    : JSON.stringify([id, config.api_key, config.cursor_api_key, config.codex_cli_command,
+                        config.codex_additional_args, config.acp_env_vars, config.acp_working_directory, config.proxy_enabled]);
                 if (quotaSettings.current !== identity) {
                     quotaSettings.current = identity;
                     setQuotaRevision(revision => revision + 1);
@@ -1067,8 +1069,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     description={description}
                     config={supportsQuota ? [
                         ...configFields,
-                        { key: "subscription_quota", config: { type: "custom", label: "订阅额度", value: "",
-                            customRender: () => <ProviderQuota key={`${id}-${quotaRevision}`} providerId={Number(id)} /> } },
+                        { key: "subscription_quota", config: { type: "custom", label: quotaLabel, value: "",
+                            customRender: () => <ProviderQuota key={`${id}-${quotaRevision}`} providerId={Number(id)} label={quotaLabel} /> } },
                     ] : configFields}
                     classNames="bottom-space"
                     extraButtons={extraButtons}

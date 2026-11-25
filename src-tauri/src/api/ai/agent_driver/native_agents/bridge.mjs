@@ -2,7 +2,7 @@ import { RequestRejected, jsonLines, probeModels } from './common.mjs';
 import { openPi } from './pi.mjs';
 import { loginCursor, openCursor } from './cursor.mjs';
 import { openOpenCode } from './opencode.mjs';
-import { openAcpNative } from './acp-native.mjs';
+import { antigravitySignedIn, openAcpNative } from './acp-native.mjs';
 import { detect, npmCli, run, runtime as nodeRuntime } from './tools.mjs';
 
 const drivers = { pi: openPi, cursor: openCursor, opencode: openOpenCode,
@@ -29,7 +29,9 @@ jsonLines(process.stdin, request => {
   void (async () => {
     if (fatal) throw new Error('Native agent bridge has failed');
     let data;
-    if (request.type === 'login') {
+    if (request.type === 'antigravity_login_status') {
+      data = await antigravitySignedIn(request.config);
+    } else if (request.type === 'login') {
       if (request.driver === 'cursor') data = await loginCursor(request.config, emit);
       else if (request.driver === 'antigravity') {
         const login = await drivers.antigravity({ ...request.config, login: true }, emit);
