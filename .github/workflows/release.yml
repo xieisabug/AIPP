@@ -465,10 +465,11 @@ jobs:
                   release_id: ${{ needs.create-release.outputs.release_id }}
               with:
                   script: |
-                      github.rest.repos.updateRelease({
+                      await github.rest.repos.updateRelease({
                         owner: context.repo.owner,
                         repo: context.repo.repo,
                         release_id: process.env.release_id,
                         draft: false,
-                        prerelease: false
+                        prerelease: false,
+                        make_latest: "true"
                       })

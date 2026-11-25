@@ -65,4 +65,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/plugins-v') || startsWith(github.ref, 'refs/tags/plugin-')
         with:
+          # The desktop updater reads latest.json from the repository's Latest release.
+          make_latest: "false"
           files: dist-official-plugins/**
