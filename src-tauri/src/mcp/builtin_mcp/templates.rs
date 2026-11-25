@@ -553,7 +553,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "report_progress".into(),
-                description: "When starting a task, call this once before doing the work. In your own words, tell the user the specific next step in one short sentence. It appears immediately in this chat. After the receipt, continue the task and deliver the result. Skip greetings, simple answers and silent callbacks.".into(),
+                description: "When starting a task, call this once before doing the work. In your own voice and natural conversational tone, tell the user what you're about to do in one short sentence—avoid robotic status-bar phrasing. It appears immediately in this chat. After the receipt, continue the task and deliver the result. Skip greetings, simple answers and silent callbacks.".into(),
                 input_schema: serde_json::json!({"type":"object","required":["text"],"additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":120}}}),
             },
             BuiltinToolInfo {

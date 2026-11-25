@@ -82,7 +82,7 @@ fn full_toolset_covers_demo_input_tools_diagrams_and_channels() {
         "AIPP Artifact 相关的 Skill",
         "`capture_artifact_screenshot`",
         "Word、Excel、PPT、PDF 或图片可以用 `preview_file`",
-        "保存到制品集合",
+        "不必每次复读系统操作提示",
         "`<external_channel_input>`",
         "看不到 `preview_code` 演示和 Artifact，",
     ]) {

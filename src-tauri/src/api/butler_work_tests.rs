@@ -134,6 +134,26 @@ fn test_resume_guidance_uses_normal_dialogue_and_preserves_user_authority() {
 }
 
 #[test]
+fn test_resume_guidance_is_injected_only_when_paused_work_exists() {
+    let conn = fixture();
+    // 没有暂停中的任务时，不注入 RESUME_GUIDANCE，避免每轮对话上下文噪音
+    let normal = user_turn_context(&conn, 20, None).unwrap().prefix.unwrap();
+    assert!(!normal.contains(RESUME_GUIDANCE));
+
+    // 暂停关联任务后，总管家主会话与执行助手联系人会话才附带 RESUME_GUIDANCE
+    crate::db::butler_control::set(&conn, 42, "pause").unwrap();
+    let contact_paused = user_turn_context(&conn, 20, None).unwrap().prefix.unwrap();
+    let main_paused = user_turn_context(&conn, 10, None).unwrap().prefix.unwrap();
+    assert!(contact_paused.contains(RESUME_GUIDANCE));
+    assert!(main_paused.contains(RESUME_GUIDANCE));
+
+    // 恢复或取消后不再注入
+    crate::db::butler_control::set(&conn, 42, "resume").unwrap();
+    let resumed = user_turn_context(&conn, 20, None).unwrap().prefix.unwrap();
+    assert!(!resumed.contains(RESUME_GUIDANCE));
+}
+
+#[test]
 fn test_current_time_prefix_only_for_butler_conversations() {
     use chrono::TimeZone;
     let now = chrono::FixedOffset::east_opt(8 * 3600).unwrap().with_ymd_and_hms(2026, 11, 8, 9, 5, 0).unwrap();

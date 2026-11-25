@@ -173,12 +173,61 @@ pub(crate) fn turn_context(app: &AppHandle, conversation: i64, quote: Option<&Wo
     user_turn_context(&connection(app)?, conversation, quote)
 }
 
-/// 用户消息这一轮发给模型的完整补充上下文：工作引用/近期工作、恢复工作的说明，以及私聊里的引用回复写法。
+/// 当前会话关联的任务里是否存在“已暂停且未取消”的工作；没有时不附带恢复指引，避免每轮上下文噪音。
+fn has_paused_work(conn: &Connection, conversation: i64) -> anyhow::Result<bool> {
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='butler_task_control')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !table_exists {
+        return Ok(false);
+    }
+    let row: Option<(String, Option<i64>)> = conn
+        .query_row(
+            "SELECT conversation_kind, assistant_id FROM conversation WHERE id=?1",
+            [conversation],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((kind, assistant)) = row else {
+        return Ok(false);
+    };
+    let paused = match kind.as_str() {
+        "butler_main" => conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM butler_task_definition d
+                JOIN butler_task_control c ON c.conversation_id = d.task_conversation_id
+                WHERE d.butler_conversation_id = ?1 AND c.paused = 1 AND c.cancelled = 0
+            )",
+            [conversation],
+            |r| r.get(0),
+        )?,
+        "butler_contact" => match assistant {
+            Some(assistant_id) => conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM butler_task_definition d
+                    JOIN butler_task_control c ON c.conversation_id = d.task_conversation_id
+                    WHERE d.executor_assistant_id = ?1 AND c.paused = 1 AND c.cancelled = 0
+                )",
+                [assistant_id],
+                |r| r.get(0),
+            )?,
+            None => false,
+        },
+        _ => false,
+    };
+    Ok(paused)
+}
+
+/// 用户消息这一轮发给模型的完整补充上下文：工作引用/近期工作、存在暂停工作时的恢复说明，以及私聊里的引用回复写法。
 pub(crate) fn user_turn_context(conn: &Connection, conversation: i64, quote: Option<&WorkQuote>) -> anyhow::Result<TurnContext> {
     let mut context = turn_context_with(conn, conversation, quote)?;
     if let Some(prefix) = context.prefix.as_mut() {
-        prefix.push_str("\n");
-        prefix.push_str(RESUME_GUIDANCE);
+        if has_paused_work(conn, conversation)? {
+            prefix.push_str("\n");
+            prefix.push_str(RESUME_GUIDANCE);
+        }
     }
     if is_private_chat(conn, conversation)? {
         context.prefix = Some(match context.prefix.take() {

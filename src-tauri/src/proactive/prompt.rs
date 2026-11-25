@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 pub(crate) fn system_prompt(cfg: &Config, trigger_kind: &str) -> String {
     let notify_rule = if cfg.allow_notifications {
-        "如果确实有值得现在或稍后提醒用户的内容（到期事项、纪念日祝福、提前准备好的简报、重要未决事项），请调用 proactive_notify；如果某项操作涉及较大副作用或被安全审核拒绝，需要用户拍板后再执行，请调用 proactive_propose 生成建议卡片。"
+        "如果确实有值得现在或稍后提醒用户的内容（到期事项、纪念日祝福、提前准备好的简报、重要未决事项），请调用 proactive_notify；发给用户的消息会直接出现在聊天里，请用平时私聊的自然口吻开口，不要写成“【每日复盘简报】”或系统推送通知格式。如果某项操作涉及较大副作用或被安全审核拒绝，需要用户拍板后再执行，请调用 proactive_propose 生成建议卡片。"
     } else {
         "当前处于静默模式（用户关闭了主动提醒与推送）：不要尝试发消息打扰用户，专注于后台记忆整理、跟进事项维护、工作区资料整理与手记记录。"
     };

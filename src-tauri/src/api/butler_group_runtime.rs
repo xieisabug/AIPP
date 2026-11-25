@@ -178,7 +178,7 @@ fn route(app: &AppHandle, state: &Shared, message: group::Message) {
 
 /// 每轮都附带的说话方式提醒：写在本轮输入旁边比只写在系统提示里更容易被遵守，
 /// 也让在规则调整前就加入的成员同样生效。
-const STYLE_REMINDER: &str = "说话方式：像在工作群里聊天。通常一两段、每段两三句，先说结论或态度；分段说，一个意思一段。用自然的句子，不要拆成 1、2、3 逐条列点，不加标题和成片的加粗。接到执行任务时先用 report_progress 说一句准备做什么，接着做；普通讨论直接发言。不客套、不总结全场，不重复别人说过的。需要完整报告或文件时照常产出，群里只说结论和产物位置。";
+const STYLE_REMINDER: &str = "说话方式：像真人在群里聊天，保持你自己的性格和口吻。简短自然、按意思分段，不要拆成 1、2、3 逐条列点，不加标题和成片的加粗；不说客套和套话，不总结全场，不重复别人说过的。接到执行任务时先用 report_progress 顺口说一句准备做什么，接着做；普通聊天讨论直接发言。需要完整报告或文件时照常产出，群里顺口说清结果和产物位置。";
 /// 引用回复的写法同样每轮提醒：规则加入前创建的成员会话，系统提示里没有这一条。
 const QUOTE_REMINDER: &str = "需要核对之前的群发言时，先用 read_group_history 翻本群最近发言或按原词查找。要回应较早的某条消息或某人的某句话时，回复第一行只写 [[QUOTE:原话片段]]（从那条消息里原样抄 5～20 个字），第二行起写回复；直接接最新消息时不用。";
 
@@ -188,11 +188,11 @@ fn turn_situation(turn: &group::Turn, peers: &[String]) -> Option<String> {
         return together.map(|text| format!("本轮：{text}"));
     }
     let guidance = if turn.round == 1 {
-        format!("先亮出你的观点和理由，之后还会互相回应。{}", together.unwrap_or_default())
+        format!("先亮出你的观点或想法，之后还可以互相接话。{}", together.unwrap_or_default())
     } else if turn.round < turn.rounds {
-        "针对别人刚说的具体观点回应：同意就简短表态并补充新理由，不同意就直说哪里不对；不要把自己的观点从头再讲一遍。没有新内容就只回复 [[NO_REPLY]]。".into()
+        "顺着大家刚说的内容自然回应，可以赞同、补充、反对或追问，不用把自己的话从头再讲一遍。没有新内容就只回复 [[NO_REPLY]]。".into()
     } else {
-        "这是最后一轮：回应还没解决的分歧，尽量收敛出结论；已经一致或没有新内容就只回复 [[NO_REPLY]]。".into()
+        "这是最后一轮：回应还没聊透的分歧或补充最后想法，尽量收拢出结果；已经一致或没有新内容就只回复 [[NO_REPLY]]。".into()
     };
     Some(format!("讨论：第 {}/{} 轮。{guidance}", turn.round, turn.rounds))
 }

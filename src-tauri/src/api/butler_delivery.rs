@@ -87,11 +87,11 @@ pub(crate) fn delivery_prompt(tools: DeliveryTools, unattended: bool) -> String 
     if tools.preview_file {
         check.push_str("生成的 Word、Excel、PPT、PDF 或图片可以用 `preview_file` 在聊天里展示（`url` 填本地路径）。");
     }
-    check.push_str("最终回复给出简短结论和实际文件路径或链接");
+    check.push_str("最终回复给出结果和实际文件路径或链接");
     if tools.artifact {
-        check.push_str("；发布了 Artifact 时写明标题，并提醒用户打开预览后可以保存到制品集合长期使用");
+        check.push_str("；发布了 Artifact 时提一下名称即可，不必每次复读系统操作提示");
     }
-    check.push_str("。若所需格式生成失败，说明具体原因，与用户确认替代格式。");
+    check.push_str("。若所需格式生成失败，说明原因，和用户商量替代格式。");
     lines.push(check);
 
     let invisible = match (tools.preview_code, tools.artifact) {
