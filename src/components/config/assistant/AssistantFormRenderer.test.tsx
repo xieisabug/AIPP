@@ -31,12 +31,27 @@ const baseProps = {
         prompts: [],
     },
     formConfig: [],
+    isDirty: false,
     assistantConfigApi: { clearFieldValue: vi.fn(), changeFieldValue: vi.fn() },
     onSave: vi.fn(),
 } as unknown as Omit<React.ComponentProps<typeof AssistantFormRenderer>, "form">;
 
 describe("AssistantFormRenderer 5-tab classification and mobile capability", () => {
     beforeEach(() => clearAllMockHandlers());
+
+    it("should enable saving only when the assistant has unsaved changes and no save is pending", async () => {
+        mockInvokeHandler("get_assistant_execution_capability", () => ({ available: true, issues: [] }));
+        const view = render(<Wrapper {...baseProps} />);
+        const save = await screen.findByRole("button", { name: "保存配置" });
+        expect(save).toBeDisabled();
+
+        view.rerender(<Wrapper {...baseProps} isDirty />);
+        expect(save).toBeEnabled();
+        view.rerender(<Wrapper {...baseProps} isDirty isSaving />);
+        expect(save).toBeDisabled();
+        view.rerender(<Wrapper {...baseProps} />);
+        expect(save).toBeDisabled();
+    });
 
     it("classifies assistant fields into role, tools, permissions, and advanced tabs", () => {
         expect(classifyAssistantFieldTab({ key: "prompt", config: { type: "textarea", label: "Prompt" } })).toBe("role");

@@ -411,11 +411,7 @@ export const useAssistantFormConfig = ({
                                   ],
                                   tooltip: "Codex 何时请求用户审批；默认跟随提供商配置",
                                   onChange: (value: string | boolean) =>
-                                      handleConfigChange(
-                                          "codex_approval_policy",
-                                          value === "default" ? "" : value,
-                                          "string"
-                                      ),
+                                      handleConfigChange("codex_approval_policy", value, "string"),
                               },
                           },
                           {
@@ -432,11 +428,7 @@ export const useAssistantFormConfig = ({
                                   ],
                                   tooltip: "Codex 命令执行的沙箱范围；默认跟随提供商配置",
                                   onChange: (value: string | boolean) =>
-                                      handleConfigChange(
-                                          "codex_sandbox",
-                                          value === "default" ? "" : value,
-                                          "string"
-                                      ),
+                                      handleConfigChange("codex_sandbox", value, "string"),
                               },
                           },
                           {
@@ -452,11 +444,7 @@ export const useAssistantFormConfig = ({
                                   ],
                                   tooltip: "Codex 审批请求由人工处理还是由子代理自动审批；默认跟随提供商配置",
                                   onChange: (value: string | boolean) =>
-                                      handleConfigChange(
-                                          "codex_approvals_reviewer",
-                                          value === "default" ? "" : value,
-                                          "string"
-                                      ),
+                                      handleConfigChange("codex_approvals_reviewer", value, "string"),
                               },
                           },
                       ]

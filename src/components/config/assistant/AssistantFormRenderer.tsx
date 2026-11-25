@@ -82,7 +82,7 @@ interface AssistantFormRendererProps {
     formConfig: AssistantFormConfig[];
     form: UseFormReturn<any>;
     /** Value-based dirty state from AssistantConfig (overrides RHF formState.isDirty). */
-    isDirty?: boolean;
+    isDirty: boolean;
     isSaving?: boolean;
     isLoading?: boolean;
     assistantConfigApi: AssistantConfigApi;
@@ -506,7 +506,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
                                 <div className="flex items-center gap-2">
                                     <Button
                                         type="button"
-                                        disabled={isSaving}
+                                        disabled={!isDirty || isSaving}
                                         onClick={onSave}
                                         className="bg-primary text-primary-foreground hover:bg-primary/90"
                                     >
