@@ -36,6 +36,7 @@ import { ACP_CLI_OPTIONS, CODEX_APPROVAL_OPTIONS, CODEX_SANDBOX_OPTIONS } from "
 import { useVaultItems } from "@/hooks/useVaultItems";
 import VaultRefField from "./vault/VaultRefField";
 import DeepSeekCapabilities from "./DeepSeekCapabilities";
+import { ProviderQuota } from "./ProviderQuota";
 import { containsVaultRef } from "./vault/vaultRefs";
 import {
     LLMModel,
@@ -90,6 +91,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
     // 已完成读取的提供商 id；与当前 id 不一致时表单仍是上一份（或空）数据，不应展示
     const [loadedId, setLoadedId] = useState<string | null>(null);
+    const [quotaRevision, setQuotaRevision] = useState(0);
+    const quotaSettings = React.useRef<string | undefined>(undefined);
+    const supportsQuota = ["opencode_go", "codex_app_server", "cursor"].includes(apiType);
     const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
     const [manualToken, setManualToken] = useState<string>("");
     const [scanTokenDialogOpen, setScanTokenDialogOpen] = useState<boolean>(false);
@@ -306,6 +310,14 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             }
             if (!isCurrent()) return;
             const config = Object.fromEntries(configArray.map((item) => [item.name, item.value]));
+            if (supportsQuota) {
+                const identity = JSON.stringify([id, config.api_key, config.cursor_api_key, config.codex_cli_command,
+                    config.codex_additional_args, config.acp_env_vars, config.acp_working_directory, config.proxy_enabled]);
+                if (quotaSettings.current !== identity) {
+                    quotaSettings.current = identity;
+                    setQuotaRevision(revision => revision + 1);
+                }
+            }
             const merged = saves.merge(config, snapshot);
             form.reset(merged);
             setHasApiKey(!!merged.api_key);
@@ -1014,7 +1026,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     key={id}
                     title={name}
                     description={description}
-                    config={configFields}
+                    config={supportsQuota ? [
+                        ...configFields,
+                        { key: "subscription_quota", config: { type: "custom", label: "订阅额度", value: "",
+                            customRender: () => <ProviderQuota key={`${id}-${quotaRevision}`} providerId={Number(id)} /> } },
+                    ] : configFields}
                     classNames="bottom-space"
                     extraButtons={extraButtons}
                     useFormReturn={form}

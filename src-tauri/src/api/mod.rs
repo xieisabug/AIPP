@@ -42,6 +42,7 @@ pub mod office_api;
 pub mod office_save;
 pub(crate) mod magpie;
 pub(crate) mod opencode_go;
+pub(crate) mod provider_quota;
 pub mod operation_api;
 pub mod plugin_api;
 pub mod scheduled_task_api;

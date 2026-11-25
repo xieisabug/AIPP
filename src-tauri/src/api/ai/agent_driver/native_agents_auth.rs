@@ -2,6 +2,7 @@
 //! Antigravity signs in through its own ACP runtime; Cursor through the SDK's
 //! `Cursor.auth.login()`, storing the minted key per provider instance.
 use super::*;
+use tauri::Emitter;
 
 fn logins() -> &'static Mutex<HashMap<i64, Arc<tokio::sync::Notify>>> {
     static LOGINS: OnceLock<Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>> = OnceLock::new();
@@ -37,22 +38,52 @@ pub(crate) fn cursor_auth_store(app: &tauri::AppHandle, provider_id: i64) -> Res
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 pub struct CursorAccount { pub signed_in: bool, pub email: Option<String>, pub expires_at_ms: Option<i64>, pub expired: bool }
 
-pub(crate) fn read_cursor_account(path: &std::path::Path, now_ms: i64) -> Result<CursorAccount, String> {
+fn cursor_sign_in(path: &std::path::Path) -> Result<Option<Value>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(CursorAccount { signed_in: false, email: None, expires_at_ms: None, expired: false }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("无法读取 Cursor 登录信息 {}：{error}", path.display())),
     };
     let value: Value = serde_json::from_str(&text).map_err(|e| format!("Cursor 登录信息 {} 已损坏，请重新登录：{e}", path.display()))?;
     if value["apiKey"].as_str().is_none_or(str::is_empty) { return Err(format!("Cursor 登录信息 {} 缺少密钥，请重新登录", path.display())); }
+    Ok(Some(value))
+}
+
+pub(crate) fn read_cursor_account(path: &std::path::Path, now_ms: i64) -> Result<CursorAccount, String> {
+    let Some(value) = cursor_sign_in(path)? else {
+        return Ok(CursorAccount { signed_in: false, email: None, expires_at_ms: None, expired: false });
+    };
     let expires_at_ms = value["apiKeyExpiresAtMs"].as_i64();
     let expired = expires_at_ms.is_some_and(|expires| expires <= now_ms);
     Ok(CursorAccount { signed_in: !expired, email: value["email"].as_str().map(str::to_string), expires_at_ms, expired })
 }
 
+/// Match cursor.mjs: the configured environment overrides the inherited environment,
+/// then the provider's SDK browser sign-in supplies the key.
+pub(crate) fn cursor_quota_key(app: &tauri::AppHandle, id: i64, configs: &[LLMProviderConfig]) -> Result<String, String> {
+    let environment = agent_environment(&[], configs, "node").map_err(|e| e.to_string())?;
+    let setting = |name: &str| environment.get(name).cloned().or_else(|| std::env::var(name).ok());
+    if setting("CURSOR_BACKEND_URL").filter(|s| !s.is_empty())
+        .is_some_and(|s| s.trim_end_matches('/') != "https://api.cursor.com")
+        || setting("CURSOR_API_ENDPOINT").filter(|s| !s.is_empty())
+            .is_some_and(|s| s.trim_end_matches('/') != "https://api2.cursor.sh") {
+        return Err("Cursor 自定义服务地址未提供受支持的账户额度查询".into());
+    }
+    if let Some(key) = setting("CURSOR_API_KEY").filter(|s| !s.is_empty()) {
+        return Ok(key);
+    }
+    let path = cursor_auth_store(app, id).map_err(|e| e.to_string())?;
+    let value = cursor_sign_in(&path)?.ok_or("请先在此提供商登录 Cursor 或填写 API Key")?;
+    if value["apiKeyExpiresAtMs"].as_i64().is_some_and(|ms| ms <= chrono::Utc::now().timestamp_millis()) {
+        return Err("Cursor 登录已过期，请重新登录".into());
+    }
+    Ok(value["apiKey"].as_str().ok_or("Cursor 登录缺少 API Key")?.to_owned())
+}
+
 #[tauri::command]
 pub async fn login_cursor(app: tauri::AppHandle, provider_id: i64, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>) -> Result<CursorAccount, String> {
     let data = browser_login(&app, provider_id, "cursor", "Cursor", settings, on_url, "login").await?;
+    let _ = app.emit(&format!("cursor-account-changed-{provider_id}"), ());
     Ok(CursorAccount { signed_in: true, email: data["email"].as_str().map(str::to_string), expires_at_ms: data["expires_at_ms"].as_i64(), expired: false })
 }
 
@@ -68,7 +99,9 @@ pub async fn logout_cursor(app: tauri::AppHandle, provider_id: i64) -> Result<()
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("无法删除 Cursor 登录信息 {}：{error}", path.display())),
-    }
+    }?;
+    let _ = app.emit(&format!("cursor-account-changed-{provider_id}"), ());
+    Ok(())
 }
 
 async fn browser_login(app: &tauri::AppHandle, provider_id: i64, driver: &'static str, display: &str, settings: HashMap<String, String>, on_url: tauri::ipc::Channel<String>, action: &str) -> Result<Value, String> {

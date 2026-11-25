@@ -24,6 +24,7 @@ vi.mock("../ConfigForm", async () => {
             {/* API Key 走真实的 customRender（保险箱引用字段），与 ConfigForm 的 custom 类型一致 */}
             <Controller control={useFormReturn.control} name="api_key" render={({ field }) => apiKey?.customRender(field)} />
             {config.find(item => item.key === "deepseek_capabilities")?.config.customRender()}
+            <span>{config.find(item => item.key === "subscription_quota")?.config.label}</span>
             {config.find(item => item.key === "advanced_config")?.config.customRender()}
             <span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span><span>{apiKey?.hint}</span>
         </div>;
@@ -41,6 +42,15 @@ describe("LLM provider field autosave", () => {
             if (command === "get_llm_models") return Promise.resolve([]);
             return Promise.resolve();
         });
+    });
+    it.each([
+        ["codex_app_server", true], ["opencode_go", true], ["cursor", true],
+        ["opencode", false], ["antigravity", false],
+    ] as const)("should show the subscription quota field only for supported providers when opening %s", async (apiType, expected) => {
+        render(<LLMProviderConfigForm id="1" index={0} apiType={apiType} name="test" description=""
+            isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
+        await refresh();
+        expect(Boolean(screen.queryByText("订阅额度"))).toBe(expected);
     });
     it.each([
         ["codex_app_server", "codex", "codex_cli_command"],

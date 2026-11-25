@@ -1055,6 +1055,25 @@ pub async fn probe_codex_model_options(
     })
 }
 
+/// Read the provider profile's account limits without opening a thread.
+pub(crate) async fn probe_account_limits(
+    app: &tauri::AppHandle,
+    config: &CodexAppServerConfig,
+) -> Result<Value, String> {
+    let stderr = CodexStderrBuffer::default();
+    let read = async {
+        let (_child, mut stdin, mut lines) = spawn_process(config, stderr.clone()).await?;
+        let requests = DesktopCodexServerRequests { app_handle: app, conversation_id: -1, cancellation: None };
+        let mut pending = VecDeque::new();
+        initialize_codex_transport(&requests, -1, "aipp-quota", &mut stdin, &mut lines, &mut pending).await?;
+        write_frame(&mut stdin, &json_rpc_request(2, "account/rateLimits/read", Value::Null)).await?;
+        read_codex_rpc_response(&requests, -1, &mut stdin, &mut lines, 2, &mut pending).await
+    };
+    tokio::time::timeout(Duration::from_secs(25), read).await
+        .unwrap_or_else(|_| Err("启动或等待额度响应超过 25 秒".into()))
+        .map_err(|e| codex_error_with_diagnostics(&e, -1, "account/rateLimits/read", &stderr))
+}
+
 fn first_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {
     match value {
         Value::Object(map) => {
