@@ -281,7 +281,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                     </div>
                 </ConfigFooterLayout>
             ) : (
-                <div className="flex flex-1 min-h-0 gap-6 px-4 py-6" data-aipp-slot="config-split">
+                <div className="flex flex-1 min-h-0 gap-6 px-4 py-6 sm:px-6" data-aipp-slot="config-split">
                     {/* 左侧列表：固定宽度、占满高度，列表内部独立滚动（工具栏固定） */}
                     <div className="w-64 shrink-0 min-h-0 2xl:w-72" data-aipp-slot="config-list-pane">
                         {sidebar}

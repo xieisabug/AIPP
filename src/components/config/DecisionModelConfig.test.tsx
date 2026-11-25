@@ -6,11 +6,7 @@ import { findProviderApiType } from "./providerApiTypes";
 import { isDecisionRequestMode, supportsRequestModeToggle } from "./llmModelTypes";
 import ModelRequestModeToggle from "./ModelRequestModeToggle";
 import { SummaryConfigForm } from "./feature/forms/SummaryConfigForm";
-import { ExperimentalConfigForm } from "./feature/forms/ExperimentalConfigForm";
-import {
-    EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
-    type ExperimentalConfigFormState,
-} from "./feature/forms/experimentalConfigShared";
+import ButlerConfigCenter from "./butler/ButlerConfigCenter";
 
 describe("Decision model UI configuration (#340)", () => {
     beforeEach(() => {
@@ -153,6 +149,10 @@ describe("Decision model UI configuration (#340)", () => {
     });
 
     it("should show the selected decision model without a probe button in Butler settings", async () => {
+        mockInvokeHandler("get_all_feature_config", () => [
+            { id: 1, feature_code: "experimental", key: "butler_experiment_enabled", value: "true", data_type: "string" },
+            { id: 2, feature_code: "experimental", key: "butler_group_dispatch_model_id", value: "gpt-6-luna%%1", data_type: "string" },
+        ]);
         mockInvokeHandler("get_models_for_select", (args) => {
             if ((args as { includeDecision?: boolean })?.includeDecision) {
                 return [
@@ -170,27 +170,15 @@ describe("Decision model UI configuration (#340)", () => {
                 { id: 1, name: "OpenAI / GPT-4o", code: "gpt-4o", llm_provider_id: 1, request_mode: "chat_completions", is_decision: false },
             ];
         });
-        mockInvokeHandler("get_experimental_summary_task_status", () => ({
-            mcp_running: false,
-            conversation_running: false,
-            conversation_running_count: 0,
-        }));
         mockInvokeHandler("get_butler_feishu_status", () => null);
+        mockInvokeHandler("get_butler_feishu_runtime_status", () => null);
+        mockInvokeHandler("get_butler_chief_avatar", () => null);
+        mockInvokeHandler("get_butler_proactive_status", () => null);
+        mockInvokeHandler("get_butler_proactive_config", () => null);
+        mockInvokeHandler("get_platform", () => "windows");
 
-        function Harness() {
-            const form = useForm<ExperimentalConfigFormState>({
-                defaultValues: {
-                    ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
-                    butler_experiment_enabled: "true",
-                    butler_group_dispatch_model_id: "gpt-6-luna%%1",
-                },
-            });
-            return <ExperimentalConfigForm form={form} onSave={async () => undefined} scope="butler" />;
-        }
-
-        render(<Harness />);
-        expect(screen.getByText("决策模型")).toBeInTheDocument();
-        expect(screen.getByLabelText("决策模型说明")).toBeInTheDocument();
+        render(<ButlerConfigCenter />);
+        expect(await screen.findByText("群聊路由决策模型")).toBeInTheDocument();
         expect(await screen.findByText("OpenAI / GPT-6 Luna [决策]")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "测试决策接口" })).not.toBeInTheDocument();
     });

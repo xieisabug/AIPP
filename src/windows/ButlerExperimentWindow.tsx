@@ -1,7 +1,6 @@
 import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
 import { resetButlerContactConversation, type ButlerContactResetResult } from "@/services/butlerContactService";
 import ButlerGroupChat from "@/components/butler/ButlerGroupChat";
-import ButlerProactiveSettings from "@/components/butler/ButlerProactiveSettings";
 import ButlerProactiveCenter from "@/components/butler/ButlerProactiveCenter";
 import { useButlerProactiveConfig } from "@/components/butler/useButlerProactiveConfig";
 import ButlerGroupMemberPicker from "@/components/butler/ButlerGroupMemberPicker";
@@ -10,7 +9,6 @@ import * as butlerGroups from "@/services/butlerGroupService";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
@@ -72,13 +70,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { ExperimentalConfigForm } from "@/components/config/feature/forms/ExperimentalConfigForm";
-import {
-    buildExperimentalConfigFormValues,
-    EXPERIMENTAL_CONFIG_DEFAULT_VALUES,
-    ExperimentalConfigFormState,
-    saveExperimentalConfigValues,
-} from "@/components/config/feature/forms/experimentalConfigShared";
+import ButlerConfigCenter from "@/components/config/butler/ButlerConfigCenter";
 import { ConversationStatsDialog } from "@/components/token-statistics";
 import DeepSeekBalanceBadge from "@/components/conversation/DeepSeekBalanceBadge";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
@@ -499,9 +491,6 @@ function ButlerExperimentWindow() {
     const [scheduledTasks, setScheduledTasks] = useState<ButlerScheduledTask[]>([]);
     const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
     const onboardingAutoTriggeredRef = useRef(false);
-    const butlerSettingsForm = useForm<ExperimentalConfigFormState>({
-        defaultValues: { ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES },
-    });
 
     const conversationIdNumber = mainConversationId ? parseInt(mainConversationId, 10) : undefined;
     const chatConversationIds = useMemo(() => {
@@ -1071,16 +1060,9 @@ function ButlerExperimentWindow() {
 
     const handleOpenSettings = useCallback(() => {
         void proactive.reload();
-        loadFeatureConfig()
-            .then((latestConfig) => {
-                butlerSettingsForm.reset(buildExperimentalConfigFormValues(latestConfig));
-                setIsSettingsDialogOpen(true);
-            })
-            .catch((error) => {
-                console.error("[ButlerExperimentWindow] Failed to load settings:", error);
-                toast.error("加载总管家设置失败");
-            });
-    }, [butlerSettingsForm, loadFeatureConfig, proactive.reload]);
+        void loadFeatureConfig();
+        setIsSettingsDialogOpen(true);
+    }, [loadFeatureConfig, proactive.reload]);
 
     // 总管家设置只覆盖 Butler 相关项；模型、助手等通用配置在 AIPP 主设置窗口里
     const handleOpenAppSettings = useCallback(() => {
@@ -1089,12 +1071,6 @@ function ButlerExperimentWindow() {
             toast.error(`打开 AIPP 设置窗口失败：${error instanceof Error ? error.message : String(error)}`);
         });
     }, []);
-
-    const handleSaveButlerSettings = useCallback(async () => {
-        // 主动整理先保存：它有后端校验（时间段、Open ID），不通过时整次保存直接报错
-        await proactive.save();
-        await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues(), "butler");
-    }, [butlerSettingsForm, saveFeatureConfig, proactive.save]);
 
     const toggleExecutionDetails = () => {
         conversationUIRef.current?.captureTranscriptPosition();
@@ -1115,13 +1091,6 @@ function ButlerExperimentWindow() {
         }
         setIsStatsDialogOpen(true);
     }, [mainConversationId]);
-
-    useEffect(() => {
-        if (loadingFeatureConfig) {
-            return;
-        }
-        butlerSettingsForm.reset(buildExperimentalConfigFormValues(featureConfig));
-    }, [butlerSettingsForm, featureConfig, loadingFeatureConfig]);
 
     const butlerWorkspaceConfig = useMemo(
         () =>
@@ -1425,10 +1394,10 @@ function ButlerExperimentWindow() {
                     open={isSettingsDialogOpen}
                     onOpenChange={setIsSettingsDialogOpen}
                 >
-                    <CompactDialogContent className="sm:max-w-3xl">
+                    <CompactDialogContent className="h-[min(760px,86dvh,var(--aipp-vv-height,86dvh))] sm:max-w-4xl">
                         <CompactDialogHeader
-                            title="总管家实验设置"
-                            description="在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。"
+                            title="总管家设置"
+                            description="管理总管家模型、可信工作区、主动整理、飞书接入、协作开关与长期记忆。"
                             actions={
                                 <button
                                     type="button"
@@ -1436,31 +1405,22 @@ function ButlerExperimentWindow() {
                                     className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                                     data-aipp-slot="butler-settings-open-app-settings"
                                 >
-                                    AIPP 设置
+                                    全部 AIPP 设置
                                     <ExternalLink className="h-3 w-3" />
                                 </button>
                             }
                         />
-                        {/* pb-0：表单的 sticky 保存栏以滚动容器的内边距为吸附边界，留底部内边距会让它悬在弹窗底边上方并露出下面的内容 */}
-                        <CompactDialogBody className="space-y-4 pb-0">
-                            <p className="text-xs text-muted-foreground">
-                                在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。其他通用配置请前往右上角「AIPP 设置」。
-                            </p>
-                            <ExperimentalConfigForm
-                                form={butlerSettingsForm}
-                                onSave={handleSaveButlerSettings}
-                                scope="butler"
-                                saveFeatureConfig={saveFeatureConfig}
-                                onConfigRefresh={handleOnboardingComplete}
-                                butlerSections={
-                                    <ButlerProactiveSettings
-                                        value={proactive.config}
-                                        error={proactive.error}
-                                        onChange={proactive.setConfig}
-                                        onOpenCenter={() => setProactiveCenterOpen(true)}
-                                    />
-                                }
-                            />
+                        <CompactDialogBody className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+                            {isSettingsDialogOpen ? (
+                                <ButlerConfigCenter
+                                    embedded
+                                    onOpenProactiveCenter={() => setProactiveCenterOpen(true)}
+                                    onSaved={() => {
+                                        void proactive.reload();
+                                        handleOnboardingComplete();
+                                    }}
+                                />
+                            ) : null}
                         </CompactDialogBody>
                     </CompactDialogContent>
                 </Dialog>

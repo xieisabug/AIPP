@@ -139,7 +139,7 @@ export const CliEnvironmentStatus: React.FC<CliEnvironmentStatusProps> = ({ env,
             {status === "bun-not-installed" && (
                 <NoticeBox>
                     <p className="text-xs text-muted-foreground">
-                        一键安装 {displayName} 需要 Bun 运行时，请先在「设置 → 预览配置」中安装 Bun。
+                        一键安装 {displayName} 需要 Bun 运行时，请先在「设置 → 运行环境与预览」中安装 Bun。
                     </p>
                     <Button
                         type="button"
@@ -148,7 +148,7 @@ export const CliEnvironmentStatus: React.FC<CliEnvironmentStatusProps> = ({ env,
                         className="w-fit"
                         onClick={async () => {
                             const { emit } = await import("@tauri-apps/api/event");
-                            await emit("config-navigate-to", { menu: "feature-assistant-config", subNav: "preview" });
+                            await emit("config-navigate-to", { menu: "runtime-preview-config", subNav: "#bun" });
                         }}
                     >
                         前往安装 Bun

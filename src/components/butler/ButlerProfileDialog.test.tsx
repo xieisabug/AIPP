@@ -122,19 +122,19 @@ describe("Butler profile editor", () => {
         render(<ButlerProfileDialog butler assistantId={7} name="小A" description="写作"
             model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }}
             onSave={vi.fn()} onClose={vi.fn()} />);
-        fireEvent.click(screen.getByRole("button", { name: "在设置中修改配置" }));
+        fireEvent.click(screen.getByRole("button", { name: "打开完整配置（提示词 / 工具 / 权限）" }));
         await waitFor(() => expect(emit).toHaveBeenCalledWith("config-navigate-to", { menu: "assistant-config", subNav: "7" }));
         expect(invoke).not.toHaveBeenCalledWith("open_config_window");
         await emit("config-assistant-ready", { assistantId: 7 });
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_config_window"));
         fireEvent.mouseDown(screen.getByRole("tab", { name: "形象" }), { button: 0 });
-        expect(screen.queryByRole("button", { name: "在设置中修改配置" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "打开完整配置（提示词 / 工具 / 权限）" })).toBeNull();
     });
 
     it("should explain that memory is unavailable before the first private chat", () => {
         render(<ButlerProfileDialog butler name="总管家" onSave={vi.fn()} onClose={vi.fn()} />);
         expect(screen.getByLabelText("名称")).toHaveValue("总管家");
-        expect(screen.queryByRole("button", { name: "在设置中修改配置" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "打开完整配置（提示词 / 工具 / 权限）" })).toBeNull();
         expect(screen.queryByLabelText("描述（选填）")).toBeNull();
         fireEvent.mouseDown(screen.getByRole("tab", { name: "记忆" }), { button: 0 });
         expect(screen.getByText(/还没有私聊/)).toBeInTheDocument();

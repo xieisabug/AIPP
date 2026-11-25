@@ -3145,7 +3145,8 @@ fn embedded_provider_parts<'a>(object_type: &str, fields: &'a Map<String, JsonVa
                     | "memory_summary_provider_id" | "auto_review_provider_id" | "conversation_summary_provider_id")
                 | ("experimental", "conversation_summary_provider_id") => false,
                 ("conversation_summary", "title_model" | "form_autofill_model" | "memory_summary_model"
-                    | "auto_review_model" | "conversation_summary_model")
+                    | "auto_review_model" | "conversation_summary_model"
+                    | "default_light_model" | "default_decision_model")
                 | ("experimental", "butler_model_id" | "mcp_summarizer_model_id"
                     | "assistant_summarizer_model_id" | "conversation_summary_model"
                     | "butler_helper_model_id" | "butler_group_dispatch_model_id") => true,

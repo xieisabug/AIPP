@@ -576,6 +576,58 @@ pub async fn list_butler_memories(app_handle: AppHandle, conversation_id: i64) -
     }).await
 }
 
+/// 设置页按助手或总管家身份读取长期记忆（不要求已存在私聊会话）。
+/// `assistant_id = Some(id)` 返回该助手私有记忆 + 全局记忆；
+/// `assistant_id = None` 自动解析总管家绑定的助手 ID，若尚未创建主会话则返回全局记忆。
+#[tauri::command]
+pub async fn list_assistant_butler_memories(
+    app_handle: AppHandle,
+    assistant_id: Option<i64>,
+) -> Result<Vec<Memory>, String> {
+    let app = app_handle.clone();
+    tokio::task::spawn_blocking(move || -> Result<Vec<Memory>> {
+        let db = ConversationDatabase::new(&app)?;
+        let conn = db.get_connection()?;
+        memory::schema(&conn)?;
+        let resolved_assistant_id = match assistant_id.filter(|id| *id > 0) {
+            Some(id) => id,
+            None => {
+                let main_conv_id = super::butler_api::active_butler_main_conversation_id(&app)
+                    .ok()
+                    .flatten();
+                let from_main = main_conv_id.and_then(|cid| {
+                    conn.query_row(
+                        "SELECT assistant_id FROM conversation WHERE id = ?1",
+                        [cid],
+                        |r| r.get::<_, Option<i64>>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .flatten()
+                });
+                from_main
+                    .or_else(|| {
+                        conn.query_row(
+                            "SELECT assistant_id FROM conversation WHERE conversation_kind = 'butler_main' AND assistant_id > 0 ORDER BY id DESC LIMIT 1",
+                            [],
+                            |r| r.get::<_, Option<i64>>(0),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                        .flatten()
+                    })
+                    .unwrap_or(-1)
+            }
+        };
+        memory::list(&conn, Viewer::Assistant(resolved_assistant_id))
+    })
+    .await
+    .map_err(|e| format!("长期记忆读取调度失败：{e}"))?
+    .map_err(|e| format!("长期记忆读取失败：{e:#}"))
+}
+
 /// 用户在界面里修改记忆内容。范围与来源不变。
 #[tauri::command]
 pub async fn update_butler_memory(app_handle: AppHandle, id: i64, content: String, revision: Option<i64>) -> Result<Memory, String> {

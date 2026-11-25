@@ -47,9 +47,19 @@ interface LLMProvider {
     is_enabled: boolean;
 }
 
-const LLMProviderConfig: React.FC = () => {
+interface LLMProviderConfigProps {
+    subNav?: string;
+    onSubNavConsumed?: () => void;
+}
+
+const LOCAL_API_TYPES = new Set(
+    PROVIDER_API_TYPES.filter((type) => type.kind === "local").map((type) => type.value)
+);
+
+const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavConsumed }) => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
+    const [providerFilter, setProviderFilter] = useState<"all" | "api" | "local">("all");
     // 首次列表读取完成前不渲染空状态，避免先闪「还没有配置提供商」
     const [providersLoaded, setProvidersLoaded] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -287,17 +297,66 @@ const LLMProviderConfig: React.FC = () => {
     ), [openNewProviderDialog]);
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
+    React.useEffect(() => {
+        if (!subNav || !providersLoaded) return;
+        const targetId = subNav.split("#")[0];
+        const found = LLMProviders.find((p) => String(p.id) === targetId);
+        if (found) {
+            setSelectedProvider(found);
+            setProviderFilter("all");
+        }
+        onSubNavConsumed?.();
+    }, [subNav, providersLoaded, LLMProviders, onSubNavConsumed]);
+
     const filteredProviders = useMemo(() => {
-        if (!searchQuery.trim()) return LLMProviders;
-        return LLMProviders.filter(provider =>
+        let list = LLMProviders;
+        if (providerFilter === "api") {
+            list = list.filter((p) => !LOCAL_API_TYPES.has(p.api_type));
+        } else if (providerFilter === "local") {
+            list = list.filter((p) => LOCAL_API_TYPES.has(p.api_type));
+        }
+        if (!searchQuery.trim()) return list;
+        return list.filter(provider =>
             PinyinFilter.matches(provider.name, searchQuery) ||
             PinyinFilter.matches(provider.api_type, searchQuery)
         );
-    }, [LLMProviders, searchQuery, pinyinReady]);
+    }, [LLMProviders, providerFilter, searchQuery, pinyinReady]);
+
+    const renderProviderButton = useCallback((provider: LLMProvider) => (
+        <ListItemButton
+            key={provider.id}
+            isSelected={selectedProvider?.id === provider.id}
+            onClick={() => handleSelectProvider(provider)}
+        >
+            <div className="flex items-center w-full">
+                <div className="flex-1 truncate">
+                    <div className="truncate">{provider.name}</div>
+                </div>
+                {provider.is_enabled && (
+                    <span className="ml-2 flex">
+                        <ProviderStatusDot enabled />
+                    </span>
+                )}
+            </div>
+        </ListItemButton>
+    ), [selectedProvider?.id, handleSelectProvider]);
+
+    const apiProviders = useMemo(
+        () => filteredProviders.filter((p) => !LOCAL_API_TYPES.has(p.api_type)),
+        [filteredProviders]
+    );
+    const localAgentProviders = useMemo(
+        () => filteredProviders.filter((p) => LOCAL_API_TYPES.has(p.api_type)),
+        [filteredProviders]
+    );
+    const hasLocalProviders = useMemo(
+        () => LLMProviders.some((p) => LOCAL_API_TYPES.has(p.api_type)),
+        [LLMProviders]
+    );
 
     const sidebar = useMemo(() => (
         <SidebarList
-            title="提供商"
+            title="模型与提供商"
             description="选择提供商进行配置"
             icon={<Cloud className="h-5 w-5" />}
             searchValue={searchQuery}
@@ -305,26 +364,45 @@ const LLMProviderConfig: React.FC = () => {
             searchPlaceholder="搜索提供商..."
             addButton={addButton}
         >
-            {filteredProviders.map((provider) => (
-                <ListItemButton
-                    key={provider.id}
-                    isSelected={selectedProvider?.id === provider.id}
-                    onClick={() => handleSelectProvider(provider)}
-                >
-                    <div className="flex items-center w-full">
-                        <div className="flex-1 truncate">
-                            <div className="truncate">{provider.name}</div>
-                        </div>
-                        {provider.is_enabled && (
-                            <span className="ml-2 flex">
-                                <ProviderStatusDot enabled />
-                            </span>
-                        )}
+            {hasLocalProviders ? (
+                <div className="mb-2 flex items-center gap-1 px-1">
+                    {([
+                        ["all", "全部"],
+                        ["api", "模型 API"],
+                        ["local", "本地智能体"],
+                    ] as const).map(([key, label]) => (
+                        <button
+                            key={key}
+                            type="button"
+                            onClick={() => setProviderFilter(key)}
+                            className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                                providerFilter === key
+                                    ? "bg-primary/10 text-primary"
+                                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                            }`}
+                        >
+                            {label}
+                        </button>
+                    ))}
+                </div>
+            ) : null}
+
+            {providerFilter === "all" && apiProviders.length > 0 && localAgentProviders.length > 0 ? (
+                <div className="space-y-3">
+                    <div className="space-y-1">
+                        <div className="px-2 text-[11px] font-medium text-muted-foreground">云端 / API 模型</div>
+                        {apiProviders.map(renderProviderButton)}
                     </div>
-                </ListItemButton>
-            ))}
+                    <div className="space-y-1">
+                        <div className="px-2 text-[11px] font-medium text-muted-foreground">本地智能体</div>
+                        {localAgentProviders.map(renderProviderButton)}
+                    </div>
+                </div>
+            ) : (
+                filteredProviders.map(renderProviderButton)
+            )}
         </SidebarList>
-    ), [filteredProviders, selectedProvider?.id, handleSelectProvider, addButton, searchQuery]);
+    ), [filteredProviders, apiProviders, localAgentProviders, hasLocalProviders, providerFilter, renderProviderButton, addButton, searchQuery]);
 
     const selectedProviderApiType = selectedProvider ? PROVIDER_API_TYPES.find(type => type.value === selectedProvider.api_type)?.label || selectedProvider.api_type : "";
 

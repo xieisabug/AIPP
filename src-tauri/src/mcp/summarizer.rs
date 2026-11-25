@@ -219,10 +219,13 @@ fn parse_model_selection(
 }
 
 fn configured_summary_model(config_map: &HashMap<String, HashMap<String, FeatureConfig>>) -> Option<(String, i64)> {
-    let experimental = config_map.get("experimental")?;
-    let raw = experimental.get("mcp_summarizer_model_id")?.value.trim().to_string();
+    let raw = config_map
+        .get("experimental")
+        .and_then(|exp| exp.get("mcp_summarizer_model_id"))
+        .map(|c| c.value.trim().to_string())
+        .unwrap_or_default();
     if raw.is_empty() {
-        return None;
+        return crate::api::ai::config::resolve_default_light_model(config_map);
     }
 
     let parts: Vec<&str> = raw.split("%%").collect();

@@ -5,6 +5,39 @@ use crate::api::genai_client::Client;
 use std::collections::HashMap;
 
 pub(crate) const DEFAULT_STREAM: bool = false;
+pub const DEFAULT_LIGHT_MODEL_KEY: &str = "default_light_model";
+pub const DEFAULT_DECISION_MODEL_KEY: &str = "default_decision_model";
+
+pub(crate) fn parse_combined_model_selection(raw: &str) -> Option<(String, i64)> {
+    let trimmed = raw.trim();
+    let (code, pid_str) = trimmed.rsplit_once("%%")?;
+    let code = code.trim();
+    let provider_id = pid_str.trim().parse::<i64>().ok().filter(|id| *id > 0)?;
+    if code.is_empty() {
+        return None;
+    }
+    Some((code.to_string(), provider_id))
+}
+
+pub(crate) fn resolve_default_light_model(
+    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+) -> Option<(String, i64)> {
+    let raw = config_feature_map
+        .get("conversation_summary")
+        .and_then(|m| m.get(DEFAULT_LIGHT_MODEL_KEY))
+        .map(|c| c.value.as_str())?;
+    parse_combined_model_selection(raw)
+}
+
+pub(crate) fn resolve_default_decision_model(
+    config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+) -> Option<(String, i64)> {
+    let raw = config_feature_map
+        .get("conversation_summary")
+        .and_then(|m| m.get(DEFAULT_DECISION_MODEL_KEY))
+        .map(|c| c.value.as_str())?;
+    parse_combined_model_selection(raw)
+}
 
 /// Shared by request execution and channel configuration readback.
 pub(crate) fn stream_enabled(value: Option<&str>) -> bool {
@@ -320,4 +353,65 @@ pub fn get_custom_headers_from_config(
 /// 计算重试延迟，使用指数退避策略
 pub fn calculate_retry_delay(attempt: u32) -> u64 {
     RETRY_DELAY_BASE_MS * (2_u64.pow(attempt.saturating_sub(1)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feature_entry(feature_code: &str, key: &str, value: &str) -> FeatureConfig {
+        FeatureConfig {
+            id: None,
+            feature_code: feature_code.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+            data_type: "string".to_string(),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_combined_model_selection() {
+        assert_eq!(
+            parse_combined_model_selection("gpt-4o-mini%%12"),
+            Some(("gpt-4o-mini".to_string(), 12))
+        );
+        assert_eq!(
+            parse_combined_model_selection("  vendor/model%%alias%%7  "),
+            Some(("vendor/model%%alias".to_string(), 7))
+        );
+        assert_eq!(parse_combined_model_selection(""), None);
+        assert_eq!(parse_combined_model_selection("gpt-4o-mini"), None);
+        assert_eq!(parse_combined_model_selection("%%12"), None);
+        assert_eq!(parse_combined_model_selection("gpt-4o-mini%%0"), None);
+        assert_eq!(parse_combined_model_selection("gpt-4o-mini%%-3"), None);
+        assert_eq!(parse_combined_model_selection("gpt-4o-mini%%abc"), None);
+    }
+
+    #[test]
+    fn test_resolve_default_light_and_decision_models() {
+        let mut map: HashMap<String, HashMap<String, FeatureConfig>> = HashMap::new();
+        assert_eq!(resolve_default_light_model(&map), None);
+        assert_eq!(resolve_default_decision_model(&map), None);
+
+        let mut summary = HashMap::new();
+        summary.insert(
+            DEFAULT_LIGHT_MODEL_KEY.to_string(),
+            feature_entry("conversation_summary", DEFAULT_LIGHT_MODEL_KEY, "flash-mini%%5"),
+        );
+        summary.insert(
+            DEFAULT_DECISION_MODEL_KEY.to_string(),
+            feature_entry("conversation_summary", DEFAULT_DECISION_MODEL_KEY, "jev-latest%%9"),
+        );
+        map.insert("conversation_summary".to_string(), summary);
+
+        assert_eq!(
+            resolve_default_light_model(&map),
+            Some(("flash-mini".to_string(), 5))
+        );
+        assert_eq!(
+            resolve_default_decision_model(&map),
+            Some(("jev-latest".to_string(), 9))
+        );
+    }
 }

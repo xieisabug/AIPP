@@ -8,9 +8,11 @@ import * as memoryApi from "@/services/butlerMemoryService";
 
 interface Props {
     /** 私聊/总管家会话或群聊的会话 id，决定能看到哪些记忆。 */
-    conversationId: number;
-    /** assistant：私聊与总管家（该助手 + 全局）；group：群聊（本群 + 全局）。 */
-    scope: "assistant" | "group";
+    conversationId?: number;
+    /** 按助手身份直接读取记忆（传 null 表示总管家），无需已有私聊会话。 */
+    assistantId?: number | null;
+    /** assistant：私聊与总管家（该助手 + 全局）；group：群聊（本群 + 全局）；chief：总管家设置页文案。 */
+    scope: "assistant" | "group" | "chief";
 }
 
 type SourceState = ButlerMemorySource | "loading" | { error: string };
@@ -20,6 +22,11 @@ const COPY = {
         intro: "在聊天里说“记住……”，助手会把你的偏好、事实和决定记在这里。每轮对话会带上与当前内容最相关的几条，修改和删除立即生效。",
         ownTitle: "该助手的记忆", ownHint: "只有这位助手能看到", forgetter: "助手",
         emptyHint: "在聊天里对助手说“记住……”，它记下的偏好和决定会出现在这里。",
+    },
+    chief: {
+        intro: "在总管家主会话里说“记住……”，总管家会把你的偏好、工作约定与长期事实记在这里，修改和删除立即生效。",
+        ownTitle: "总管家私有记忆", ownHint: "仅总管家可见", forgetter: "总管家",
+        emptyHint: "在总管家主会话里说“记住……”，记下的偏好和决定会出现在这里。",
     },
     group: {
         intro: "在群里说“大家记住……”，成员会把约定记在这里，本群成员共享。修改和删除立即生效。",
@@ -57,7 +64,7 @@ function SourceBlock({ state }: { state: SourceState }) {
 }
 
 /** 长期记忆列表：查看来源、修改与删除，改动立即生效。 */
-export default function ButlerMemoryPanel({ conversationId, scope }: Props) {
+export default function ButlerMemoryPanel({ conversationId, assistantId, scope }: Props) {
     const copy = COPY[scope];
     const [memories, setMemories] = useState<ButlerMemory[] | null>(null);
     const [loadError, setLoadError] = useState("");
@@ -71,14 +78,19 @@ export default function ButlerMemoryPanel({ conversationId, scope }: Props) {
     const load = useCallback(async () => {
         const current = ++request.current;
         try {
-            const list = await memoryApi.listButlerMemories(conversationId);
+            const list = conversationId !== undefined
+                ? await memoryApi.listButlerMemories(conversationId)
+                : await memoryApi.listAssistantButlerMemories(assistantId);
             if (current !== request.current) return;
             setMemories(list);
             setLoadError("");
         } catch (error) {
-            if (current === request.current) setLoadError(`读取记忆失败（会话 ${conversationId}）：${errorText(error)}`);
+            if (current === request.current) {
+                const targetLabel = conversationId !== undefined ? `会话 ${conversationId}` : assistantId ? `助手 ${assistantId}` : "总管家";
+                setLoadError(`读取记忆失败（${targetLabel}）：${errorText(error)}`);
+            }
         }
-    }, [conversationId]);
+    }, [conversationId, assistantId]);
 
     useEffect(() => {
         void load();

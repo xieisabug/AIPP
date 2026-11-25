@@ -229,7 +229,7 @@ export default function ConnectedAppsConfig() {
     </div>;
 
     return <div ref={scroll} className="h-full overflow-y-auto bg-background">
-        <div className="space-y-6 px-4 py-6 sm:py-8">
+        <div className="space-y-6 px-4 py-6 sm:px-6">
             <header className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                     <h2 className="text-xl font-semibold tracking-tight">应用与工具</h2>

@@ -153,14 +153,23 @@ async fn light_triage(
     }
     let mut selection = cfg.small_model.clone();
     if selection.is_empty() {
-        selection = app
+        let map = app
             .state::<crate::FeatureConfigState>()
             .config_feature_map
             .lock()
             .await
+            .clone();
+        selection = map
             .get("experimental")
             .and_then(|m| m.get(crate::api::butler_progress::HELPER_MODEL_KEY))
             .map(|c| c.value.clone())
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                map.get("conversation_summary")
+                    .and_then(|m| m.get(crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY))
+                    .map(|c| c.value.clone())
+                    .filter(|v| !v.trim().is_empty())
+            })
             .unwrap_or_default();
     }
     let input = serde_json::to_string(&json!({

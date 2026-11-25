@@ -332,7 +332,8 @@ describe("VaultConfig", () => {
     it("should ask for the sync passphrase only when something waits for it", async () => {
         mockBackend({ vault_capability: { ...capability, syncState: "needs_passphrase", syncMessage: "其他设备已开启加密同步，输入同步口令后才能同步条目" } });
         render(<VaultConfig />);
-        expect(await screen.findByText("其他设备已开启同步，在「程序功能 → 数据」输入同步口令后才能同步。")).toBeInTheDocument();
+        expect(await screen.findByText("其他设备已开启同步，输入同步口令后才能同步。")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /前往数据与同步/ })).toBeInTheDocument();
     });
 
     it("should say where each entry is kept", async () => {

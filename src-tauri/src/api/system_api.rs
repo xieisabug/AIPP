@@ -200,9 +200,33 @@ pub async fn save_feature_config(
     let config = persist_feature_settings(&mut db, &feature_code, config, partial)?;
 
     let model_key = "mcp_summarizer_model_id";
-    let summary_model_changed = feature_code == "experimental" && config.get(model_key).is_some_and(|model|
-        !model.trim().is_empty() && config_feature_map.get(&feature_code).and_then(|old| old.get(model_key))
-            .is_none_or(|old| old.value != *model));
+    let explicit_summary_model_changed = feature_code == "experimental"
+        && config.get(model_key).is_some_and(|model| {
+            !model.trim().is_empty()
+                && config_feature_map
+                    .get(&feature_code)
+                    .and_then(|old| old.get(model_key))
+                    .is_none_or(|old| old.value != *model)
+        });
+    let default_light_changed = feature_code == "conversation_summary"
+        && config
+            .get(crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY)
+            .is_some_and(|model| {
+                !model.trim().is_empty()
+                    && config_feature_map
+                        .get(&feature_code)
+                        .and_then(|old| old.get(crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY))
+                        .is_none_or(|old| old.value != *model)
+            })
+        && config_feature_map
+            .get("experimental")
+            .and_then(|exp| exp.get("dynamic_mcp_loading_enabled"))
+            .is_some_and(|v| v.value == "true")
+        && config_feature_map
+            .get("experimental")
+            .and_then(|exp| exp.get(model_key))
+            .is_none_or(|v| v.value.trim().is_empty());
+    let summary_model_changed = explicit_summary_model_changed || default_light_changed;
 
     // 删除旧的配置
     configs.retain(|c| c.feature_code != feature_code || (partial && !config.contains_key(&c.key)));

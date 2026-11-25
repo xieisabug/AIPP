@@ -628,7 +628,7 @@ pub(super) async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), 
     if enabled {
         Ok(())
     } else {
-        Err("请先在实验性功能中启用总管家实验模式".to_string())
+        Err("请先在「设置 → 总管家」中启用总管家模式".to_string())
     }
 }
 
@@ -934,10 +934,10 @@ pub(crate) async fn get_butler_model_selection(
 ) -> Result<ButlerModelSelection, String> {
     let raw_value = get_experimental_config_value(app_handle, "butler_model_id")
         .await
-        .ok_or_else(|| "请先在实验性功能中为总管家选择模型".to_string())?;
+        .ok_or_else(|| "请先在「设置 → 总管家」中为总管家选择模型".to_string())?;
     let raw_value = raw_value.trim().to_string();
     if raw_value.is_empty() {
-        return Err("请先在实验性功能中为总管家选择模型".to_string());
+        return Err("请先在「设置 → 总管家」中为总管家选择模型".to_string());
     }
     let parts: Vec<&str> = raw_value.split("%%").collect();
     if parts.len() != 2 {

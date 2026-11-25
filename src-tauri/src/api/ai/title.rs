@@ -24,6 +24,9 @@ pub fn should_auto_generate_title(conversation_name: &str) -> bool {
 fn has_explicit_title_model_config(
     config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
 ) -> bool {
+    if crate::api::ai::config::resolve_default_light_model(config_feature_map).is_some() {
+        return true;
+    }
     config_feature_map.get("conversation_summary").is_some_and(|feature_config| {
         let provider_id = feature_config
             .get("title_provider_id")
@@ -207,12 +210,15 @@ pub async fn generate_title(
                 ModelSource::FromConfig { provider_id: pid, model_code: mcode }
             }
             _ => {
-                // 回退到旧配置
+                // 回退到旧配置，再回退到默认轻量模型
                 match (legacy_provider_id_res, legacy_model_code_opt) {
                     (Some(pid), Some(mcode)) if !mcode.is_empty() => {
                         ModelSource::FromConfig { provider_id: pid, model_code: mcode }
                     }
-                    _ => ModelSource::FromConversationMessage,
+                    _ => match crate::api::ai::config::resolve_default_light_model(&config_feature_map) {
+                        Some((mcode, pid)) => ModelSource::FromConfig { provider_id: pid, model_code: mcode },
+                        None => ModelSource::FromConversationMessage,
+                    },
                 }
             }
         }

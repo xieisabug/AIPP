@@ -236,11 +236,17 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
                             {profileFields}
                         </div>
                         {assistantId != null && <div className="mt-auto px-1 pt-4 pb-1">
-                            <button type="button" className="inline-flex items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                                data-aipp-slot="butler-profile-open-assistant-settings" disabled={saving} onClick={openSettings}>
-                                在设置中修改配置
+                            <Button
+                                type="button"
+                                variant="outline"
+                                className="w-full justify-center gap-1.5"
+                                data-aipp-slot="butler-profile-open-assistant-settings"
+                                disabled={saving}
+                                onClick={openSettings}
+                            >
+                                打开完整配置（提示词 / 工具 / 权限）
                                 <ExternalLink className="size-3.5" />
-                            </button>
+                            </Button>
                         </div>}
                     </TabsContent>
                     <TabsContent value="appearance" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-4 sm:px-5">

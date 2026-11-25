@@ -1205,6 +1205,7 @@ pub fn run() {
             crate::api::butler_group::rename_butler_group,
             crate::api::butler_group::delete_butler_group,
             crate::api::butler_memory::list_butler_memories,
+            crate::api::butler_memory::list_assistant_butler_memories,
             crate::proactive::get_butler_proactive_config,
             crate::proactive::save_butler_proactive_config,
             crate::proactive::run_butler_proactive_now,

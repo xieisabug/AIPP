@@ -830,3 +830,44 @@ fn test_review_intent_group_uses_only_visible_human_posts() {
     let history = review_intent_text(&db, 5, Some(10), false).unwrap().unwrap();
     assert_eq!(serde_json::from_str::<Vec<String>>(&history).unwrap(), ["检查配置", "仅查看", "继续"]);
 }
+
+#[test]
+fn test_configured_review_model_falls_back_to_default_decision_model() {
+    use crate::db::system_db::FeatureConfig;
+
+    let entry = |key: &str, value: &str| FeatureConfig {
+        id: None,
+        feature_code: "conversation_summary".to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+        data_type: "string".to_string(),
+        description: None,
+    };
+
+    // Unconfigured -> error referencing AI 与自动化
+    let empty: HashMap<String, HashMap<String, FeatureConfig>> = HashMap::new();
+    let err = configured_review_model(&empty).unwrap_err();
+    assert!(err.contains("AI 与自动化"));
+    assert!(!has_configured_review_model(&empty));
+
+    // Only default_decision_model configured -> fallback succeeds
+    let mut only_default = HashMap::new();
+    let mut summary = HashMap::new();
+    summary.insert("default_decision_model".to_string(), entry("default_decision_model", "jev-latest%%9"));
+    only_default.insert("conversation_summary".to_string(), summary);
+    assert_eq!(
+        configured_review_model(&only_default).unwrap(),
+        ("jev-latest".to_string(), 9)
+    );
+    assert!(has_configured_review_model(&only_default));
+
+    // Explicit auto_review_model takes precedence over default_decision_model
+    let mut overridden = only_default.clone();
+    let summary_mut = overridden.get_mut("conversation_summary").unwrap();
+    summary_mut.insert("auto_review_model".to_string(), entry("auto_review_model", "gpt-5-mini"));
+    summary_mut.insert("auto_review_provider_id".to_string(), entry("auto_review_provider_id", "3"));
+    assert_eq!(
+        configured_review_model(&overridden).unwrap(),
+        ("gpt-5-mini".to_string(), 3)
+    );
+}

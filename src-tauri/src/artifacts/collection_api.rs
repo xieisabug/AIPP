@@ -390,37 +390,47 @@ pub async fn generate_artifact_metadata(
             return Err("表单自动填写功能已禁用，请在辅助AI配置中开启".to_string());
         }
 
-        // 解析模型配置 - 优先新格式，其次兼容旧格式
-        let (provider_id, model_code) = if let Some(form_model) = config.get("form_autofill_model")
-        {
-            let form_model_value = &form_model.value;
-            if form_model_value.contains("%%") && !form_model_value.starts_with("%%") {
-                let parts: Vec<&str> = form_model_value.split("%%").collect();
-                if parts.len() == 2 {
-                    let provider_id = parts[0]
-                        .parse::<i64>()
-                        .map_err(|e| format!("表单填写模型provider_id解析失败: {}", e))?;
-                    (provider_id, parts[1].to_string())
-                } else {
-                    return Err("表单填写模型配置格式错误".to_string());
+        // 解析模型配置 - 优先新格式，其次兼容旧格式，再回退到默认轻量模型
+        let parse_form_model = |raw: &str| -> Option<(i64, String)> {
+            let trimmed = raw.trim();
+            let (left, right) = trimmed.rsplit_once("%%")?;
+            if let Ok(pid) = right.trim().parse::<i64>() {
+                if pid > 0 && !left.trim().is_empty() {
+                    return Some((pid, left.trim().to_string()));
                 }
-            } else {
-                return Err(
-                    "表单填写模型未配置，请在设置 -> 功能助手配置 -> 辅助AI 中配置表单填写模型"
-                        .to_string(),
-                );
             }
+            if let Ok(pid) = left.trim().parse::<i64>() {
+                if pid > 0 && !right.trim().is_empty() {
+                    return Some((pid, right.trim().to_string()));
+                }
+            }
+            None
+        };
+
+        let (provider_id, model_code) = if let Some(parsed) = config
+            .get("form_autofill_model")
+            .and_then(|c| parse_form_model(&c.value))
+        {
+            parsed
         } else if let (Some(provider_id), Some(model_code)) = (
             config
                 .get("form_autofill_provider_id")
                 .or(config.get("provider_id"))
                 .and_then(|c| c.value.parse::<i64>().ok()),
-            config.get("form_autofill_model").or(config.get("model_code")).map(|c| c.value.clone()),
+            config
+                .get("form_autofill_model")
+                .or(config.get("model_code"))
+                .map(|c| c.value.trim().to_string())
+                .filter(|v| !v.is_empty()),
         ) {
             (provider_id, model_code)
+        } else if let Some((fallback_code, fallback_pid)) =
+            crate::api::ai::config::resolve_default_light_model(&config_feature_map)
+        {
+            (fallback_pid, fallback_code)
         } else {
             return Err(
-                "表单填写模型未配置，请在设置 -> 功能助手配置 -> 辅助AI 中配置表单填写模型"
+                "表单填写模型未配置，请在「设置 → AI 与自动化」中配置表单填写模型或默认轻量模型"
                     .to_string(),
             );
         };

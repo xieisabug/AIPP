@@ -18,6 +18,8 @@ import type { AssistantListItem } from "@/data/Assistant";
 import { type ButlerGroupDetail, type ButlerGroupMember, type ButlerGroupMessage } from "@/data/ButlerGroup";
 import * as groups from "@/services/butlerGroupService";
 import { ConversationStatsDialog } from "@/components/token-statistics";
+import SettingsLink from "@/components/config/SettingsLink";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
@@ -330,6 +332,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                         </div>)}
                     </section>
                     <ButlerMemoryPanel conversationId={groupId} scope="group" />
+                    <GroupRoutingModelCard />
                     <Button variant="ghost" className="mt-auto justify-start gap-2 text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
                         <Trash2 className="size-4" />删除群聊
                     </Button>
@@ -361,4 +364,53 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             </AlertDialogContent>
         </AlertDialog>
     </div>;
+}
+
+function parseModelCode(raw?: string): string {
+    if (!raw) return "";
+    const trimmed = raw.trim();
+    const sep = trimmed.lastIndexOf("%%");
+    return sep > 0 ? trimmed.slice(0, sep) : trimmed;
+}
+
+function GroupRoutingModelCard() {
+    const { featureConfig } = useFeatureConfig();
+    const ec = featureConfig.get("experimental");
+    const sc = featureConfig.get("conversation_summary");
+
+    const resolved = useMemo(() => {
+        const candidates: Array<{ raw?: string; source: string }> = [
+            { raw: ec?.get("butler_group_dispatch_model_id"), source: "群聊调度专用" },
+            { raw: sc?.get("default_decision_model"), source: "系统默认决策/审核模型" },
+            { raw: ec?.get("butler_helper_model_id"), source: "管家辅助模型" },
+            { raw: sc?.get("default_light_model"), source: "系统默认轻量模型" },
+            { raw: ec?.get("butler_model_id"), source: "总管家主模型" },
+        ];
+        for (const item of candidates) {
+            const code = parseModelCode(item.raw);
+            if (code) return { code, source: item.source };
+        }
+        return null;
+    }, [ec, sc]);
+
+    return (
+        <section className="space-y-1.5 rounded-lg border border-border/80 bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-muted-foreground">群聊调度模型</span>
+                <SettingsLink menu="butler-config" subNav="basic#butler-basic" openWindow variant="link">
+                    去修改
+                </SettingsLink>
+            </div>
+            {resolved ? (
+                <div className="space-y-0.5">
+                    <div className="truncate font-mono text-xs text-foreground" title={resolved.code}>
+                        {resolved.code}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">来源：{resolved.source}</div>
+                </div>
+            ) : (
+                <div className="text-xs text-muted-foreground">尚未配置模型，请前往总管家设置选择。</div>
+            )}
+        </section>
+    );
 }

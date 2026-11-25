@@ -5,7 +5,7 @@ type ConfigGetter = (name: string, defaultValue: string) => string;
 type ConfigSetter = (key: string, value: string | boolean, valueType: string) => void;
 
 const REVIEW_TOOLTIP =
-    "智能体请求执行操作时：人工审批会弹出确认；AIPP 模型自动审核先由「设置 → 辅助AI」中的审核模型判断，安全的直接按「本次允许」执行（不会替你选「始终允许」），有风险或审核失败才弹出确认并说明原因。";
+    "智能体请求执行操作时：人工审批会弹出确认；AIPP 模型自动审核先由「设置 → AI 与自动化」中的审核模型判断，安全的直接按「本次允许」执行（不会替你选「始终允许」），有风险或审核失败才弹出确认并说明原因。";
 
 /**
  * Native permission controls and AIPP review settings for agent assistants.

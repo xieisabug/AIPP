@@ -50,7 +50,7 @@ import type { AgentModelOption } from "@/utils/agentDefaults";
 
 interface AssistantConfigProps {
     pluginList: LoadedPlugin[];
-    navigateTo: (menuKey: string) => void;
+    navigateTo: (menuKey: string, subNav?: string) => void;
     /** 从其他窗口打开设置时要选中的助手 id。 */
     subNav?: string;
     onSubNavConsumed?: () => void;
@@ -787,6 +787,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         </SidebarList>
     ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery, isFormDirtyNow, handleItemAction]);
 
+    const handleDiscardForm = useCallback(() => {
+        form.reset(cloneFormSnapshot(loadedFormSnapshotRef.current));
+        scheduleDirtyCheck();
+    }, [form, scheduleDirtyCheck]);
+
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => currentAssistant ? (
         <AssistantFormRenderer
@@ -798,10 +803,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             isLoading={formAssistantId !== currentAssistant.assistant.id}
             assistantConfigApi={assistantConfigApi}
             onSave={() => { void handleAssistantFormSave().catch(() => undefined); }}
+            onDiscard={handleDiscardForm}
             onCopy={currentAssistant.assistant.id === 1 ? undefined : handleCopyAssistant}
             onDelete={currentAssistant.assistant.id === 1 ? undefined : openConfirmDeleteDialog}
             onEdit={openUpdateFormDialog}
             onShare={handleShareAssistant}
+            navigateTo={navigateTo}
         />
     ) : (
         <EmptyState
@@ -809,7 +816,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             title="选择一个助手"
             description="从左侧列表中选择一个助手开始配置"
         />
-    ), [currentAssistant, formConfig, form, isDirty, isSaving, formAssistantId, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
+    ), [currentAssistant, formConfig, form, isDirty, isSaving, formAssistantId, assistantConfigApi, handleAssistantFormSave, handleDiscardForm, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant, navigateTo]);
 
     const leaveDialog = (
         <>{itemActions.dialogs}<AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>

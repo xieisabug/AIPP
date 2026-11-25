@@ -58,7 +58,13 @@ export const useFilteredModels = (assistantType: number | null, shouldFetch: boo
         };
         const onMenuActivated = (event: Event) => {
             const menu = (event as CustomEvent<string>).detail;
-            if (menu && menu !== "assistant-config" && menu !== "feature-assistant-config") return;
+            if (
+                menu &&
+                menu !== "assistant-config" &&
+                menu !== "feature-assistant-config" &&
+                menu !== "butler-config" &&
+                menu !== "ai-automation-config"
+            ) return;
             requestRefresh();
         };
         window.addEventListener("focus", refreshWhenVisible);

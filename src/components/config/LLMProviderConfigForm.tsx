@@ -37,6 +37,8 @@ import { useVaultItems } from "@/hooks/useVaultItems";
 import VaultRefField from "./vault/VaultRefField";
 import DeepSeekCapabilities from "./DeepSeekCapabilities";
 import { ProviderQuota } from "./ProviderQuota";
+import EnvVarEditor from "./EnvVarEditor";
+import SettingsLink from "./SettingsLink";
 import { containsVaultRef } from "./vault/vaultRefs";
 import {
     LLMModel,
@@ -660,12 +662,19 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 {
                     key: "acp_env_vars",
                     config: {
-                        type: "textarea" as const,
-                        label: "环境变量（JSON）",
+                        type: "custom" as const,
+                        label: "环境变量",
                         value: "",
-                        className: "min-h-24",
-                        placeholder: '{"OPENAI_BASE_URL":"..."}',
                         tooltip: "默认复用 ~/.codex 登录态；这里只填写需要覆盖的环境变量",
+                        customRender: (field: { value?: string; onChange: (value: string) => void }) => (
+                            <EnvVarEditor
+                                value={field.value ?? ""}
+                                onChange={field.onChange}
+                                format="json"
+                                placeholder='{"OPENAI_BASE_URL":"..."}'
+                                ariaLabel="Codex 环境变量"
+                            />
+                        ),
                     },
                 },
                 agentProxyField,
@@ -737,12 +746,19 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 {
                     key: "acp_env_vars",
                     config: {
-                        type: "textarea" as const,
-                        label: "环境变量（JSON）",
+                        type: "custom" as const,
+                        label: "环境变量",
                         value: "",
-                        className: "min-h-24",
-                        placeholder: '{"ANTHROPIC_BASE_URL":"..."}',
                         tooltip: "默认复用本机 Claude Code 登录态；这里只填写需要覆盖的环境变量",
+                        customRender: (field: { value?: string; onChange: (value: string) => void }) => (
+                            <EnvVarEditor
+                                value={field.value ?? ""}
+                                onChange={field.onChange}
+                                format="json"
+                                placeholder='{"ANTHROPIC_BASE_URL":"..."}'
+                                ariaLabel="Claude Code 环境变量"
+                            />
+                        ),
                     },
                 },
                 agentProxyField,
@@ -829,14 +845,20 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                                 {
                                     key: "acp_claude_env_vars",
                                     config: {
-                                        type: "textarea" as const,
+                                        type: "custom" as const,
                                         label: "Claude 环境变量",
                                         value: "",
-                                        className: "min-h-32",
-                                        placeholder:
-                                            "ANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_BASE_URL=https://your-proxy.example.com",
                                         tooltip:
-                                            "每行一个 KEY=VALUE；仅在“手动填写环境变量”模式下生效",
+                                            "仅在“手动填写环境变量”模式下生效，启动 claude-code-acp 时注入",
+                                        customRender: (field: { value?: string; onChange: (value: string) => void }) => (
+                                            <EnvVarEditor
+                                                value={field.value ?? ""}
+                                                onChange={field.onChange}
+                                                format="dotenv"
+                                                placeholder={"ANTHROPIC_API_KEY=sk-ant-...\nANTHROPIC_BASE_URL=https://..."}
+                                                ariaLabel="Claude 环境变量"
+                                            />
+                                        ),
                                     },
                                 },
                             ]
@@ -919,7 +941,15 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 config: {
                     type: "custom" as const,
                     label: "能力",
-                    hint: <span>同一把 Key 可供内置搜索使用；搜索参数在「应用与工具 → 搜索工具」中调整。</span>,
+                    hint: (
+                        <span>
+                            同一把 Key 可供内置搜索使用；搜索参数在{" "}
+                            <SettingsLink menu="mcp-config" variant="link">
+                                应用与工具 → 搜索工具
+                            </SettingsLink>{" "}
+                            中调整。
+                        </span>
+                    ),
                     value: "",
                     customRender: () => (
                         <DeepSeekCapabilities
@@ -988,19 +1018,28 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         onCheckedChange={() => onToggleEnabled(index)}
                     />
                 </div>
+                {onRename && (
+                    <Button
+                        iconLabel="重命名提供商"
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleOpenRenameDialog}
+                        className="gap-1 text-xs px-2 py-1 h-7"
+                    >
+                        <Edit className="h-3.5 w-3.5" />
+                    </Button>
+                )}
                 {onShare && (
                     <div className="flex items-center gap-1">
-                        {onShare && (
-                            <Button
-                                iconLabel="分享提供商"
-                                variant="ghost"
-                                size="sm"
-                                onClick={onShare}
-                                className="gap-1 text-xs px-2 py-1 h-7"
-                            >
-                                <Share className="h-3 w-3" />
-                            </Button>
-                        )}
+                        <Button
+                            iconLabel="分享提供商"
+                            variant="ghost"
+                            size="sm"
+                            onClick={onShare}
+                            className="gap-1 text-xs px-2 py-1 h-7"
+                        >
+                            <Share className="h-3 w-3" />
+                        </Button>
                     </div>
                 )}
 

@@ -179,7 +179,7 @@ pub fn resolve_auto_execute(
 }
 
 pub fn unconfigured_model_reason() -> String {
-    "自动审核模型未配置，请在设置 → 辅助AI 中选择模型".to_string()
+    "自动审核模型未配置，请在「设置 → AI 与自动化」中选择模型".to_string()
 }
 
 pub fn missing_model_reason(model_code: &str, provider_id: i64, source: &str) -> String {
@@ -900,6 +900,9 @@ fn configured_review_model(
         .map(|config| config.value.trim().to_string())
         .unwrap_or_default();
     if model_code.is_empty() || provider_id.is_empty() {
+        if let Some(fallback) = crate::api::ai::config::resolve_default_decision_model(config_feature_map) {
+            return Ok(fallback);
+        }
         return Err(unconfigured_model_reason());
     }
     let provider_id = provider_id.parse::<i64>().map_err(|_| {

@@ -55,10 +55,17 @@ export const ReviewOutputCapability: React.FC<{ model: string; mode: string }> =
 interface SummaryConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
+    /** Hide internal save footer when embedded inside a composite page with its own sticky footer. */
+    hideFooter?: boolean;
+    /** Label of the global default light model for display in inherit option. */
+    defaultLightModelLabel?: string;
+    /** Value (`code%%providerId`) of the global default decision model. */
+    defaultDecisionModelValue?: string;
 }
 
 // 可折叠的配置分组
 interface ConfigSectionProps {
+    id?: string;
     title: string;
     description?: string;
     enabled: boolean;
@@ -67,6 +74,7 @@ interface ConfigSectionProps {
 }
 
 const ConfigSection: React.FC<ConfigSectionProps> = ({
+    id,
     title,
     description,
     enabled,
@@ -76,7 +84,7 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({
     const [isExpanded, setIsExpanded] = React.useState(true);
 
     return (
-        <section className="space-y-3">
+        <section id={id} className="space-y-3">
             <div className="flex items-center justify-between gap-3">
                 <button
                     type="button"
@@ -113,6 +121,7 @@ interface ModelSelectProps {
     placeholder?: string;
     disabled?: boolean;
     allowClear?: boolean;
+    clearLabel?: string;
     includeDecision?: boolean;
 }
 
@@ -122,6 +131,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
     placeholder = "选择模型",
     disabled,
     allowClear = false,
+    clearLabel = "不使用",
     includeDecision = false,
 }) => {
     const { models, loading, error } = useModels(!disabled, { includeDecision });
@@ -152,7 +162,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
             </SelectTrigger>
             <SelectContent>
                 {allowClear && (
-                    <SelectItem value={CLEAR_MODEL_VALUE}>不使用</SelectItem>
+                    <SelectItem value={CLEAR_MODEL_VALUE}>{clearLabel}</SelectItem>
                 )}
                 {modelOptions.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
@@ -167,17 +177,27 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
 export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
     form,
     onSave,
+    hideFooter = false,
+    defaultLightModelLabel,
+    defaultDecisionModelValue,
 }) => {
     const assistantAiEnabled = Boolean(form.watch("assistant_ai_enabled"));
     const selectedAutoReviewModel = String(form.watch("auto_review_model") || "");
+    const effectiveReviewModel = selectedAutoReviewModel || defaultDecisionModelValue || "";
     const { models: reviewCandidateModels } = useModels(assistantAiEnabled, { includeDecision: true });
+    const defaultDecisionLabel = useMemo(() => {
+        if (!defaultDecisionModelValue) return undefined;
+        return reviewCandidateModels.find(
+            (m) => `${m.code}%%${m.llm_provider_id}` === defaultDecisionModelValue,
+        )?.name;
+    }, [reviewCandidateModels, defaultDecisionModelValue]);
     const isDecisionReviewModel = useMemo(() => {
-        if (!selectedAutoReviewModel) return false;
+        if (!effectiveReviewModel) return false;
         const found = reviewCandidateModels.find(
-            (m) => `${m.code}%%${m.llm_provider_id}` === selectedAutoReviewModel,
+            (m) => `${m.code}%%${m.llm_provider_id}` === effectiveReviewModel,
         );
         return Boolean(found && (found.is_decision || isDecisionRequestMode(found.request_mode)));
-    }, [reviewCandidateModels, selectedAutoReviewModel]);
+    }, [reviewCandidateModels, effectiveReviewModel]);
 
     const handleSaveSummary = useCallback(async () => {
         try {
@@ -242,6 +262,8 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                                 value={field.value || ""}
                                                 onChange={field.onChange}
                                                 placeholder="选择总结模型"
+                                                allowClear={Boolean(defaultLightModelLabel)}
+                                                clearLabel={defaultLightModelLabel ? `沿用默认轻量模型（${defaultLightModelLabel}）` : "不使用"}
                                                 disabled={!form.watch("title_summary_enabled")}
                                             />
                                         </FormControl>
@@ -301,6 +323,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
 
                     {/* 表单自动填写 */}
                     <ConfigSection
+                        id="form-autofill"
                         title="表单自动填写"
                         description="根据对话内容自动填写表单字段"
                         enabled={form.watch("form_autofill_enabled") === true || form.watch("form_autofill_enabled") === "true"}
@@ -317,6 +340,8 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                             value={field.value || ""}
                                             onChange={field.onChange}
                                             placeholder="选择表单填写模型"
+                                            allowClear={Boolean(defaultLightModelLabel)}
+                                            clearLabel={defaultLightModelLabel ? `沿用默认轻量模型（${defaultLightModelLabel}）` : "不使用"}
                                             disabled={!form.watch("form_autofill_enabled")}
                                         />
                                     </FormControl>
@@ -373,6 +398,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                                 onChange={field.onChange}
                                                 placeholder="选择自动审核模型"
                                                 allowClear
+                                                clearLabel={defaultDecisionLabel ? `沿用默认决策/审核模型（${defaultDecisionLabel}）` : "不使用"}
                                                 includeDecision
                                                 disabled={!form.watch("assistant_ai_enabled")}
                                             />
@@ -412,7 +438,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                         )}
                                     />
                                     <DecisionModelProbeButton
-                                        modelValue={selectedAutoReviewModel}
+                                        modelValue={effectiveReviewModel}
                                         disabled={!form.watch("assistant_ai_enabled")}
                                     />
                                 </>
@@ -433,13 +459,14 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                                             <FormMessage />
                                         </FormItem>
                                     )} />
-                                    <ReviewOutputCapability model={selectedAutoReviewModel} mode={form.watch("auto_review_output_mode") || "auto"} />
+                                    <ReviewOutputCapability model={effectiveReviewModel} mode={form.watch("auto_review_output_mode") || "auto"} />
                                 </>
                             )}
                         </div>
                     </section>
 
                     <ConfigSection
+                        id="context-compaction"
                         title="上下文压缩"
                         description="为长对话自动压缩较早历史，适用于使用普通聊天链路的对话"
                         enabled={
@@ -529,11 +556,13 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                 </CardContent>
             </Card>
             {/* 保存按钮 */}
-            <ConfigSaveFooter>
-                <Button onClick={handleSaveSummary} className="bg-primary hover:bg-primary/90 text-primary-foreground">
-                    保存配置
-                </Button>
-            </ConfigSaveFooter>
+            {!hideFooter && (
+                <ConfigSaveFooter>
+                    <Button onClick={handleSaveSummary} className="bg-primary hover:bg-primary/90 text-primary-foreground">
+                        保存配置
+                    </Button>
+                </ConfigSaveFooter>
+            )}
         </Form>
     );
 };

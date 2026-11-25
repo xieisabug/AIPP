@@ -5,6 +5,7 @@ import { Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FolderPicker } from "@/components/config/FolderPicker";
 import AntigravityLogin from "@/components/config/AntigravityLogin";
+import EnvVarEditor from "@/components/config/EnvVarEditor";
 import {
     NATIVE_AGENT_DETECTION_KEYS,
     useNativeAgentEnvironment,
@@ -245,8 +246,21 @@ export function useNativeAgentProviderFields({ apiType, apiTypeLabel, providerId
                 hint: workingDirectory?.configured && !workingDirectory.exists
                     ? <span role="alert" className="text-destructive">目录不存在：{workingDirectory.resolved}</span>
                     : undefined } },
-            { key: "acp_env_vars", config: { type: "textarea" as const, label: "环境变量（可选）", value: "", placeholder: "KEY=VALUE，每行一个",
-                tooltip: apiType === "antigravity" ? "支持每行 KEY=VALUE 或 JSON；账号与认证目录由上方认证设置管理" : "支持每行 KEY=VALUE 或 JSON 对象；默认复用本机登录与配置" } },
+            { key: "acp_env_vars", config: custom(
+                "环境变量（可选）",
+                (field) => (
+                    <EnvVarEditor
+                        value={text(field.value)}
+                        onChange={field.onChange}
+                        format="dotenv"
+                        placeholder="KEY=VALUE，每行一个"
+                        ariaLabel={`${apiTypeLabel} 环境变量`}
+                    />
+                ),
+                apiType === "antigravity"
+                    ? "支持每行 KEY=VALUE 或粘贴 JSON；账号与认证目录由上方认证设置管理"
+                    : "支持每行 KEY=VALUE 或粘贴 JSON 对象；默认复用本机登录与配置"
+            ) },
         ];
     }, [enabled, apiType, apiTypeLabel, providerId, standalone, authMethod, state, workingDirectory, formSnapshot]);
 }

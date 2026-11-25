@@ -1,6 +1,7 @@
 import { isAssistantExtensionConfig } from "@/utils/assistantFormSections";
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useEffect, useState } from "react";
 import React from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import quickAssistantPrompt from "@/data/quick-assistant-prompt.txt?raw";
@@ -11,12 +12,36 @@ import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDispl
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
 import MobileSkillsManager from "@/components/config/MobileSkillsManager";
 import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspaceFieldDisplay";
+import EnvVarEditor from "@/components/config/EnvVarEditor";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredProviders } from "@/hooks/useFilteredProviders";
 import { useIsMobilePlatform, usePlatform } from "@/hooks/use-platform";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import type { AgentModelOption } from "@/utils/agentDefaults";
 import { buildNativeAgentApprovalFields } from "./nativeAgentApprovalFields";
+
+const CODEX_APPROVAL_LABELS: Record<string, string> = {
+    untrusted: "仅读命令自动执行",
+    "on-request": "按需询问",
+    never: "从不请求审批",
+};
+const CODEX_SANDBOX_LABELS: Record<string, string> = {
+    "read-only": "只读",
+    "workspace-write": "工作区可写",
+    "danger-full-access": "完全访问",
+};
+const CODEX_REVIEWER_LABELS: Record<string, string> = {
+    user: "人工审批",
+    auto_review: "自动审批",
+};
+const CLAUDE_EFFORT_LABELS: Record<string, string> = {
+    default: "CLI 默认",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+};
 
 function AutoReviewModelMissingHint() {
     return React.createElement(
@@ -87,6 +112,35 @@ export const useAssistantFormConfig = ({
     const isAgentAssistant = currentAssistant?.assistant.assistant_type === 4;
     // 智能体助手需要知道所选提供商的 api_type，以便按通道（如 Codex）展示专用配置项
     const { providers: agentProviders } = useFilteredProviders(isAgentAssistant ? 4 : null, isAgentAssistant);
+
+    // 读取所选 Agent 提供商的当前配置，以便「跟随提供商配置」时直接展示当前生效值
+    const activeAgentProviderId = useMemo(() => {
+        if (!isAgentAssistant || !currentAssistant) return "";
+        const modelProviderId = currentAssistant.model[0]?.provider_id ?? 0;
+        if (modelProviderId > 0) return String(modelProviderId);
+        const legacy = currentAssistant.model_configs.find((c) => c.name === "acp_provider")?.value?.trim() ?? "";
+        return Number.parseInt(legacy, 10) > 0 ? legacy : "";
+    }, [isAgentAssistant, currentAssistant]);
+
+    const [providerConfigMap, setProviderConfigMap] = useState<Record<string, string>>({});
+    useEffect(() => {
+        if (!activeAgentProviderId) {
+            setProviderConfigMap({});
+            return;
+        }
+        let active = true;
+        invoke<Array<{ name: string; value: string }>>("get_llm_provider_config", { id: activeAgentProviderId })
+            .then((items) => {
+                if (!active || !Array.isArray(items)) return;
+                const map: Record<string, string> = {};
+                for (const item of items) map[item.name] = item.value;
+                setProviderConfigMap(map);
+            })
+            .catch(() => {
+                if (active) setProviderConfigMap({});
+            });
+        return () => { active = false; };
+    }, [activeAgentProviderId]);
 
     const resolvePluginFieldValue = useCallback(
         (
@@ -187,14 +241,21 @@ export const useAssistantFormConfig = ({
             const selectedAgentModel = agentModelOptions.find(option =>
                 option.code === `${currentAssistant.model[0]?.model_code}%%${currentProviderId}`
             ) ?? agentModelOptions.find(option => option.is_default);
+            const inheritedClaudeEffort = CLAUDE_EFFORT_LABELS[providerConfigMap.claude_effort || "default"] ?? (providerConfigMap.claude_effort || "CLI 默认");
+            const inheritedCodexApproval = CODEX_APPROVAL_LABELS[providerConfigMap.codex_approval_policy || "on-request"] ?? (providerConfigMap.codex_approval_policy || "按需询问");
+            const inheritedCodexSandbox = CODEX_SANDBOX_LABELS[providerConfigMap.codex_sandbox || "workspace-write"] ?? (providerConfigMap.codex_sandbox || "工作区可写");
+            const inheritedCodexReviewer = CODEX_REVIEWER_LABELS[providerConfigMap.codex_approvals_reviewer || "user"] ?? (providerConfigMap.codex_approvals_reviewer || "人工审批");
+
+            const reviewModelConfigured = Boolean(
+                (getConfigValue("conversation_summary", "auto_review_model").trim()
+                    && /^[1-9]\d*$/.test(getConfigValue("conversation_summary", "auto_review_provider_id").trim()))
+                || getConfigValue("conversation_summary", "default_decision_model").includes("%%")
+            );
             const nativeAgentApprovalFields = buildNativeAgentApprovalFields(
                 agentApiType,
                 getAcpConfigValue,
                 handleConfigChange,
-                Boolean(
-                    getConfigValue("conversation_summary", "auto_review_model").trim()
-                    && /^[1-9]\d*$/.test(getConfigValue("conversation_summary", "auto_review_provider_id").trim())
-                ),
+                reviewModelConfigured,
                 () => React.createElement(AutoReviewModelMissingHint),
                 agentProvider?.tool_review_mode,
             );
@@ -261,7 +322,7 @@ export const useAssistantFormConfig = ({
                                   label: "默认思考强度",
                                   value: getAcpConfigValue("claude_effort", "") || "inherit",
                                   options: [
-                                      { value: "inherit", label: "跟随提供商" },
+                                      { value: "inherit", label: `跟随提供商（当前：${inheritedClaudeEffort}）` },
                                       ...(selectedAgentModel?.efforts ?? []).map(value => ({
                                           value,
                                           label: ({ default: "CLI 默认", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" } as Record<string, string>)[value] ?? value,
@@ -306,13 +367,20 @@ export const useAssistantFormConfig = ({
                 {
                     key: "acp_env_vars",
                     config: {
-                        type: "textarea" as const,
+                        type: "custom" as const,
                         label: "环境变量",
                         value: getAcpConfigValue("acp_env_vars", ""),
-                        tooltip: "每行一个，格式：变量名=值；原生 Pi / Cursor / OpenCode 也支持 JSON 对象",
-                        className: "h-32",
-                        onChange: (value: string | boolean) =>
-                            handleConfigChange("acp_env_vars", value, "string"),
+                        tooltip: "启动该智能体助手时覆盖注入的环境变量；支持粘贴 .env 或 JSON",
+                        customRender: (field?: { value?: string; onChange?: (value: string) => void }) =>
+                            React.createElement(EnvVarEditor, {
+                                value: field?.value ?? getAcpConfigValue("acp_env_vars", ""),
+                                onChange: (next: string) => {
+                                    field?.onChange?.(next);
+                                    handleConfigChange("acp_env_vars", next, "string");
+                                },
+                                format: "dotenv",
+                                ariaLabel: "智能体环境变量",
+                            }),
                     },
                 },
                 {
@@ -336,7 +404,7 @@ export const useAssistantFormConfig = ({
                                   label: "审批策略",
                                   value: getAcpConfigValue("codex_approval_policy", "") || "default",
                                   options: [
-                                      { value: "default", label: "跟随提供商配置" },
+                                      { value: "default", label: `跟随提供商（当前：${inheritedCodexApproval}）` },
                                       { value: "untrusted", label: "仅读命令自动执行" },
                                       { value: "on-request", label: "由模型决定何时请求审批" },
                                       { value: "never", label: "从不请求审批" },
@@ -357,7 +425,7 @@ export const useAssistantFormConfig = ({
                                   label: "沙箱模式",
                                   value: getAcpConfigValue("codex_sandbox", "") || "default",
                                   options: [
-                                      { value: "default", label: "跟随提供商配置" },
+                                      { value: "default", label: `跟随提供商（当前：${inheritedCodexSandbox}）` },
                                       { value: "read-only", label: "只读" },
                                       { value: "workspace-write", label: "工作区可写" },
                                       { value: "danger-full-access", label: "完全访问" },
@@ -378,7 +446,7 @@ export const useAssistantFormConfig = ({
                                   label: "审批人",
                                   value: getAcpConfigValue("codex_approvals_reviewer", "") || "default",
                                   options: [
-                                      { value: "default", label: "跟随提供商配置" },
+                                      { value: "default", label: `跟随提供商（当前：${inheritedCodexReviewer}）` },
                                       { value: "user", label: "人工审批" },
                                       { value: "auto_review", label: "自动审批" },
                                   ],
@@ -569,8 +637,9 @@ export const useAssistantFormConfig = ({
                 ? "auto_model"
                 : "off";
             const autoReviewModelConfigured = Boolean(
-                getConfigValue("conversation_summary", "auto_review_model").trim()
-                && getConfigValue("conversation_summary", "auto_review_provider_id").trim()
+                (getConfigValue("conversation_summary", "auto_review_model").trim()
+                    && getConfigValue("conversation_summary", "auto_review_provider_id").trim())
+                || getConfigValue("conversation_summary", "default_decision_model").includes("%%")
             );
             baseConfigs.push({
                 key: "tool_review_mode",
@@ -583,7 +652,7 @@ export const useAssistantFormConfig = ({
                         { value: "auto_model", label: "模型自动审核" },
                     ],
                     tooltip:
-                        "安全的内置操作直接执行；其他操作（包括外部工具）必须审核，自动运行开关不能跳过审核。人工审核等待确认；模型自动审核由「设置 → 辅助AI」中的模型判断能否执行。审核中仍可手动确认或拒绝。",
+                        "安全的内置操作直接执行；其他操作（包括外部工具）必须审核，自动运行开关不能跳过审核。人工审核等待确认；模型自动审核由「设置 → AI 与自动化」中的模型判断能否执行。审核中仍可手动确认或拒绝。",
                     onChange: (value: string | boolean) =>
                         handleConfigChange("tool_review_mode", value, "string"),
                 },
@@ -785,6 +854,7 @@ export const useAssistantFormConfig = ({
         getAcpConfigValue,
         isMobilePlatform,
         platform,
+        providerConfigMap,
     ]);
 
     return { formConfig };

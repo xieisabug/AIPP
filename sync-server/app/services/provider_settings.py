@@ -12,7 +12,8 @@ REFERENCE = "value_provider_id"
 CAPABILITY_HEADER = "X-AIPP-Provider-Refs"
 UPGRADE_REQUIRED = "模型配置使用全局供应商引用，请升级 AIPP 客户端后重新同步"
 SUMMARY_MODELS = {"title_model", "form_autofill_model", "memory_summary_model",
-                  "auto_review_model", "conversation_summary_model"}
+                  "auto_review_model", "conversation_summary_model",
+                  "default_light_model", "default_decision_model"}
 SUMMARY_PROVIDERS = {key.removesuffix("_model") + "_provider_id" for key in SUMMARY_MODELS} | {"provider_id"}
 EXPERIMENTAL_MODELS = {"butler_model_id", "butler_helper_model_id", "butler_group_dispatch_model_id",
                        "mcp_summarizer_model_id", "assistant_summarizer_model_id",

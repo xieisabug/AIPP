@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 pub const REFERENCE_HEADER: &str = "x-aipp-credential-ref";
 /// The connection exists (it syncs) but this device holds no copy of its credential. A device-local
 /// condition, never an authentication failure: recording it would disable the connection everywhere.
-pub const MISSING_ON_DEVICE: &str = "此设备没有该连接的凭据：连接凭据只在设置同步口令后才会同步到其他设备，请在「程序功能 → 数据」中设置或解锁同步口令";
+pub const MISSING_ON_DEVICE: &str = "此设备没有该连接的凭据：连接凭据只在设置同步口令后才会同步到其他设备，请在「数据与同步」中设置或解锁同步口令";
 pub static CREDENTIAL_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
 // Never derive Debug: this value only exists on the trusted Rust side.

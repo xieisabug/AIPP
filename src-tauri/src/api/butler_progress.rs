@@ -225,7 +225,12 @@ pub(crate) fn observe(conversation: i64, event: &ConversationEvent, response_id:
 
 pub(crate) async fn begin_turn(app: &AppHandle, conversation: i64, user_id: i64, request: &str) {
     let model = super::butler_api::get_experimental_config_value(app, HELPER_MODEL_KEY).await;
-    let Some(model) = model.as_deref().and_then(parse_model) else { return };
+    let model = model.as_deref().and_then(parse_model).or_else(|| {
+        let state = app.try_state::<crate::FeatureConfigState>()?;
+        let map = state.config_feature_map.try_lock().ok()?;
+        crate::api::ai::config::resolve_default_light_model(&map)
+    });
+    let Some(model) = model else { return };
     let manager = app.state::<ConversationActivityManager>();
     let epoch = manager.get_runtime_state(conversation).await.epoch;
     let turn = Arc::new(Turn { user_id, epoch, buffer: Default::default(), cancel: Default::default() });

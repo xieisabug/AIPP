@@ -326,11 +326,23 @@ async fn model(app: &AppHandle) -> Result<(String, i64, &'static str), String> {
             .ok_or_else(|| format!("决策模型配置无效：{raw}；请在管家设置中重新选择"))?;
         return Ok((code, provider, "决策模型"));
     }
+    let feature_map = app
+        .state::<crate::FeatureConfigState>()
+        .config_feature_map
+        .lock()
+        .await
+        .clone();
+    if let Some((code, provider)) = crate::api::ai::config::resolve_default_decision_model(&feature_map) {
+        return Ok((code, provider, "默认决策模型"));
+    }
     let helper = super::butler_api::get_experimental_config_value(app, super::butler_progress::HELPER_MODEL_KEY).await
         .filter(|value| !value.trim().is_empty());
     if let Some(raw) = helper {
         let (code, provider) = parse_model(&raw).ok_or_else(|| format!("小型辅助模型配置无效：{raw}；请在管家设置中重新选择"))?;
         return Ok((code, provider, "小型辅助模型"));
+    }
+    if let Some((code, provider)) = crate::api::ai::config::resolve_default_light_model(&feature_map) {
+        return Ok((code, provider, "默认轻量模型"));
     }
     let selection = super::butler_api::get_butler_model_selection(app).await?;
     Ok((selection.model_code, selection.provider_id, "总管家模型"))

@@ -5,18 +5,22 @@ export const settingRowClassName = "flex items-center justify-between gap-4 px-4
 export const stackedRowClassName = "grid gap-2 px-4 py-3";
 
 export function SettingsGroup({
+    id,
     title,
     description,
     action,
+    className,
     children,
 }: {
+    id?: string;
     title: ReactNode;
     description?: ReactNode;
     action?: ReactNode;
+    className?: string;
     children: ReactNode;
 }) {
     return (
-        <section className="space-y-2">
+        <section id={id} className={`space-y-2 ${className ?? ""}`}>
             <div className="flex items-end justify-between gap-3">
                 <div className="min-w-0">
                     <h3 className="text-sm font-medium">{title}</h3>

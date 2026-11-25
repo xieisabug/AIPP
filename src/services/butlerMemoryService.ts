@@ -8,6 +8,12 @@ export const BUTLER_MEMORY_CHANGED_EVENT = "butler_memory_changed";
 export const listButlerMemories = (conversationId: number) =>
     invoke<ButlerMemory[]>("list_butler_memories", { conversationId });
 
+/** 设置页按助手或总管家身份读取记忆（传 null/undefined 表示总管家 + 全局）。 */
+export const listAssistantButlerMemories = (assistantId?: number | null) =>
+    invoke<ButlerMemory[]>("list_assistant_butler_memories", {
+        assistantId: assistantId ?? null,
+    });
+
 /** 带上读取时的 revision，别处刚改过时会报错而不是覆盖。 */
 export const updateButlerMemory = (id: number, content: string, revision: number) =>
     invoke<ButlerMemory>("update_butler_memory", { id, content, revision });

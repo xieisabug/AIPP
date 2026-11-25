@@ -18,9 +18,10 @@ import VaultItemDetail, { type VaultItemPatch } from "./vault/VaultItemDetail";
 import VaultMigrationDialog from "./vault/VaultMigrationDialog";
 import { VaultKeyInput } from "./vault/VaultItemEditDialog";
 import { isSimpleVaultValue, keyError, suggestKey } from "./vault/vaultHelpers";
+import SettingsLink from "./SettingsLink";
 
 interface VaultConfigProps {
-    navigateTo?: (menuKey: string) => void;
+    navigateTo?: (menuKey: string, subNav?: string) => void;
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -32,18 +33,33 @@ const isEnterSubmit = (event: React.KeyboardEvent) =>
  * 只在需要用户处理时出现：其他设备开启了同步、口令已更换，或有条目还没解密。
  * 「未设置同步口令」「同步正常」都是常态，不显示。
  */
-function SyncNotice({ capability }: { capability: VaultCapability }) {
-    const where = "「程序功能 → 数据」";
+function SyncNotice({
+    capability,
+    navigateTo,
+}: {
+    capability: VaultCapability;
+    navigateTo?: (menuKey: string, subNav?: string) => void;
+}) {
     const pending = capability.pendingFromOtherDevices;
     const text = capability.syncState === "mismatch"
-        ? `同步口令已在其他设备更换，请在${where}输入新口令。`
+        ? "同步口令已在其他设备更换，请前往输入新口令。"
         : pending > 0
-            ? `有 ${pending} 个来自其他设备的条目待解锁，在${where}输入同步口令后可用。`
+            ? `有 ${pending} 个来自其他设备的条目待解锁，输入同步口令后可用。`
             : capability.syncState === "needs_passphrase"
-                ? `其他设备已开启同步，在${where}输入同步口令后才能同步。`
+                ? "其他设备已开启同步，输入同步口令后才能同步。"
                 : null;
     if (!text) return null;
-    return <p className="shrink-0 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm" data-aipp-slot="vault-sync-notice">{text}</p>;
+    return (
+        <div
+            className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm"
+            data-aipp-slot="vault-sync-notice"
+        >
+            <span>{text}</span>
+            <SettingsLink menu="data-sync-config" subNav="#passphrase" navigateTo={navigateTo} variant="link">
+                前往数据与同步
+            </SettingsLink>
+        </div>
+    );
 }
 
 interface CreateState {
@@ -437,7 +453,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                     showEmptyState
                     emptyState={
                         <VaultGuide onCreate={openCreate}>
-                            <SyncNotice capability={capability} />
+                            <SyncNotice capability={capability} navigateTo={navigateTo} />
                             <VaultMigrationDialog onComplete={() => reload()} />
                             {appCredentialsLink}
                         </VaultGuide>
@@ -454,7 +470,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                 sidebar={sidebar}
                 content={
                     <div className="space-y-4">
-                        <SyncNotice capability={capability} />
+                        <SyncNotice capability={capability} navigateTo={navigateTo} />
                         <VaultMigrationDialog onComplete={() => reload()} />
                         {selected && (
                             <VaultItemDetail

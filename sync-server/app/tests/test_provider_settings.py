@@ -87,6 +87,8 @@ def test_legacy_repair_preserves_remote_choice(witness):
 
 @pytest.mark.parametrize(("kind", "fields", "value"), [
     ("system.feature_config", {"feature_code": "conversation_summary", "key": "title_provider_id"}, "41"),
+    ("system.feature_config", {"feature_code": "conversation_summary", "key": "default_light_model"}, "flash%%41"),
+    ("system.feature_config", {"feature_code": "conversation_summary", "key": "default_decision_model"}, "jev%%41"),
     ("assistant.model_config", {"name": "acp_provider"}, "41"),
     ("system.feature_config", {"feature_code": "experimental", "key": "mcp_summarizer_model_id"}, "code%%41"),
 ])

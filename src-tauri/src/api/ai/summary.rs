@@ -263,9 +263,13 @@ pub async fn generate_conversation_summary(
                 AppError::UnknownError("对话总结模型 provider_id 解析失败".to_string())
             })?;
             (model_code, provider_id)
+        } else if let Some((fallback_code, fallback_pid)) =
+            crate::api::ai::config::resolve_default_light_model(&config_feature_map)
+        {
+            (fallback_code, fallback_pid)
         } else {
             return Err(AppError::UnknownError(
-                "对话总结模型未配置，请在设置中配置 conversation_summary_model".to_string(),
+                "对话总结模型未配置，请在「设置 → AI 与自动化」中配置对话总结模型或默认轻量模型".to_string(),
             ));
         }
     };
