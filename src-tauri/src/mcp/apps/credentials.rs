@@ -103,7 +103,29 @@ pub fn migrate_all(app: &tauri::AppHandle) -> Result<(), String> {
     let references = db.conn.prepare("SELECT credential_ref FROM app_connection WHERE credential_ref IS NOT NULL UNION SELECT reference FROM app_credential_cleanup")
         .map_err(|e| e.to_string())?.query_map([], |r| r.get::<_,String>(0)).map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
-    for reference in references { load_optional(app, &reference)?; }
+    let (stored, pending_cleanup) = {
+        let _lock = crate::sync::vault::LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+        let system = crate::db::system_db::SystemDatabase::new(app).map_err(|e| e.to_string())?;
+        crate::sync::vault::init(&system.conn)?;
+        let stored = crate::sync::vault::stored_references_with(&system.conn)?;
+        let pending_cleanup: std::collections::HashSet<String> = system.conn
+            .prepare("SELECT reference FROM credential_vault_legacy_cleanup")
+            .map_err(|e| e.to_string())?
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| e.to_string())?;
+        (stored, pending_cleanup)
+    };
+    for reference in references {
+        if stored.contains(&reference) {
+            if pending_cleanup.contains(&reference) {
+                cleanup_legacy(app, &reference)?;
+            }
+        } else {
+            load_optional(app, &reference)?;
+        }
+    }
     // MCP deletion cascades app metadata in another database. Remove orphaned
     // Vault rows so the ordinary sync deletion scanner publishes tombstones.
     let _lock = crate::sync::vault::LOCK.lock().map_err(|_| "凭据库锁已损坏")?;

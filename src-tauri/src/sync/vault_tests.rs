@@ -387,3 +387,128 @@ fn test_vault_stored_references_reports_presence_without_decrypting() {
     assert!(stored.contains(&here));
     assert!(!stored.contains(&Uuid::new_v4().to_string()), "a reference that synced without its secret is absent");
 }
+
+#[derive(Default)]
+struct CountingKeys {
+    values: RefCell<HashMap<String, String>>,
+    read_calls: RefCell<usize>,
+    read_error: RefCell<Option<String>>,
+}
+impl KeyStore for CountingKeys {
+    fn read(&self, slot: &str) -> Result<Option<String>, String> {
+        *self.read_calls.borrow_mut() += 1;
+        if let Some(error) = self.read_error.borrow().clone() {
+            return Err(error);
+        }
+        Ok(self.values.borrow().get(slot).cloned())
+    }
+    fn write(&self, slot: &str, value: &str) -> Result<(), String> {
+        self.values.borrow_mut().insert(slot.into(), value.into());
+        Ok(())
+    }
+    fn remove(&self, slot: &str) -> Result<(), String> {
+        self.values.borrow_mut().remove(slot);
+        Ok(())
+    }
+}
+
+#[test]
+fn test_vault_cached_store_reads_os_once_and_updates_on_switch() {
+    let db = db();
+    let raw = CountingKeys::default();
+    let key = secrets::prepare_passphrase(&db, "shared-password", false).unwrap();
+    // Seed directly into underlying store as if persisted in a previous process run.
+    switch(&db, &raw, None, &key).unwrap();
+    *raw.read_calls.borrow_mut() = 0;
+
+    let cache = StdMutex::new(KeyCache::default());
+    let store = CachedKeyStore { inner: &raw, cache: &cache };
+    for _ in 0..5 {
+        let state = state_with(&db, &store, || panic!("active key exists")).unwrap();
+        assert_eq!(state.code(), "ready");
+    }
+    assert_eq!(*raw.read_calls.borrow(), 1, "repeated status reads should hit in-process cache");
+
+    // Switching keys writes the new slot into cache and evicts/retires the old one.
+    let next = secrets::prepare_passphrase(&db, "rotated-password", true).unwrap();
+    switch(&db, &store, Some(&key), &next).unwrap();
+    assert_eq!(*raw.read_calls.borrow(), 1, "switch should reuse cached old key without re-reading OS store");
+    let state = state_with(&db, &store, || panic!("active key exists")).unwrap();
+    assert_eq!(state.code(), "ready");
+    assert!(state.ready_key().unwrap().record == next.record, "current Vault key record must match the rotated key record");
+    assert_eq!(*raw.read_calls.borrow(), 1, "post-switch reads should hit cached new and retained keys");
+}
+
+#[test]
+fn test_vault_cached_store_circuit_breaks_after_denial_until_cleared() {
+    let db = db();
+    let raw = CountingKeys::default();
+    let key = secrets::prepare_passphrase(&db, "shared-password", false).unwrap();
+    switch(&db, &raw, None, &key).unwrap();
+    *raw.read_calls.borrow_mut() = 0;
+    *raw.read_error.borrow_mut() = Some("读取凭据库密钥失败，请解锁系统安全存储: User canceled".into());
+
+    let cache = StdMutex::new(KeyCache::default());
+    let store = CachedKeyStore { inner: &raw, cache: &cache };
+    for _ in 0..5 {
+        let state = super::secret_state_for_sync(state_with(&db, &store, || panic!("active key exists")));
+        assert_eq!(state.code(), "unavailable");
+    }
+    assert_eq!(*raw.read_calls.borrow(), 1, "denied OS keychain read must circuit-break subsequent background reads");
+
+    // Simulate user-initiated retry after unlocking/allowing keychain access.
+    *raw.read_error.borrow_mut() = None;
+    cache.lock().unwrap().blocked_error = None;
+    let recovered = state_with(&db, &store, || panic!("active key exists")).unwrap();
+    assert_eq!(recovered.code(), "ready");
+    assert_eq!(*raw.read_calls.borrow(), 2);
+    // Subsequent calls hit the populated cache.
+    assert_eq!(state_with(&db, &store, || panic!("active key exists")).unwrap().code(), "ready");
+    assert_eq!(*raw.read_calls.borrow(), 2);
+}
+
+#[test]
+fn test_vault_state_local_random_skips_os_key_store() {
+    let db = db();
+    let store = MemoryKeys::default();
+    let local = secrets::random_local_key();
+    switch(&db, &store, None, &local).unwrap();
+
+    // Without encrypted sync configured, state_with must not read the OS keychain.
+    let state = state_with(&db, &UnavailableKeys, || panic!("should not touch legacy")).unwrap();
+    assert_eq!(state.code(), "not_configured");
+    assert!(state.ready_key().is_none());
+
+    // Even when another device has published a remote key_check record, local-random still
+    // resolves to NeedsPassphrase from SQLite metadata alone.
+    let remote = secrets::prepare_passphrase(&db, "remote-password", false).unwrap();
+    secrets::write_record(&db, &remote.record).unwrap();
+    let state = state_with(&db, &UnavailableKeys, || panic!("should not touch legacy")).unwrap();
+    assert_eq!(state.code(), "needs_passphrase");
+    assert!(state.ready_key().is_none());
+}
+
+#[test]
+fn test_vault_read_missing_credential_skips_os_key_store() {
+    let db = db();
+    let missing = Uuid::new_v4().to_string();
+    assert!(read_from_store(&db, &UnavailableKeys, &missing, || panic!("should not touch legacy")).unwrap().is_none());
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM credential_vault_key", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+
+    // Even when a key record exists, looking up an absent credential does not touch the OS keychain.
+    let store = MemoryKeys::default();
+    let local = secrets::random_local_key();
+    switch(&db, &store, None, &local).unwrap();
+    assert!(read_from_store(&db, &UnavailableKeys, &missing, || panic!("should not touch legacy")).unwrap().is_none());
+}
+
+#[test]
+fn test_vault_finish_rotation_without_retired_keys_skips_os_key_store() {
+    let db = db();
+    let sync = Connection::open_in_memory().unwrap();
+    sync.execute_batch(SYNC_SCHEMA_SQL).unwrap();
+    let store = MemoryKeys::default();
+    let key = secrets::prepare_passphrase(&db, "shared-password", false).unwrap();
+    switch(&db, &store, None, &key).unwrap();
+    finish_rotation_with(&sync, &db, &UnavailableKeys).unwrap();
+}

@@ -658,6 +658,7 @@ fn after_unlock(db: &Connection, key: &secrets::SecretKey) {
 /// Open system.db and the Vault key under the shared Vault lock. Provisions a local key on first use.
 fn with_key<T>(app: &AppHandle, f: impl FnOnce(&Connection, &secrets::SecretKey) -> Result<T, String>) -> Result<T, String> {
     ensure_platform()?;
+    vault::clear_blocked();
     let _lock = vault::LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
     init(&db.conn)?;
@@ -746,14 +747,29 @@ pub(crate) fn replace_secret(app: &AppHandle, uuid: &str, value: &SecretValue) -
 }
 
 pub(crate) fn delete(app: &AppHandle, uuid: &str) -> Result<(), String> {
-    with_optional_key(app, |db, _| delete_with(db, uuid))?;
+    ensure_platform()?;
+    {
+        let _lock = vault::LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+        let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
+        delete_with(&db.conn, uuid)?;
+    }
     schedule_sync_after_local_change(app);
     Ok(())
 }
 
 /// Decrypt entries named in placeholders (trusted resolver only).
 pub(crate) fn resolve_keys(app: &AppHandle, keys: &[String]) -> Result<BTreeMap<String, Resolved>, ResolveError> {
-    with_resolver(app, |db, key| resolve_keys_with(db, Some(key), keys))
+    if keys.is_empty() { return Ok(BTreeMap::new()); }
+    ensure_platform().map_err(|e| ResolveError::new("vault_unavailable_on_device", e))?;
+    let _lock = vault::LOCK.lock().map_err(|_| ResolveError::new("vault_error", "凭据库锁已损坏"))?;
+    let db = SystemDatabase::new(app).map_err(|e| ResolveError::new("vault_error", e.to_string()))?;
+    init(&db.conn).map_err(|e| ResolveError::new("vault_error", e))?;
+    if !has_items(&db.conn).map_err(|e| ResolveError::new("vault_error", e))? {
+        return resolve_keys_with(&db.conn, None, keys);
+    }
+    let key = vault::key(app, &db.conn).map_err(|e| ResolveError::new("vault_locked", e))?;
+    after_unlock(&db.conn, &key);
+    resolve_keys_with(&db.conn, Some(&key), keys)
 }
 
 pub(crate) fn confirm_use(app: &AppHandle, expected: &BTreeMap<String, Resolved>, always: Option<(&[String], &str)>) -> Result<BTreeMap<String, Resolved>, ResolveError> {
@@ -764,7 +780,17 @@ pub(crate) fn confirm_use(app: &AppHandle, expected: &BTreeMap<String, Resolved>
 
 /// Decrypt the referenced entries for a configuration reference (trusted resolver only).
 pub(crate) fn resolve_ids(app: &AppHandle, uuids: &[String]) -> Result<BTreeMap<String, Resolved>, ResolveError> {
-    with_resolver(app, |db, key| resolve_ids_with(db, Some(key), uuids))
+    if uuids.is_empty() { return Ok(BTreeMap::new()); }
+    ensure_platform().map_err(|e| ResolveError::new("vault_unavailable_on_device", e))?;
+    let _lock = vault::LOCK.lock().map_err(|_| ResolveError::new("vault_error", "凭据库锁已损坏"))?;
+    let db = SystemDatabase::new(app).map_err(|e| ResolveError::new("vault_error", e.to_string()))?;
+    init(&db.conn).map_err(|e| ResolveError::new("vault_error", e))?;
+    if !has_items(&db.conn).map_err(|e| ResolveError::new("vault_error", e))? {
+        return resolve_ids_with(&db.conn, None, uuids);
+    }
+    let key = vault::key(app, &db.conn).map_err(|e| ResolveError::new("vault_locked", e))?;
+    after_unlock(&db.conn, &key);
+    resolve_ids_with(&db.conn, Some(&key), uuids)
 }
 
 pub(crate) fn metas(app: &AppHandle, uuids: &[String]) -> Result<BTreeMap<String, (ItemMeta, Vec<ConfigBinding>)>, String> {

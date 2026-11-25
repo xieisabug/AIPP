@@ -817,6 +817,8 @@ pub async fn save_sync_settings(
 
 #[tauri::command]
 pub async fn trigger_sync_now(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    // User explicitly requested a sync: allow retrying a previously denied/locked OS keychain once.
+    vault::clear_blocked();
     let settings = load_settings(&app_handle)?;
     if settings.mode != SyncMode::SelfHosted {
         return Err("当前是本地模式，未启用自建同步".to_string());
@@ -6201,6 +6203,7 @@ pub async fn set_sync_passphrase(
     if passphrase.chars().count() < secrets::MIN_PASSPHRASE_CHARS {
         return Err(format!("同步口令至少需要 {} 个字符", secrets::MIN_PASSPHRASE_CHARS));
     }
+    vault::clear_blocked();
     ensure_sync_db(&app_handle)?;
     // Pull first: an existing record must be verified (not replaced) and the
     // latest server API keys must be known before they win over local values.

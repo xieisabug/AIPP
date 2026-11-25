@@ -225,6 +225,7 @@ pub async fn commit_sync_server_switch(app_handle: AppHandle, feature_state: Sta
     let status = fetch_remote_status(&candidate.url, &candidate.token, "", &CancellationToken::new()).await?;
     if status.account_id != candidate.account { return Err("目标账号在检查后发生变化，请返回重新检查".into()); }
     let master = get_or_create_master_key(&app_handle)?;
+    vault::clear_blocked();
     let current = load_secret_state(&app_handle)?;
     let phrase = passphrase.filter(|p| !p.is_empty());
     if phrase.is_some() && !candidate.key_known { return Err("服务器不支持口令预检查，请先沿用当前口令，连接后在 API Key 加密同步中输入目标口令。".into()); }

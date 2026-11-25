@@ -23,7 +23,69 @@ pub(super) trait KeyStore {
     fn write(&self, slot: &str, value: &str) -> Result<(), String>;
     fn remove(&self, slot: &str) -> Result<(), String>;
 }
-struct SystemKeys;
+#[derive(Default)]
+struct KeyCache {
+    entries: HashMap<String, String>,
+    blocked_error: Option<String>,
+}
+static KEY_CACHE: LazyLock<StdMutex<KeyCache>> = LazyLock::new(|| StdMutex::new(KeyCache::default()));
+
+/// Clear a cached OS key-store denial/lock error so the next user-initiated action may retry.
+pub(crate) fn clear_blocked() {
+    KEY_CACHE.lock().unwrap_or_else(|e| e.into_inner()).blocked_error = None;
+}
+
+struct CachedKeyStore<'a, S: KeyStore> {
+    inner: &'a S,
+    cache: &'a StdMutex<KeyCache>,
+}
+impl<S: KeyStore> KeyStore for CachedKeyStore<'_, S> {
+    fn read(&self, slot: &str) -> Result<Option<String>, String> {
+        {
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(value) = cache.entries.get(slot) {
+                return Ok(Some(value.clone()));
+            }
+            if let Some(error) = &cache.blocked_error {
+                return Err(error.clone());
+            }
+        }
+        match self.inner.read(slot) {
+            Ok(Some(value)) => {
+                let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                cache.entries.insert(slot.to_owned(), value.clone());
+                cache.blocked_error = None;
+                Ok(Some(value))
+            }
+            Ok(None) => {
+                let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                cache.entries.remove(slot);
+                cache.blocked_error = None;
+                Ok(None)
+            }
+            Err(error) => {
+                let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                cache.blocked_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+    fn write(&self, slot: &str, value: &str) -> Result<(), String> {
+        self.inner.write(slot, value)?;
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entries.insert(slot.to_owned(), value.to_owned());
+        cache.blocked_error = None;
+        Ok(())
+    }
+    fn remove(&self, slot: &str) -> Result<(), String> {
+        self.inner.remove(slot)?;
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.entries.remove(slot);
+        Ok(())
+    }
+}
+
+struct RawSystemKeys;
 struct PreparedKey<'a, S: KeyStore> { store: &'a S, slot: String, committed: bool }
 impl<S: KeyStore> Drop for PreparedKey<'_, S> {
     fn drop(&mut self) {
@@ -32,7 +94,7 @@ impl<S: KeyStore> Drop for PreparedKey<'_, S> {
         }
     }
 }
-impl KeyStore for SystemKeys {
+impl KeyStore for RawSystemKeys {
     fn read(&self, slot: &str) -> Result<Option<String>, String> {
         match keyring::Entry::new(SERVICE, slot).map_err(|e| format!("打开凭据库密钥失败: {e}"))?.get_password() {
             Ok(value) => Ok(Some(value)),
@@ -52,6 +114,10 @@ impl KeyStore for SystemKeys {
             Err(e) => Err(format!("清理旧凭据库密钥失败: {e}")),
         }
     }
+}
+fn system_keys() -> CachedKeyStore<'static, RawSystemKeys> {
+    static RAW: RawSystemKeys = RawSystemKeys;
+    CachedKeyStore { inner: &RAW, cache: &KEY_CACHE }
 }
 
 fn cleanup_keys(db: &Connection, store: &impl KeyStore) -> Result<(),String> {
@@ -143,8 +209,9 @@ pub(super) fn switch_server(
     apply: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+    let keys = system_keys();
     let old = key(app, db)?;
-    switch_key_with(db, &SystemKeys, Some(&old), new, true, |write_key| {
+    switch_key_with(db, &keys, Some(&old), new, true, |write_key| {
         persistence::coordinated(sync, db, || { write_key()?; apply() })
     })
 }
@@ -175,19 +242,20 @@ fn legacy_key(app: &AppHandle, db: &Connection) -> Result<Option<secrets::Secret
 }
 
 pub(super) fn key(app: &AppHandle, db: &Connection) -> Result<secrets::SecretKey, String> {
-    if let Some(key) = existing_key(db, &SystemKeys, || legacy_key(app, db))? {
-        if let Err(error) = cleanup_keys(db,&SystemKeys) { warn!(%error,"Vault key cleanup deferred"); }
+    let keys = system_keys();
+    if let Some(key) = existing_key(db, &keys, || legacy_key(app, db))? {
+        if let Err(error) = cleanup_keys(db, &keys) { warn!(%error,"Vault key cleanup deferred"); }
         return Ok(key);
     }
     let key = secrets::random_local_key();
-    switch_key(db, &SystemKeys, None, &key, false)?;
+    switch_key(db, &keys, None, &key, false)?;
     Ok(key)
 }
 
 pub(super) fn state(app: &AppHandle) -> Result<secrets::SecretState, String> {
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
-    state_with(&db.conn, &SystemKeys, || legacy_key(app, &db.conn))
+    state_with(&db.conn, &system_keys(), || legacy_key(app, &db.conn))
 }
 
 fn state_with(
@@ -195,8 +263,31 @@ fn state_with(
     store: &impl KeyStore,
     load_legacy: impl FnOnce() -> Result<Option<secrets::SecretKey>, String>,
 ) -> Result<secrets::SecretState, String> {
-    let key = existing_key(db, store, load_legacy)?;
+    init(db)?;
     let record = secrets::read_record(db)?;
+    // A device-local random key never participates in encrypted sync. Answer status queries
+    // from SQLite metadata without touching the OS keychain (avoids macOS prompts when
+    // encrypted sync is not configured or all local credentials were deleted).
+    if let Some(local_record_json) = db
+        .query_row("SELECT record FROM credential_vault_key WHERE id=1", [], |r| r.get::<_, String>(0))
+        .optional()
+        .map_err(|e| e.to_string())?
+    {
+        let has_retained: bool = db
+            .query_row("SELECT EXISTS(SELECT 1 FROM credential_vault_retired_key WHERE retain=1)", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if !has_retained
+            && serde_json::from_str::<secrets::KeyCheckRecord>(&local_record_json)
+                .is_ok_and(|local| local.kdf == "local-random")
+        {
+            return Ok(if record.is_some() {
+                secrets::SecretState::NeedsPassphrase
+            } else {
+                secrets::SecretState::NotConfigured
+            });
+        }
+    }
+    let key = existing_key(db, store, load_legacy)?;
     let Some(mut key) = key else {
         return Ok(if record.is_some() { secrets::SecretState::NeedsPassphrase } else { secrets::SecretState::NotConfigured });
     };
@@ -215,11 +306,13 @@ fn state_with(
 }
 
 pub(super) fn set_passphrase(app: &AppHandle, passphrase: &str, replace: bool) -> Result<(), String> {
+    clear_blocked();
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
+    let keys = system_keys();
     let old = key(app, &db.conn)?;
     let new = secrets::prepare_passphrase(&db.conn, passphrase, replace)?;
-    switch(&db.conn, &SystemKeys, Some(&old), &new)
+    switch(&db.conn, &keys, Some(&old), &new)
 }
 
 pub(super) fn encrypt(key: &secrets::SecretKey, reference: &str, server_id: i64, plain: &str) -> Result<String, String> {
@@ -240,7 +333,7 @@ pub(crate) fn stored_references(app: &AppHandle) -> Result<std::collections::Has
     init(&db.conn)?;
     stored_references_with(&db.conn)
 }
-pub(super) fn stored_references_with(db: &Connection) -> Result<std::collections::HashSet<String>, String> {
+pub(crate) fn stored_references_with(db: &Connection) -> Result<std::collections::HashSet<String>, String> {
     let mut statement = db.prepare("SELECT reference FROM credential_vault").map_err(|e| e.to_string())?;
     let rows = statement.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
@@ -249,22 +342,40 @@ pub(super) fn stored_references_with(db: &Connection) -> Result<std::collections
 pub(crate) fn read(app: &AppHandle, reference: &str) -> Result<Option<crate::mcp::apps::credentials::Credential>, String> {
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
-    let key = key(app, &db.conn)?;
-    read_with(&db.conn, &key, reference)
+    read_from_store(&db.conn, &system_keys(), reference, || legacy_key(app, &db.conn))
+}
+fn read_from_store(
+    db: &Connection,
+    store: &impl KeyStore,
+    reference: &str,
+    load_legacy: impl FnOnce() -> Result<Option<secrets::SecretKey>, String>,
+) -> Result<Option<crate::mcp::apps::credentials::Credential>, String> {
+    init(db)?;
+    let row: Option<(i64, String)> = db
+        .query_row("SELECT server_id,value FROM credential_vault WHERE reference=?1", [reference], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((id, value)) = row else { return Ok(None) };
+    let key = existing_key(db, store, load_legacy)?.ok_or("已有凭据缺少原加密密钥，不会生成新密钥覆盖已有凭据")?;
+    let credential = serde_json::from_str(&decrypt(&key, reference, id, &value)?)
+        .map_err(|_| "凭据库内容格式无效")?;
+    Ok(Some(credential))
 }
 pub(super) fn read_with(db: &Connection, key: &secrets::SecretKey, reference: &str) -> Result<Option<crate::mcp::apps::credentials::Credential>, String> {
     let row: Option<(i64,String)> = db.query_row("SELECT server_id,value FROM credential_vault WHERE reference=?1", [reference], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e| e.to_string())?;
     row.map(|(id, value)| serde_json::from_str(&decrypt(key, reference, id, &value)?).map_err(|_| "凭据库内容格式无效".into())).transpose()
 }
 pub(crate) fn write(app: &AppHandle, reference: &str, credential: &crate::mcp::apps::credentials::Credential) -> Result<(), String> {
+    clear_blocked();
     compare_write(app,reference,None,credential)
 }
 pub(crate) fn compare_write(app: &AppHandle, reference: &str, expected: Option<&crate::mcp::apps::credentials::Credential>, credential: &crate::mcp::apps::credentials::Credential) -> Result<(), String> {
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
+    let keys = system_keys();
     key(app, &db.conn)?;
     let tx = rusqlite::Transaction::new_unchecked(&db.conn,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
-    let key = active(&tx,&SystemKeys)?.ok_or("凭据库密钥状态缺失")?;
+    let key = active(&tx, &keys)?.ok_or("凭据库密钥状态缺失")?;
     if let Some(expected) = expected {
         let current = read_with(&tx,&key,reference)?.ok_or("连接凭据已删除，丢弃迟到刷新结果")?;
         if serde_json::to_value(&current).map_err(|e|e.to_string())? != serde_json::to_value(expected).map_err(|e|e.to_string())? {
@@ -306,16 +417,26 @@ pub(super) fn finish_rotation(app: &AppHandle) -> Result<(),String> {
     if pending { return Ok(()); }
     let _lock = LOCK.lock().map_err(|_|"凭据库锁已损坏")?;
     let system = SystemDatabase::new(app).map_err(|e|e.to_string())?;
-    let Some(key) = active(&system.conn,&SystemKeys)? else { return Ok(()) };
-    if secrets::read_record(&system.conn)?.as_ref() != Some(&key.record) { return Ok(()); }
+    finish_rotation_with(&sync, &system.conn, &system_keys())
+}
+fn finish_rotation_with(sync: &Connection, system: &Connection, store: &impl KeyStore) -> Result<(), String> {
+    init(system)?;
+    let has_retired: bool = system
+        .query_row("SELECT EXISTS(SELECT 1 FROM credential_vault_retired_key)", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if !has_retired {
+        return Ok(());
+    }
+    let Some(key) = active(system, store)? else { return Ok(()) };
+    if secrets::read_record(system)?.as_ref() != Some(&key.record) { return Ok(()); }
     let copies = sync.prepare("SELECT change_json FROM sync_secret_server").map_err(|e|e.to_string())?
         .query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
     for raw in copies {
         let change: PullChange = serde_json::from_str(&raw).map_err(|_|"远端凭据版本记录损坏，保留旧密钥")?;
         if change.operation != "delete" && change.payload.as_ref().and_then(|p|p["fields"]["value"]["kid"].as_str()) != Some(key.kid().as_str()) { return Ok(()); }
     }
-    system.conn.execute("UPDATE credential_vault_retired_key SET retain=0",[]).map_err(|e|e.to_string())?;
-    cleanup_keys(&system.conn,&SystemKeys)
+    system.execute("UPDATE credential_vault_retired_key SET retain=0",[]).map_err(|e|e.to_string())?;
+    cleanup_keys(system, store)
 }
 
 #[cfg(test)]
