@@ -26,6 +26,61 @@ fn test_claude_background_wake_persists_separate_reply_in_original_conversation(
     assert!(insert_reply(&repo, &other, previous.id).is_err());
 }
 
+#[test]
+fn test_claude_resumed_prompt_waits_for_its_answer_after_background_receipt() {
+    use database_fixture::{create_message_test_db, create_test_message};
+    use std::ops::ControlFlow::{Break, Continue};
+    use crate::api::ai::agent_driver::{response_message, session::AgentSessionKind};
+
+    let (repo, conversation) = create_message_test_db();
+    let mut previous = response_message(conversation, AgentSessionKind::Claude);
+    previous.content = "等待后台截图".into();
+    previous.finish_time = Some(chrono::Utc::now());
+    let previous = repo.create(&previous).unwrap();
+    let prompt = repo.create(&create_test_message(conversation, "user", "截图好了吗？", Some(previous.id), None)).unwrap();
+    let mut current = response_message(conversation, AgentSessionKind::Claude);
+    current.parent_id = Some(prompt.id);
+    let current = repo.create(&current).unwrap();
+    let mut follow_up = ClaudeTurnOutput::new(current.id);
+    let receipt = json!({
+        "session_id": "resumed", "type": "result", "subtype": "success",
+        "origin": {"kind": "task-notification"}, "is_error": false, "num_turns": 0,
+        "result": "", "usage": {"output_tokens": 0}
+    });
+    assert_eq!(follow_up.apply_result(&receipt, None, false), Ok(Continue(())));
+    assert!(follow_up.content.is_empty());
+    assert!(follow_up.final_text.is_none());
+    assert!(follow_up.usage.is_null());
+    assert!(repo.read(current.id).unwrap().unwrap().finish_time.is_none());
+
+    let answer = json!({
+        "session_id": "resumed", "type": "result", "subtype": "success",
+        "is_error": false, "num_turns": 1, "result": "截图已生成。",
+        "usage": {"output_tokens": 6}
+    });
+    assert_eq!(follow_up.apply_result(&answer, None, false), Ok(Break(())));
+    assert_eq!(follow_up.content, "截图已生成。");
+    assert_eq!(follow_up.final_text.as_deref(), Some("截图已生成。"));
+    assert_eq!(follow_up.usage, answer["usage"]);
+
+    follow_up.persist_message(&repo, true, follow_up.final_text.as_deref());
+    let saved = repo.read(current.id).unwrap().unwrap();
+    assert_eq!(saved.parent_id, Some(prompt.id));
+    assert_eq!(saved.content, "截图已生成。");
+    assert!(saved.finish_time.is_some());
+    assert_eq!(repo.read(previous.id).unwrap().unwrap().content, previous.content);
+}
+
+#[test]
+fn test_claude_empty_user_result_still_ends_the_prompt() {
+    let mut reply = ClaudeTurnOutput::new(12);
+    let empty = json!({
+        "type": "result", "subtype": "success", "is_error": false, "num_turns": 0, "result": ""
+    });
+    assert_eq!(reply.apply_result(&empty, None, false), Ok(std::ops::ControlFlow::Break(())));
+    assert!(reply.content.is_empty());
+}
+
 #[tokio::test]
 async fn test_claude_background_idle_notification_then_native_reply_without_input() {
     let (_commands, mut receiver) = mpsc::unbounded_channel();

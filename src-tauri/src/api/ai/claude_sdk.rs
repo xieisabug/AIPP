@@ -680,26 +680,6 @@ pub async fn prepare_claude_mcp_bridge(
     Ok(())
 }
 
-fn persist(app: &tauri::AppHandle, id: i64, content: &str, done: bool, final_text: Option<&str>) {
-    if let Ok(db) = ConversationDatabase::new(app) {
-        if let Ok(repo) = db.message_repo() {
-            if let Ok(Some(mut message)) = repo.read(id) {
-                message.content = content.into();
-                if done {
-                    message.finish_time = Some(chrono::Utc::now());
-                    if let Some(text) = final_text {
-                        let mut metadata = message.metadata_json.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok())
-                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
-                        crate::db::butler_execution::record_agent_final(&mut metadata, content, text);
-                        message.metadata_json = Some(metadata.to_string());
-                    }
-                }
-                let _ = repo.update(&message);
-            }
-        }
-    }
-}
-
 /// Claude Code 的 usage 是 Anthropic 口径：`input_tokens` 不含缓存读取与缓存写入。
 /// 换成全应用统一口径（输入含缓存读写），缓存命中/写入另记，统计与缓存命中率才能和其他通道对齐。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1410,6 +1390,66 @@ async fn apply_claude_permission_mode(
     Ok(())
 }
 
+struct ClaudeTurnOutput {
+    message_id: i64,
+    content: String,
+    final_text: Option<String>,
+    usage: Value,
+}
+
+impl ClaudeTurnOutput {
+    fn new(message_id: i64) -> Self {
+        Self { message_id, content: String::new(), final_text: None, usage: Value::Null }
+    }
+
+    fn persist(&self, app: &tauri::AppHandle, done: bool, final_text: Option<&str>) {
+        let Ok(db) = ConversationDatabase::new(app) else { return };
+        if let Ok(repo) = db.message_repo() {
+            self.persist_message(&repo, done, final_text);
+        }
+    }
+
+    fn persist_message(&self, repo: &crate::db::conversation_db::MessageRepository, done: bool, final_text: Option<&str>) {
+        if let Ok(Some(mut message)) = repo.read(self.message_id) {
+            message.content.clone_from(&self.content);
+            if done {
+                message.finish_time = Some(chrono::Utc::now());
+                if let Some(text) = final_text {
+                    let mut metadata = message.metadata_json.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok())
+                        .filter(Value::is_object).unwrap_or_else(|| json!({}));
+                    crate::db::butler_execution::record_agent_final(&mut metadata, &self.content, text);
+                    message.metadata_json = Some(metadata.to_string());
+                }
+            }
+            let _ = repo.update(&message);
+        }
+    }
+
+    fn apply_result(
+        &mut self,
+        frame: &Value,
+        compact_boundary: Option<Option<u64>>,
+        was_cancelled: bool,
+    ) -> Result<std::ops::ControlFlow<()>, String> {
+        use std::ops::ControlFlow::{Break, Continue};
+        if background::lifecycle_result(frame) {
+            return Ok(Continue(()));
+        }
+        if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") {
+            return Ok(Break(()));
+        }
+        if let Some(error) = claude_result_error(frame) {
+            return Err(error);
+        }
+        if self.content.is_empty() {
+            self.content = claude_result_fallback_content(frame, compact_boundary);
+        }
+        self.final_text = frame["result"].as_str().filter(|text| !text.is_empty()).map(str::to_owned);
+        self.usage = frame.get("usage").cloned().unwrap_or(Value::Null);
+        Ok(Break(()))
+    }
+}
+
 fn claude_result_error(frame: &Value) -> Option<String> {
     if frame.get("is_error").and_then(Value::as_bool) == Some(true)
         || frame.get("subtype").and_then(Value::as_str) == Some("error")
@@ -1823,8 +1863,7 @@ pub fn spawn_claude_session_task(
             if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                 manager.set_agent_streaming(&app, &event_identity, message_id).await;
             }
-            let mut content = String::new();
-            let mut final_text = None;
+            let mut reply = ClaudeTurnOutput::new(message_id);
             let mut agent_plan_message: Option<AgentPlanMessage> = None;
             let mut activities = ClaudeActivities::default();
             let mut was_cancelled = false;
@@ -1842,7 +1881,6 @@ pub fn spawn_claude_session_task(
                 ),
             )
             .await;
-            let mut usage = Value::Null;
             // `/compact` 完成时 CLI 发 system/compact_boundary；记录下来，结果为空时写入压缩说明
             let mut compact_boundary: Option<Option<u64>> = None;
             let mut stream_error: Option<String> = None;
@@ -1931,8 +1969,7 @@ pub fn spawn_claude_session_task(
                     }
                 }
                 background.observe(&frame, message_id);
-                if background::lifecycle_result(&frame) { continue; }
-                let changes = activities.consume(&frame, content.chars().count());
+                let changes = activities.consume(&frame, reply.content.chars().count());
                 if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, changes) {
                     stream_failure_stage = AgentFailureStage::Persistence;
                     stream_error = Some(format!("Claude Code activity persistence/delivery failed [message_id={message_id}]: {error}"));
@@ -1968,13 +2005,13 @@ pub fn spawn_claude_session_task(
                         if let Some(delta) =
                             frame.pointer("/event/delta/text").and_then(Value::as_str)
                         {
-                            content.push_str(delta);
-                            persist(&app, message_id, &content, false, None);
+                            reply.content.push_str(delta);
+                            reply.persist(&app, false, None);
                             emit_update(&event_identity,
                                 &window,
                                 _conversation_id,
                                 message_id,
-                                &content,
+                                &reply.content,
                                 false,
                             );
                         }
@@ -2042,19 +2079,14 @@ pub fn spawn_claude_session_task(
                             break;
                         }
                     }
-                    "result" => {
-                        if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") { break; }
-                        if let Some(error) = claude_result_error(&frame) {
+                    "result" => match reply.apply_result(&frame, compact_boundary, was_cancelled) {
+                        Ok(std::ops::ControlFlow::Continue(())) => continue,
+                        Ok(std::ops::ControlFlow::Break(())) => break,
+                        Err(error) => {
                             stream_error = Some(error);
                             break;
                         }
-                        if content.is_empty() {
-                            content = claude_result_fallback_content(&frame, compact_boundary);
-                        }
-                        final_text = frame["result"].as_str().filter(|text| !text.is_empty()).map(str::to_owned);
-                        usage = frame.get("usage").cloned().unwrap_or(Value::Null);
-                        break;
-                    }
+                    },
                     _ => {}
                 }
             }
@@ -2070,7 +2102,7 @@ pub fn spawn_claude_session_task(
                 }
                 break;
             }
-            if !was_cancelled && content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
+            if !was_cancelled && reply.content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
                 emit_claude_run_failure(
                     &app,
                     &event_identity,
@@ -2082,7 +2114,8 @@ pub fn spawn_claude_session_task(
                 }
                 break;
             }
-            persist(&app, message_id, &content, true, if was_cancelled { Some("") } else { final_text.as_deref() });
+            reply.persist(&app, true, if was_cancelled { Some("") } else { reply.final_text.as_deref() });
+            let ClaudeTurnOutput { message_id, content, usage, .. } = reply;
             if !usage.is_null() {
                 persist_usage(&app, message_id, &usage);
             }
