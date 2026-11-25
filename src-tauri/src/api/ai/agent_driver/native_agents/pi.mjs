@@ -1,4 +1,4 @@
-import { deadline, jsonLines, launch, splitModel, stopChild } from './common.mjs';
+import { RequestRejected, deadline, jsonLines, launch, splitModel, stopChild } from './common.mjs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -98,8 +98,9 @@ export async function openPi(config, emit, dependencies = {}) {
       const waiter = pending.get(frame.id);
       if (!waiter) return;
       pending.delete(frame.id);
-      if (frame.success === false) waiter.reject(new Error(`Pi ${frame.command}: ${frame.error}`));
-      else waiter.resolve(frame.data);
+      if (frame.success === false && typeof frame.error === 'string') waiter.reject(new RequestRejected(`Pi ${frame.command}: ${frame.error}`));
+      else if (frame.success === true) waiter.resolve(frame.data);
+      else waiter.reject(new Error(`Pi ${frame.command} returned an invalid response for request ${frame.id}`));
       return;
     }
     if (!turn) return;
@@ -198,12 +199,12 @@ export async function openPi(config, emit, dependencies = {}) {
         send({ type: 'extension_ui_response', id, ...(answers ? { value: answers[question] } : { cancelled: true }) });
       },
       async configure(key, value) {
-        if (turn) throw new Error('Cannot change Pi configuration during a turn');
+        if (turn) throw new RequestRejected('Cannot change Pi configuration during a turn');
         if (key === 'model') {
           const model = splitModel(value);
           await request({ type: 'set_model', provider: model.providerID, modelId: model.modelID });
         } else if (key === 'thought_level') await request({ type: 'set_thinking_level', level: value });
-        else throw new Error(`Unsupported Pi configuration: ${key}`);
+        else throw new RequestRejected(`Unsupported Pi configuration: ${key}`);
       },
       async models() {
         const data = await request({ type: 'get_available_models' });

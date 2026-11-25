@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { openAcpNative, antigravityLaunch, authorizationUrl } from './acp-native.mjs';
+import { RequestRejected } from './common.mjs';
 import { processFixture, tick } from './test-helpers.mjs';
 
 const select = (id, values, currentValue = values[0]) => ({ id, name: id, category: id, type: 'select', currentValue, options: values.map(value => ({ value, name: value })) });
@@ -50,6 +51,28 @@ test('should use Kiro V3 cli auth and disable Autopilot before selecting agent a
 });
 
 for (const driver of ['kiro', 'antigravity']) {
+  test(`should keep the ${driver} turn running after a busy config rejection and accept an idle retry`, async () => {
+    const f = fixture();
+    const runtime = await f.open(driver);
+    try {
+      const prompt = runtime.prompt('first', 'turn-1');
+      await assert.rejects(runtime.configure('model', 'model-a'), error =>
+        error instanceof RequestRejected && /configuration during a turn/.test(error.message));
+      assert.equal(runtime.configOptions.find(option => option.id === 'model').current_value, 'auto');
+      f.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'still running' } });
+      f.finish();
+      await prompt;
+      assert.equal(f.events.find(event => event.type === 'text' && event.turn === 'turn-1').text, 'still running');
+      await runtime.configure('model', 'model-a');
+      assert.equal(runtime.configOptions.find(option => option.id === 'model').current_value, 'model-a');
+      const next = runtime.prompt('second', 'turn-2');
+      f.finish();
+      await next;
+      assert.deepEqual(f.commands.filter(c => c.method === 'session/prompt').map(c => c.params.sessionId), ['s1', 's1']);
+      assert.equal(f.launches.length, 1);
+    } finally { await runtime.close(); }
+  });
+
   test(`should fail ${driver} restoration without creating a new session`, async () => {
     const f = fixture({ respond: c => c.method === 'session/resume' ? { error: { code: -32000, message: 'session missing' } } : undefined });
     await assert.rejects(f.open(driver, { session: 'saved' }), /session\/resume.*session missing/);
@@ -90,6 +113,21 @@ test('should preserve Kiro loadSession when resume is not advertised', async () 
   const f = fixture({ capabilities: { loadSession: true } }); const runtime = await f.open('kiro', { session: 's1' });
   try { assert.equal(f.commands.some(c => c.method === 'session/load'), true); }
   finally { await runtime.close(); }
+});
+
+test('should distinguish a native Kiro config rejection from a malformed acknowledgement', async () => {
+  const f = fixture({ respond(frame) {
+    if (frame.method !== 'session/set_config_option' || frame.params.configId !== 'model') return;
+    if (frame.params.value === 'unknown') return { error: { code: -32602, message: 'unknown model' } };
+    return {};
+  } });
+  const runtime = await f.open('kiro');
+  try {
+    await assert.rejects(runtime.configure('model', 'unknown'), error =>
+      error instanceof RequestRejected && /unknown model/.test(error.message));
+    await assert.rejects(runtime.configure('model', 'model-a'), error =>
+      !(error instanceof RequestRejected) && /omitted result\/error/.test(error.message));
+  } finally { await runtime.close(); }
 });
 
 for (const [capabilities, canLoad, canResume] of [

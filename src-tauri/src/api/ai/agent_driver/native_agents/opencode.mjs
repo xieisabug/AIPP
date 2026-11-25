@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { deadline, launch, splitModel, stopChild } from './common.mjs';
+import { RequestRejected, deadline, launch, splitModel, stopChild } from './common.mjs';
 
 export async function openOpenCode(config, emit, dependencies = {}) {
   const fetch = dependencies.fetch || globalThis.fetch;
@@ -220,8 +220,8 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         await api(`/question/${encodeURIComponent(id)}/reply`, 'POST', { answers: values });
       },
       async configure(key, value) {
-        if (turn) throw new Error('Cannot change OpenCode configuration during a turn');
-        if (key !== 'model') throw new Error(`Unsupported OpenCode configuration: ${key}`);
+        if (turn) throw new RequestRejected('Cannot change OpenCode configuration during a turn');
+        if (key !== 'model') throw new RequestRejected(`Unsupported OpenCode configuration: ${key}`);
         splitModel(value); model = value;
       },
       models,

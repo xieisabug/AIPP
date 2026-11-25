@@ -138,7 +138,7 @@ async fn test_native_agent_env_launch_cli_uses_the_installer_candidate_and_prese
         let installed = global.join(&filename);
         std::fs::write(&installed, "").unwrap();
         let mut config = NativeConfig {
-            node: root.path().join("fixture-node").display().to_string(), cwd: root.path().to_owned(), env: env.clone(), wire: json!({}), review: false,
+            node: root.path().join("fixture-node").display().to_string(), cwd: root.path().to_owned(), env: env.clone(), wire: json!({}), review: PermissionReview::Manual,
         };
         let files = cli_candidates(driver, false, spec.command, &env, root.path());
         assert_eq!(files.first().unwrap().0, installed);

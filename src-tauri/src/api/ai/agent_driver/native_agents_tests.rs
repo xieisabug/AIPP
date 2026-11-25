@@ -238,18 +238,18 @@ fn test_native_agents_review_and_permission_settings_follow_the_assistant() {
     use crate::db::assistant_db::AssistantModelConfig;
     let assistant = |name: &str, value: &str| AssistantModelConfig { id: 0, assistant_id: 1, assistant_model_id: 0, name: name.into(), value: Some(value.into()), value_type: "string".into() };
     let config = configuration(&[assistant("tool_review_mode", "auto_model"), assistant("pi_approval", "read_only")], &[], None).unwrap();
-    assert!(config.review);
+    assert_eq!(config.review, PermissionReview::Model);
     assert_eq!(config.wire["pi_approval"], "read_only");
     assert_eq!(config.wire["aipp_review"], true, "the review mode is part of the session signature");
     let manual = configuration(&[assistant("tool_review_mode", "off")], &[], None).unwrap();
-    assert!(!manual.review);
+    assert_eq!(manual.review, PermissionReview::Manual);
     for (saved, has_model, expected) in [
         (None, true, true), (None, false, false), (Some("off"), true, false),
         (Some("auto_model"), false, true), (Some("invalid"), true, false),
     ] {
         let configs = saved.map(|value| assistant("tool_review_mode", value));
         let config = configuration_with_review_default(configs.as_slice(), &[], None, has_model).unwrap();
-        assert_eq!(config.review, expected);
+        assert_eq!(config.review, if expected { PermissionReview::Model } else { PermissionReview::Manual });
         assert_eq!(config.wire["aipp_review"], expected);
     }
     let provider = LLMProviderConfig { id: 1, llm_provider_id: 2, name: "tool_review_mode".into(),
@@ -257,8 +257,75 @@ fn test_native_agents_review_and_permission_settings_follow_the_assistant() {
     for (value, expected) in [("", false), ("auto_model", true)] {
         let config = configuration_with_review_default(&[assistant("tool_review_mode", value)],
             std::slice::from_ref(&provider), None, true).unwrap();
-        assert_eq!(config.review, expected);
+        assert_eq!(config.review, if expected { PermissionReview::Model } else { PermissionReview::Manual });
     }
+}
+
+#[test]
+fn test_proactive_permissions_use_native_modes_only_for_background_runs() {
+    let base = configuration(&[], &[], None).unwrap();
+    for (driver, key, modes) in [
+        ("kiro", "kiro_autopilot", vec![("on", "off"), ("off", "off")]),
+        ("pi", "pi_approval", vec![("none", "all"), ("read_only", "all"), ("all", "all")]),
+        ("antigravity", "antigravity_mode", vec![("yolo", "default"), ("auto", "default"),
+            ("auto_edit", "default"), ("plan", "plan"), ("default", "default")]),
+    ] {
+        for (saved, expected) in modes {
+            let mut config = base.clone();
+            config.wire[key] = json!(saved);
+            config.apply_conversation_permissions(driver, "butler_contact");
+            assert_eq!(config.wire[key], saved);
+            assert_eq!(config.review, PermissionReview::Manual);
+            config.apply_conversation_permissions(driver, crate::proactive::tools::PROACTIVE_RUN_KIND);
+            assert_eq!(config.wire[key], expected);
+            assert_eq!(config.wire["aipp_review"], true);
+            assert_eq!(config.review, PermissionReview::Proactive);
+        }
+    }
+    for driver in DRIVER_IDS {
+        let mut config = base.clone();
+        config.apply_conversation_permissions(driver, crate::proactive::tools::PROACTIVE_RUN_KIND);
+        assert_eq!(config.review, PermissionReview::Proactive, "{driver}");
+        if driver == "kiro" { assert_eq!(config.wire["kiro_autopilot"], "off"); }
+        if driver == "pi" { assert_eq!(config.wire["pi_approval"], "all"); }
+    }
+}
+
+#[test]
+fn test_config_rejection_replies_to_caller_and_allows_next_config() {
+    let request = json!({"type":"config", "key":"model", "value":"new"});
+    let mut current = json!("old");
+    let (reply, mut receiver) = oneshot::channel();
+    handle_bridge_response(&json!({"ok":false, "config_rejected":true, "error":"turn active"}), Some((request.clone(), reply)), |_| {
+        panic!("a rejected setting must not be published")
+    }).unwrap();
+    assert_eq!(receiver.try_recv().unwrap().unwrap_err(), "turn active");
+    assert_eq!(current, "old");
+    let (reply, mut receiver) = oneshot::channel();
+    handle_bridge_response(&json!({"ok":true}), Some((request, reply)), |wire| {
+        current = wire["value"].clone();
+        Ok(())
+    }).unwrap();
+    assert_eq!(receiver.try_recv().unwrap(), Ok(Value::Null));
+    assert_eq!(current, "new");
+}
+
+#[test]
+fn test_other_bridge_failures_still_stop_session() {
+    for (kind, frame, error) in [
+        ("steer", json!({"ok":false, "error":"steer failed"}), "steer failed"),
+        ("cancel", json!({"ok":false, "error":"cancel failed"}), "cancel failed"),
+        ("config", json!({"ok":false}), "Native response omitted error detail"),
+        ("config", json!({"ok":false, "error":"native config timeout"}), "native config timeout"),
+        ("config", json!({"error":"missing status"}), "Native response omitted boolean ok status"),
+    ] {
+        let (reply, mut receiver) = oneshot::channel();
+        let result = handle_bridge_response(&frame, Some((json!({"type":kind}), reply)), |_| unreachable!());
+        assert_eq!(result.unwrap_err(), error);
+        assert_eq!(receiver.try_recv().unwrap().unwrap_err(), error);
+    }
+    let frame = json!({"ok":false, "error":"prompt failed"});
+    assert_eq!(handle_bridge_response(&frame, None, |_| unreachable!()).unwrap_err(), "prompt failed");
 }
 
 #[test]

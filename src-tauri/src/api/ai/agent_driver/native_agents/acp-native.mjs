@@ -5,7 +5,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { deadline, jsonLines, launch, stopChild, thinkingStream, readableResult } from './common.mjs';
+import { RequestRejected, deadline, jsonLines, launch, stopChild, thinkingStream, readableResult } from './common.mjs';
 
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: ';
 const AUTH_MARKER = '__AIPP_ANTIGRAVITY_AUTH_URL__';
@@ -237,7 +237,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     const waiter = pending.get(String(frame.id));
     if (!waiter) return;
     pending.delete(String(frame.id));
-    if (frame.error) waiter.reject(new Error(`${driver} ${waiter.method}: ${frame.error.message} (code=${frame.error.code}, data=${JSON.stringify(frame.error.data ?? null)})`));
+    if (typeof frame.error?.message === 'string') waiter.reject(new RequestRejected(`${driver} ${waiter.method}: ${frame.error.message} (code=${frame.error.code}, data=${JSON.stringify(frame.error.data ?? null)})`));
     else if ('result' in frame) waiter.resolve(frame.result);
     else waiter.reject(new Error(`${driver} ${waiter.method} response omitted result/error`));
   }, fail);
@@ -248,12 +248,16 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     pending.clear(); await stopChild(child); await plan.cleanup();
   };
   const configure = async (key, value) => {
-    if (turn !== null) throw new Error(`Cannot change ${driver} configuration during a turn`);
-    if (driver === 'kiro' && key !== 'model') await waitOption(key);
+    if (turn !== null) throw new RequestRejected(`Cannot change ${driver} configuration during a turn`);
+    if (driver === 'kiro' && key !== 'model') {
+      // Still waiting for the advertised choices. No configuration write has been sent.
+      try { await waitOption(key); }
+      catch (error) { throw new RequestRejected(error.message); }
+    }
     const option = options.find(option => option.id === key);
     // Kiro's model option can arrive after session/new. Explicit values are
     // sent to Kiro itself; rejected values fail, never select another model.
-    if (!(driver === 'kiro' && key === 'model') && (!option || !choices(option).some(choice => choice.value === value))) throw new Error(`${driver} unavailable configuration ${key}=${value}`);
+    if (!(driver === 'kiro' && key === 'model') && (!option || !choices(option).some(choice => choice.value === value))) throw new RequestRejected(`${driver} unavailable configuration ${key}=${value}`);
     if (key === 'model' && legacyModels) {
       const selectedCatalog = legacyModels;
       await request('session/set_model', { sessionId: session, modelId: value });

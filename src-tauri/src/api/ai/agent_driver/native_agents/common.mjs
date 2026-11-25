@@ -3,9 +3,12 @@ import { StringDecoder } from 'node:string_decoder';
 import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, dirname, extname, join, isAbsolute } from 'node:path';
 
+// A local validation error or an explicit rejection by the native agent.
+export class RequestRejected extends Error {}
+
 export function splitModel(model) {
   const index = model.indexOf('/');
-  if (index < 1 || index === model.length - 1) throw new Error(`Model '${model}' must use provider/model format`);
+  if (index < 1 || index === model.length - 1) throw new RequestRejected(`Model '${model}' must use provider/model format`);
   return { providerID: model.slice(0, index), modelID: model.slice(index + 1) };
 }
 

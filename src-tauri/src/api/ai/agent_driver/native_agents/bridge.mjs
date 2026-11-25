@@ -1,4 +1,4 @@
-import { jsonLines, probeModels } from './common.mjs';
+import { RequestRejected, jsonLines, probeModels } from './common.mjs';
 import { openPi } from './pi.mjs';
 import { loginCursor, openCursor } from './cursor.mjs';
 import { openOpenCode } from './opencode.mjs';
@@ -64,7 +64,8 @@ jsonLines(process.stdin, request => {
       }
     }
     emit({ type: 'response', id: request.id, ok: true, data });
-  })().catch(error => emit({ type: 'response', id: request.id, ok: false, error: error.message }));
+  })().catch(error => emit({ type: 'response', id: request.id, ok: false, error: error.message,
+    config_rejected: request.type === 'config' && error instanceof RequestRejected }));
 }, fail, 64);
 process.stdin.on('end', () => { void runtime?.close().finally(() => process.exit(0)); });
 process.on('uncaughtException', fail);

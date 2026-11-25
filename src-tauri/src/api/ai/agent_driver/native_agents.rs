@@ -91,13 +91,29 @@ impl AgentDriver for NativeDriver {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionReview { Manual, Model, Proactive }
+
 #[derive(Clone)]
 pub(crate) struct NativeConfig {
     node: String, pub cwd: PathBuf, env: HashMap<String, String>, wire: Value,
-    /// Assistant `tool_review_mode=auto_model`: native permission requests go to AIPP's review model first.
-    review: bool,
+    review: PermissionReview,
 }
 impl NativeConfig {
+    fn apply_conversation_permissions(&mut self, driver: &str, kind: &str) {
+        if kind != crate::proactive::tools::PROACTIVE_RUN_KIND { return; }
+        self.review = PermissionReview::Proactive;
+        self.wire["aipp_review"] = json!(true);
+        match driver {
+            "pi" => self.wire["pi_approval"] = json!("all"),
+            "kiro" => self.wire["kiro_autopilot"] = json!("off"),
+            "antigravity" if matches!(self.wire["antigravity_mode"].as_str(), Some("auto_edit" | "auto" | "yolo")) => {
+                self.wire["antigravity_mode"] = json!("default");
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn apply_proxy(&mut self, driver: &str, proxy: Option<&str>) {
         if let Some(proxy) = proxy {
             crate::api::ai::acp::apply_network_proxy_to_env_vars(&mut self.env, proxy);
@@ -184,6 +200,7 @@ fn configuration_with_review_default(models: &[AssistantModelConfig], providers:
         "pi_approval": get("pi_approval"), "kiro_autopilot": get("kiro_autopilot"), "antigravity_mode": get("antigravity_mode"),
         // Part of the session signature, so changing the review mode restarts the native session.
         "aipp_review": review });
+    let review = if review { PermissionReview::Model } else { PermissionReview::Manual };
     Ok(NativeConfig { node, cwd, env, wire, review })
 }
 
@@ -197,20 +214,9 @@ impl PreparedAgentSession for Prepared {
     fn metadata(&self) -> AgentDriverMetadata { self.driver.metadata() }
     async fn finalize(&mut self, app: &tauri::AppHandle, cid: i64, payload: String) -> Result<(), AppError> {
         configure_instance(app, self.instance.provider_id, self.driver.0, &mut self.config)?;
-        if crate::mcp::butler_tools::conversation_kind(app, Some(cid))
-            .is_ok_and(|k| k == crate::proactive::tools::PROACTIVE_RUN_KIND)
-        {
-            // 主动整理后台运行时强制启用 AIPP 模型审核并关闭自动跳过审批，确保写操作受门禁保护。
-            self.config.review = true;
-            self.config.wire["aipp_review"] = json!(true);
-            self.config.wire["kiro_autopilot"] = json!("false");
-            if self.config.wire.get("pi_approval").and_then(Value::as_str) == Some("yolo") {
-                self.config.wire["pi_approval"] = json!("default");
-            }
-            if self.config.wire.get("antigravity_mode").and_then(Value::as_str) == Some("auto") {
-                self.config.wire["antigravity_mode"] = json!("default");
-            }
-        }
+        let conversation = ConversationDatabase::new(app)?.conversation_repo()?.read(cid)?
+            .ok_or_else(|| error(format!("无法读取原生 Agent 权限配置，会话 {cid} 不存在")))?;
+        self.config.apply_conversation_permissions(self.driver.0, &conversation.conversation_kind);
         if payload.trim().is_empty() || payload.trim() == "[]" { return Ok(()); }
         use crate::acp_mcp_bridge::*;
         let proxy = ensure_proxy_server(app.clone()).await.map_err(error)?;
@@ -246,7 +252,7 @@ impl PreparedAgentSession for Prepared {
             }
         }
         let ordered_env: std::collections::BTreeMap<_, _> = self.config.env.iter().collect();
-        let signature = format!("{}:{}:{}:{:?}", self.instance.config_fingerprint, self.config.node, signature_wire, ordered_env);
+        let signature = format!("{}:{}:{}:{:?}:{:?}", self.instance.config_fingerprint, self.config.node, signature_wire, ordered_env, self.config.review);
         let existing = sessions().lock().await.get(&key).cloned();
         if let Some(entry) = existing {
             if entry.signature == signature && !entry.control.tx.is_closed() {
@@ -346,6 +352,33 @@ async fn bridge_files() -> Result<BridgeFiles, String> {
     Ok(files)
 }
 
+type PendingRequest = (Value, oneshot::Sender<Result<Value, String>>);
+
+fn handle_bridge_response(
+    frame: &Value, pending: Option<PendingRequest>,
+    apply_config: impl FnOnce(&Value) -> Result<(), String>,
+) -> Result<(), String> {
+    let result = match frame["ok"].as_bool() {
+        Some(true) => Ok(frame["data"].clone()),
+        Some(false) => Err(frame["error"].as_str().unwrap_or("Native response omitted error detail").to_string()),
+        None => Err("Native response omitted boolean ok status".into()),
+    };
+    let Some((request, reply)) = pending else { return result.map(drop); };
+    let is_config = request["type"] == "config";
+    if is_config && frame["config_rejected"] == true && frame["ok"] == false && frame["error"].is_string() {
+        // The driver rejected this setting. The current turn and session can continue.
+        let _ = reply.send(result);
+        return Ok(());
+    }
+    let result = result.and_then(|data| {
+        if is_config { apply_config(&request)?; }
+        Ok(data)
+    });
+    let session_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
+    let _ = reply.send(result);
+    session_result
+}
+
 fn is_native_output(frame: &Value) -> bool {
     match frame["type"].as_str() {
         Some("text") => frame["text"].as_str().is_some_and(|s| !s.is_empty()),
@@ -413,7 +446,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
             snapshot.lock().unwrap()["config_options"] = json!(options);
         }
         if ready.take().unwrap().send(Ok(())).is_err() { return Err("Session acquisition caller disappeared".into()); }
-        let mut requests: HashMap<String, (Value, oneshot::Sender<Result<Value, String>>)> = HashMap::new();
+        let mut requests: HashMap<String, PendingRequest> = HashMap::new();
         let mut next_id = 0u64;
         let mut cancel_deadline = None;
         loop {
@@ -485,23 +518,17 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                         continue;
                     }
                     if frame["type"] == "response" {
-                        let result = if frame["ok"] == true { Ok(frame["data"].clone()) } else { Err(frame["error"].as_str().unwrap_or("Native response omitted error detail").to_string()) };
-                        if let Some((wire, reply)) = frame["id"].as_str().and_then(|id| requests.remove(id)) {
-                            if result.is_ok() && wire["type"] == "config" {
-                                let key = wire["key"].as_str().unwrap_or_default();
-                                let value = wire["value"].clone();
-                                let mut state = snapshot.lock().unwrap();
-                                let options = state["config_options"].as_array_mut().unwrap();
-                                if let Some(option) = options.iter_mut().find(|option|option["id"] == key) { option["current_value"] = value; }
-                                else { options.push(json!({"id":key,"name":key,"category":key,"current_value":value,"options":[]})); }
-                                drop(state);
-                                publish_snapshot(&app, &identity, driver, &snapshot)?;
-                            }
-                            let failure = result.as_ref().err().cloned();
-                            let _ = reply.send(result);
-                            if let Some(detail) = failure { return Err(detail); }
-                        }
-                        else { result?; }
+                        let pending = frame["id"].as_str().and_then(|id| requests.remove(id));
+                        handle_bridge_response(&frame, pending, |wire| {
+                            let key = wire["key"].as_str().unwrap_or_default();
+                            let value = wire["value"].clone();
+                            let mut state = snapshot.lock().unwrap();
+                            let options = state["config_options"].as_array_mut().unwrap();
+                            if let Some(option) = options.iter_mut().find(|option| option["id"] == key) { option["current_value"] = value; }
+                            else { options.push(json!({"id":key,"name":key,"category":key,"current_value":value,"options":[]})); }
+                            drop(state);
+                            publish_snapshot(&app, &identity, driver, &snapshot)
+                        })?;
                         continue;
                     }
                     let Some(turn) = active.as_mut() else { continue; };
@@ -543,9 +570,8 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                                 write_frame(&mut stdin, &json!({"type":"reply","request_id":frame["id"],"value":reject["id"]})).await?;
                                 continue;
                             }
-                            let review = prepared.config.review.then(|| (driver.metadata().display_name, prepared.config.cwd.display().to_string()));
                             let prompt = prepared.mcp_scope.as_ref().map(|s| s.current_prompt()).transpose()?.flatten();
-                            queue_permission(&app, &identity, turn.id, &frame, tx.clone(), review, prompt.as_ref()).await?;
+                            queue_permission(&app, &identity, turn.id, &frame, tx.clone(), &prepared, prompt.as_ref()).await?;
                         }
                         Some("question") => {
                             if cancel_deadline.is_some() {
@@ -920,7 +946,7 @@ pub(crate) async fn review_permission(app: tauri::AppHandle, event: crate::api::
 }
 
 async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity, turn: i64, frame: &Value, tx: mpsc::UnboundedSender<Command>,
-    review: Option<(&'static str, String)>, prompt: Option<&crate::acp_mcp_bridge::provenance::CapturedNativeMcpPrompt>) -> Result<(), String> {
+    prepared: &Prepared, prompt: Option<&crate::acp_mcp_bridge::provenance::CapturedNativeMcpPrompt>) -> Result<(), String> {
     use crate::api::ai::acp::{AcpPermissionState, AcpPermissionRequestEvent, AcpPermissionOptionPayload, AcpPermissionDecision};
     let native_id = frame["id"].as_str().ok_or("Native permission request omitted ID")?.to_string();
     let request_id = format!("{}:{}:{}:{turn}:{native_id}", identity.driver_id, identity.conversation_id, identity.run_id.as_deref().unwrap_or_default());
@@ -945,11 +971,20 @@ async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity,
         _ => None,
     };
     if !approve_exempt_mcp_call(app, &event, &scope, prompt, call).await {
-        if let Some((agent, working_directory)) = review {
-            tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, turn, agent, working_directory));
-        } else if let Err(error) = present_permission(app, &event, json!(event)).await {
-            app.state::<AcpPermissionState>().remove_request(&event.request_id).await;
-            return Err(error);
+        let agent = prepared.driver.metadata().display_name;
+        match prepared.config.review {
+            PermissionReview::Proactive => {
+                tauri::async_runtime::spawn(review_proactive_permission(app.clone(), event, scope, turn, agent, prepared.config.cwd.display().to_string()));
+            }
+            PermissionReview::Model => {
+                tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, turn, agent, prepared.config.cwd.display().to_string()));
+            }
+            PermissionReview::Manual => {
+                if let Err(error) = present_permission(app, &event, json!(event)).await {
+                    app.state::<AcpPermissionState>().remove_request(&event.request_id).await;
+                    return Err(error);
+                }
+            }
         }
     }
     let app = app.clone();

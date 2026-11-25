@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { deadline, thinkingStream, readableResult } from './common.mjs';
+import { RequestRejected, deadline, thinkingStream, readableResult } from './common.mjs';
 
 const loadSdk = config => createRequire(resolve(config.sdk_directory || config.cwd, 'package.json'))('@cursor/sdk');
 
@@ -190,8 +190,8 @@ export async function openCursor(config, emit, dependencies = {}) {
       if (run) await run.cancel();
     },
     async configure(key, value) {
-      if (active) throw new Error('Cannot change Cursor configuration during a turn');
-      if (key !== 'model') throw new Error(`Unsupported Cursor configuration: ${key}`);
+      if (active) throw new RequestRejected('Cannot change Cursor configuration during a turn');
+      if (key !== 'model') throw new RequestRejected(`Unsupported Cursor configuration: ${key}`);
       model = value;
     },
     async close() { try { if (run) await run.cancel(); } finally { active = null; await agent.close(); } },
