@@ -4651,25 +4651,21 @@ pub fn spawn_acp_session_task(
     handle
 }
 
-async fn apply_next_acp_permissions(
-    client: &AcpTauriClient,
+async fn apply_next_acp_permissions<Fut>(
     cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
     session_id: &str,
-) -> Result<(), AppError> {
-    let Some(provider) = client.instance_id else { return Ok(()); };
-    let selections = super::agent_driver::next_permissions::read(
-        &ConversationDatabase::new(&client.app_handle)?.get_connection()?, client.conversation_id, "acp", Some(provider), Some(session_id),
-    )?;
+    selections: super::agent_driver::next_permissions::Selections,
+    snapshot: impl Fn(Option<Vec<acp::SessionConfigOption>>) -> Fut,
+) -> Result<(), AppError>
+where Fut: std::future::Future<Output = Option<AcpConversationSessionState>> + Send {
     if selections.is_empty() { return Ok(()); }
     let missing_session = || AppError::ProviderError(format!("ACP 会话已切换 [session={session_id}]"));
-    let mut current = client.update_session_state(|_| {}).await.ok_or_else(missing_session)?;
+    let mut current = snapshot(None).await.ok_or_else(missing_session)?;
     for (key, value) in &selections {
         if current.config_options.iter().any(|o| &o.id == key && &o.current_value == value) { continue; }
         let response = cx.send_request(acp::SetSessionConfigOptionRequest::new(session_id.to_string(), key.clone(), value.as_str()))
             .block_task().await.map_err(|e| AppError::ProviderError(format!("ACP 应用 {key}={value} 失败 [session={session_id}]：{e:?}")))?;
-        let state = client.update_session_state(|snapshot| apply_config_options_to_snapshot(snapshot, Some(&response.config_options))).await;
-        current = state.ok_or_else(missing_session)?;
-        client.publish_session_state(Some(current.clone())).await;
+        current = snapshot(Some(response.config_options)).await.ok_or_else(missing_session)?;
     }
     for (key, value) in selections {
         if !current.config_options.iter().any(|o| o.id == key && o.current_value == value) {
@@ -4677,6 +4673,30 @@ async fn apply_next_acp_permissions(
         }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+enum AcpPromptDispatchError {
+    Permission(AppError),
+    Preparation(AppError),
+}
+
+async fn dispatch_acp_prompt<Fut>(
+    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    session_id: &str,
+    output_session: &tokio::sync::RwLock<Option<String>>,
+    load_permissions: impl FnOnce() -> Result<super::agent_driver::next_permissions::Selections, AppError>,
+    snapshot: impl Fn(Option<Vec<acp::SessionConfigOption>>) -> Fut,
+    build_blocks: impl FnOnce() -> Result<Vec<acp::ContentBlock>, AppError>,
+) -> Result<(Vec<acp::ContentBlock>, acp::Result<acp::PromptResponse>), AcpPromptDispatchError>
+where Fut: std::future::Future<Output = Option<AcpConversationSessionState>> + Send {
+    let selections = load_permissions().map_err(AcpPromptDispatchError::Permission)?;
+    apply_next_acp_permissions(cx, session_id, selections, snapshot).await.map_err(AcpPromptDispatchError::Permission)?;
+    let blocks = build_blocks().map_err(AcpPromptDispatchError::Preparation)?;
+    *output_session.write().await = Some(session_id.to_owned());
+    let response = cx.send_request(acp::PromptRequest::new(session_id.to_owned(), blocks.clone())).block_task().await;
+    *output_session.write().await = None;
+    Ok((blocks, response))
 }
 
 async fn process_acp_prompt(
@@ -4696,20 +4716,35 @@ async fn process_acp_prompt(
     client_handle.set_window(window).await;
     client_handle.reset_buffers().await;
 
-    if let Err(error) = apply_next_acp_permissions(client_handle, cx, session_id).await {
-        client_handle.send_error_event(&error.to_string()).await;
-        return Ok(false);
-    }
-    let prompt_blocks = build_acp_prompt_blocks(prompt, &attachments, &prompt_capabilities, history_prefix, butler_instructions)?;
-
-    info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
-    *client_handle.output_session.write().await = Some(session_id.to_owned());
-    let prompt_response = cx
-        .send_request(acp::PromptRequest::new(session_id.to_string(), prompt_blocks.clone()))
-        .block_task()
-        .await;
-
-    *client_handle.output_session.write().await = None;
+    let load_permissions = || {
+        let Some(provider) = client_handle.instance_id else { return Ok(Default::default()); };
+        super::agent_driver::next_permissions::read(
+            &ConversationDatabase::new(&client_handle.app_handle)?.get_connection()?,
+            conversation_id, "acp", Some(provider), Some(session_id),
+        )
+    };
+    let snapshot = |options: Option<Vec<acp::SessionConfigOption>>| async move {
+        if let Some(options) = options {
+            let state = client_handle.update_session_state(|s| apply_config_options_to_snapshot(s, Some(&options))).await?;
+            client_handle.publish_session_state(Some(state.clone())).await;
+            Some(state)
+        } else {
+            client_handle.update_session_state(|_| {}).await
+        }
+    };
+    let dispatch = dispatch_acp_prompt(cx, session_id, &client_handle.output_session, load_permissions, snapshot, || {
+        let blocks = build_acp_prompt_blocks(prompt, &attachments, &prompt_capabilities, history_prefix, butler_instructions)?;
+        info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
+        Ok(blocks)
+    }).await;
+    let (prompt_blocks, prompt_response) = match dispatch {
+        Ok(sent) => sent,
+        Err(AcpPromptDispatchError::Preparation(error)) => return Err(error),
+        Err(AcpPromptDispatchError::Permission(error)) => {
+            client_handle.send_error_event(&error.to_string()).await;
+            return Ok(false);
+        }
+    };
     if let Err(e) = &prompt_response {
         let err_msg = format!("ACP prompt failed: {:?}", e);
         error!("ACP: {}", err_msg);
@@ -7246,3 +7281,7 @@ mod acp_session_tests;
 #[cfg(test)]
 #[path = "acp_protocol_tests.rs"]
 mod acp_protocol_tests;
+
+#[cfg(test)]
+#[path = "acp_queued_permissions_tests.rs"]
+mod acp_queued_permissions_tests;
