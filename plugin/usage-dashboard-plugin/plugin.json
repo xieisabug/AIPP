@@ -1,14 +1,18 @@
 {
   "id": "usage-dashboard-plugin",
   "code": "usage-dashboard-plugin",
-  "name": "Usage Dashboard Plugin",
-  "version": "0.1.0",
+  "name": "使用统计",
+  "version": "0.2.0",
+  "description": "统计本机会话、消息、模型与助手的使用情况，并生成趋势图。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "读取本地 conversation / assistant / llm 数据，生成多维度使用统计与趋势图。",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "interfaceType",
     "applicationType"
@@ -24,7 +28,7 @@
       {
         "id": "usage-dashboard",
         "location": "config.plugin-center",
-        "title": "Usage Dashboard",
+        "title": "使用统计",
         "description": "多维度统计本地会话、消息、模型与助手使用情况。"
       }
     ]

@@ -23,12 +23,17 @@ const once = <T,>(cache: Map<string, Promise<T>>, key: string, load: () => Promi
     return cache.get(key)!;
 };
 
-/** 插件的预览图来源，按优先级：本机实时渲染（主题 / 形象）→ 插件自带图片 → 官方目录图片 → 按类型的通用插画。 */
+/**
+ * 插件的预览图来源，按优先级：本机实时渲染（主题 / 形象）→ 插件自带图片 → 官方目录图片 → 按类型的通用插画。
+ * 官方插件包内的 `preview` 与目录的 `previewImages` 是同一组图（打包时导出给 helper），
+ * 所以包内有图时不再拼接目录图，否则详情里每张图会出现两次。
+ */
 export function previewImageSources(entry: PluginEntry): { local: string[]; remote: string[] } {
     const installed = entry.installed?.isInstalled ? entry.installed : undefined;
+    const local = installed?.preview ?? [];
     return {
-        local: installed?.preview ?? [],
-        remote: (entry.official?.previewImages ?? []).filter(url => url.startsWith(TRUSTED_PREVIEW_PREFIX)),
+        local,
+        remote: local.length ? [] : (entry.official?.previewImages ?? []).filter(url => url.startsWith(TRUSTED_PREVIEW_PREFIX)),
     };
 }
 

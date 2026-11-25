@@ -74,7 +74,7 @@ GET /api/plugins
   ],
   "sourceUrl": "string",
   "sha256": "sha256:string",
-  "previewImages": ["https://aipp-helper.xiejingyang.com/plugin-previews/<code>-1.webp"]
+  "previewImages": ["https://aipp-helper.xiejingyang.com/plugin-previews/<code>-<version>-1.webp"]
 }
 ```
 
@@ -110,7 +110,21 @@ GET /api/plugins
 ]
 ```
 
-`previewImages`：插件市场卡片与详情的效果预览图，第一张做卡片缩略图（约 3:1，建议 1200×400 webp），最多 6 张。客户端只加载 `https://aipp-helper.xiejingyang.com/plugin-previews/` 前缀的地址，其他地址会被丢弃。没有预览图时客户端按插件类型显示通用插画。
+`previewImages`：插件市场卡片与详情的效果预览图，第一张做卡片缩略图（约 3:1，建议 1200×400 webp），最多 6 张。客户端只加载 `https://aipp-helper.xiejingyang.com/plugin-previews/` 前缀的地址，其他地址会被丢弃。没有预览图时客户端按插件类型显示通用插画。旧客户端不认识这个字段，会直接忽略。
+
+官方插件的预览图只维护一份：放在 `plugin/<code>/preview/`，在 `plugin.json` 的 `preview` 里列出。打包脚本（`scripts/package-official-plugins.js`）把它们打进 zip，同时导出为 `plugin-previews/<code>-<version>-<n>.<ext>` 并写进 `official-plugins.json` 的 `previewImages`。文件名带版本号，旧图可以长期缓存。已安装的插件包里带图时，客户端只显示包内的图，不再拼接目录图。
+
+### 版本选择与旧客户端
+
+- 同一个 `code` 可以同时保留多个发布版本（例如 plugins-v0.1.0 与 plugins-v0.2.0）。helper 按请求的客户端版本，为每个 `code` 返回 `minAippVersion` 不高于该版本的最新一版；没有任何一版可用时不返回这个插件。这样新版插件依赖新宿主能力时，旧客户端仍拿到它能运行的旧版，而不是丢失插件。
+- 客户端从 1.6.2 起在请求头带 `X-AIPP-Version`。不带头的请求来自 1.2.0（首个有官方插件列表的版本）到 1.6.1 之间，无法区分，helper 一律按 1.2.0 处理，保证列给它们的插件在这一段版本里都能运行。
+- 新发布只新增条目、不改旧条目：旧条目的 sha256 对应已发布的 zip，改动会让旧客户端的下载校验失败。
+
+### 发布流程
+
+1. 改 `plugin/<code>/`，提升 `version`；依赖新宿主能力时同时提高 `minAippVersion`。
+2. 推 `plugins-vX.Y.Z` 标签，CI（Package official plugins）打包除 Office 预览外的全部插件，Release 里附带 zip、`official-plugins.json` 与预览图。Office 预览走自己的 `plugin-office-preview-plugin-v*` 标签。
+3. 在 AIPP-helper 执行 `node scripts/sync-plugin-release.mjs plugins-vX.Y.Z`，把 `official-plugins.json` 原样写入 `src/worker/data/official-plugins.json`、预览图写入 `public/plugin-previews/`；跑 `node --test tests/plugins.test.mjs` 后部署。
 
 ## 3. source 格式
 

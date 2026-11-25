@@ -75,7 +75,7 @@
                 "connect-src": "'self' http://localhost:* https://localhost:* ipc: http://ipc.localhost",
                 "style-src": "'self' 'unsafe-inline'",
                 "font-src": "'self' data:",
-                "img-src": "'self' asset: data: aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost https://aipp-helper.xiejingyang.com",
+                "img-src": "'self' asset: http://asset.localhost data: aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost https://aipp-helper.xiejingyang.com",
                 "script-src": "'self' 'unsafe-eval'"
             },
             "assetProtocol": {

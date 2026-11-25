@@ -1,17 +1,23 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "none",
+    "module": "preserve",
     "jsx": "react",
     "jsxFactory": "React.createElement",
     "jsxFragmentFactory": "React.Fragment",
-    "lib": ["ES2020", "DOM"],
-    "outFile": "dist/main.js",
+    "lib": [
+      "ES2020",
+      "DOM"
+    ],
     "strict": false,
     "noEmitOnError": true,
     "skipLibCheck": true,
     "sourceMap": false,
-    "types": ["react"]
+    "types": [
+      "react"
+    ],
+    "outDir": "dist/.build",
+    "rootDir": "src"
   },
   "files": [
     "../../docs/plugin-template/shared/aipp-plugin-sdk.d.ts",

@@ -41,15 +41,21 @@ jobs:
           INPUT_PLUGINS: ${{ github.event.inputs.plugins }}
         run: |
           plugins="$INPUT_PLUGINS"
+          exclude=""
           if [[ "$GITHUB_REF_NAME" =~ ^plugin-(.+)-v[0-9] ]]; then
             plugins="${BASH_REMATCH[1]}"
+          elif [[ "$GITHUB_REF_NAME" == plugins-v* ]]; then
+            # Office preview ships from its own plugin-office-preview-plugin-v* tag (large BetterOffice build).
+            exclude="office-preview-plugin"
           fi
           echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
+          echo "exclude=$exclude" >> "$GITHUB_OUTPUT"
 
       - name: Package official plugins
         run: node scripts/package-official-plugins.js
         env:
           AIPP_PLUGINS: ${{ steps.filter.outputs.plugins }}
+          AIPP_PLUGINS_EXCLUDE: ${{ steps.filter.outputs.exclude }}
 
       - uses: actions/upload-artifact@v4
         with:

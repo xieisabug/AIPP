@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Benchmark plugin source project (builds to dist/main.js)",
   "scripts": {
-    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "build": "node ../../scripts/build-script-plugin.mjs",
     "watch": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --watch",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
   }

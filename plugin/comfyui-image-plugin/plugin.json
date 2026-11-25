@@ -3,11 +3,25 @@
   "code": "comfyui-image-plugin",
   "name": "AI 图片生成",
   "version": "0.1.0",
+  "description": "把 AI 回复转成提示词，通过 ComfyUI 或 Kie 出图，并附在原回复下。",
+  "author": "AIPP",
+  "minAippVersion": "1.4.0",
   "entry": "dist/main.js",
-  "runtime": { "type": "js", "entry": "dist/main.js" },
-  "description": "将 AI 回复转换为提示词，并通过可配置的图片生成供应商附加到原回复。",
-  "pluginTypes": ["interfaceType", "applicationType"],
-  "kinds": ["ui", "worker"],
+  "runtime": {
+    "type": "js",
+    "entry": "dist/main.js"
+  },
+  "preview": [
+    "preview/1.webp"
+  ],
+  "pluginTypes": [
+    "interfaceType",
+    "applicationType"
+  ],
+  "kinds": [
+    "ui",
+    "worker"
+  ],
   "permissions": [
     "hook.chat.afterResponseCompleted",
     "conversation.read",

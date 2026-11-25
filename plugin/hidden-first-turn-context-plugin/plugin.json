@@ -1,14 +1,18 @@
 {
   "id": "hidden-first-turn-context-plugin",
   "code": "hidden-first-turn-context-plugin",
-  "name": "Hidden First Turn Context Plugin",
-  "version": "0.1.0",
+  "name": "首轮隐藏上下文",
+  "version": "0.2.0",
+  "description": "为助手配置一段只在第一轮请求时发给模型的隐藏上下文，聊天界面里看不到。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "为助手配置首轮隐藏上下文，并只在首轮模型请求时注入，不改动聊天界面里的用户消息。",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "applicationType"
   ],

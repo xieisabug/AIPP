@@ -13,7 +13,13 @@ const repository = process.env.GITHUB_REPOSITORY || "xieisabug/AIPP";
 const releaseTag = process.env.GITHUB_REF_NAME || "plugins-dev";
 const releaseBaseUrl = `https://github.com/${repository}/releases/download/${releaseTag}`;
 
-const optionalEntries = ["README.md", "README.MD", "readme.md", "LICENSE", "LICENSE.md", "assets", "avatars", "accessories"];
+const optionalEntries = ["README.md", "README.MD", "readme.md", "LICENSE", "LICENSE.md", "assets", "avatars", "accessories", "preview"];
+
+// The AIPP client only loads catalog preview images from this prefix (TRUSTED_PLUGIN_PREVIEW_PREFIX).
+const helperPreviewBaseUrl = "https://aipp-helper.xiejingyang.com/plugin-previews";
+const previewDirName = "plugin-previews";
+const PREVIEW_MAX_IMAGES = 6;
+const PREVIEW_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]);
 
 function toPosixPath(value) {
     return value.split(path.sep).join("/");
@@ -109,6 +115,36 @@ async function copyRuntimePackage(pluginDir, packageDir, manifest, entryChecksum
     }
 }
 
+/**
+ * Copies the manifest's `preview` images next to the zips as `<code>-<version>-<n>.<ext>` so the
+ * helper can host them under /plugin-previews/, and returns the catalog `previewImages` URLs.
+ * The version in the name keeps old images cacheable while a new release ships new ones.
+ * Official plugins fail the build on a bad path instead of silently dropping it like the client does.
+ */
+async function exportPreviewImages(pluginDir, manifest, code, version) {
+    const previews = Array.isArray(manifest.preview) ? manifest.preview : [];
+    if (previews.length > PREVIEW_MAX_IMAGES) {
+        throw new Error(`${code}: preview lists ${previews.length} images, at most ${PREVIEW_MAX_IMAGES} are shown`);
+    }
+    const urls = [];
+    for (const [index, raw] of previews.entries()) {
+        const relative = String(raw).trim().replace(/^\.\//, "");
+        const extension = path.extname(relative).toLowerCase();
+        if (!relative || relative.split(/[\\/]/).includes("..") || path.isAbsolute(relative) || !PREVIEW_EXTENSIONS.has(extension)) {
+            throw new Error(`${code}: invalid preview path ${raw}`);
+        }
+        const source = path.join(pluginDir, ...relative.split("/"));
+        if (!(await pathExists(source))) {
+            throw new Error(`${code}: preview image not found: ${relative}`);
+        }
+        const fileName = `${code}-${version}-${index + 1}${extension}`;
+        await fs.mkdir(path.join(outputRoot, previewDirName), { recursive: true });
+        await fs.copyFile(source, path.join(outputRoot, previewDirName, fileName));
+        urls.push(`${helperPreviewBaseUrl}/${fileName}`);
+    }
+    return urls;
+}
+
 async function packagePlugin(pluginDirName) {
     const pluginDir = path.join(pluginRoot, pluginDirName);
     const manifestPath = path.join(pluginDir, "plugin.json");
@@ -148,6 +184,7 @@ async function packagePlugin(pluginDirName) {
     const archiveChecksum = await sha256File(zipPath);
     const pluginTypes = manifest.pluginTypes || manifest.pluginType || [];
     const permissions = manifest.permissions || [];
+    const previewImages = await exportPreviewImages(pluginDir, manifest, code, version);
 
     return {
         id: code,
@@ -175,6 +212,7 @@ async function packagePlugin(pluginDirName) {
         ],
         sourceUrl: `https://github.com/${repository}/tree/main/plugin/${code}`,
         sha256: archiveChecksum,
+        ...(previewImages.length ? { previewImages } : {}),
     };
 }
 
@@ -183,9 +221,16 @@ async function main() {
     await fs.mkdir(stagingRoot, { recursive: true });
 
     const entries = await fs.readdir(pluginRoot, { withFileTypes: true });
-    // AIPP_PLUGINS=office-preview-plugin,foo packages only the listed plugins.
+    // AIPP_PLUGINS=office-preview-plugin,foo packages only the listed plugins;
+    // AIPP_PLUGINS_EXCLUDE skips plugins that ship from their own release tag.
     const only = new Set(
         (process.env.AIPP_PLUGINS || "")
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+    );
+    const excluded = new Set(
+        (process.env.AIPP_PLUGINS_EXCLUDE || "")
             .split(",")
             .map((value) => value.trim())
             .filter(Boolean),
@@ -193,7 +238,7 @@ async function main() {
     const pluginDirs = entries
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
-        .filter((name) => only.size === 0 || only.has(name))
+        .filter((name) => (only.size === 0 || only.has(name)) && !excluded.has(name))
         .sort();
     const officialPlugins = [];
 

@@ -1,14 +1,18 @@
 {
   "id": "run-script-bang-plugin",
   "code": "run-script-bang-plugin",
-  "name": "Run Script Bang Plugin",
-  "version": "0.1.0",
+  "name": "脚本快捷命令",
+  "version": "0.2.0",
+  "description": "在输入框用 !run_script、!rs 或 !bash 执行 shell 命令，并把输出放进提示词。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "Adds !run_script, !rs and !bash bangs backed by the built-in execute_bash tool.",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "toolType",
     "applicationType"

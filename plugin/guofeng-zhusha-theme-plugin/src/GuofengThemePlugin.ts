@@ -260,11 +260,11 @@ var GuofengThemePlugin = class GuofengThemePlugin {
       return null;
     }
     var React = (window as any).React;
-    if (!React || !this.systemApi || typeof this.systemApi.assetUrl !== "function") {
+    if (!React) {
       return null;
     }
     var isResponding = Boolean(context && context.isResponding);
-    var assetPath = "assets/send-leaf.svg";
+    var leafSrc = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(GUOFENG_SEND_LEAF_SVG);
     return React.createElement(
       "span",
       {
@@ -280,7 +280,7 @@ var GuofengThemePlugin = class GuofengThemePlugin {
         },
       },
       React.createElement("img", {
-        src: this.systemApi.assetUrl(assetPath),
+        src: leafSrc,
         alt: "",
         style: { width: "100%", height: "100%", objectFit: "contain", userSelect: "none" },
         draggable: false,

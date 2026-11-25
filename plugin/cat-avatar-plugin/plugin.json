@@ -1,15 +1,20 @@
 {
   "id": "cat-avatar-plugin",
   "code": "cat-avatar-plugin",
-  "name": "小猫形象插件",
+  "name": "小猫形象",
   "version": "0.1.1",
-  "description": "纯声明式助手形象与配饰示例插件：包含萌系小猫形象，以及小鱼干发卡与星星眼镜配饰。",
+  "description": "萌系小猫助手形象，附带小鱼干发卡与星星眼镜两件配饰。",
   "author": "AIPP",
-  "minAippVersion": "0.5.0",
-  "pluginTypes": ["avatarType"],
+  "minAippVersion": "1.6.4",
   "runtime": {
     "type": "declarative"
   },
+  "preview": [
+    "preview/1.webp"
+  ],
+  "pluginTypes": [
+    "avatarType"
+  ],
   "contributions": {
     "avatars": [
       "avatars/cat.json"

@@ -96,10 +96,10 @@ plugin/<your-theme-plugin>/
 
 ### 5.1 tsconfig（关键点）
 
-推荐使用：
-- `"module": "none"`
-- `"outFile": "dist/main.js"`
-- `files` 显式包含 SDK 类型声明：`../../docs/plugin-template/shared/aipp-plugin-sdk.d.ts`
+推荐使用（仓库根目录是 TypeScript 7，已不支持 `outFile` 与 `"module": "none"`）：
+- `"module": "preserve"`、`"outDir": "dist/.build"`、`"rootDir": "src"`
+- `files` 显式包含 SDK 类型声明 `../../docs/plugin-template/shared/aipp-plugin-sdk.d.ts`，再按加载顺序列出源码
+- `package.json` 的 `build` 写 `node ../../scripts/build-script-plugin.mjs`：tsc 做类型检查并逐个输出，脚本按 `files` 顺序拼成 `dist/main.js`（与原来 `outFile` 的结果一致）
 
 ### 5.2 全局构造函数导出（关键）
 

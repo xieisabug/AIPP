@@ -1,14 +1,18 @@
 {
   "id": "think-markdown-plugin",
   "code": "think-markdown-plugin",
-  "name": "Think Markdown Plugin",
-  "version": "0.1.0",
+  "name": "思考过程折叠",
+  "version": "0.2.0",
+  "description": "把回复里的 <think> 块显示为可展开的「思考过程」，默认收起。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "Registers a renderer for <think> markdown blocks.",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "markdownType",
     "interfaceType"

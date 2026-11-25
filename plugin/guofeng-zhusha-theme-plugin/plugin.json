@@ -1,14 +1,19 @@
 {
   "id": "guofeng-zhusha-theme-plugin",
   "code": "guofeng-zhusha-theme-plugin",
-  "name": "国风·朱砂 主题插件",
-  "version": "0.1.0",
+  "name": "国风·朱砂主题",
+  "version": "0.2.0",
+  "description": "以朱砂红与象牙白为主色的国风主题，发送按钮换成叶子与折扇。",
+  "author": "AIPP",
+  "minAippVersion": "1.4.0",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "以朱砂红与象牙白为主色的一键国风主题插件。",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "themeType",
     "interfaceType",

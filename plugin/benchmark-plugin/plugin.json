@@ -1,14 +1,18 @@
 {
   "id": "benchmark-plugin",
   "code": "benchmark-plugin",
-  "name": "Benchmark Plugin",
-  "version": "0.1.0",
+  "name": "问答评测",
+  "version": "0.2.0",
+  "description": "管理问答数据集，批量让助手或模型作答并打分，生成排行榜。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "QA benchmark plugin with dataset management, scoring, and leaderboards.",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "interfaceType",
     "applicationType"
@@ -22,8 +26,8 @@
       {
         "id": "benchmark-dashboard",
         "location": "config.plugin-center",
-        "title": "Benchmark Dashboard",
-        "description": "基于插件能力平台渲染的 Benchmark 仪表盘。"
+        "title": "问答评测",
+        "description": "管理数据集、运行评测并查看排行榜。"
       }
     ]
   }

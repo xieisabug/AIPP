@@ -1,14 +1,18 @@
 {
   "id": "prompt-optimizer-plugin",
   "code": "prompt-optimizer-plugin",
-  "name": "Prompt Optimizer Plugin",
-  "version": "0.1.0",
+  "name": "提示词优化",
+  "version": "0.2.0",
+  "description": "分析当前对话，让模型审阅助手提示词并给出修改建议，对比差异后再应用。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "Manual assistant prompt optimizer with model-based review and diff preview.",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "interfaceType"
   ],

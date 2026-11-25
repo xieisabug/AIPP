@@ -1,14 +1,18 @@
 {
   "id": "directory-bang-plugin",
   "code": "directory-bang-plugin",
-  "name": "Directory Bang Plugin",
-  "version": "0.1.0",
+  "name": "目录快捷命令",
+  "version": "0.2.0",
+  "description": "在输入框用 !directory 或 !dir 列出指定目录的文件和子目录，结果直接放进提示词。",
+  "author": "AIPP",
   "entry": "dist/main.js",
   "runtime": {
     "type": "js",
     "entry": "dist/main.js"
   },
-  "description": "Adds !directory and !dir bangs backed by the built-in list_directory tool.",
+  "preview": [
+    "preview/1.webp"
+  ],
   "pluginTypes": [
     "toolType",
     "applicationType"
