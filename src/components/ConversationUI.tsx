@@ -76,9 +76,7 @@ import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
 import { useNativeChoices } from "./choices/useNativeChoices";
 import { ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteJumpContext, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
 import { restoreTranscriptPosition } from "./conversation/restoreTranscriptPosition";
-import { reportedProgressByMessage } from "@/components/butler/reportedProgress";
-import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
-import { useLinger } from "@/hooks/useStablePresence";
+import { useButlerTranscript } from "@/components/butler/useButlerTranscript";
 import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
 import { useButlerInteractions, type InteractionRow } from "@/components/butler/butlerInteractions";
 import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline";
@@ -266,8 +264,6 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
 }
 
 const EMPTY_STREAMS = new Map();
-// 总管家简洁视图：吸收工具轮次间的短暂空闲。
-const BUTLER_IDLE_GAP_MS = 1200;
 
 interface ConversationUIProps {
     conversationId: string;
@@ -1155,42 +1151,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return rows;
         }, [savedInteractions, inlineInteractionItems, resultOnly]);
         const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
-        const butlerRunningHeld = useLinger(resultOnly && effectiveAiIsResponsing, BUTLER_IDLE_GAP_MS, conversationId);
-        // Replies already on screen before a run starts stay published. "Responding" turns on
-        // when the user presses send, but the new user message is persisted a moment later;
-        // until then the last user message is the previous turn's, and hiding everything after
-        // it made the previous reply vanish and pop back on every send.
-        const settledTailRef = useRef<{ conversationId: string; ids: ReadonlySet<number> }>({ conversationId: "", ids: new Set() });
-        if (resultOnly && !effectiveAiIsResponsing && !butlerRunningHeld) {
-            const ids = new Set<number>();
-            for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
-                if (allDisplayMessages[index].message_type === "user" && allDisplayMessages[index].id > 0) break;
-                ids.add(allDisplayMessages[index].id);
-            }
-            settledTailRef.current = { conversationId, ids };
-        }
-        const transcript = useMemo(() => {
-            if (!resultOnly) return windowLabel === "butler_experiment"
-                ? withButlerProcessing(allDisplayMessages, Number(conversationId), effectiveAiIsResponsing)
-                : allDisplayMessages;
-            const unpublished = new Set<number>();
-            if (effectiveAiIsResponsing || butlerRunningHeld) {
-                const settled = settledTailRef.current.conversationId === conversationId
-                    ? settledTailRef.current.ids
-                    : new Set<number>();
-                for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
-                    const message = allDisplayMessages[index];
-                    if (message.message_type === "user" && message.id > 0) break;
-                    if (!settled.has(message.id)) unpublished.add(message.id);
-                }
-            }
-            const reports = reportedProgressByMessage(Number(conversationId), displayAgentActivities.values(), mcpToolCallStates.values(), interactions);
-            const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId), interactions, inlineInteractionItems, mcpToolCallStates, reports);
-            // 工具轮次之间运行态会短暂回落为空闲；保留"处理中"直到真正的回复发布，避免提示行闪烁。
-            return withButlerProcessing(visible, Number(conversationId),
-                effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)),
-                visible.filter(row => row.message_type === "butler_report" && unpublished.has(row.parent_id!)).map(row => row.content));
-        }, [resultOnly, windowLabel, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId, interactions, inlineInteractionItems, mcpToolCallStates, displayAgentActivities]);
+        const transcript = useButlerTranscript({
+            conversationId: Number(conversationId), compact: resultOnly, running: windowLabel === "butler_experiment" && effectiveAiIsResponsing,
+            messages: allDisplayMessages, posts: peerTimeline?.posts, interactions, liveItems: inlineInteractionItems,
+            calls: mcpToolCallStates, activities: displayAgentActivities,
+        });
         const nativeChoices = useNativeChoices(Number(conversationId), !resultOnly);
         const remainingInlineItems = useMemo(() => {
             if (!resultOnly) return nativeChoices?.length ? [...(inlineInteractionItems ?? []), ...nativeChoices] : inlineInteractionItems;
