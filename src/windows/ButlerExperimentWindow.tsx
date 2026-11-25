@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
+import { ConversationDraftContext, createConversationDraftStore } from "@/hooks/useConversationDraft";
 import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
@@ -200,6 +201,7 @@ function ButlerExperimentWindow() {
     const showFeishuStatus = butlerExperimentEnabled && feishuEnabled;
 
     const conversationUIRef = useRef<ConversationUIRef>(null);
+    const [conversationDrafts] = useState(createConversationDraftStore);
     const mainLoadRequestRef = useRef(0);
     const resettingMainConversationRef = useRef(false);
     const mainConversationIdRef = useRef("");
@@ -1253,6 +1255,7 @@ function ButlerExperimentWindow() {
     ));
 
     return (
+        <ConversationDraftContext.Provider value={conversationDrafts}>
         <ButlerAppearanceContext.Provider value={featureConfig.get("butler_appearance") ?? new Map()}>
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div
@@ -1498,6 +1501,7 @@ function ButlerExperimentWindow() {
                 onClose={() => setProfileTarget(null)} onSave={saveProfile} />}
         </AntiLeakageProvider>
         </ButlerAppearanceContext.Provider>
+        </ConversationDraftContext.Provider>
     );
 }
 

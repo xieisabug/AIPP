@@ -1,4 +1,4 @@
-import { Dispatch, SetStateAction, useCallback, useRef, useState } from "react";
+import { createContext, Dispatch, SetStateAction, useCallback, useContext, useRef, useState, useSyncExternalStore } from "react";
 import { FileInfo } from "@/data/Conversation";
 import {
     draftAttachmentsToFileInfo,
@@ -9,6 +9,26 @@ import {
     useMobileDraftPersistence,
 } from "./useMobileDraftPersistence";
 
+export function createConversationDraftStore() {
+    const drafts = new Map<string, string>();
+    const listeners = new Set<() => void>();
+    return {
+        get: (id: string) => drafts.get(id) ?? "",
+        set(id: string, text: string) {
+            if ((drafts.get(id) ?? "") === text) return;
+            if (text) drafts.set(id, text);
+            else drafts.delete(id);
+            listeners.forEach(notify => notify());
+        },
+        subscribe(notify: () => void) {
+            listeners.add(notify);
+            return () => { listeners.delete(notify); };
+        },
+    };
+}
+
+export const ConversationDraftContext = createContext<ReturnType<typeof createConversationDraftStore> | null>(null);
+
 /** Desktop session drafts; mobile persists in the native app-local DB, never browser storage. */
 export function useConversationDraft(
     conversationId: string,
@@ -16,8 +36,10 @@ export function useConversationDraft(
     onDraftReady?: () => void,
     onMissingAttachments?: (missing: MobileDraftMissingAttachmentDto[]) => void,
 ): [string, Dispatch<SetStateAction<string>>, (attachmentIds: number[]) => void] {
-    const drafts = useRef(new Map<string, string>());
-    const [, redraw] = useState(0);
+    const windowDrafts = useContext(ConversationDraftContext);
+    const [localDrafts] = useState(createConversationDraftStore);
+    const drafts = windowDrafts ?? localDrafts;
+    const content = useSyncExternalStore(drafts.subscribe, () => drafts.get(conversationId));
     const restoreAttachments = useRef(onRestoreAttachments);
     restoreAttachments.current = onRestoreAttachments;
     const draftReady = useRef(onDraftReady);
@@ -28,27 +50,25 @@ export function useConversationDraft(
     const { saveContent, saveAttachmentIds } = useMobileDraftPersistence(
         conversationId,
         (draft: MobileDraftDto, options?: DraftRestoreOptions) => {
-            drafts.current.set(conversationId, draft.content);
+            drafts.set(conversationId, draft.content);
             if (!options?.preserveAttachments) {
                 restoreAttachments.current?.(draftAttachmentsToFileInfo(draft.attachments));
             }
             const missing = draftMissingAttachments(draft);
             if (missing.length > 0) missingAttachments.current?.(missing);
-            redraw((version) => version + 1);
         },
         () => draftReady.current?.(),
     );
 
     const setDraft = useCallback<Dispatch<SetStateAction<string>>>(
         (value) => {
-            const previous = drafts.current.get(conversationId) ?? "";
+            const previous = drafts.get(conversationId);
             const next = typeof value === "function" ? value(previous) : value;
-            drafts.current.set(conversationId, next);
+            drafts.set(conversationId, next);
             saveContent(next);
-            redraw((version) => version + 1);
         },
-        [conversationId, saveContent],
+        [conversationId, drafts, saveContent],
     );
 
-    return [drafts.current.get(conversationId) ?? "", setDraft, saveAttachmentIds];
+    return [content, setDraft, saveAttachmentIds];
 }
