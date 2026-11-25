@@ -199,6 +199,15 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(result.current.renderItems.map(item => item.key)).not.toContain("chat-bottom-spacer");
     });
 
+    it("should start a separate bubble when Claude wakes in a merged conversation", () => {
+        const { result } = renderHook(() => useMessageListElements(makeHookProps([
+            makeMessage({ id: 1, message_type: "user", content: "查一下" }),
+            makeMessage({ id: 2, content: "正在等截图" }),
+            makeMessage({ id: 3, content: "截图已完成", parent_id: 2, metadata_json: '{"origin":"claude_background_wake"}' }),
+        ])));
+        expect(result.current.messageElements.map(entry => entry.messageIds ?? [entry.messageId])).toEqual([[1], [2], [3]]);
+    });
+
     it("should keep consecutive replies apart when the host turns merging off", () => {
         const { result } = renderHook(() => useMessageListElements({
             ...makeHookProps([

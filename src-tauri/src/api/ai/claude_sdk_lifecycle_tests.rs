@@ -223,6 +223,9 @@ fn test_claude_active_prompt_prevents_idle_release_and_touch_refreshes_entry() {
     session.snapshot.has_active_prompt = true;
     assert!(!session.is_idle_for(Duration::from_secs(60)));
     session.snapshot.has_active_prompt = false;
+    session.background_pending = true;
+    assert!(!session.is_idle_for(Duration::from_secs(60)));
+    session.background_pending = false;
     assert!(session.is_idle_for(Duration::from_secs(60)));
     let previous = session.last_activity;
     session.touch();

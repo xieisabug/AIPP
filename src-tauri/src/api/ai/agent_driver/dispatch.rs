@@ -27,7 +27,7 @@ pub(super) trait TurnEffects: Sync {
     async fn clear_focus(&self, _conversation_id: i64) {}
 }
 
-pub(super) fn response_message(conversation_id: i64, metadata: impl Into<AgentDriverMetadata>) -> Message {
+pub(in crate::api::ai) fn response_message(conversation_id: i64, metadata: impl Into<AgentDriverMetadata>) -> Message {
     let metadata = metadata.into();
     Message {
         id: 0, parent_id: None, conversation_id, message_type: "response".into(),

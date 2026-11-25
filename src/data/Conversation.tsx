@@ -82,6 +82,15 @@ export function readScheduledTaskMetadata(raw: Message["metadata_json"]): Record
     return result;
 }
 
+export function isClaudeBackgroundWake(message: Message): boolean {
+    if (!message.parent_id || !message.metadata_json?.includes('"claude_background_wake"')) return false;
+    try {
+        return JSON.parse(message.metadata_json)?.origin === "claude_background_wake";
+    } catch {
+        return false;
+    }
+}
+
 export interface MessageReplyQuote {
     label: string;
     /** Displayed id of the quoted message, used to jump to it. */

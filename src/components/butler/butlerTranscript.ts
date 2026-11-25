@@ -1,5 +1,5 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
-import { readScheduledTaskMetadata, type Message } from "@/data/Conversation";
+import { isClaudeBackgroundWake, readScheduledTaskMetadata, type Message } from "@/data/Conversation";
 import { isButlerInteractionTool, isResultCardTool } from "./ButlerPresentationContext";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
@@ -15,13 +15,19 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
     interactionRows?: ReadonlyMap<number, Message[]>, positionedCalls?: ReadonlySet<number>, toolOwners?: ReadonlySet<number>): Message[] {
     const result: Message[] = [];
     const lastResponses = new Set<Message>();
+    const beforeWake = new Set<number>();
     let needLast = true;
     for (let index = messages.length - 1; index >= 0; index--) {
         const message = messages[index];
         if (message.message_type === "user" && message.id > 0) needLast = true;
-        if (needLast && (message.message_type === "response" || message.message_type === "assistant")) {
+        if ((needLast || beforeWake.has(message.id)) && (message.message_type === "response" || message.message_type === "assistant")) {
             lastResponses.add(message);
             needLast = false;
+        }
+        // A native background wake starts a new turn without a user message.
+        if (message.parent_id && isClaudeBackgroundWake(message)) {
+            beforeWake.add(message.parent_id);
+            lastResponses.add(message);
         }
     }
     let internalTurn = false;

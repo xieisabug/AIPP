@@ -8,7 +8,7 @@ import MessageItem from "../MessageItem";
 import ButlerProgressRow, { ReportBubble } from "@/components/butler/ButlerProgressRow";
 import ButlerExchangeRow from "../butler/ButlerExchangeRow";
 import VersionPagination from "../VersionPagination";
-import { AgentActivityEvent, Message, readScheduledTaskMetadata, StreamEvent } from "../../data/Conversation";
+import { AgentActivityEvent, isClaudeBackgroundWake, Message, readScheduledTaskMetadata, StreamEvent } from "../../data/Conversation";
 import { isHiddenAgentActivity } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
@@ -709,7 +709,7 @@ export function useMessageListElements({
                 result.push(custom);
                 continue;
             }
-            if (message.message_type === "response" && readScheduledTaskMetadata(message.metadata_json)?.role === "result") {
+            if (isClaudeBackgroundWake(message) || (message.message_type === "response" && readScheduledTaskMetadata(message.metadata_json)?.role === "result")) {
                 flushGroup();
                 currentGroup.push(message);
                 flushGroup({ keepExpanded: message.id === lastMessageId });

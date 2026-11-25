@@ -1,4 +1,7 @@
 use super::official_cli;
+#[path = "claude_background.rs"]
+mod background;
+use background::{BackgroundTasks, IdleEvent};
 use std::collections::VecDeque;
 use crate::api::ai::acp::{
     AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
@@ -350,6 +353,7 @@ pub struct ClaudeSessionEntry {
     pub config_signature: String,
     pub run_id: String,
     pub last_activity: Instant,
+    background_pending: bool,
 }
 
 impl ClaudeSessionEntry {
@@ -383,6 +387,7 @@ impl ClaudeSessionEntry {
                 ..Default::default()
             },
             last_activity: Instant::now(),
+            background_pending: false,
         }
     }
 
@@ -400,7 +405,7 @@ impl ClaudeSessionEntry {
 
     pub fn is_idle_for(&self, idle_timeout: Duration) -> bool {
         super::agent_session_lifecycle::should_release_idle_session(
-            self.snapshot.has_active_prompt,
+            self.snapshot.has_active_prompt || self.background_pending,
             self.last_activity.elapsed(),
             idle_timeout,
         )
@@ -1483,6 +1488,7 @@ async fn wait_claude_permission_decision(
 enum ClaudePromptInput {
     Frame(Value),
     Interrupted,
+    PendingPrompt(SessionCommand),
 }
 
 async fn read_claude_prompt_input(
@@ -1506,7 +1512,7 @@ async fn read_claude_prompt_input(
                     let _ = response.send(result.map_err(|error| error.to_string()));
                     return Ok(ClaudePromptInput::Interrupted);
                 }
-                Some(SessionCommand::Prompt { .. }) => continue,
+                Some(prompt @ SessionCommand::Prompt { .. }) => return Ok(ClaudePromptInput::PendingPrompt(prompt)),
                 Some(SessionCommand::SetConfig { response, .. }) => {
                     let _ = response.send(Err("Claude Code 正在回复，当前无法执行即时配置请求".into()));
                     continue;
@@ -1599,15 +1605,48 @@ pub fn spawn_claude_session_task(
             ),
         )
         .await;
+        let mut background = BackgroundTasks::default();
+        let mut wake_source = None;
+        let mut last_turn: Option<(i64, tauri::Window, u64)> = None;
+        let mut background_scope = None;
+        let mut pending_prompts = VecDeque::new();
         let mut deferred_frames = VecDeque::new();
-        while let Some(message) = rx.recv().await {
-            match message {
-                SessionCommand::Cancel { response } => {
+        loop {
+            let event = if last_turn.is_some() && !deferred_frames.is_empty() {
+                IdleEvent::Frame(deferred_frames.pop_front().unwrap())
+            } else if let Some(prompt) = pending_prompts.pop_front() {
+                IdleEvent::Command(prompt)
+            } else if last_turn.is_some() {
+                match background::read_idle_event(&mut lines, &mut rx).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(error) => {
+                        if background.pending() || wake_source.is_some() {
+                            let (previous, window, _) = last_turn.as_ref().unwrap();
+                            if let Ok(id) = background::create_reply(&app, &event_identity, wake_source.unwrap_or(*previous)) {
+                                emit_claude_run_failure(&app, &event_identity, id, window, &error, AgentFailureStage::Stream,
+                                    diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s| s.to_string()), None));
+                            }
+                        }
+                        tracing::warn!(conversation_id = _conversation_id, run_id = %task_run_id, %error, "Claude idle stream closed");
+                        break;
+                    }
+                }
+            } else {
+                let Some(command) = rx.recv().await else { break };
+                IdleEvent::Command(command)
+            };
+            let (message_id, window, cancel_generation, prompt_input, mut first_frame) = match event {
+                IdleEvent::Command(SessionCommand::Cancel { response }) => {
                     let _ = child.kill().await;
                     let _ = response.send(Ok(()));
                     break;
                 }
-                SessionCommand::SetConfig { config_id, value, response } => {
+                IdleEvent::Command(SessionCommand::SetConfig { config_id, value, response }) => {
+                    if background.pending() {
+                        let _ = response.send(Err("Claude Code 后台任务仍在运行，请在任务结束后更改配置".into()));
+                        continue;
+                    }
                     match config_id.as_str() {
                         "model" => {
                             if !config.model_choices.iter().any(|choice| choice.value == value) {
@@ -1629,6 +1668,8 @@ pub fn spawn_claude_session_task(
                         _ => { let _ = response.send(Err(format!("Claude Code 不支持会话配置项: {config_id}"))); continue; }
                     }
                     if config_id != "permission_mode" {
+                        last_turn = None;
+                        background_scope.take();
                         deferred_frames.clear();
                         let _ = child.kill().await;
                         diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
@@ -1654,7 +1695,7 @@ pub fn spawn_claude_session_task(
                     let _ = response.send(Ok(()));
                     continue;
                 }
-                SessionCommand::Prompt { message_id, prompt, attachments, window, cancel_generation, permissions } => {
+                IdleEvent::Command(SessionCommand::Prompt { message_id, prompt, attachments, window, cancel_generation, permissions }) => {
                     event_identity.response_message_id = Some(message_id);
                     let desired = permissions.selected.as_deref().or_else(|| {
                         (permissions.configured != configured_permission_mode)
@@ -1675,173 +1716,273 @@ pub fn spawn_claude_session_task(
                         }
                     }
                     configured_permission_mode = permissions.configured;
-                    let _mcp_prompt = match config.mcp_scope.as_ref().map(|scope| scope.begin_prompt(message_id)).transpose() {
-                        Ok(guard) => guard.map(|guard| guard.watch_cancellation(cancellation.clone(), cancel_generation)),
+                    if last_turn.is_some() && !deferred_frames.is_empty() {
+                        // Deliver frames received before the acknowledgement to their original turn.
+                        // Permission is already confirmed for this prompt.
+                        pending_prompts.push_front(SessionCommand::Prompt {
+                            message_id, prompt, attachments, window, cancel_generation,
+                            permissions: ClaudeTurnPermissions { configured: configured_permission_mode.clone(), selected: None },
+                        });
+                        continue;
+                    }
+                    (message_id, window, cancel_generation, Some((prompt, attachments)), None)
+                }
+                IdleEvent::Frame(frame) => {
+                    let (previous, window, generation) = last_turn.as_ref().unwrap();
+                    if frame["session_id"].as_str().is_some_and(|id| Some(id) != session_id.as_deref()) {
+                        tracing::error!(conversation_id = _conversation_id, run_id = %task_run_id, "Claude idle event belongs to a different session");
+                        break;
+                    }
+                    let was_pending = background.pending();
+                    if let Some(owner) = background.observe(&frame, *previous) {
+                        wake_source.get_or_insert(owner);
+                    }
+                    if background.pending() != was_pending {
+                        background::set_pending(&app, _conversation_id, &task_run_id, background.pending()).await;
+                        if !background.pending() { background_scope.take(); }
+                    }
+                    if frame["type"] != "control_request" && !background::starts_wake(&frame) { continue; }
+                    let source = wake_source.unwrap_or(*previous);
+                    match background::can_continue(&app, _conversation_id, source) {
+                        Ok(true) if *generation == *cancellation.borrow() => {}
+                        Ok(_) => break,
                         Err(error) => {
-                            emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
-                                AgentFailureStage::Mcp, diagnostics.diagnostics(None, None));
+                            tracing::error!(conversation_id = _conversation_id, %error, "Cannot validate Claude background owner");
+                            break;
+                        }
+                    }
+                    if frame["type"] == "control_request" {
+                        if let Err(error) = crate::api::butler_peer::TOOL_MESSAGE.scope(Some(*previous), handle_permission(
+                            &app, _conversation_id, &frame, *previous, config.mcp_scope.as_ref(), &config.working_directory,
+                            &task_run_id, config.instance_id, &mut stdin, &mut cancellation, *generation,
+                        )).await {
+                            tracing::error!(conversation_id = _conversation_id, %error, "Claude background permission failed");
+                            break;
+                        }
+                        continue;
+                    }
+                    let id = match background::create_reply(&app, &event_identity, source) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            tracing::error!(conversation_id = _conversation_id, %error, "Cannot persist Claude wake reply");
                             break;
                         }
                     };
-                    let input = match claude_user_input(prompt, attachments, session_id.clone()).await {
-                        Ok(input) => input,
-                        Err(error) => {
-                            emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
-                                AgentFailureStage::SendPrompt, diagnostics.diagnostics(None, None));
-                            if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                                manager.clear_agent_focus(&app, &event_identity, false).await;
-                            }
-                            crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, false).await;
-                            continue;
-                        }
-                    };
-                    if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
-                        emit_claude_run_failure(
-                            &app,
-                            &event_identity,
-                            message_id,
-                            &window,
-                            &format!("写入 Claude Code 请求失败：{error}"), AgentFailureStage::SendPrompt, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
+                    (id, window.clone(), *generation, None, Some(frame))
+                }
+            };
+            background_scope.take();
+            wake_source = None;
+            event_identity.response_message_id = Some(message_id);
+            let mcp_prompt = match config.mcp_scope.as_ref().map(|scope| scope.begin_prompt(message_id)).transpose() {
+                Ok(guard) => guard.map(|guard| guard.watch_cancellation(cancellation.clone(), cancel_generation)),
+                Err(error) => {
+                    emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
+                        AgentFailureStage::Mcp, diagnostics.diagnostics(None, None));
+                    break;
+                }
+            };
+            if let Some((prompt, attachments)) = prompt_input {
+                let input = match claude_user_input(prompt, attachments, session_id.clone()).await {
+                    Ok(input) => input,
+                    Err(error) => {
+                        emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
+                            AgentFailureStage::SendPrompt, diagnostics.diagnostics(None, None));
                         if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                             manager.clear_agent_focus(&app, &event_identity, false).await;
                         }
-                        break;
+                        crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, false).await;
+                        continue;
                     }
-                    if let Err(error) = stdin.flush().await {
-                        emit_claude_run_failure(
-                            &app,
-                            &event_identity,
-                            message_id,
-                            &window,
-                            &format!("提交 Claude Code 请求失败：{error}"), AgentFailureStage::SendPrompt, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
-                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_agent_focus(&app, &event_identity, false).await;
-                        }
-                        break;
-                    }
-                    if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                        manager.set_agent_streaming(&app, &event_identity, message_id).await;
-                    }
-                    let mut content = String::new();
-                    let mut final_text = None;
-                    let mut agent_plan_message: Option<AgentPlanMessage> = None;
-                    let mut activities = ClaudeActivities::default();
-                    let mut was_cancelled = false;
-                    emit_snapshot(&event_identity,
+                };
+                if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
+                    emit_claude_run_failure(
                         &app,
-                        _conversation_id,
-                        claude_session_snapshot(
-                            _conversation_id,
-                            session_id.clone(),
-                            &config,
-                            true,
-                            restored_session_method.clone(),
-                            connection_event_id.clone(),
-                            &current_plan,
-                        ),
-                    )
-                    .await;
-                    let mut usage = Value::Null;
-                    // `/compact` 完成时 CLI 发 system/compact_boundary；记录下来，结果为空时写入压缩说明
-                    let mut compact_boundary: Option<Option<u64>> = None;
-                    let mut stream_error: Option<String> = None;
-                    let mut stream_failure_stage = AgentFailureStage::Stream;
-                    loop {
-                        let next = match deferred_frames.pop_front() {
-                            Some(frame) => Ok(ClaudePromptInput::Frame(frame)),
-                            None => read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await,
-                        };
-                        let frame = match next {
-                            Ok(ClaudePromptInput::Frame(frame)) => frame,
-                            Ok(ClaudePromptInput::Interrupted) => {
-                                was_cancelled = true;
-                                if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                                    manager.clear_agent_focus(&app, &event_identity, false).await;
-                                }
-                                continue;
-                            }
-                            Err(error) => {
-                                stream_error = Some(error);
-                                break;
-                            }
-                        };
-                        if let Some(reported) = reported_claude_models(&frame) {
-                            if let Some(provider_id) = config.instance_id {
-                                REPORTED_MODELS.lock().unwrap().insert(config.catalog_key(provider_id), reported);
-                                match crate::db::llm_db::LLMDatabase::new(&app).and_then(|db|
-                                    Ok((db.get_llm_provider(provider_id)?, db.get_llm_models(provider_id.to_string())?))) {
-                                    Ok((provider, models)) => config.model_choices =
-                                        claude_model_choices(&config, provider_id, &models, provider.api_type != "anthropic"),
-                                    Err(error) => tracing::warn!(provider_id, %error, "Failed to update Claude model choices"),
-                                }
-                            }
-                            continue;
+                        &event_identity,
+                        message_id,
+                        &window,
+                        &format!("写入 Claude Code 请求失败：{error}"), AgentFailureStage::SendPrompt, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
+                    if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                        manager.clear_agent_focus(&app, &event_identity, false).await;
+                    }
+                    break;
+                }
+                if let Err(error) = stdin.flush().await {
+                    emit_claude_run_failure(
+                        &app,
+                        &event_identity,
+                        message_id,
+                        &window,
+                        &format!("提交 Claude Code 请求失败：{error}"), AgentFailureStage::SendPrompt, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
+                    if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                        manager.clear_agent_focus(&app, &event_identity, false).await;
+                    }
+                    break;
+                }
+            }
+            if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                manager.set_agent_streaming(&app, &event_identity, message_id).await;
+            }
+            let mut content = String::new();
+            let mut final_text = None;
+            let mut agent_plan_message: Option<AgentPlanMessage> = None;
+            let mut activities = ClaudeActivities::default();
+            let mut was_cancelled = false;
+            emit_snapshot(&event_identity,
+                &app,
+                _conversation_id,
+                claude_session_snapshot(
+                    _conversation_id,
+                    session_id.clone(),
+                    &config,
+                    true,
+                    restored_session_method.clone(),
+                    connection_event_id.clone(),
+                    &current_plan,
+                ),
+            )
+            .await;
+            let mut usage = Value::Null;
+            // `/compact` 完成时 CLI 发 system/compact_boundary；记录下来，结果为空时写入压缩说明
+            let mut compact_boundary: Option<Option<u64>> = None;
+            let mut stream_error: Option<String> = None;
+            let mut stream_failure_stage = AgentFailureStage::Stream;
+            loop {
+                let next = match first_frame.take().or_else(|| deferred_frames.pop_front()) {
+                    Some(frame) => Ok(ClaudePromptInput::Frame(frame)),
+                    None => read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await,
+                };
+                let frame = match next {
+                    Ok(ClaudePromptInput::PendingPrompt(command)) => {
+                        pending_prompts.push_back(command);
+                        continue;
+                    }
+                    Ok(ClaudePromptInput::Frame(frame)) => frame,
+                    Ok(ClaudePromptInput::Interrupted) => {
+                        was_cancelled = true;
+                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                            manager.clear_agent_focus(&app, &event_identity, false).await;
                         }
-                        if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
-                            match confirm_claude_resume(
-                                pending_resume_session_id.as_deref(),
-                                id,
-                                &task_run_id,
-                            ) {
-                                Ok(Some((method, event_id))) => {
-                                    restored_session_method = Some(method);
-                                    connection_event_id = Some(event_id);
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    stream_failure_stage = AgentFailureStage::Resume;
-                                    stream_error = Some(error);
-                                    break;
-                                }
-                            }
-                            if pending_resume_session_id.is_some() {
-                                pending_resume_session_id = None;
-                                emit_snapshot(&event_identity,
-                                    &app,
-                                    _conversation_id,
-                                    claude_session_snapshot(
-                                        _conversation_id,
-                                        Some(id.into()),
-                                        &config,
-                                        true,
-                                        restored_session_method.clone(),
-                                        connection_event_id.clone(),
-                                        &current_plan,
-                                    ),
-                                )
-                                .await;
-                            }
-                            session_id = Some(id.into());
-                            event_identity.native_session_id = session_id.clone();
-                            let save_result = {
-                                let state = app.state::<crate::ClaudeSessionState>();
-                                let sessions = state.sessions.lock().await;
-                                super::agent_driver::persistence::persist_session_id(&app, &event_identity,
-                                    sessions.get(&_conversation_id).map(|entry| entry.run_id.as_str()), id)
-                            };
-                            if let Err(error) = save_result {
-                                stream_failure_stage = AgentFailureStage::Persistence;
-                                stream_error = Some(format!("Claude Code session persistence failed: {error}"));
-                                break;
-                            }
+                        continue;
+                    }
+                    Err(error) => {
+                        stream_error = Some(error);
+                        break;
+                    }
+                };
+                if let Some(reported) = reported_claude_models(&frame) {
+                    if let Some(provider_id) = config.instance_id {
+                        REPORTED_MODELS.lock().unwrap().insert(config.catalog_key(provider_id), reported);
+                        match crate::db::llm_db::LLMDatabase::new(&app).and_then(|db|
+                            Ok((db.get_llm_provider(provider_id)?, db.get_llm_models(provider_id.to_string())?))) {
+                            Ok((provider, models)) => config.model_choices =
+                                claude_model_choices(&config, provider_id, &models, provider.api_type != "anthropic"),
+                            Err(error) => tracing::warn!(provider_id, %error, "Failed to update Claude model choices"),
                         }
-                        let changes = activities.consume(&frame, content.chars().count());
-                        if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, changes) {
-                            stream_failure_stage = AgentFailureStage::Persistence;
-                            stream_error = Some(format!("Claude Code activity persistence/delivery failed [message_id={message_id}]: {error}"));
+                    }
+                    continue;
+                }
+                if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
+                    match confirm_claude_resume(
+                        pending_resume_session_id.as_deref(),
+                        id,
+                        &task_run_id,
+                    ) {
+                        Ok(Some((method, event_id))) => {
+                            restored_session_method = Some(method);
+                            connection_event_id = Some(event_id);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            stream_failure_stage = AgentFailureStage::Resume;
+                            stream_error = Some(error);
                             break;
                         }
-                        match frame.get("type").and_then(Value::as_str).unwrap_or("") {
-                            "system" => {
-                                if let Some(pre_tokens) = claude_compact_boundary(&frame) {
-                                    compact_boundary = Some(pre_tokens);
-                                }
-                                if let Some(model) = frame.get("model").and_then(Value::as_str) {
-                                    config.resolved_model = Some(model.to_string());
-                                }
-                                if let Some(effort) = frame.get("effort").and_then(Value::as_str) {
-                                    config.effort = Some(effort.to_string());
-                                }
+                    }
+                    if pending_resume_session_id.is_some() {
+                        pending_resume_session_id = None;
+                        emit_snapshot(&event_identity,
+                            &app,
+                            _conversation_id,
+                            claude_session_snapshot(
+                                _conversation_id,
+                                Some(id.into()),
+                                &config,
+                                true,
+                                restored_session_method.clone(),
+                                connection_event_id.clone(),
+                                &current_plan,
+                            ),
+                        )
+                        .await;
+                    }
+                    session_id = Some(id.into());
+                    event_identity.native_session_id = session_id.clone();
+                    let save_result = {
+                        let state = app.state::<crate::ClaudeSessionState>();
+                        let sessions = state.sessions.lock().await;
+                        super::agent_driver::persistence::persist_session_id(&app, &event_identity,
+                            sessions.get(&_conversation_id).map(|entry| entry.run_id.as_str()), id)
+                    };
+                    if let Err(error) = save_result {
+                        stream_failure_stage = AgentFailureStage::Persistence;
+                        stream_error = Some(format!("Claude Code session persistence failed: {error}"));
+                        break;
+                    }
+                }
+                background.observe(&frame, message_id);
+                if background::lifecycle_result(&frame) { continue; }
+                let changes = activities.consume(&frame, content.chars().count());
+                if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, changes) {
+                    stream_failure_stage = AgentFailureStage::Persistence;
+                    stream_error = Some(format!("Claude Code activity persistence/delivery failed [message_id={message_id}]: {error}"));
+                    break;
+                }
+                match frame.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "system" => {
+                        if let Some(pre_tokens) = claude_compact_boundary(&frame) {
+                            compact_boundary = Some(pre_tokens);
+                        }
+                        if let Some(model) = frame.get("model").and_then(Value::as_str) {
+                            config.resolved_model = Some(model.to_string());
+                        }
+                        if let Some(effort) = frame.get("effort").and_then(Value::as_str) {
+                            config.effort = Some(effort.to_string());
+                        }
+                        emit_snapshot(&event_identity,
+                            &app,
+                            _conversation_id,
+                            claude_session_snapshot(
+                                _conversation_id,
+                                session_id.clone(),
+                                &config,
+                                true,
+                                restored_session_method.clone(),
+                                connection_event_id.clone(),
+                                &current_plan,
+                            ),
+                        )
+                        .await;
+                    }
+                    "stream_event" => {
+                        if let Some(delta) =
+                            frame.pointer("/event/delta/text").and_then(Value::as_str)
+                        {
+                            content.push_str(delta);
+                            persist(&app, message_id, &content, false, None);
+                            emit_update(&event_identity,
+                                &window,
+                                _conversation_id,
+                                message_id,
+                                &content,
+                                false,
+                            );
+                        }
+                    }
+                    "assistant" => {
+                        for block in message_content_blocks(&frame) {
+                            if let Some(plan) = claude_plan_from_tool_use(block) {
+                                current_plan = plan;
                                 emit_snapshot(&event_identity,
                                     &app,
                                     _conversation_id,
@@ -1856,168 +1997,170 @@ pub fn spawn_claude_session_task(
                                     ),
                                 )
                                 .await;
+                                continue;
                             }
-                            "stream_event" => {
-                                if let Some(delta) =
-                                    frame.pointer("/event/delta/text").and_then(Value::as_str)
-                                {
-                                    content.push_str(delta);
-                                    persist(&app, message_id, &content, false, None);
-                                    emit_update(&event_identity,
+                            if let Some(plan) = claude_full_plan_from_tool_use(block) {
+                                let item_id = block.get("id").and_then(Value::as_str);
+                                match AgentPlanMessage::create_with_identity(
+                                    &app,
+                                    &window,
+                                    _conversation_id,
+                                    message_id,
+                                    CLAUDE_SDK_API_TYPE,
+                                    session_id.as_deref(),
+                                    None,
+                                    item_id, event_identity.clone()) {
+                                    Ok(mut plan_message) => {
+                                    plan_message.replace_content(
+                                        &app,
                                         &window,
                                         _conversation_id,
-                                        message_id,
-                                        &content,
-                                        false,
+                                        plan.to_string(),
+                                        true,
                                     );
+                                    agent_plan_message = Some(plan_message);
+                                    }
+                                    Err(error) => {
+                                        stream_failure_stage = AgentFailureStage::Persistence;
+                                        stream_error = Some(format!("Claude Code Plan 已返回，但 AIPP 创建 Plan 消息失败: {error}"));
+                                    }
                                 }
+                                continue;
                             }
-                            "assistant" => {
-                                for block in message_content_blocks(&frame) {
-                                    if let Some(plan) = claude_plan_from_tool_use(block) {
-                                        current_plan = plan;
-                                        emit_snapshot(&event_identity,
-                                            &app,
-                                            _conversation_id,
-                                            claude_session_snapshot(
-                                                _conversation_id,
-                                                session_id.clone(),
-                                                &config,
-                                                true,
-                                                restored_session_method.clone(),
-                                                connection_event_id.clone(),
-                                                &current_plan,
-                                            ),
-                                        )
-                                        .await;
-                                        continue;
-                                    }
-                                    if let Some(plan) = claude_full_plan_from_tool_use(block) {
-                                        let item_id = block.get("id").and_then(Value::as_str);
-                                        match AgentPlanMessage::create_with_identity(
-                                            &app,
-                                            &window,
-                                            _conversation_id,
-                                            message_id,
-                                            CLAUDE_SDK_API_TYPE,
-                                            session_id.as_deref(),
-                                            None,
-                                            item_id, event_identity.clone()) {
-                                            Ok(mut plan_message) => {
-                                            plan_message.replace_content(
-                                                &app,
-                                                &window,
-                                                _conversation_id,
-                                                plan.to_string(),
-                                                true,
-                                            );
-                                            agent_plan_message = Some(plan_message);
-                                            }
-                                            Err(error) => {
-                                                stream_failure_stage = AgentFailureStage::Persistence;
-                                                stream_error = Some(format!("Claude Code Plan 已返回，但 AIPP 创建 Plan 消息失败: {error}"));
-                                            }
-                                        }
-                                        continue;
-                                    }
 
-                                }
-                            }
-                            "control_request" => {
-                                if let Err(error) =
-                                    crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message_id), handle_permission(
-                                        &app, _conversation_id, &frame, message_id, config.mcp_scope.as_ref(), &config.working_directory, &task_run_id, config.instance_id, &mut stdin,
-                                        &mut cancellation, cancel_generation,
-                                    )).await
-                                {
-                                    stream_failure_stage = AgentFailureStage::Permission;
-                                    stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
-                                    break;
-                                }
-                            }
-                            "result" => {
-                                if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") { break; }
-                                if let Some(error) = claude_result_error(&frame) {
-                                    stream_error = Some(error);
-                                    break;
-                                }
-                                if content.is_empty() {
-                                    content = claude_result_fallback_content(&frame, compact_boundary);
-                                }
-                                final_text = frame["result"].as_str().filter(|text| !text.is_empty()).map(str::to_owned);
-                                usage = frame.get("usage").cloned().unwrap_or(Value::Null);
-                                break;
-                            }
-                            _ => {}
                         }
                     }
-                    let settled = activities.finish(was_cancelled, stream_error.as_deref());
-                    if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, settled) {
-                        stream_failure_stage = AgentFailureStage::Persistence;
-                        stream_error = Some(format!("Claude Code final activity persistence/delivery failed [message_id={message_id}]: {error}"));
-                    }
-                    if let Some(error) = stream_error.as_deref() {
-                        emit_claude_run_failure(&app, &event_identity, message_id, &window, error, stream_failure_stage, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
-                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_agent_focus(&app, &event_identity, false).await;
+                    "control_request" => {
+                        if let Err(error) =
+                            crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message_id), handle_permission(
+                                &app, _conversation_id, &frame, message_id, config.mcp_scope.as_ref(), &config.working_directory, &task_run_id, config.instance_id, &mut stdin,
+                                &mut cancellation, cancel_generation,
+                            )).await
+                        {
+                            stream_failure_stage = AgentFailureStage::Permission;
+                            stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
+                            break;
                         }
+                    }
+                    "result" => {
+                        if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") { break; }
+                        if let Some(error) = claude_result_error(&frame) {
+                            stream_error = Some(error);
+                            break;
+                        }
+                        if content.is_empty() {
+                            content = claude_result_fallback_content(&frame, compact_boundary);
+                        }
+                        final_text = frame["result"].as_str().filter(|text| !text.is_empty()).map(str::to_owned);
+                        usage = frame.get("usage").cloned().unwrap_or(Value::Null);
                         break;
                     }
-                    if !was_cancelled && content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
-                        emit_claude_run_failure(
-                            &app,
-                            &event_identity,
-                            message_id,
-                            &window,
-                            "Claude Code 本轮未返回任何内容", AgentFailureStage::Stream, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
-                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_agent_focus(&app, &event_identity, false).await;
-                        }
-                        break;
-                    }
-                    persist(&app, message_id, &content, true, if was_cancelled { Some("") } else { final_text.as_deref() });
-                    if !usage.is_null() {
-                        persist_usage(&app, message_id, &usage);
-                    }
-                    emit_update(&event_identity, &window, _conversation_id, message_id, &content, true);
-                    let _ = emit_to_window(
-                        &window, event_identity.clone(),
-                        ConversationEvent {
-                            r#type: "stream_complete".into(),
-                            data: json!({
-                                "conversation_id": _conversation_id,
-                                "response_message_id": message_id,
-                                "has_response": !content.is_empty(),
-                            }),
-                        },
-                    );
-                    let success_content = if content.is_empty() {
-                        agent_plan_message.as_ref().map(|plan| plan.content.as_str()).unwrap_or_default()
-                    } else {
-                        content.as_str()
-                    };
-                    if !was_cancelled {
-                        handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
-                    }
-                    if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                        manager.clear_agent_focus(&app, &event_identity, false).await;
-                    }
-                    emit_snapshot(&event_identity,
-                        &app,
-                        _conversation_id,
-                        claude_session_snapshot(
-                            _conversation_id,
-                            session_id.clone(),
-                            &config,
-                            false,
-                            restored_session_method.clone(),
-                            connection_event_id.clone(),
-                            &current_plan,
-                        ),
-                    )
-                    .await;
-                    crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, !was_cancelled).await;
+                    _ => {}
                 }
+            }
+            let settled = activities.finish(was_cancelled, stream_error.as_deref());
+            if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, settled) {
+                stream_failure_stage = AgentFailureStage::Persistence;
+                stream_error = Some(format!("Claude Code final activity persistence/delivery failed [message_id={message_id}]: {error}"));
+            }
+            if let Some(error) = stream_error.as_deref() {
+                emit_claude_run_failure(&app, &event_identity, message_id, &window, error, stream_failure_stage, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
+                if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                    manager.clear_agent_focus(&app, &event_identity, false).await;
+                }
+                break;
+            }
+            if !was_cancelled && content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
+                emit_claude_run_failure(
+                    &app,
+                    &event_identity,
+                    message_id,
+                    &window,
+                    "Claude Code 本轮未返回任何内容", AgentFailureStage::Stream, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
+                if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                    manager.clear_agent_focus(&app, &event_identity, false).await;
+                }
+                break;
+            }
+            persist(&app, message_id, &content, true, if was_cancelled { Some("") } else { final_text.as_deref() });
+            if !usage.is_null() {
+                persist_usage(&app, message_id, &usage);
+            }
+            emit_update(&event_identity, &window, _conversation_id, message_id, &content, true);
+            let _ = emit_to_window(
+                &window, event_identity.clone(),
+                ConversationEvent {
+                    r#type: "stream_complete".into(),
+                    data: json!({
+                        "conversation_id": _conversation_id,
+                        "response_message_id": message_id,
+                        "has_response": !content.is_empty(),
+                    }),
+                },
+            );
+            let success_content = if content.is_empty() {
+                agent_plan_message.as_ref().map(|plan| plan.content.as_str()).unwrap_or_default()
+            } else {
+                content.as_str()
+            };
+            if !was_cancelled {
+                handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
+            }
+            if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                manager.clear_agent_focus(&app, &event_identity, false).await;
+            }
+            if was_cancelled {
+                last_turn = None;
+                if background.pending() {
+                    // Native background tasks belong to this process. Stop must also stop their later wakes.
+                    let _ = child.kill().await;
+                    cleanup_claude_session(&app, _conversation_id, &task_run_id, config.instance_id).await;
+                    crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, false).await;
+                    break;
+                }
+            } else {
+                last_turn = Some((message_id, window.clone(), cancel_generation));
+                if background.pending() {
+                    match background::can_continue(&app, _conversation_id, message_id) {
+                        Ok(true) => background_scope = mcp_prompt,
+                        Ok(false) => {
+                            let _ = child.kill().await;
+                            cleanup_claude_session(&app, _conversation_id, &task_run_id, config.instance_id).await;
+                            crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, true).await;
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::error!(conversation_id = _conversation_id, %error, "Cannot retain Claude background scope");
+                            break;
+                        }
+                    }
+                }
+            }
+            background::set_pending(&app, _conversation_id, &task_run_id, background.pending()).await;
+            emit_snapshot(&event_identity,
+                &app,
+                _conversation_id,
+                claude_session_snapshot(
+                    _conversation_id,
+                    session_id.clone(),
+                    &config,
+                    false,
+                    restored_session_method.clone(),
+                    connection_event_id.clone(),
+                    &current_plan,
+                ),
+            )
+            .await;
+            crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, !was_cancelled).await;
+        }
+        // Prompts submitted while a native wake was starting already own response rows.
+        rx.close();
+        while let Ok(command) = rx.try_recv() { pending_prompts.push_back(command); }
+        for command in pending_prompts {
+            if let SessionCommand::Prompt { message_id, window, .. } = command {
+                emit_claude_run_failure(&app, &event_identity, message_id, &window,
+                    "Claude Code 会话在派发这条排队消息前已结束", AgentFailureStage::SendPrompt,
+                    diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s| s.to_string()), None));
             }
         }
         cleanup_claude_session(&app, _conversation_id, &task_run_id, config.instance_id).await;

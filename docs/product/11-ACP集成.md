@@ -267,6 +267,7 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 - 打开或切换到历史对话不会仅因浏览而启动 Codex / Claude Code 进程；首次发送消息时才连接，已有热会话继续复用
 - 切换离开对话不会中断正在生成、等待权限或执行工具的会话
 - ACP、Codex、Claude Code 的本地运行实例统一在无活跃请求且空闲 15 分钟后释放；持久化的 session/thread ID 保留，下次请求通过原生恢复能力继续
+- 普通聊天、当前管家私聊和总管家主会话会保留仍在执行后台任务的 Claude Code 进程。后台命令或子代理结束、Claude 主动继续作答时，AIPP 会在原聊天中追加一条助手回复。期间的工具授权沿用该会话的审批规则。
 - Codex 空闲释放只关闭本地 app-server 进程，不调用 `thread/archive` 或 `thread/delete`；Claude Code 空闲释放只关闭本地 stream-json 进程
 - 恢复成功提示按连接代次去重：Codex 在 `thread/resume` 成功响应后确认，Claude Code 在 CLI 返回并核对原 session ID 后确认
 - 删除 AIPP 对话时会停止三类本地运行实例并清理本地 session 映射；Codex / Claude Code 的 CLI 侧历史不会被隐式归档或删除

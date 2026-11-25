@@ -5,6 +5,7 @@ mod turn;
 pub(crate) use turn::{send_turn, prompt_with_file_paths, AgentTurnRequest};
 pub(crate) mod failure;
 mod dispatch;
+pub(super) use dispatch::response_message;
 
 pub(crate) mod approval;
 

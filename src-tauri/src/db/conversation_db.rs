@@ -859,6 +859,17 @@ impl MessageRepository {
         f(&self.conn)
     }
 
+    /// Preserve the native wake's lineage using a normal, sync-mapped message
+    /// reference. The launching reply can contain megabytes of activity data.
+    pub(crate) fn create_native_continuation(&self, mut message: Message, previous: i64) -> Result<Message> {
+        self.conn.query_row(
+            "SELECT 1 FROM message WHERE id=?1 AND conversation_id=?2 AND message_type='response'",
+            params![previous, message.conversation_id], |_| Ok(()),
+        )?;
+        message.parent_id = Some(previous);
+        self.create(&message)
+    }
+
     #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
     pub fn list_by_conversation_id(
         &self,
