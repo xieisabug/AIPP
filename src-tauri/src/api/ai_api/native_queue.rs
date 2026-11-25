@@ -7,6 +7,7 @@ pub(super) struct SteerTarget {
     pub session: AgentSessionLookup,
     pub turn: String,
     pub assistant_id: i64,
+    pub defer_for_permission: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 tokio::task_local! { pub(super) static STEER_TARGET: Option<SteerTarget>; }
 
@@ -43,6 +44,18 @@ fn active(session: &AgentSessionLookup) -> Result<bool, AppError> {
         .ok_or_else(|| AppError::ProviderError(format!("{} session {} omitted active-turn state", session.handle.metadata().id, session.run_id)))
 }
 
+pub(super) fn pi_permission_changed(app: &tauri::AppHandle, session: &AgentSessionLookup) -> Result<bool, AppError> {
+    if session.handle.metadata().id != "pi" { return Ok(false); }
+    let binding = session.binding.as_ref().ok_or_else(|| AppError::ProviderError("Pi 会话缺少提供商绑定".into()))?;
+    let conn = ConversationDatabase::new(app)?.get_connection()?;
+    let selected = crate::api::ai::agent_driver::next_permissions::read(&conn, binding.conversation_id, "pi",
+        Some(binding.provider_id), session.snapshot["session_id"].as_str())?;
+    Ok(selected.get("pi_approval").is_some_and(|value| {
+        !session.snapshot["config_options"].as_array().into_iter().flatten()
+            .any(|option| option["id"] == "pi_approval" && option["current_value"].as_str() == Some(value.as_str()))
+    }))
+}
+
 async fn wait_for_interrupted_turn(
     cancel: impl std::future::Future<Output = Result<(), AppError>>,
     mut settled: tokio::sync::oneshot::Receiver<()>,
@@ -76,7 +89,8 @@ pub(super) async fn interrupt(app: &tauri::AppHandle, window: &tauri::Window, ro
     let driver = session.handle.metadata().id;
     let db = ConversationDatabase::new(app)?;
     let owner = db.conversation_repo()?.read(conversation)?.and_then(|c| c.assistant_id);
-    let steer = matches!(driver, "pi" | "codex_app_server") && owner == Some(row.assistant_id);
+    let steer = matches!(driver, "pi" | "codex_app_server") && owner == Some(row.assistant_id)
+        && !pi_permission_changed(app, &session)?;
     let stop = CancellationToken::new();
     let (terminal, settled) = tokio::sync::oneshot::channel();
     if !steer {
@@ -98,7 +112,7 @@ pub(super) async fn interrupt(app: &tauri::AppHandle, window: &tauri::Window, ro
             if steer {
                 let turn = session.snapshot["current_turn_id"].as_str()
                     .ok_or_else(|| AppError::ProviderError(format!("{driver} 未提供当前回合 ID，无法插队")))?;
-                let target = SteerTarget { turn: turn.to_string(), assistant_id: row.assistant_id, session };
+                let target = SteerTarget { turn: turn.to_string(), assistant_id: row.assistant_id, session, defer_for_permission: Default::default() };
                 dispatch_queued_target(app.clone(), window.clone(), claimed, Some(target)).map(|_| ())
             } else {
                 wait_for_interrupted_turn(session.handle.cancel_current_prompt(), settled, &stop, driver, &session.run_id).await?;

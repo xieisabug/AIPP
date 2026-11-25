@@ -6,6 +6,11 @@ import { delimiter, dirname, extname, join, isAbsolute } from 'node:path';
 // A local validation error or an explicit rejection by the native agent.
 export class RequestRejected extends Error {}
 
+export function permissionOption(id, name, current, choices, category = 'permission') {
+  return { id, name, category, current_value: current, description: '从下一条用户消息开始生效',
+    options: choices.map(([value, label]) => ({ value, name: label })) };
+}
+
 export function splitModel(model) {
   const index = model.indexOf('/');
   if (index < 1 || index === model.length - 1) throw new RequestRejected(`Model '${model}' must use provider/model format`);

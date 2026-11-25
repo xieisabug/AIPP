@@ -4651,6 +4651,34 @@ pub fn spawn_acp_session_task(
     handle
 }
 
+async fn apply_next_acp_permissions(
+    client: &AcpTauriClient,
+    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    session_id: &str,
+) -> Result<(), AppError> {
+    let Some(provider) = client.instance_id else { return Ok(()); };
+    let selections = super::agent_driver::next_permissions::read(
+        &ConversationDatabase::new(&client.app_handle)?.get_connection()?, client.conversation_id, "acp", Some(provider), Some(session_id),
+    )?;
+    if selections.is_empty() { return Ok(()); }
+    let missing_session = || AppError::ProviderError(format!("ACP 会话已切换 [session={session_id}]"));
+    let mut current = client.update_session_state(|_| {}).await.ok_or_else(missing_session)?;
+    for (key, value) in &selections {
+        if current.config_options.iter().any(|o| &o.id == key && &o.current_value == value) { continue; }
+        let response = cx.send_request(acp::SetSessionConfigOptionRequest::new(session_id.to_string(), key.clone(), value.as_str()))
+            .block_task().await.map_err(|e| AppError::ProviderError(format!("ACP 应用 {key}={value} 失败 [session={session_id}]：{e:?}")))?;
+        let state = client.update_session_state(|snapshot| apply_config_options_to_snapshot(snapshot, Some(&response.config_options))).await;
+        current = state.ok_or_else(missing_session)?;
+        client.publish_session_state(Some(current.clone())).await;
+    }
+    for (key, value) in selections {
+        if !current.config_options.iter().any(|o| o.id == key && o.current_value == value) {
+            return Err(AppError::ProviderError(format!("ACP 未确认 {key}={value} [session={session_id}]")));
+        }
+    }
+    Ok(())
+}
+
 async fn process_acp_prompt(
     client_handle: &AcpTauriClient,
     cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
@@ -4668,6 +4696,10 @@ async fn process_acp_prompt(
     client_handle.set_window(window).await;
     client_handle.reset_buffers().await;
 
+    if let Err(error) = apply_next_acp_permissions(client_handle, cx, session_id).await {
+        client_handle.send_error_event(&error.to_string()).await;
+        return Ok(false);
+    }
     let prompt_blocks = build_acp_prompt_blocks(prompt, &attachments, &prompt_capabilities, history_prefix, butler_instructions)?;
 
     info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
@@ -5959,13 +5991,24 @@ pub async fn get_acp_session_state(
 }
 
 #[tauri::command]
+pub fn get_agent_next_permissions(app_handle: tauri::AppHandle, conversation_id: i64, driver: String, session_id: String)
+    -> Result<super::agent_driver::next_permissions::Selections, AppError>
+{
+    super::agent_driver::next_permissions::read(&ConversationDatabase::new(&app_handle)?.get_connection()?,
+        conversation_id, &driver, None, Some(&session_id))
+}
+
+#[tauri::command]
 pub async fn set_acp_session_config_option(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
     config_id: String,
     value: String,
+    expected_session_id: Option<String>,
+    expected_driver: Option<String>,
 ) -> Result<(), String> {
-    use super::agent_driver::{lifecycle, registry};
+    use super::agent_driver::{lifecycle, next_permissions, registry};
+    let _gate = lifecycle::lock_conversation(&app_handle, conversation_id).await.map_err(|e| e.to_string())?;
     let session = lifecycle::lookup_session(&app_handle, conversation_id)
         .await.map_err(|error| error.to_string())?
         .ok_or_else(|| "Agent session not found".to_string())?;
@@ -5974,6 +6017,29 @@ pub async fn set_acp_session_config_option(
     driver.capabilities()
         .require_operation(super::agent_driver::capabilities::AgentOperation::SetConfigOption)
         .map_err(|error| error.to_string())?;
+    let kind = session.handle.metadata().id;
+    let native_id = session.snapshot["session_id"].as_str();
+    if expected_driver.as_deref().is_some_and(|id| id != kind)
+        || expected_session_id.as_deref().is_some_and(|id| Some(id) != native_id) {
+        return Err("会话已经切换，请在当前会话重新选择".into());
+    }
+    let option = session.snapshot["config_options"].as_array().and_then(|items| items.iter().find(|o| o["id"] == config_id));
+    if next_permissions::deferred(kind, &config_id, option.unwrap_or(&serde_json::Value::Null)) {
+        if !option.and_then(|o| o["options"].as_array()).is_some_and(|choices| choices.iter().any(|c| c["value"] == value)) {
+            return Err(format!("{kind} 当前会话没有提供权限选项 {config_id}={value}"));
+        }
+        let conversation_kind = crate::mcp::butler_tools::conversation_kind(&app_handle, Some(conversation_id)).map_err(|e| e.to_string())?;
+        if matches!(conversation_kind.as_str(), "scheduled_run" | crate::proactive::tools::PROACTIVE_RUN_KIND) {
+            return Err("后台运行的权限由无人值守审核控制".into());
+        }
+        let provider = session.binding.as_ref().ok_or("权限选择缺少提供商实例")?.provider_id;
+        let native_id = native_id.ok_or("权限选择缺少原生会话编号")?;
+        ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?.with_write_connection(|conn|
+            next_permissions::save(conn, conversation_id, kind, provider, native_id, &config_id, &value)
+        ).map_err(|e| e.to_string())?;
+        let _ = tauri::Emitter::emit(&app_handle, "agent-next-permissions-changed", conversation_id);
+        return Ok(());
+    }
     // The actor remains authoritative for current catalogs, aliases and opaque
     // extension options; a discovery snapshot can become stale before dispatch.
     session.handle.set_config_option(config_id, value).await.map_err(|error| error.to_string())

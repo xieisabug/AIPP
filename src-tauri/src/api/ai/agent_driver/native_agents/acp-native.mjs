@@ -5,7 +5,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { RequestRejected, deadline, jsonLines, launch, stopChild, thinkingStream, readableResult } from './common.mjs';
+import { RequestRejected, deadline, jsonLines, launch, permissionOption, stopChild, thinkingStream, readableResult } from './common.mjs';
 
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: ';
 const AUTH_MARKER = '__AIPP_ANTIGRAVITY_AUTH_URL__';
@@ -95,6 +95,8 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
   try { child = (dependencies.launch || launch)(plan.command, plan.args, { cwd: config.cwd, env: plan.env }); }
   catch (error) { await plan.cleanup(); throw error; }
   let legacyModels;
+  let advertisedModes = [], selectedMode = config.antigravity_mode || 'default';
+  let autopilot = config.kiro_autopilot || 'off';
   let sequence = 0, session, turn = null, closing = false, ready = false, fatal, options = [], cancelTimer;
   let started = false, cancelling = false, cancelSent = false;
   const pending = new Map(), approvals = new Map(), optionWaiters = new Set();
@@ -114,9 +116,33 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
       return await deadline(new Promise((resolve, reject) => { pending.set(id, { resolve, reject, method }); send({ id, method, params }); }), `${driver} ${method}`, milliseconds);
     } finally { pending.delete(id); }
   };
+  const modeOption = () => options.find(option => option.category === 'mode' || option.id === 'mode');
+  const observeMode = id => {
+    const match = Object.entries(ANTIGRAVITY_MODES).find(([, aliases]) => aliases.includes(id));
+    if (match) selectedMode = cliAutoApproval(config) ? 'yolo' : match[0];
+  };
+  const availableModes = () => new Set([...advertisedModes, ...choices(modeOption() ?? {}).map(c => c.value)]);
+  const sessionOptions = () => {
+    const current = snapshotOptions(options);
+    if (driver === 'kiro') {
+      return [...current.filter(o => o.id !== 'autopilot'), permissionOption('autopilot', 'Kiro Autopilot', autopilot,
+        [['off', '逐项审批（off）'], ['on', '自动执行（on）']])];
+    }
+    const supported = availableModes();
+    const labels = { default: '默认', auto_edit: '自动接受编辑', auto: '自动审核', plan: '规划', yolo: '跳过审核' };
+    const modes = Object.entries(ANTIGRAVITY_MODES).filter(([key, aliases]) =>
+      aliases.some(id => supported.has(id)) || (key === 'yolo' && (config.runtime || 'cli') === 'cli' && supported.has('default')));
+    return [...current.filter(o => o.id !== modeOption()?.id), permissionOption('antigravity_mode', 'Antigravity 权限模式',
+      selectedMode, modes.map(([key]) => [key, `${labels[key]}（${key}）`]), 'mode')];
+  };
   const updateOptions = next => {
     if (!Array.isArray(next)) return;
     options = next;
+    if (ready && driver === 'kiro') {
+      const reported = next.find(o => o.id === 'autopilot')?.currentValue;
+      if (['off', 'on'].includes(reported)) autopilot = reported;
+    }
+    if (ready && driver === 'antigravity') observeMode(modeOption()?.currentValue);
     if (next.some(option => option.id === 'model' || option.category === 'model')) legacyModels = undefined;
     if (legacyModels) {
       options = [...next, { id: 'model', name: '模型', category: 'model', type: 'select',
@@ -124,7 +150,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
         options: sessionModels([], legacyModels).map(({ id, name }) => ({ value: id, name })) }];
     }
     for (const notify of optionWaiters) notify();
-    if (ready) emit({ type: 'config_options', options: snapshotOptions(options) });
+    if (ready) emit({ type: 'config_options', options: sessionOptions() });
   };
   const waitOption = async key => {
     const find = () => options.find(option => option.id === key || option.category === key);
@@ -182,6 +208,10 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
         const update = frame.params?.update;
         if (!update) throw new Error(`${driver} session/update omitted update`);
         if (update.sessionUpdate === 'config_option_update') updateOptions(update.configOptions);
+        if (driver === 'antigravity' && ready && update.sessionUpdate === 'current_mode_update') {
+          observeMode(update.currentModeId);
+          emit({ type: 'config_options', options: sessionOptions() });
+        }
         if (turn === null) return;
         if (['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update'].includes(update.sessionUpdate)
           || (update.sessionUpdate === 'info' && update._meta?.kiro?.kind === 'turn_start')) {
@@ -249,6 +279,33 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
   };
   const configure = async (key, value) => {
     if (turn !== null) throw new RequestRejected(`Cannot change ${driver} configuration during a turn`);
+    if (driver === 'kiro' && key === 'autopilot') {
+      if (!['off', 'on'].includes(value)) throw new RequestRejected(`Unsupported Kiro Autopilot setting '${value}'; expected off or on`);
+      const response = await request('session/set_config_option', { sessionId: session, configId: 'autopilot', value });
+      const reported = response.configOptions?.find(o => o.id === 'autopilot')?.currentValue;
+      if (reported != null && reported !== value) throw new RequestRejected(`Kiro returned autopilot=${reported} after selecting ${value}`);
+      autopilot = value;
+      updateOptions(response.configOptions);
+      return;
+    }
+    if (driver === 'antigravity' && key === 'antigravity_mode') {
+      const aliases = ANTIGRAVITY_MODES[value];
+      if (!Object.hasOwn(ANTIGRAVITY_MODES, value)) throw new RequestRejected(`Unsupported Antigravity permission mode '${value}'`);
+      const mode = modeOption();
+      const modeId = aliases.find(id => advertisedModes.includes(id));
+      const optionValue = mode && aliases.find(id => choices(mode).some(choice => choice.value === id));
+      if (modeId) await request('session/set_mode', { sessionId: session, modeId });
+      else if (optionValue) {
+        const response = await request('session/set_config_option', { sessionId: session, configId: mode.id, value: optionValue });
+        const reported = response.configOptions?.find(o => o.id === mode.id)?.currentValue;
+        if (reported != null && !aliases.includes(reported)) throw new RequestRejected(`Antigravity returned ${reported} after selecting ${value}`);
+        updateOptions(response.configOptions);
+      }
+      else throw new RequestRejected(`Antigravity did not advertise the ${value} permission mode (advertised: ${[...availableModes()].join(', ') || 'none'})`);
+      selectedMode = cliAutoApproval(config) ? 'yolo' : value;
+      if (ready) emit({ type: 'config_options', options: sessionOptions() });
+      return;
+    }
     if (driver === 'kiro' && key !== 'model') {
       // Still waiting for the advertised choices. No configuration write has been sent.
       try { await waitOption(key); }
@@ -316,27 +373,13 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     if (driver === 'kiro') {
       // V3 starts with Autopilot enabled. Write the chosen state (off unless the assistant
       // opted in) even before it advertises options, and fail if Kiro rejects it.
-      const autopilot = config.kiro_autopilot || 'off';
-      if (!['off', 'on'].includes(autopilot)) throw new Error(`Unsupported Kiro Autopilot setting '${autopilot}'; expected off or on`);
-      const response = await request('session/set_config_option', { sessionId: session, configId: 'autopilot', value: autopilot });
-      updateOptions(response.configOptions);
+      await configure('autopilot', autopilot);
       if (config.kiro_agent) await configure('mode', config.kiro_agent);
     } else {
       // Reset any persisted execution mode (including plan) when the CLI
       // received the independent auto-approval flag on launch.
-      const wanted = cliAutoApproval(config) ? 'default' : config.antigravity_mode || 'default';
-      if (!Object.hasOwn(ANTIGRAVITY_MODES, wanted)) throw new Error(`Unsupported Antigravity permission mode '${wanted}'; expected ${Object.keys(ANTIGRAVITY_MODES).join(', ')}`);
-      const aliases = ANTIGRAVITY_MODES[wanted];
-      const advertised = result.modes?.availableModes?.map(mode => mode.id) ?? [];
-      const mode = options.find(option => option.category === 'mode' || option.id === 'mode');
-      const modeId = aliases.find(id => advertised.includes(id));
-      const optionValue = mode && aliases.find(id => choices(mode).some(choice => choice.value === id));
-      if (modeId) await request('session/set_mode', { sessionId: session, modeId });
-      else if (optionValue) await configure(mode.id, optionValue);
-      else {
-        const available = new Set([...advertised, ...(mode ? choices(mode).map(choice => choice.value) : [])]);
-        throw new Error(`Antigravity did not advertise the ${wanted} permission mode (advertised: ${[...available].join(', ') || 'none'})`);
-      }
+      advertisedModes = result.modes?.availableModes?.map(mode => mode.id) ?? [];
+      await configure('antigravity_mode', cliAutoApproval(config) ? 'default' : selectedMode);
     }
     if (config.model) await configure('model', config.model);
     if (config.kiro_effort) {
@@ -356,7 +399,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     return {
       promptCapabilities: { image: Boolean(init.agentCapabilities?.promptCapabilities?.image),
         audio: false, embedded_context: Boolean(init.agentCapabilities?.promptCapabilities?.embeddedContext) },
-      session, canLoad, canResume, get configOptions() { return snapshotOptions(options); },
+      session, canLoad, canResume, get configOptions() { return sessionOptions(); },
       async models() { return sessionModels(options); },
       configure,
       async prompt(text, id, images = [], documents = [], hasImagePaths = false) {

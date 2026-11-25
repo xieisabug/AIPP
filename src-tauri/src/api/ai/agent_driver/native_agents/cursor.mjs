@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { RequestRejected, deadline, thinkingStream, readableResult } from './common.mjs';
+import { RequestRejected, deadline, permissionOption, thinkingStream, readableResult } from './common.mjs';
 
 const loadSdk = config => createRequire(resolve(config.sdk_directory || config.cwd, 'package.json'))('@cursor/sdk');
 
@@ -93,10 +93,12 @@ export async function openCursor(config, emit, dependencies = {}) {
     sdk.configureCursorSdk({ local: { useHttp1ForAgent: true } });
   }
   const { Agent } = sdk;
+  const review = config.cursor_auto_review ?? 'on';
+  if (!['on', 'off'].includes(review)) throw new Error(`Unsupported Cursor auto-review: ${review}`);
   const options = {
     model: { id: config.model || 'default' },
     mode: 'agent',
-    local: { cwd: config.cwd, autoReview: true,
+    local: { cwd: config.cwd, autoReview: review === 'on',
       settingSources: ['project', 'user', 'team', 'mdm', 'plugins'], enableAgentRetries: false },
     ...(config.mcp ? { mcpServers: { aipp: config.mcp } } : {}),
     ...(apiKey ? { apiKey } : {}),
@@ -109,6 +111,9 @@ export async function openCursor(config, emit, dependencies = {}) {
   let run, admission, active = null, model = config.model;
   return {
     session: agent.agentId,
+    configOptions: [permissionOption('cursor_auto_review', 'Cursor 自动审核', review, [
+      ['on', '开启自动审核'], ['off', '关闭自动审核（工具可直接执行）'],
+    ])],
     models,
     async prompt(text, turn, images = []) {
       if (active) throw new Error('Cursor already has an active turn');

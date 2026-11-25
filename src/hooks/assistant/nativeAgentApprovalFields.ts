@@ -25,7 +25,7 @@ export function buildNativeAgentApprovalFields(
             config: {
                 type: "static" as const,
                 label: "审批",
-                value: "Cursor 使用 SDK 自带的自动审核（Auto-review）决定能否执行，SDK 不支持逐项人工审批，因此不会弹出确认。",
+                value: "Cursor 默认开启 SDK 自动审核（Auto-review），可以在聊天中关闭。关闭后工具可直接执行，SDK 不提供逐项人工审批。",
             },
         }];
     }
@@ -64,7 +64,7 @@ export function buildNativeAgentApprovalFields(
             config: {
                 type: "static" as const,
                 label: "需要审批的操作",
-                value: "由本机 OpenCode 配置中的 permissions 规则决定（默认几乎全部放行，仅对 .env 等敏感读取请求审批）。",
+                value: "默认使用本机 OpenCode 权限规则。可以在聊天中选择默认工具权限，工具专属规则仍然适用。",
             },
         }],
     }[apiType] ?? [];

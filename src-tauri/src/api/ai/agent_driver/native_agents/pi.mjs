@@ -1,4 +1,4 @@
-import { RequestRejected, deadline, jsonLines, launch, splitModel, stopChild } from './common.mjs';
+import { RequestRejected, deadline, jsonLines, launch, permissionOption, splitModel, stopChild } from './common.mjs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,6 +186,9 @@ export async function openPi(config, emit, dependencies = {}) {
     }
     return {
       session,
+      configOptions: [permissionOption('pi_approval', '工具审批范围', approval, [
+        ['all', '全部审批（all）'], ['read_only', '只读免审（read_only）'], ['none', '全部免审（none）'],
+      ])],
       async prompt(text, id, images = []) {
         if (turn) throw new Error('Pi already has an active turn');
         startTurn(id);

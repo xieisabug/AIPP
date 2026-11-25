@@ -178,7 +178,8 @@ struct DesktopTurnEffects {
 #[async_trait::async_trait]
 impl TurnEffects for DesktopTurnEffects {
     type Prepared = RegisteredPreparedSession;
-    type Handle = AgentSessionHandle;
+    // Serialize permission selection with both acquisition and prompt submission.
+    type Handle = (AgentSessionHandle, tokio::sync::OwnedMutexGuard<()>);
     fn create_response(&self, conversation_id: i64, metadata: AgentDriverMetadata) -> Result<Message, AppError> {
         let mut message=response_message(conversation_id, metadata);
         message.parent_id=self.source_message_id;
@@ -189,8 +190,8 @@ impl TurnEffects for DesktopTurnEffects {
         if let Some(provider_id) = self.provider_id { identity = identity.with_instance(provider_id); }
         let _ = super::events::emit_to_window(&self.window, identity, event);
     }
-    async fn acquire(&self, prepared: Self::Prepared, conversation_id: i64) -> Result<AgentSessionHandle, AppError> {
-        let _gate = super::lifecycle::lock_conversation(&self.app_handle, conversation_id).await?;
+    async fn acquire(&self, prepared: Self::Prepared, conversation_id: i64) -> Result<Self::Handle, AppError> {
+        let gate = super::lifecycle::lock_conversation(&self.app_handle, conversation_id).await?;
         let handle = prepared.prepared.acquire(&self.app_handle, conversation_id).await?;
         if handle.metadata().id != prepared.instance.driver_id {
             return Err(super::registry::routing_error("acquired handle belongs to a different driver"));
@@ -200,10 +201,10 @@ impl TurnEffects for DesktopTurnEffects {
             driver_id: prepared.instance.driver_id, config_fingerprint: prepared.instance.config_fingerprint,
             run_id: handle.run_id().to_string(),
         })?;
-        Ok(handle)
+        Ok((handle, gate))
     }
-    fn submit(&self, handle: &AgentSessionHandle, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>) -> Result<(), AppError> {
-        handle.send_prompt(message_id, prompt, attachments, self.window.clone())
+    fn submit(&self, handle: &Self::Handle, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>) -> Result<(), AppError> {
+        handle.0.send_prompt(message_id, prompt, attachments, self.window.clone())
     }
     async fn fail(&self, conversation_id: i64, message_id: i64, metadata: AgentDriverMetadata, detail: &str) {
         let mut identity = super::events::AgentEventIdentity::new(metadata.id, conversation_id);

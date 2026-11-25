@@ -225,8 +225,12 @@ test('should report the last Pi retry failure and release a turn cancelled durin
 test('should pass the assistant approval scope to the Pi extension and reject unknown scopes', async () => {
   for (const [configured, expected] of [[undefined, 'all'], ['read_only', 'read_only'], ['none', 'none']]) {
     const fixture = piFixture();
-    const runtime = await openPi({ cwd: process.cwd(), pi_approval: configured }, () => {}, fixture);
-    try { assert.equal(fixture.launches[0][2].env.AIPP_PI_APPROVAL, expected); } finally { await runtime.close(); }
+    const runtime = await openPi({ cwd: process.cwd(), session: '/native/session.jsonl', pi_approval: configured }, () => {}, fixture);
+    try {
+      assert.equal(fixture.launches[0][2].env.AIPP_PI_APPROVAL, expected);
+      assert.equal(runtime.configOptions.find(o => o.id === 'pi_approval').current_value, expected);
+      assert.equal(runtime.session, '/native/session.jsonl');
+    } finally { await runtime.close(); }
   }
   const fixture = piFixture();
   await assert.rejects(openPi({ cwd: process.cwd(), pi_approval: 'yolo' }, () => {}, fixture), /Unsupported Pi approval scope 'yolo'/);

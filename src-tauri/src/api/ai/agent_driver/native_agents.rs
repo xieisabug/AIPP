@@ -100,6 +100,36 @@ pub(crate) struct NativeConfig {
     review: PermissionReview,
 }
 impl NativeConfig {
+    fn apply_next_permissions(&mut self, driver: &str, selections: super::next_permissions::Selections) -> Result<(), AppError> {
+        for (key, value) in selections {
+            let wire_key = match (driver, key.as_str()) {
+                ("kiro", "autopilot") => "kiro_autopilot",
+                ("pi", "pi_approval") | ("antigravity", "antigravity_mode")
+                | ("cursor", "cursor_auto_review") | ("opencode", "opencode_permission") => &key,
+                _ => return Err(error(format!("{driver} 不支持保存的权限选项 {key}"))),
+            };
+            self.wire[wire_key] = json!(value);
+        }
+        Ok(())
+    }
+
+    // Kiro and ordinary Antigravity modes are session RPCs. Only CLI yolo
+    // changes Antigravity's launch arguments in addition to its session mode.
+    fn live_permission(&self, driver: &str, signature: &mut Value) -> Option<(&'static str, String)> {
+        match driver {
+            "kiro" => {
+                signature.as_object_mut()?.remove("kiro_autopilot");
+                Some(("autopilot", self.wire["kiro_autopilot"].as_str().unwrap_or("off").into()))
+            }
+            "antigravity" => {
+                let mode = self.wire["antigravity_mode"].as_str().unwrap_or("default");
+                signature["antigravity_mode"] = json!(self.wire["runtime"].as_str().unwrap_or("cli") == "cli" && mode == "yolo");
+                Some(("antigravity_mode", mode.into()))
+            }
+            _ => None,
+        }
+    }
+
     fn apply_conversation_permissions(&mut self, driver: &str, kind: &str) {
         if kind != crate::proactive::tools::PROACTIVE_RUN_KIND { return; }
         self.review = PermissionReview::Proactive;
@@ -236,14 +266,29 @@ impl PreparedAgentSession for Prepared {
         self.mcp_payload = Some(payload);
         Ok(())
     }
-    async fn acquire(self: Box<Self>, host: &dyn AgentSessionHost, cid: i64) -> Result<AgentSessionHandle, AppError> {
+    async fn acquire(mut self: Box<Self>, host: &dyn AgentSessionHost, cid: i64) -> Result<AgentSessionHandle, AppError> {
         let app = host.app_handle()?.clone();
+        let db = ConversationDatabase::new(&app)?;
+        let startup_permission = match self.driver.0 {
+            "pi" => Some(("pi_approval", "all")),
+            "cursor" => Some(("cursor_auto_review", "on")),
+            "opencode" => Some(("opencode_permission", "default")),
+            _ => None,
+        };
+        if let Some((key, default)) = startup_permission {
+            if self.config.wire[key].is_null() { self.config.wire[key] = json!(default); }
+        }
+        if self.config.review != PermissionReview::Proactive {
+            let selections = super::next_permissions::read(&db.get_connection()?, cid, self.driver.0, Some(self.instance.provider_id), None)?;
+            self.config.apply_next_permissions(self.driver.0, selections)?;
+        }
         let _account = if self.driver.0 == "antigravity" {
             Some(catalog::gate(self.instance.provider_id).lock_owned().await)
         } else { None };
         let key = (self.driver.0, cid);
         // Include assistant/model/MCP selections as well as provider configuration.
         let mut signature_wire = self.config.wire.clone();
+        let live_permission = self.config.live_permission(self.driver.0, &mut signature_wire);
         if let Some(env) = signature_wire["mcp"]["env"].as_object_mut() {
             env.remove(crate::acp_mcp_bridge::ACP_MCP_PROXY_TOKEN_ENV);
             env.remove(crate::acp_mcp_bridge::ACP_MCP_SELECTED_TOOLS_FILE_ENV);
@@ -256,6 +301,13 @@ impl PreparedAgentSession for Prepared {
         let existing = sessions().lock().await.get(&key).cloned();
         if let Some(entry) = existing {
             if entry.signature == signature && !entry.control.tx.is_closed() {
+                if let Some((option, value)) = live_permission {
+                    let confirmed = entry.snapshot.lock().unwrap()["config_options"].as_array()
+                        .and_then(|options| options.iter().find(|o| o["id"] == option)).is_some_and(|o| o["current_value"] == value);
+                    if !confirmed {
+                        entry.control.set_config_option(option.into(), value).await?;
+                    }
+                }
                 return Ok(AgentSessionHandle::new(entry.control.clone(), entry.run_id.clone()));
             }
             if !entry.control.tx.is_closed() {
@@ -264,7 +316,7 @@ impl PreparedAgentSession for Prepared {
             }
         }
         sessions().lock().await.remove(&key);
-        let session = ConversationDatabase::new(&app)?.get_agent_session_id_for_instance(cid, self.driver.0, Some(self.instance.provider_id))?;
+        let session = db.get_agent_session_id_for_instance(cid, self.driver.0, Some(self.instance.provider_id))?;
         let run_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::unbounded_channel();
         let busy = Arc::new(AtomicBool::new(false));

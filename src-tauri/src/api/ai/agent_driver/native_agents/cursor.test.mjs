@@ -6,6 +6,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tick } from './test-helpers.mjs';
 
+test('should resume the same Cursor agent with the selected auto-review setting', async () => {
+  const calls = [];
+  const sdk = { Agent: { async resume(id, options) {
+    calls.push([id, options.local.autoReview]);
+    return { agentId: id, async close() {} };
+  } } };
+  for (const value of ['off', 'on']) {
+    const runtime = await openCursor({ cwd: '/repo', session: 'saved', cursor_auto_review: value }, () => {}, { sdk });
+    assert.equal(runtime.configOptions.find(o => o.id === 'cursor_auto_review').current_value, value);
+    await runtime.close();
+  }
+  assert.deepEqual(calls, [['saved', false], ['saved', true]]);
+});
+
 test('should pass the scoped MCP configuration to Cursor without enabling agent retries', async () => {
   let options;
   const mcp = { type: 'stdio', command: 'aipp', args: ['--aipp-acp-mcp-bridge'], env: { AIPP_SCOPE: 'synthetic-token' } };

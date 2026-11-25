@@ -1996,6 +1996,7 @@ pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<
     // NULL means historical ownership is unknown. Never infer an owner from
     // the conversation's current assistant/provider configuration during migration.
     ensure_column_exists(conn, "acp_session", "provider_instance_id", "INTEGER")?;
+    ensure_column_exists(conn, "acp_session", "next_permissions", "TEXT NOT NULL DEFAULT '{}'")?;
     Ok(())
 }
 
@@ -2559,6 +2560,9 @@ impl ConversationDatabase {
              VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
              ON CONFLICT(conversation_id, agent_kind)
              DO UPDATE SET session_id = excluded.session_id,
+                           next_permissions = CASE WHEN acp_session.session_id = excluded.session_id
+                               AND acp_session.provider_instance_id IS excluded.provider_instance_id
+                               THEN acp_session.next_permissions ELSE '{}' END,
                            provider_instance_id = excluded.provider_instance_id,
                            updated_time = CURRENT_TIMESTAMP
              WHERE excluded.provider_instance_id IS NOT NULL OR acp_session.provider_instance_id IS NULL",

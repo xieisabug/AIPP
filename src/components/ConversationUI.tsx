@@ -1,4 +1,5 @@
 import { claudePermissionModes } from "@/data/claudePermissionModes";
+import { useNextAgentPermissions } from "@/hooks/useNextAgentPermissions";
 import { composerKey, upsertPersistedRow, type ComposerReceipt } from "@/utils/composerMessage";
 import { afterSendMotion } from "./conversation/sendMotion";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
@@ -873,9 +874,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             clearStreamingMessages,
             clearShiningMessages,
             setPendingUserMessage,
-            acpSessionState,
+            acpSessionState: nativeSessionState,
             applyAcpSessionState,
         } = useConversationEvents(conversationEventsOptions);
+        const acpSessionState = useNextAgentPermissions(nativeSessionState);
 
         const acpLoadUnsupportedNoticeRef = useRef<string | null>(null);
         const acpRestoreNoticeRef = useRef<string | null>(null);
@@ -1817,6 +1819,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         conversationId: conversationIdNum,
                         configId: option.id,
                         value,
+                        expectedSessionId: acpSessionState?.session_id,
+                        expectedDriver: acpSessionState?.agent_kind,
                     });
                     return true;
                 } catch (error) {
@@ -1829,7 +1833,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     setAcpMutationKey(null);
                 }
             },
-            [conversationId, acpSessionState?.agent_capabilities]
+            [conversationId, acpSessionState?.agent_capabilities, acpSessionState?.session_id, acpSessionState?.agent_kind]
         );
 
         const planModeOption = useMemo(

@@ -1174,6 +1174,7 @@ pub fn run() {
             ensure_acp_session_connected,
             get_acp_session_state,
             set_acp_session_config_option,
+            api::ai::acp::get_agent_next_permissions,
             save_assistant,
             add_assistant,
             delete_assistant,

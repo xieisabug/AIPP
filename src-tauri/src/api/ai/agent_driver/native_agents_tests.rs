@@ -2,6 +2,32 @@ use crate::api::ai::agent_driver::capabilities::AttachmentInput;
 use super::*;
 
 #[test]
+fn test_next_permissions_launch_changes_only_for_startup_settings() {
+    let signature = |driver, runtime, key: &str, value: &str| {
+        let mut config = configuration(&[], &[], None).unwrap();
+        config.wire["runtime"] = json!(runtime);
+        config.apply_next_permissions(driver, [(key.to_owned(), value.to_owned())].into_iter().collect()).unwrap();
+        let mut signature = config.wire.clone();
+        let control = config.live_permission(driver, &mut signature);
+        (signature, control)
+    };
+    for (driver, runtime, key, first, second, restart) in [
+        ("kiro", "cli", "autopilot", "off", "on", false),
+        ("antigravity", "cli", "antigravity_mode", "default", "auto", false),
+        ("antigravity", "cli", "antigravity_mode", "default", "yolo", true),
+        ("antigravity", "standalone", "antigravity_mode", "default", "yolo", false),
+        ("pi", "cli", "pi_approval", "all", "read_only", true),
+        ("cursor", "cli", "cursor_auto_review", "on", "off", true),
+        ("opencode", "cli", "opencode_permission", "default", "ask", true),
+    ] {
+        let (before, _) = signature(driver, runtime, key, first);
+        let (after, control) = signature(driver, runtime, key, second);
+        assert_eq!(before != after, restart, "{driver} {runtime} {second}");
+        if !restart { assert_eq!(control, Some((key, second.into()))); }
+    }
+}
+
+#[test]
 fn test_native_agent_usage_normalizes_protocols_and_sums_requests() {
     for (driver, input, output, total, expected_output) in [
         ("pi", 10, 12, 0, 12), ("cursor", 10, 12, 0, 12),

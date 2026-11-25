@@ -1,18 +1,25 @@
 import { pathToFileURL } from 'node:url';
 import { basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { RequestRejected, deadline, launch, splitModel, stopChild } from './common.mjs';
+import { RequestRejected, deadline, launch, permissionOption, splitModel, stopChild } from './common.mjs';
 
 export async function openOpenCode(config, emit, dependencies = {}) {
   const fetch = dependencies.fetch || globalThis.fetch;
   const password = randomBytes(24).toString('hex');
   const nativeConfig = process.env.OPENCODE_CONFIG_CONTENT ? JSON.parse(process.env.OPENCODE_CONFIG_CONTENT) : {};
+  const rule = config.opencode_permission ?? 'default';
+  if (!['default', 'ask', 'allow', 'deny'].includes(rule)) throw new Error(`Unsupported OpenCode permission: ${rule}`);
+  const env = { ...process.env, OPENCODE_SERVER_PASSWORD: password };
+  if (rule !== 'default') {
+    const inherited = JSON.parse(env.OPENCODE_PERMISSION || '{}');
+    env.OPENCODE_PERMISSION = JSON.stringify({ '*': rule, ...(inherited && typeof inherited === 'object'
+      ? Object.fromEntries(Object.entries(inherited).filter(([key]) => key !== '*')) : {}) });
+  }
   if (config.mcp) nativeConfig.mcp = { ...nativeConfig.mcp, aipp: { type: 'local', command: [config.mcp.command, ...config.mcp.args], environment: config.mcp.env, enabled: true,
     ...(config.mcpAnswerTimeoutMs ? { timeout: config.mcpAnswerTimeoutMs } : {}) } };
   const child = (dependencies.launch || launch)(config.command || 'opencode', ['serve', '--hostname=127.0.0.1', '--port=0'], {
     cwd: config.cwd,
-    env: { ...process.env, OPENCODE_SERVER_PASSWORD: password,
-      OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeConfig) },
+    env: { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(nativeConfig) },
   });
   const abort = new AbortController();
   let closing = false, turn = null, session, model = config.model, errorMessage, cancelling = false, sawActivity = false;
@@ -43,6 +50,12 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       return text ? JSON.parse(text) : null;
     };
     await api('/global/health');
+    if (rule !== 'default') {
+      const effective = (await api('/config')).permission;
+      if ((typeof effective === 'string' ? effective : effective?.['*']) !== rule) {
+        throw new Error(`OpenCode did not apply the requested default permission rule: ${rule}`);
+      }
+    }
     const models = async () => {
       const catalog = await api('/provider');
       return catalog.all.filter(p => catalog.connected.includes(p.id)).flatMap(p =>
@@ -182,6 +195,9 @@ export async function openOpenCode(config, emit, dependencies = {}) {
     void consume().catch(error => { if (!closing) emit({ type: 'fatal', error: error.message }); });
     return {
       session,
+      configOptions: [permissionOption('opencode_permission', '默认工具权限', rule, [
+        ['default', '沿用本机配置'], ['ask', '询问（ask）'], ['allow', '允许（allow）'], ['deny', '拒绝（deny）'],
+      ])],
       async prompt(text, id, images = [], documents = []) {
         if (turn) throw new Error('OpenCode already has an active turn');
         startTurn(id);

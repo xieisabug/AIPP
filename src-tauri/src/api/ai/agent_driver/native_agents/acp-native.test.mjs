@@ -51,6 +51,29 @@ test('should use Kiro V3 cli auth and disable Autopilot before selecting agent a
 });
 
 for (const driver of ['kiro', 'antigravity']) {
+  test(`should apply the selected ${driver} permission before the second prompt in the same session`, async () => {
+    const f = fixture({ options: [select('mode', ['default', 'auto']), select('autopilot', ['on', 'off'])] });
+    const runtime = await f.open(driver);
+    const [key, nativeKey, initial, next] = driver === 'kiro'
+      ? ['autopilot', 'autopilot', 'off', 'on'] : ['antigravity_mode', 'mode', 'default', 'auto'];
+    try {
+      const first = runtime.prompt('first', 'turn-1');
+      assert.equal(runtime.configOptions.find(o => o.id === key).current_value, initial);
+      f.finish();
+      await first;
+      await runtime.configure(key, next);
+      assert.equal(runtime.configOptions.find(o => o.id === key).current_value, next);
+      const second = runtime.prompt('second', 'turn-2');
+      f.finish();
+      await second;
+      assert.deepEqual(f.commands.filter(c => c.method === 'session/prompt' || c.params?.configId === nativeKey)
+        .map(c => [c.params.sessionId, c.params.value ?? 'prompt']), [
+        ['s1', initial], ['s1', 'prompt'], ['s1', next], ['s1', 'prompt'],
+      ]);
+      assert.equal(f.launches.length, 1);
+    } finally { await runtime.close(); }
+  });
+
   test(`should keep the ${driver} turn running after a busy config rejection and accept an idle retry`, async () => {
     const f = fixture();
     const runtime = await f.open(driver);

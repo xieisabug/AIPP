@@ -3,6 +3,20 @@ import assert from 'node:assert/strict';
 import { openOpenCode } from './opencode.mjs';
 import { tick, openCodeFixture } from './test-helpers.mjs';
 
+test('should verify the OpenCode default permission before prompting the restored session', async () => {
+  const f = openCodeFixture({ respond: path => path === '/config' ? Response.json({ permission: { '*': 'ask' } }) : undefined });
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1', opencode_permission: 'ask' }, () => {}, f);
+  try {
+    assert.equal(JSON.parse(f.launches[0][2].env.OPENCODE_PERMISSION)['*'], 'ask');
+    await runtime.prompt('second', 'turn-2');
+    assert.deepEqual(f.requests.map(r => r.path).filter(p => p === '/config' || p.startsWith('/session')),
+      ['/config', '/session/s1', '/session/s1/prompt_async']);
+  } finally { await runtime.close(); }
+  const rejected = openCodeFixture({ respond: path => path === '/config' ? Response.json({ permission: 'allow' }) : undefined });
+  await assert.rejects(openOpenCode({ cwd: '/repo', session: 's1', opencode_permission: 'deny' }, () => {}, rejected), /did not apply/);
+  assert.equal(rejected.requests.some(r => r.path.includes('/session')), false);
+});
+
 test('should count each OpenCode step once when parts precede assistant identity or are replayed', async () => {
   const f = openCodeFixture(), events = [];
   const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, event => events.push(event), f);

@@ -926,6 +926,7 @@ fn dispatch_queued_target(
     tokio::spawn(async move {
         let queued_id = queued.id;
         let steering = target.is_some();
+        let defer_for_permission = target.as_ref().map(|t| t.defer_for_permission.clone());
         let response = native_queue::STEER_TARGET.scope(target, RECOVERED_QUESTION_ID.scope(recovered_question_id, ask_ai(
             app_handle.clone(),
             app_handle.state::<AppState>(),
@@ -933,7 +934,7 @@ fn dispatch_queued_target(
             app_handle.state::<FeatureConfigState>(),
             app_handle.state::<MessageTokenManager>(),
             app_handle.state::<ConversationActivityManager>(),
-            window,
+            window.clone(),
             request,
             override_model_config,
             None,
@@ -963,6 +964,18 @@ fn dispatch_queued_target(
                     Err(error) => {
                         warn!(queued_id, error = %error, "failed to get queued message repo after dispatch");
                     }
+                }
+            }
+            Err(_) if defer_for_permission.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) => {
+                // The permission changed while a Pi steer was being prepared. The input
+                // hasn't been saved or sent yet. Let normal dispatch start its own turn.
+                match db.queued_message_repo().and_then(|repo| Ok(repo.reset_dispatch(queued_id)?)) {
+                    Ok(Some(row)) => {
+                        emit_queued_message_payload(&app_handle, "queued_message_add", &row);
+                        try_dispatch_queued_message_after_completion(&app_handle, &window, row.conversation_id).await;
+                    }
+                    Ok(None) => {}
+                    Err(error) => record_request_error(&app_handle, queued.conversation_id, &format!("Pi 权限变更后恢复队列消息 {queued_id} 失败：{error}")),
                 }
             }
             Err(error) if cfg!(mobile) || steering => {
@@ -4185,8 +4198,13 @@ async fn initialize_conversation(
         let runtime_user_prompt_with_context = crate::utils::turn_context::append(
             &build_prompt_with_attachment_context(&runtime_user_prompt, &context), turn_context);
         if native_queue::STEER_TARGET.try_with(|target| target.is_some()).unwrap_or(false) {
+            let _gate = crate::api::ai::agent_driver::lifecycle::lock_conversation(app_handle, conversation_id).await?;
             let (handle, turn) = native_queue::STEER_TARGET.with(|target| {
                 let target = target.as_ref().expect("steer target checked above");
+                if native_queue::pi_permission_changed(app_handle, &target.session)? {
+                    target.defer_for_permission.store(true, std::sync::atomic::Ordering::Release);
+                    return Err(AppError::ProviderError("Pi 插队准备期间权限已改变，转为下轮派发".into()));
+                }
                 let binding = target.session.binding.as_ref().ok_or_else(|| AppError::ProviderError(
                     format!("插队目标缺少提供商绑定 [conversation={conversation_id}, turn={}]", target.turn)
                 ))?;
