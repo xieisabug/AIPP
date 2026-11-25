@@ -1,3 +1,4 @@
+import { claudePermissionModes } from "@/data/claudePermissionModes";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useEffect, useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -182,6 +183,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     );
 
     // 监听 proxy_enabled 字段变化
+    const legacyClaudePlan = form.watch("claude_permission_mode") === "plan";
     const webEnabled = form.watch("deepseek_web_enabled") === "true";
     const showBalanceInChat = form.watch("deepseek_show_balance_in_chat") === "true";
     const proxyEnabled = form.watch("proxy_enabled");
@@ -699,13 +701,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         type: "select" as const,
                         label: "权限模式",
                         value: "default",
-                        options: [
-                            { value: "default", label: "默认询问" },
-                            { value: "acceptEdits", label: "自动接受编辑" },
-                            { value: "auto", label: "Claude Code 原生自动审核（auto）" },
-                            { value: "plan", label: "计划模式" },
-                            { value: "dontAsk", label: "不询问（自动拒绝未授权工具）" },
-                        ],
+                        options: legacyClaudePlan
+                            ? [...claudePermissionModes, { value: "plan", label: "计划模式（plan）" }]
+                            : claudePermissionModes,
                     },
                 },
                 {
@@ -953,7 +951,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name, apiKeyValue, endpoint, handleKeyShared, webEnabled, showBalanceInChat, form, updateField]);
+    }, [legacyClaudePlan, nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name, apiKeyValue, endpoint, handleKeyShared, webEnabled, showBalanceInChat, form, updateField]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

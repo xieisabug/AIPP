@@ -1,4 +1,5 @@
 use super::official_cli;
+use std::collections::VecDeque;
 use crate::api::ai::acp::{
     AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
     AcpPermissionState, AcpPlanEntryPayload, AcpSessionConfigChoicePayload,
@@ -230,6 +231,8 @@ pub(crate) async fn discover_claude_models(mut config: ClaudeSdkConfig, provider
     PROBES.get_or_probe(key.clone(), move || async move {
         // Discovery asks for the entire catalog, including when the stored selection is a CLI-default sentinel.
         config.model = None;
+        config.interactive_permissions = false;
+        config.permission_mode = None;
         let resolved = official_cli::for_session("claude", &config.cli_command, &config.env_vars).await?.path;
         let mut command = build_claude_command(&config, None, &resolved);
         command.args(["--no-session-persistence", "--strict-mcp-config"]);
@@ -290,6 +293,8 @@ pub struct ClaudeSdkConfig {
     pub env_vars: HashMap<String, String>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
+    pub turn_permission_mode: Option<String>,
+    pub interactive_permissions: bool,
     pub effort: Option<String>,
     pub model_choices: Vec<AcpSessionConfigChoicePayload>,
     resolved_model: Option<String>,
@@ -318,14 +323,22 @@ pub struct ClaudeConversationSessionState {
     pub config_options: Vec<AcpSessionConfigOptionPayload>,
 }
 
+/// Carried by the per-turn handle so queued messages keep the choice made when sent.
+#[derive(Clone, Default)]
+pub(crate) struct ClaudeTurnPermissions {
+    pub configured: Option<String>,
+    pub selected: Option<String>,
+}
+
 enum SessionCommand {
-    Prompt { message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, window: tauri::Window, cancel_generation: u64 },
+    Prompt { message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, window: tauri::Window, cancel_generation: u64, permissions: ClaudeTurnPermissions },
     Cancel { response: oneshot::Sender<Result<(), String>> },
     SetConfig { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
 }
 
 #[derive(Clone)]
 pub struct ClaudeSessionHandle {
+    pub(crate) permissions: ClaudeTurnPermissions,
     sender: mpsc::UnboundedSender<SessionCommand>,
     cancel_signal: watch::Sender<u64>,
     run_id: String,
@@ -423,6 +436,7 @@ impl ClaudeSessionHandle {
             sender,
             cancel_signal: watch::channel(0).0,
             run_id: "driver-test-run".into(),
+            permissions: Default::default(),
         }, observations)
     }
 
@@ -435,7 +449,7 @@ impl ClaudeSessionHandle {
     ) -> Result<(), AppError> {
         self.sender
             .send(SessionCommand::Prompt {
-                message_id, prompt, attachments, window, cancel_generation: *self.cancel_signal.borrow(),
+                message_id, prompt, attachments, window, cancel_generation: *self.cancel_signal.borrow(), permissions: self.permissions.clone(),
             })
             .map_err(|_| AppError::UnknownError("Claude Code session closed".into()))
     }
@@ -479,6 +493,17 @@ fn model_value(
         .map(str::to_string)
 }
 
+pub(crate) fn configured_claude_permission_mode(
+    models: &[crate::db::assistant_db::AssistantModelConfig],
+    providers: &[crate::db::llm_db::LLMProviderConfig],
+) -> Option<String> {
+    model_value(models, "claude_permission_mode").or_else(|| provider_value(providers, "claude_permission_mode"))
+}
+
+pub(crate) const CLAUDE_PERMISSION_MODES: &[&str] = &[
+    "default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan",
+];
+
 pub fn extract_claude_sdk_config(
     models: &[crate::db::assistant_db::AssistantModelConfig],
     providers: &[crate::db::llm_db::LLMProviderConfig],
@@ -500,8 +525,7 @@ pub fn extract_claude_sdk_config(
         .or_else(|| provider_value(providers, "acp_cli_command"))
         .unwrap_or_else(|| "claude".into());
     let working_directory = super::working_directory::from_configs(models, providers, true)?;
-    let permission_mode = model_value(models, "claude_permission_mode")
-        .or_else(|| provider_value(providers, "claude_permission_mode"));
+    let permission_mode = configured_claude_permission_mode(models, providers);
     let effort = model_value(models, "claude_effort")
         .or_else(|| provider_value(providers, "claude_effort"))
         .filter(|value| value != "default");
@@ -529,14 +553,15 @@ pub fn extract_claude_sdk_config(
     {
         crate::api::ai::acp::merge_acp_env_blob(&mut env_vars, &raw);
     }
-    let session_signature = serde_json::to_string(&json!({"cli":cli_command,"cwd":working_directory,"model":model,"permission_mode":permission_mode,"effort":effort,"env":env_vars,"selected_mcp":""})).unwrap_or_default();
-    Ok(ClaudeSdkConfig {
+    let mut config = ClaudeSdkConfig {
         instance_id: None,
         cli_command,
         working_directory,
         env_vars,
         model,
         permission_mode,
+        turn_permission_mode: None,
+        interactive_permissions: true,
         effort,
         model_choices,
         resolved_model: None,
@@ -545,14 +570,16 @@ pub fn extract_claude_sdk_config(
         instructions_file: None,
         butler_instructions: None,
         mcp_scope: None,
-        session_signature,
-    })
+        session_signature: String::new(),
+    };
+    refresh_claude_session_signature(&mut config);
+    Ok(config)
 }
 
 pub fn refresh_claude_session_signature(config: &mut ClaudeSdkConfig) {
     config.session_signature = serde_json::to_string(&json!({
         "instance_id": config.instance_id, "cli": config.cli_command, "cwd": config.working_directory, "model": config.model,
-        "permission_mode": config.permission_mode, "effort": config.effort, "env": config.env_vars,
+        "interactive_permissions": config.interactive_permissions, "effort": config.effort, "env": config.env_vars,
         "selected_mcp": config.selected_mcp_tools_payload,
         "instructions": config.butler_instructions,
     })).unwrap_or_default();
@@ -1084,9 +1111,12 @@ fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOption
             category: Some("mode".into()),
             current_value: config.permission_mode.clone().unwrap_or_else(|| "default".into()),
             options: [
-                ("default", "执行模式"),
+                ("default", "默认（default）"),
+                ("acceptEdits", "接受编辑（acceptEdits）"),
+                ("auto", "自动审核（auto）"),
+                ("bypassPermissions", "跳过审核（bypassPermissions）"),
+                ("dontAsk", "不问询（dontAsk）"),
                 ("plan", "Plan 模式"),
-                ("auto", "Claude Code 原生自动审核（auto）"),
             ]
             .into_iter()
             .map(|(value, name)| AcpSessionConfigChoicePayload {
@@ -1318,10 +1348,61 @@ fn build_claude_command(
     }
     if let Some(session_id) = session_id { command.arg("--resume").arg(session_id); }
     if let Some(model) = &config.model { command.args(["--model", model]); }
-    if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
+    if config.interactive_permissions {
+        command.arg("--allow-dangerously-skip-permissions");
+    }
+    command.args(["--permission-mode", config.permission_mode.as_deref().unwrap_or("default")]);
     if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
     command.current_dir(&config.working_directory).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     command
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ClaudeModeError {
+    #[error("{0}")]
+    Rejected(String),
+    #[error("{0}")]
+    Transport(String),
+}
+
+async fn apply_claude_permission_mode(
+    config: &mut ClaudeSdkConfig,
+    mode: &str,
+    stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+    lines: &mut tokio::io::Lines<impl tokio::io::AsyncBufRead + Unpin>,
+    deferred: &mut VecDeque<Value>,
+) -> Result<(), ClaudeModeError> {
+    if !CLAUDE_PERMISSION_MODES.contains(&mode) || (!config.interactive_permissions && mode != "default") {
+        return Err(ClaudeModeError::Rejected(format!("当前 Claude Code 会话不支持权限模式 {mode}")));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let frame = json!({"type":"control_request","request_id":id,"request":{"subtype":"set_permission_mode","mode":mode}});
+    let exchange = async {
+        stdin.write_all(format!("{frame}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+        stdin.flush().await.map_err(|e| e.to_string())?;
+        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+            let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
+            let response = &frame["response"];
+            if frame["type"] != "control_response" || response["request_id"] != id {
+                deferred.push_back(frame);
+                continue;
+            }
+            return match response["subtype"].as_str() {
+                Some("success") => Ok(Ok(())),
+                Some("error") => Ok(Err(response["error"].as_str().map(str::to_owned)
+                    .unwrap_or_else(|| format!("CLI 错误详情：{}", response["error"])))),
+                _ => Err(format!("CLI 返回了未知确认类型 {}", response["subtype"])),
+            };
+        }
+        Err("CLI 在确认前关闭了输出".into())
+    };
+    let detail = |reason: String| format!("Claude Code set_permission_mode({mode}) 失败 [request_id={id}]：{reason}");
+    tokio::time::timeout(Duration::from_secs(15), exchange).await
+        .unwrap_or_else(|_| Err("15 秒内未收到 CLI 确认".into()))
+        .map_err(|reason| ClaudeModeError::Transport(detail(reason)))?
+        .map_err(|reason| ClaudeModeError::Rejected(detail(reason)))?;
+    config.permission_mode = Some(mode.to_owned());
+    Ok(())
 }
 
 fn claude_result_error(frame: &Value) -> Option<String> {
@@ -1427,7 +1508,7 @@ async fn read_claude_prompt_input(
                 }
                 Some(SessionCommand::Prompt { .. }) => continue,
                 Some(SessionCommand::SetConfig { response, .. }) => {
-                    let _ = response.send(Err("Claude Code 配置将在下一次会话启动时生效".into()));
+                    let _ = response.send(Err("Claude Code 正在回复，当前无法执行即时配置请求".into()));
                     continue;
                 }
                 None => return Err("Claude Code 会话在完成当前请求前已关闭".into()),
@@ -1449,7 +1530,10 @@ pub fn spawn_claude_session_task(
     let run_id = uuid::Uuid::new_v4().to_string();
     let task_run_id = run_id.clone();
     let (cancel_signal, mut cancellation) = watch::channel(0);
-    let handle = ClaudeSessionHandle { sender: tx, cancel_signal, run_id };
+    let mut configured_permission_mode = config.permission_mode.clone();
+    let permissions = ClaudeTurnPermissions { configured: configured_permission_mode.clone(), selected: config.turn_permission_mode.take() };
+    if let Some(mode) = &permissions.selected { config.permission_mode = Some(mode.clone()); }
+    let handle = ClaudeSessionHandle { sender: tx, cancel_signal, run_id, permissions };
     tauri::async_runtime::spawn(async move {
         let session_lookup = ConversationDatabase::new(&app)
             .map_err(|error| format!("Claude Code restore database unavailable: {error}"))
@@ -1515,6 +1599,7 @@ pub fn spawn_claude_session_task(
             ),
         )
         .await;
+        let mut deferred_frames = VecDeque::new();
         while let Some(message) = rx.recv().await {
             match message {
                 SessionCommand::Cancel { response } => {
@@ -1534,47 +1619,62 @@ pub fn spawn_claude_session_task(
                         }
                         "effort" => config.effort = (value != "default").then_some(value),
                         "permission_mode" => {
-                            if !matches!(value.as_str(), "default" | "plan" | "auto") {
-                                let _ = response.send(Err(format!("Claude Code 不支持工作模式：{value}")));
-                                continue;
+                            let result = apply_claude_permission_mode(&mut config, &value, &mut stdin, &mut lines, &mut deferred_frames).await;
+                            if let Err(error) = result {
+                                let _ = response.send(Err(error.to_string()));
+                                if matches!(error, ClaudeModeError::Rejected(_)) { continue; }
+                                break;
                             }
-                            config.permission_mode = Some(value)
                         }
                         _ => { let _ = response.send(Err(format!("Claude Code 不支持会话配置项: {config_id}"))); continue; }
                     }
-                    let _ = child.kill().await;
-                    diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
-                    match spawn_claude_process_with_diagnostics(&config, session_id.as_deref(), diagnostics.clone()).await {
-                        Ok((new_child, new_stdin, new_lines)) => {
-                            child = new_child;
-                            stdin = new_stdin;
-                            lines = new_lines;
-                            pending_resume_session_id = session_id.clone();
-                            restored_session_method = None;
-                            connection_event_id = None;
-                            let _ = response.send(Ok(()));
+                    if config_id != "permission_mode" {
+                        deferred_frames.clear();
+                        let _ = child.kill().await;
+                        diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
+                        match spawn_claude_process_with_diagnostics(&config, session_id.as_deref(), diagnostics.clone()).await {
+                            Ok((new_child, new_stdin, new_lines)) => {
+                                child = new_child;
+                                stdin = new_stdin;
+                                lines = new_lines;
+                                pending_resume_session_id = session_id.clone();
+                                restored_session_method = None;
+                                connection_event_id = None;
+                            }
+                            Err(error) => {
+                                let _ = response.send(Err(format!("重启 Claude Code 会话失败: {error}")));
+                                break;
+                            }
                         }
-                        Err(error) => {
-                            let _ = response.send(Err(format!("重启 Claude Code 会话失败: {error}")));
+                    }
+                    emit_snapshot(&event_identity, &app, _conversation_id, claude_session_snapshot(
+                        _conversation_id, session_id.clone(), &config, false, restored_session_method.clone(),
+                        connection_event_id.clone(), &current_plan,
+                    )).await;
+                    let _ = response.send(Ok(()));
+                    continue;
+                }
+                SessionCommand::Prompt { message_id, prompt, attachments, window, cancel_generation, permissions } => {
+                    event_identity.response_message_id = Some(message_id);
+                    let desired = permissions.selected.as_deref().or_else(|| {
+                        (permissions.configured != configured_permission_mode)
+                            .then(|| permissions.configured.as_deref().unwrap_or("default"))
+                    });
+                    if let Some(mode) = desired {
+                        if let Err(error) = apply_claude_permission_mode(&mut config, mode, &mut stdin, &mut lines, &mut deferred_frames).await {
+                            emit_claude_run_failure(&app, &event_identity, message_id, &window, &error.to_string(),
+                                AgentFailureStage::Permission, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s| s.to_string()), None));
+                            if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                                manager.clear_agent_focus(&app, &event_identity, false).await;
+                            }
+                            if matches!(error, ClaudeModeError::Rejected(_)) {
+                                crate::api::ai_api::native_queue::finish_turn(&app, &window, _conversation_id, &task_run_id, false).await;
+                                continue;
+                            }
                             break;
                         }
                     }
-                    emit_snapshot(&event_identity,
-                        &app,
-                        _conversation_id,
-                        claude_session_snapshot(
-                            _conversation_id,
-                            session_id.clone(),
-                            &config,
-                            false,
-                            restored_session_method.clone(),
-                            connection_event_id.clone(),
-                            &current_plan,
-                        ),
-                    )
-                    .await;
-                }
-                SessionCommand::Prompt { message_id, prompt, attachments, window, cancel_generation } => {
+                    configured_permission_mode = permissions.configured;
                     let _mcp_prompt = match config.mcp_scope.as_ref().map(|scope| scope.begin_prompt(message_id)).transpose() {
                         Ok(guard) => guard.map(|guard| guard.watch_cancellation(cancellation.clone(), cancel_generation)),
                         Err(error) => {
@@ -1583,7 +1683,6 @@ pub fn spawn_claude_session_task(
                             break;
                         }
                     };
-                    event_identity.response_message_id = Some(message_id);
                     let input = match claude_user_input(prompt, attachments, session_id.clone()).await {
                         Ok(input) => input,
                         Err(error) => {
@@ -1648,7 +1747,11 @@ pub fn spawn_claude_session_task(
                     let mut stream_error: Option<String> = None;
                     let mut stream_failure_stage = AgentFailureStage::Stream;
                     loop {
-                        let frame = match read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await {
+                        let next = match deferred_frames.pop_front() {
+                            Some(frame) => Ok(ClaudePromptInput::Frame(frame)),
+                            None => read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await,
+                        };
+                        let frame = match next {
                             Ok(ClaudePromptInput::Frame(frame)) => frame,
                             Ok(ClaudePromptInput::Interrupted) => {
                                 was_cancelled = true;

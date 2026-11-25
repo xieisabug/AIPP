@@ -4,7 +4,7 @@
 use super::session::{AgentSessionHandle, AgentSessionKind};
 use crate::api::ai::acp::{AcpConfig, AcpSessionConfigChoicePayload, apply_network_proxy_to_env_vars, extract_acp_config, refresh_acp_config_signature, spawn_agent_idle_reaper_once, spawn_acp_session_task};
 use crate::api::ai::codex_app_server::{CodexAppServerConfig, extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task, CodexSessionEntry, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES};
-use crate::api::ai::claude_sdk::{ClaudeSdkConfig, claude_model_choices, extract_claude_sdk_config, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry};
+use crate::api::ai::claude_sdk::{CLAUDE_PERMISSION_MODES, ClaudeSdkConfig, claude_model_choices, extract_claude_sdk_config, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry};
 use crate::api::ai::config::agent_network_proxy;
 use crate::api::assistant_api::{AssistantDetail, resolve_acp_provider_id, CLAUDE_CODE_DEFAULT_MODEL};
 use super::turn::AgentTurnRequest;
@@ -106,8 +106,8 @@ fn prepare_selected_config(
         if let Some(overrides) = override_model_config.as_ref() {
             if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
             if let Some(mode) = overrides.get("permission_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
-                if !matches!(mode, "default" | "plan" | "auto") { return Err(AppError::UnknownError(format!("Claude Code 不支持工作模式：{mode}"))); }
-                config.permission_mode = Some(mode.to_string());
+                if !CLAUDE_PERMISSION_MODES.contains(&mode) { return Err(AppError::UnknownError(format!("Claude Code 不支持工作模式：{mode}"))); }
+                config.turn_permission_mode = Some(mode.to_string());
             }
         }
         if let Some(proxy) = &network_proxy { apply_network_proxy_to_env_vars(&mut config.env_vars, proxy); }
@@ -238,12 +238,16 @@ impl PreparedAgentSession {
                                 conversation_id,
                                 config.session_signature.clone(),
                                 config.model.clone(),
-                                config.permission_mode.clone(),
+                                config.turn_permission_mode.clone().or_else(|| config.permission_mode.clone()),
                                 config.effort.clone(),
                             ),
                         );
                         handle
                     }
+                };
+                let mut handle = handle;
+                handle.permissions = crate::api::ai::claude_sdk::ClaudeTurnPermissions {
+                    configured: config.permission_mode, selected: config.turn_permission_mode,
                 };
                 let run_id = handle.run_id().to_string();
                 AgentSessionHandle::new(handle, run_id)
@@ -332,7 +336,7 @@ impl AgentDriver for BuiltinDriver {
             ]),
             AgentSessionKind::Claude => fields.extend([
                 string("claude_cli_command"),
-                choice("claude_permission_mode", &["default", "plan", "auto"]),
+                choice("claude_permission_mode", CLAUDE_PERMISSION_MODES),
                 choice("claude_effort", crate::api::ai::claude_sdk::CLAUDE_EFFORTS),
             ]),
         }
@@ -402,8 +406,8 @@ impl AgentDriver for BuiltinDriver {
 impl super::registry::PreparedAgentSession for PreparedAgentSession {
     fn metadata(&self) -> AgentDriverMetadata { self.kind().into() }
     async fn finalize(&mut self, app: &tauri::AppHandle, conversation_id: i64, payload: String) -> Result<(), AppError> {
-        let is_proactive = crate::mcp::butler_tools::conversation_kind(app, Some(conversation_id))
-            .is_ok_and(|k| k == crate::proactive::tools::PROACTIVE_RUN_KIND);
+        let is_proactive = crate::mcp::butler_tools::conversation_kind(app, Some(conversation_id))?
+            == crate::proactive::tools::PROACTIVE_RUN_KIND;
         if is_proactive {
             // 主动整理后台运行时强制走审批回调与受控沙箱，防止原生 Agent 绕过 AIPP 安全审核。
             match self {
@@ -415,6 +419,8 @@ impl super::registry::PreparedAgentSession for PreparedAgentSession {
                 }
                 Self::Claude(config) => {
                     config.permission_mode = Some("default".to_string());
+                    config.turn_permission_mode = None;
+                    config.interactive_permissions = false;
                 }
                 Self::Acp(_) => {}
             }

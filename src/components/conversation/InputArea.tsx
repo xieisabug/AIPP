@@ -122,6 +122,7 @@ interface InputAreaProps {
      * Plan 模式开关：只有支持 Plan 的 Agent 助手才传 onPlanModeToggle，
      * 开关显示在输入框下方（仅底部输入框布局）。
      */
+    permissionControl?: ReactNode;
     planMode?: boolean;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
@@ -165,6 +166,7 @@ const InputArea = React.memo(
                 commandMode,
                 onContextCommand,
                 acpAvailableCommands = EMPTY_ACP_COMMANDS,
+                permissionControl,
                 planMode = false,
                 planModeSwitching = false,
                 onPlanModeToggle,
@@ -1434,6 +1436,7 @@ const InputArea = React.memo(
             }, []);
 
             const showPlanModeToggle = Boolean(onPlanModeToggle) && placement === "bottom";
+            const showFooter = placement === "bottom" && (showPlanModeToggle || Boolean(permissionControl));
             const planToggleDisabled = planModeSwitching || aiIsResponsing;
             const planToggleTitle = aiIsResponsing
                 ? "回复进行中，结束后可切换"
@@ -1456,7 +1459,7 @@ const InputArea = React.memo(
             return (
                 <div
                     ref={rootRef}
-                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeToggle ? 'has-footer' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showFooter ? 'has-footer' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
                     data-attachment-count={attachmentCount}
@@ -1536,13 +1539,14 @@ const InputArea = React.memo(
                         />
                     </div>
 
-                    {showPlanModeToggle ? (
+                    {showFooter ? (
                         <div
                             className="input-area-footer"
                             data-theme-slot="input-area-footer"
                             data-aipp-slot="chat-input-footer"
                         >
-                            <div
+                            {permissionControl}
+                            {showPlanModeToggle && <div
                                 className="input-area-plan-mode"
                                 data-theme-slot="input-area-plan-mode"
                                 data-aipp-slot="chat-input-plan-mode"
@@ -1562,7 +1566,7 @@ const InputArea = React.memo(
                                 {planModeSwitching ? (
                                     <Loader2 className="input-area-plan-mode-spinner animate-spin" aria-label="正在切换" />
                                 ) : null}
-                            </div>
+                            </div>}
                         </div>
                     ) : null}
 

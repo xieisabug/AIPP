@@ -46,6 +46,7 @@ pub struct AgentModelOption {
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct AgentRuntimeInfo {
+    pub claude_permission_mode: Option<String>,
     pub agent_kind: String,
     pub working_directory: String,
 }
@@ -1057,7 +1058,11 @@ pub fn get_agent_runtime_info(
         provider.api_type
     };
     let working_directory = get_acp_working_directory(app_handle, assistant_id)?;
+    let claude_permission_mode = (agent_kind == CLAUDE_SDK_API_TYPE).then(||
+        crate::api::ai::claude_sdk::configured_claude_permission_mode(&model_configs, &provider_configs)
+            .unwrap_or_else(|| "default".into()));
     Ok(AgentRuntimeInfo {
+        claude_permission_mode,
         agent_kind,
         working_directory,
     })

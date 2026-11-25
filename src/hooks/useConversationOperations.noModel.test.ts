@@ -12,10 +12,10 @@ vi.mock("./useConversationManager", () => ({
     default: () => ({ deleteConversation: vi.fn(), updateConversationName: vi.fn() }),
 }));
 
-function setup(quietRuntimeErrors = false, selectedAgentMode = "") {
+function setup(quietRuntimeErrors = false, claudePermissionMode = "", overrides = {}) {
     const props: any = {
         quietRuntimeErrors,
-        selectedAgentMode,
+        claudePermissionMode,
         conversation: null,
         selectedAssistant: 1,
         assistants: [{ id: 1, name: "快速使用助手", assistant_type: 0 }],
@@ -33,6 +33,7 @@ function setup(quietRuntimeErrors = false, selectedAgentMode = "") {
         clearShiningMessages: vi.fn(),
         assistantTypePluginMap: new Map(),
         assistantRunApi: {},
+        ...overrides,
     };
     const { result } = renderHook(() => useConversationOperations(props));
     return { result, props };
@@ -108,12 +109,27 @@ describe.each([
         expect(toastMock.error).not.toHaveBeenCalled();
     });
 
-    it("should pass an explicitly selected Claude permission mode to the native command", async () => {
+    it.each(["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk"])("should pass Claude mode %s to the native command", async mode => {
         mockInvokeHandler("ask_ai", () => ({ conversation_id: 7, request_prompt_result_with_context: "" }));
-        const { result } = setup(false, "auto");
+        const { result } = setup(false, mode);
         await act(async () => { result.current.handleSend(); });
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("ask_ai", expect.objectContaining({
-            overrideModelConfig: expect.objectContaining({ permission_mode: "auto" }),
+            overrideModelConfig: { permission_mode: mode },
+        })));
+    });
+
+    it("should capture the open conversation's mode when queuing the next message", async () => {
+        mockInvokeHandler("enqueue_conversation_message", () => ({ id: 8, conversation_id: 7 }));
+        const { result } = setup(false, "dontAsk", {
+            selectedAssistant: 99,
+            conversation: { id: 7, assistant_id: 1 },
+            assistants: [{ id: 1, name: "Claude", assistant_type: 4 }],
+            aiIsResponsing: true,
+        });
+        await act(async () => { result.current.handleSend(); });
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("enqueue_conversation_message", expect.objectContaining({
+            request: expect.objectContaining({ assistant_id: 1, conversation_id: "7" }),
+            overrideModelConfig: { permission_mode: "dontAsk" },
         })));
     });
 

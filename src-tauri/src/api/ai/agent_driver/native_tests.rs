@@ -247,19 +247,19 @@ fn test_prepare_codex_rejects_invalid_turn_modes_and_permissions() {
 }
 
 #[test]
-fn test_prepare_claude_validates_turn_permission_modes() {
+fn test_claude_permission_mode_validates_turn_overrides() {
     let mut fixture = Fixture::new();
-    for mode in ["default", "plan", "auto"] {
+    for mode in ["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"] {
         fixture.overrides(&[("permission_mode", mode), ("claude_effort", "high")]);
         let PreparedAgentSession::Claude(config) = fixture.prepare("claude_sdk", Vec::new()).unwrap() else {
             panic!("expected Claude");
         };
-        assert_eq!(config.permission_mode.as_deref(), Some(mode));
+        assert_eq!(config.turn_permission_mode.as_deref(), Some(mode));
         assert_eq!(config.effort.as_deref(), Some("high"));
     }
-    fixture.overrides(&[("permission_mode", "bypassPermissions")]);
+    fixture.overrides(&[("permission_mode", "unknown")]);
     let error = fixture.prepare("claude_sdk", Vec::new()).err().unwrap().to_string();
-    assert!(error.contains("Claude Code 不支持工作模式：bypassPermissions"));
+    assert!(error.contains("Claude Code 不支持工作模式：unknown"));
 }
 
 #[test]
@@ -382,7 +382,8 @@ fn test_prepare_mcp_finalization_refreshes_each_native_signature_after_overrides
                 assert_eq!(config.selected_mcp_tools_payload, payload);
                 let signed: serde_json::Value = serde_json::from_str(&finalized).unwrap();
                 assert_eq!(signed["selected_mcp"], payload);
-                assert_eq!(signed["permission_mode"], "plan");
+                assert!(signed.get("permission_mode").is_none());
+                assert_eq!(config.turn_permission_mode.as_deref(), Some("plan"));
             }
             PreparedAgentSession::Acp(config) => {
                 assert_eq!(config.selected_mcp_tools_payload, payload);

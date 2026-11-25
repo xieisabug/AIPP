@@ -29,7 +29,7 @@ fn test_claude_effort_uses_reported_model_levels_and_passes_assistant_choice_to_
 }
 
 #[test]
-fn test_claude_native_auto_for_new_and_resumed_sessions() {
+fn test_claude_permission_mode_for_new_and_resumed_sessions() {
     let provider_mode = crate::db::llm_db::LLMProviderConfig {
         id: 1, llm_provider_id: 1, name: "claude_permission_mode".into(),
         value: "auto".into(), append_location: String::new(), is_addition: false,
@@ -38,18 +38,64 @@ fn test_claude_native_auto_for_new_and_resumed_sessions() {
     let mode = claude_config_options(&config).into_iter()
         .find(|option| option.id == "permission_mode").unwrap();
     assert_eq!(mode.current_value, "auto");
+    let mut changed = config.clone();
+    changed.permission_mode = Some("dontAsk".into());
+    changed.turn_permission_mode = Some("bypassPermissions".into());
+    refresh_claude_session_signature(&mut changed);
+    assert_eq!(config.session_signature, changed.session_signature, "权限切换必须复用现有进程");
     assert!(mode.options.iter().any(|choice| choice.value == "auto"));
     for session_id in [None, Some("existing-session")] {
         let command = build_claude_command(&config, session_id, std::path::Path::new("claude"));
         let args: Vec<_> = command.as_std().get_args().collect();
         assert_eq!(args.iter().filter(|arg| **arg == "--permission-mode").count(), 1);
         assert!(args.windows(2).any(|pair| pair == ["--permission-mode", "auto"]));
+        assert!(args.iter().any(|arg| *arg == "--allow-dangerously-skip-permissions"));
     }
+}
+
+#[tokio::test]
+async fn test_claude_permission_changes_on_one_stream_only_after_matching_ack() {
+    let mut config = extract_claude_sdk_config(&[], &[], None, vec![]).unwrap();
+    let (client, peer) = tokio::io::duplex(4096);
+    let (read, mut write) = tokio::io::split(client);
+    let mut lines = BufReader::new(read).lines();
+    let (peer_read, mut peer_write) = tokio::io::split(peer);
+    let mut requests = BufReader::new(peer_read).lines();
+    let modes = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "default"];
+    let cli = async {
+        for (i, mode) in modes.iter().enumerate() {
+            let request: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["request"], json!({"subtype":"set_permission_mode","mode":mode}));
+            let reply = json!({"type":"control_response","response":{
+                "request_id":request["request_id"], "subtype":if i == 1 {"error"} else {"success"},
+                "error":"classifier unavailable"
+            }});
+            let stale = json!({"type":"control_response","response":{"request_id":"unrelated","subtype":"success"}});
+            let notification = json!({"type":"system","subtype":"task_notification","task_id":"prior-task"});
+            peer_write.write_all(format!("{stale}\n{notification}\n{reply}\n").as_bytes()).await.unwrap();
+        }
+    };
+    let app = async {
+        for mode in modes {
+            let mut deferred = VecDeque::new();
+            let result = apply_claude_permission_mode(&mut config, mode, &mut write, &mut lines, &mut deferred).await;
+            assert_eq!(deferred.len(), 2);
+            assert_eq!(deferred[1]["task_id"], "prior-task");
+            if mode == "auto" {
+                assert!(result.unwrap_err().to_string().contains("classifier unavailable"));
+                assert_eq!(config.permission_mode.as_deref(), Some("acceptEdits"));
+            } else {
+                result.unwrap();
+                assert_eq!(config.permission_mode.as_deref(), Some(mode));
+            }
+        }
+    };
+    tokio::join!(cli, app);
 }
 
 fn handle_channel(run_id: &str) -> (ClaudeSessionHandle, mpsc::UnboundedReceiver<SessionCommand>) {
     let (sender, receiver) = mpsc::unbounded_channel();
-    (ClaudeSessionHandle { sender, cancel_signal: watch::channel(0).0, run_id: run_id.into() }, receiver)
+    (ClaudeSessionHandle { permissions: Default::default(), sender, cancel_signal: watch::channel(0).0, run_id: run_id.into() }, receiver)
 }
 
 fn entry(id: i64, run_id: &str) -> ClaudeSessionEntry {

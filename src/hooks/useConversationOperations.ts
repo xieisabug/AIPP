@@ -44,6 +44,7 @@ export interface UseConversationOperationsProps {
     selectedAgentApprovalPolicy?: string;
     selectedAgentSandbox?: string;
     selectedAgentMode?: string;
+    claudePermissionMode?: string;
     /** 管家会话中的引用回复：发送时携带稳定身份，发送后清除 */
     quote?: { kind: string; id: number } | null;
     clearQuote?: () => void;
@@ -101,6 +102,7 @@ export function useConversationOperations({
     selectedAgentApprovalPolicy = "",
     selectedAgentSandbox = "",
     selectedAgentMode = "",
+    claudePermissionMode,
     quote = null,
     clearQuote,
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
@@ -316,6 +318,10 @@ export function useConversationOperations({
                 agentOverrideConfig.collaboration_mode = selectedAgentMode;
                 agentOverrideConfig.permission_mode = selectedAgentMode;
             }
+        }
+        if (claudePermissionMode && parsedAssistantId === (conversation?.assistant_id ?? selectedAssistant)) {
+            agentOverrideConfig.permission_mode = claudePermissionMode;
+            delete agentOverrideConfig.collaboration_mode;
         }
         return {
             overrideModelId: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,

@@ -1,3 +1,4 @@
+import { claudePermissionModes } from "@/data/claudePermissionModes";
 import { composerKey, upsertPersistedRow, type ComposerReceipt } from "@/utils/composerMessage";
 import { afterSendMotion } from "./conversation/sendMotion";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
@@ -57,6 +58,7 @@ import AgentWorkspacePanel from "./chat-sidebar/AgentWorkspacePanel";
 import { agentAllowsConfigMutation, agentSessionRestoreUnsupported } from "@/utils/agentCapabilities";
 
 interface AgentRuntimeInfo {
+    claude_permission_mode?: string | null;
     agent_kind: string;
     working_directory: string;
 }
@@ -421,7 +423,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
         // 运行时信息按助手记录，换助手后旧助手迟到的结果不会被当成当前助手的 Agent 类型
-        const [configuredAgent, setConfiguredAgent] = useState<{ assistantId: number; kind: string | null } | null>(null);
+        const [configuredAgent, setConfiguredAgent] = useState<{ assistantId: number; kind: string | null; permissionMode?: string | null } | null>(null);
         const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         // 常规消息列表
@@ -1344,6 +1346,24 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const loadedConversation = conversationId && conversation?.id === Number(conversationId) ? conversation : null;
         const activeAssistantId = conversationId ? (loadedConversation?.assistant_id ?? null) : selectedAssistant;
 
+        const agentSnapshot = acpSessionState?.conversation_id === Number(conversationId) ? acpSessionState : null;
+        const assistantRuntime = configuredAgent?.assistantId === activeAssistantId ? configuredAgent : null;
+        const isClaudeComposer = (agentSnapshot?.agent_kind ?? assistantRuntime?.kind) === "claude_sdk";
+        const modeScope = JSON.stringify([conversationId, activeAssistantId]);
+        const [claudeDraft, setClaudeDraft] = useState<{ scope: string; mode: string; plan: boolean } | null>(null);
+        const draft = claudeDraft?.scope === modeScope ? claudeDraft : null;
+        useEffect(() => {
+            setClaudeDraft(previous => previous?.scope === modeScope ? previous : null);
+        }, [modeScope]);
+        const configuredMode = assistantRuntime?.permissionMode ?? "default";
+        const runtimeMode = agentSnapshot?.permission_mode ?? configuredMode;
+        const claudePlan = draft?.plan ?? (runtimeMode === "plan");
+        const claudeMode = draft?.mode ?? (runtimeMode !== "plan" ? runtimeMode
+            : configuredMode !== "plan" ? configuredMode : "default");
+        const chooseClaudeMode = useCallback((mode: string, plan: boolean) => {
+            setClaudeDraft({ scope: modeScope, mode, plan });
+        }, [modeScope]);
+
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
             beginComposerMessage, finishComposerMessage,
@@ -1428,7 +1448,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             selectedAgentEffort,
             selectedAgentApprovalPolicy,
             selectedAgentSandbox,
-            selectedAgentMode,
+            selectedAgentMode: isClaudeComposer ? undefined : selectedAgentMode,
+            claudePermissionMode: isClaudeComposer && draft ? (draft.plan ? "plan" : draft.mode) : undefined,
         });
 
         const mobilePlatform = useIsMobilePlatform();
@@ -1703,9 +1724,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return assistant ? assistant.assistant_type === 4 : null;
         }, [activeAssistantId, assistants]);
         const isAcpAssistant = activeAssistantIsAgent === true;
-        const configuredAgentKind = configuredAgent && configuredAgent.assistantId === activeAssistantId
-            ? configuredAgent.kind
-            : null;
+        const configuredAgentKind = assistantRuntime?.kind ?? null;
 
         // 移动端不能连接/启动本机 CLI Agent（MOB-02），不自动连接 ACP 会话
         const isMobilePlatform = useIsMobilePlatform();
@@ -1734,7 +1753,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 .then((runtimeInfo) => {
                     if (cancelled) return;
                     setAcpWorkingDirectory(runtimeInfo.working_directory);
-                    setConfiguredAgent({ assistantId, kind: runtimeInfo.agent_kind });
+                    setConfiguredAgent({ assistantId, kind: runtimeInfo.agent_kind, permissionMode: runtimeInfo.claude_permission_mode });
                     if (!connectKey) {
                         return;
                     }
@@ -1832,7 +1851,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             hasSessionPlanOption: Boolean(planModeOption),
             isMobilePlatform,
         });
-        const isPlanMode = planModeOption && planModeChoice
+        const isPlanMode = isClaudeComposer ? claudePlan : planModeOption && planModeChoice
             ? planModeOption.current_value === planModeChoice.value
             : selectedAgentMode === "plan";
         const planModeSwitching = Boolean(
@@ -1842,6 +1861,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const setAgentPlanMode = useCallback(
             async (enabled: boolean) => {
                 if (enabled === isPlanMode) return true;
+                if (isClaudeComposer) {
+                    chooseClaudeMode(claudeMode, enabled);
+                    return true;
+                }
                 if (!planModeOption) {
                     setSelectedAgentMode(enabled ? "plan" : "default");
                     return true;
@@ -1850,7 +1873,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 if (!choice) return false;
                 return handleAcpConfigChange(planModeOption, choice.value);
             },
-            [executionModeChoice, handleAcpConfigChange, isPlanMode, planModeChoice, planModeOption]
+            [chooseClaudeMode, claudeMode, isClaudeComposer, executionModeChoice, handleAcpConfigChange, isPlanMode, planModeChoice, planModeOption]
         );
 
         // Office 预览里“让 AI 修改”：把修改要求连同选区作为一条消息发到这个会话（不动输入框里的草稿）
@@ -2243,9 +2266,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         </div>
                     ) : null}
                     <AcpConfigSelect
-                        option={option}
-                        disabled={Boolean(acpMutationKey) || !agentAllowsConfigMutation(acpSessionState?.agent_capabilities)}
-                        onChange={(option, value) => void handleAcpConfigChange(option, value)}
+                        option={isClaudeSession && option.id === "permission_mode" ? {
+                            ...option, current_value: claudeMode, options: option.options.filter(choice => choice.value !== "plan"),
+                        } : option}
+                        disabled={Boolean(acpMutationKey) || !agentAllowsConfigMutation(acpSessionState?.agent_capabilities)
+                            || (isClaudeSession && option.id === "permission_mode" && claudePlan)}
+                        onChange={(option, value) => {
+                            if (isClaudeSession && option.id === "permission_mode") chooseClaudeMode(value, claudePlan);
+                            else void handleAcpConfigChange(option, value);
+                        }}
                     />
                 </div>
             );
@@ -2360,6 +2389,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpWorkingDirectory,
             combinedHeaderActions,
             configuredAgentKind,
+            chooseClaudeMode,
+            claudeMode,
+            claudePlan,
             handleAcpConfigChange,
             isAcpAssistant,
             selectedAgentModel,
@@ -2603,6 +2635,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 toast.success(command === "reload" ? "已重新加载系统提示词、工具和 Skills" : "上下文已压缩");
                             }}
                             acpAvailableCommands={acpSessionState?.available_commands ?? []}
+                            permissionControl={isClaudeComposer && !isMobilePlatform ? (
+                                <select className="input-area-plan-mode" aria-label="Claude Code 权限模式"
+                                    title={claudePlan ? "关闭 Plan 模式后可选择权限" : "下一条消息使用的 Claude Code 权限模式"}
+                                    disabled={claudePlan} value={claudeMode} onChange={event => chooseClaudeMode(event.target.value, claudePlan)}>
+                                    {claudePermissionModes.map(choice => (
+                                        <option key={choice.value} value={choice.value}>{choice.label}</option>
+                                    ))}
+                                </select>
+                            ) : undefined}
                             planMode={isPlanMode}
                             planModeSwitching={planModeSwitching}
                             onPlanModeToggle={showPlanModeToggle

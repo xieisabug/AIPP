@@ -57,7 +57,7 @@ fn session() -> (AgentSessionHandle, mpsc::UnboundedReceiver<SessionCommand>, wa
     let (sender, commands) = mpsc::unbounded_channel();
     let (cancel_signal, cancellation) = watch::channel(0);
     (AgentSessionHandle::new(ClaudeSessionHandle {
-        sender, cancel_signal, run_id: "fixture-run".into(),
+        sender, cancel_signal, run_id: "fixture-run".into(), permissions: Default::default(),
     }, "fixture-run".into()), commands, cancellation)
 }
 
@@ -91,7 +91,7 @@ async fn test_claude_unified_active_config_rejection_preserves_cancel_and_native
         peer.ready(&mut commands).await;
         let control = async {
             let error = handle.set_config_option("model".into(), "next-model".into()).await.unwrap_err();
-            assert!(error.to_string().contains("配置将在下一次会话启动时生效"));
+            assert!(error.to_string().contains("正在回复，当前无法执行即时配置请求"));
             handle.cancel_current_prompt().await.unwrap();
         };
         let ((), observed) = tokio::join!(control, peer.read(&mut commands));
