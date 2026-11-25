@@ -20,7 +20,7 @@ fn database() -> Connection {
 fn approval(conn: &Connection, conversation: i64) -> ApprovalBinding {
     ApprovalBinding {
         conversation, action: "send".into(), args: serde_json::json!({"recipient":"test@example.invalid"}),
-        goal_revision: goal::current_revision(conn, conversation).unwrap(), latest_user: Some(1), expires_at: 1000,
+        goal_revision: goal::current_revision(conn, conversation).unwrap(), latest_user: Some(1), expires_at: None,
     }
 }
 

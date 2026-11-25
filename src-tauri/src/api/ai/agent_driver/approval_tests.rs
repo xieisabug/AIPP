@@ -403,15 +403,15 @@ fn guarded_permission_fixture() -> (rusqlite::Connection, crate::db::butler_appr
     conn.execute("INSERT INTO butler_goal VALUES(42,1,'report',0)", []).unwrap();
     crate::db::butler_goal::bind_turn(&conn, 42, 1, 1).unwrap();
     let request = ApprovalRequest { action_id: "test.permission".into(), args: serde_json::json!({"file":"report"}) };
-    let frozen = binding_from_connection(&conn, 42, &request, 100, Some(2)).unwrap();
+    let frozen = binding_from_connection(&conn, 42, &request, Some(2)).unwrap();
     (conn, NativeApprovalGuard { frozen, request, source: Some(2) })
 }
 
 /// The exact preflight used by the application rejects stale grants but lets a
 /// scoped, advertised rejection reach the native waiter without reauthorizing work.
 #[tokio::test]
-async fn test_native_permission_denial_remains_available_after_authority_expires() {
-    for reason in ["expired", "paused", "stopped", "changed_goal"] {
+async fn test_native_permission_denial_remains_available_after_work_changes() {
+    for reason in ["paused", "stopped", "changed_goal"] {
         for driver in ["acp", "codex_app_server", "claude_sdk"] {
             let fixture = Fixture::new();
             let mut target = target(&format!("{driver}-{reason}"));
@@ -420,15 +420,16 @@ async fn test_native_permission_denial_remains_available_after_authority_expires
             let (tx, rx) = oneshot::channel();
             fixture.permissions.store_request_guarded(permission_event(&target), tx,
                 target.scope.clone(), Some(guard)).await.unwrap();
-            let now = match reason {
-                "expired" => 100,
-                "paused" => { crate::db::butler_control::set(&conn, 42, "pause").unwrap(); 99 },
-                "stopped" => { crate::db::butler_control::set(&conn, 42, "cancel").unwrap(); 99 },
-                _ => { conn.execute("UPDATE butler_goal SET revision=2", []).unwrap(); 99 },
-            };
             let required = fixture.permissions.butler_guard_for_reply(&target.request_id,
                 &target.scope, " vendor:approve/一次 ").await.unwrap().expect("grant must be checked");
-            assert!(required.validate_connection(&conn, now).is_err(), "{driver} {reason}");
+            let later = chrono::Utc::now().timestamp() + 3600;
+            assert!(required.validate_connection(&conn, later).is_ok(), "{driver}");
+            match reason {
+                "paused" => { crate::db::butler_control::set(&conn, 42, "pause").unwrap(); }
+                "stopped" => { crate::db::butler_control::set(&conn, 42, "cancel").unwrap(); }
+                _ => { conn.execute("UPDATE butler_goal SET revision=2", []).unwrap(); }
+            }
+            assert!(required.validate_connection(&conn, later).is_err(), "{driver} {reason}");
             assert!(fixture.permissions.butler_guard_for_reply(&target.request_id,
                 &target.scope, "vendor:deny").await.unwrap().is_none());
             assert!(fixture.reply(&target, select("vendor:deny")).await.unwrap().delivered);
