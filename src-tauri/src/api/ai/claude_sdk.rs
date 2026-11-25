@@ -326,11 +326,19 @@ pub struct ClaudeConversationSessionState {
     pub config_options: Vec<AcpSessionConfigOptionPayload>,
 }
 
-/// Carried by the per-turn handle so queued messages keep the choice made when sent.
+/// Bound to this dispatch after resolving the conversation's latest selection.
 #[derive(Clone, Default)]
 pub(crate) struct ClaudeTurnPermissions {
     pub configured: Option<String>,
     pub selected: Option<String>,
+}
+
+impl ClaudeTurnPermissions {
+    fn desired(&self, previous_configured: &Option<String>) -> Option<&str> {
+        self.selected.as_deref().or_else(|| {
+            (&self.configured != previous_configured).then(|| self.configured.as_deref().unwrap_or("default"))
+        })
+    }
 }
 
 enum SessionCommand {
@@ -1350,6 +1358,18 @@ enum ClaudeModeError {
     Transport(String),
 }
 
+impl ClaudeSdkConfig {
+    pub(super) fn apply_saved_turn_permission(&mut self, conn: &rusqlite::Connection, conversation_id: i64) -> Result<(), AppError> {
+        if let Some(provider) = self.instance_id {
+            let mut selected = super::agent_driver::next_permissions::read(conn, conversation_id, CLAUDE_SDK_API_TYPE, Some(provider), None)?;
+            if let Some(mode) = selected.remove("permission_mode") {
+                self.turn_permission_mode = Some(mode);
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn apply_claude_permission_mode(
     config: &mut ClaudeSdkConfig,
     mode: &str,
@@ -1737,11 +1757,7 @@ pub fn spawn_claude_session_task(
                 }
                 IdleEvent::Command(SessionCommand::Prompt { message_id, prompt, attachments, window, cancel_generation, permissions }) => {
                     event_identity.response_message_id = Some(message_id);
-                    let desired = permissions.selected.as_deref().or_else(|| {
-                        (permissions.configured != configured_permission_mode)
-                            .then(|| permissions.configured.as_deref().unwrap_or("default"))
-                    });
-                    if let Some(mode) = desired {
+                    if let Some(mode) = permissions.desired(&configured_permission_mode) {
                         if let Err(error) = apply_claude_permission_mode(&mut config, mode, &mut stdin, &mut lines, &mut deferred_frames).await {
                             emit_claude_run_failure(&app, &event_identity, message_id, &window, &error.to_string(),
                                 AgentFailureStage::Permission, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s| s.to_string()), None));

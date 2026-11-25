@@ -7,26 +7,30 @@ const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
-it("should show the latest selection during a reply and discard it when the native session changes", async () => {
+it.each([
+    ["kiro", "autopilot", "off", "on"],
+    ["claude_sdk", "permission_mode", "acceptEdits", "dontAsk"],
+])("should show the latest %s selection during a reply and discard it when the native session changes", async (driver, key, initial, next) => {
+    invoke.mockReset();
     let onChange: (event: { payload: number }) => void = () => {};
     listen.mockImplementation(async (_, handler) => { onChange = handler; return () => {}; });
-    invoke.mockResolvedValueOnce({}).mockResolvedValueOnce({ autopilot: "on" }).mockResolvedValueOnce({});
+    invoke.mockResolvedValueOnce({}).mockResolvedValueOnce({ [key]: next }).mockResolvedValueOnce({});
     const snapshot: AcpConversationSessionState = {
-        conversation_id: 7, session_id: "first", agent_kind: "kiro", has_active_prompt: true,
+        conversation_id: 7, session_id: "first", agent_kind: driver, has_active_prompt: true,
         prompt_capabilities: { image: false, audio: false, embedded_context: false },
-        config_options: [{ id: "autopilot", name: "Autopilot", current_value: "off", options: [] }],
+        config_options: [{ id: key, name: key, current_value: initial, options: [] }],
         modes: [], plan: [], available_commands: [],
     };
     const { result, rerender } = renderHook(useNextAgentPermissions, { initialProps: snapshot });
     await waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
     await act(async () => onChange({ payload: 7 }));
-    expect(result.current?.config_options[0].current_value).toBe("on");
+    expect(result.current?.config_options[0].current_value).toBe(next);
     rerender({ ...snapshot, has_active_prompt: false });
-    expect(result.current?.config_options[0].current_value).toBe("on");
-    expect(snapshot.config_options[0].current_value).toBe("off");
+    expect(result.current?.config_options[0].current_value).toBe(next);
+    expect(snapshot.config_options[0].current_value).toBe(initial);
     rerender({ ...snapshot, session_id: "second" });
-    expect(result.current?.config_options[0].current_value).toBe("off");
+    expect(result.current?.config_options[0].current_value).toBe(initial);
     await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("get_agent_next_permissions", {
-        conversationId: 7, driver: "kiro", sessionId: "second",
+        conversationId: 7, driver, sessionId: "second",
     }));
 });

@@ -100,6 +100,23 @@ pub(crate) struct NativeConfig {
     review: PermissionReview,
 }
 impl NativeConfig {
+    fn load_dispatch_permissions(&mut self, conn: &rusqlite::Connection, cid: i64, driver: &str, provider: i64) -> Result<(), AppError> {
+        let startup_permission = match driver {
+            "pi" => Some(("pi_approval", "all")),
+            "cursor" => Some(("cursor_auto_review", "on")),
+            "opencode" => Some(("opencode_permission", "default")),
+            _ => None,
+        };
+        if let Some((key, default)) = startup_permission {
+            if self.wire[key].is_null() { self.wire[key] = json!(default); }
+        }
+        if self.review != PermissionReview::Proactive {
+            let selections = super::next_permissions::read(conn, cid, driver, Some(provider), None)?;
+            self.apply_next_permissions(driver, selections)?;
+        }
+        Ok(())
+    }
+
     fn apply_next_permissions(&mut self, driver: &str, selections: super::next_permissions::Selections) -> Result<(), AppError> {
         for (key, value) in selections {
             let wire_key = match (driver, key.as_str()) {
@@ -269,19 +286,7 @@ impl PreparedAgentSession for Prepared {
     async fn acquire(mut self: Box<Self>, host: &dyn AgentSessionHost, cid: i64) -> Result<AgentSessionHandle, AppError> {
         let app = host.app_handle()?.clone();
         let db = ConversationDatabase::new(&app)?;
-        let startup_permission = match self.driver.0 {
-            "pi" => Some(("pi_approval", "all")),
-            "cursor" => Some(("cursor_auto_review", "on")),
-            "opencode" => Some(("opencode_permission", "default")),
-            _ => None,
-        };
-        if let Some((key, default)) = startup_permission {
-            if self.config.wire[key].is_null() { self.config.wire[key] = json!(default); }
-        }
-        if self.config.review != PermissionReview::Proactive {
-            let selections = super::next_permissions::read(&db.get_connection()?, cid, self.driver.0, Some(self.instance.provider_id), None)?;
-            self.config.apply_next_permissions(self.driver.0, selections)?;
-        }
+        self.config.load_dispatch_permissions(&db.get_connection()?, cid, self.driver.0, self.instance.provider_id)?;
         let _account = if self.driver.0 == "antigravity" {
             Some(catalog::gate(self.instance.provider_id).lock_owned().await)
         } else { None };
@@ -1128,3 +1133,7 @@ fn queue_question(app: &tauri::AppHandle, identity: &AgentEventIdentity, turn: i
 #[cfg(test)]
 #[path = "native_agents_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_agents_queued_permissions_tests.rs"]
+mod queued_permissions_tests;

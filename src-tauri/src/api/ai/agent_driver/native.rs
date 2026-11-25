@@ -436,8 +436,15 @@ impl super::registry::PreparedAgentSession for PreparedAgentSession {
         }
         Ok(())
     }
-    async fn acquire(self: Box<Self>, host: &dyn super::registry::AgentSessionHost, conversation_id: i64) -> Result<AgentSessionHandle, AppError> {
-        Ok((*self).acquire(host.app_handle()?, conversation_id).await)
+    async fn acquire(mut self: Box<Self>, host: &dyn super::registry::AgentSessionHost, conversation_id: i64) -> Result<AgentSessionHandle, AppError> {
+        let app = host.app_handle()?;
+        if let Self::Claude(config) = self.as_mut() {
+            if config.interactive_permissions {
+                let db = crate::db::conversation_db::ConversationDatabase::new(app)?;
+                config.apply_saved_turn_permission(&db.get_connection()?, conversation_id)?;
+            }
+        }
+        Ok((*self).acquire(app, conversation_id).await)
     }
 }
 

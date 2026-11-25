@@ -1,5 +1,59 @@
 use super::*;
 
+#[tokio::test]
+async fn test_queued_permissions_codex_uses_final_snapshot_in_second_turn_start() {
+    use crate::api::ai::agent_driver::queued_permission_fixture::Queue;
+    let queue = Queue::new();
+    let (mut writer, reader) = tokio::io::duplex(4096);
+    let mut peer = BufReader::new(reader).lines();
+    let (mut server, notifications) = tokio::io::duplex(4096);
+    let mut notifications = BufReader::new(notifications).lines();
+    let thread = "original-thread";
+    let mut snapshot = CodexConversationSessionState {
+        approval_policy: Some("on-request".into()), sandbox: Some("read-only".into()),
+        approvals_reviewer: Some("user".into()), ..Default::default()
+    };
+    let turn_start = |id, state: &CodexConversationSessionState, prompt: &str| {
+        json_rpc_request(id, "turn/start", codex_turn_start_params(thread, state, prompt, &Default::default()))
+    };
+    write_frame(&mut writer, &turn_start(1, &snapshot, "first")).await.unwrap();
+    let first: Value = serde_json::from_str(&peer.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(first["params"]["approvalPolicy"], "on-request");
+    assert_eq!(first["params"]["sandboxPolicy"]["type"], "readOnly");
+    assert_eq!(first["params"]["threadId"], thread);
+    write_frame(&mut server, &json!({
+        "method": "item/agentMessage/delta",
+        "params": { "threadId": thread, "turnId": "turn-1", "delta": "working" }
+    })).await.unwrap();
+    let delta: Value = serde_json::from_str(&notifications.next_line().await.unwrap().unwrap()).unwrap();
+    assert!(codex_notification_matches_turn(&delta, thread, Some("turn-1")));
+    assert_eq!(delta["params"]["delta"], "working");
+    let id = queue.enqueue("{}");
+    for (key, value) in [("approval_policy", "never"), ("sandbox", "danger-full-access"),
+                         ("approval_policy", "untrusted"), ("sandbox", "workspace-write"), ("approvals_reviewer", "auto_review")] {
+        apply_codex_config_option(&mut snapshot, &[], key, value.into()).unwrap();
+    }
+    assert!(apply_codex_config_option(&mut snapshot, &[], "approval_policy", "invalid".into()).is_err());
+    write_frame(&mut server, &json!({
+        "method": "turn/completed",
+        "params": { "threadId": thread, "turn": { "id": "turn-1", "status": "completed" } }
+    })).await.unwrap();
+    let done: Value = serde_json::from_str(&notifications.next_line().await.unwrap().unwrap()).unwrap();
+    assert!(codex_notification_matches_turn(&done, thread, Some("turn-1")));
+    assert_eq!(done["params"]["turn"]["status"], "completed");
+    let row = queue.dequeue(id);
+    write_frame(&mut writer, &turn_start(2, &snapshot, &row.prompt)).await.unwrap();
+    drop(writer);
+    let second: Value = serde_json::from_str(&peer.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(second["method"], "turn/start");
+    assert_eq!(second["params"]["threadId"], thread);
+    assert_eq!(second["params"]["input"][0]["text"], "second");
+    assert_eq!(second["params"]["approvalPolicy"], "untrusted");
+    assert_eq!(second["params"]["sandboxPolicy"]["type"], "workspaceWrite");
+    assert_eq!(second["params"]["approvalsReviewer"], "auto_review");
+    assert!(peer.next_line().await.unwrap().is_none());
+}
+
 #[test]
 fn test_butler_context_codex_splits_without_truncation_and_keeps_user_input_separate() {
     let role = format!("角色约定\n{}\n工具约定", "文".repeat(4001));

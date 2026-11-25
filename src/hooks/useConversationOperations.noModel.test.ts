@@ -118,9 +118,12 @@ describe.each([
         })));
     });
 
-    it("should capture the open conversation's mode when queuing the next message", async () => {
+    it.each([
+        { state: "before the native session connects", draft: "dontAsk", expected: { permission_mode: "dontAsk" } },
+        { state: "after permissions are bound to the native session", draft: undefined, expected: undefined },
+    ])("should queue the message with the open conversation's assistant $state", async ({ draft, expected }) => {
         mockInvokeHandler("enqueue_conversation_message", () => ({ id: 8, conversation_id: 7 }));
-        const { result } = setup(false, "dontAsk", {
+        const { result } = setup(false, draft, {
             selectedAssistant: 99,
             conversation: { id: 7, assistant_id: 1 },
             assistants: [{ id: 1, name: "Claude", assistant_type: 4 }],
@@ -129,7 +132,7 @@ describe.each([
         await act(async () => { result.current.handleSend(); });
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("enqueue_conversation_message", expect.objectContaining({
             request: expect.objectContaining({ assistant_id: 1, conversation_id: "7" }),
-            overrideModelConfig: { permission_mode: "dontAsk" },
+            overrideModelConfig: expected,
         })));
     });
 

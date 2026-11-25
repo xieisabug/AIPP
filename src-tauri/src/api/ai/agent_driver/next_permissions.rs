@@ -29,6 +29,7 @@ pub fn save(conn: &Connection, cid: i64, driver: &str, provider: i64, session: &
 
 pub fn deferred(driver: &str, key: &str, option: &Value) -> bool {
     match driver {
+        "claude_sdk" => key == "permission_mode",
         "pi" => key == "pi_approval",
         "kiro" => key == "autopilot",
         "antigravity" => key == "antigravity_mode",

@@ -98,6 +98,69 @@ fn handle_channel(run_id: &str) -> (ClaudeSessionHandle, mpsc::UnboundedReceiver
     (ClaudeSessionHandle { permissions: Default::default(), sender, cancel_signal: watch::channel(0).0, run_id: run_id.into() }, receiver)
 }
 
+#[tokio::test]
+async fn test_queued_permissions_claude_overrides_enqueue_mode_only_after_matching_ack() {
+    use crate::api::ai::agent_driver::{next_permissions, queued_permission_fixture::Queue};
+    for reject in [false, true] {
+        let queue = Queue::new();
+        let session = "original-claude-session";
+        queue.db.upsert_agent_session_id_for_instance(queue.cid, CLAUDE_SDK_API_TYPE, Some(3), session).unwrap();
+        let (client, peer) = tokio::io::duplex(4096);
+        let (read, mut write) = tokio::io::split(client);
+        let mut lines = BufReader::new(read).lines();
+        let (peer_read, mut peer_write) = tokio::io::split(peer);
+        let mut requests = BufReader::new(peer_read).lines();
+        let (edited, release) = oneshot::channel();
+        let cli = async {
+            let first: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(first["session_id"], session);
+            assert_eq!(first["message"]["content"][0]["text"], "first");
+            peer_write.write_all(b"{\"type\":\"stream_event\"}\n").await.unwrap();
+            release.await.unwrap();
+            peer_write.write_all(b"{\"type\":\"result\"}\n").await.unwrap();
+            let request: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["request"], json!({"subtype":"set_permission_mode","mode":"dontAsk"}));
+            let ack = json!({"type":"control_response","response":{"request_id":request["request_id"],
+                "subtype":if reject {"error"} else {"success"}, "error":"fixture rejected dontAsk"}});
+            peer_write.write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            if !reject {
+                let second: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(second["session_id"], session);
+                assert_eq!(second["message"]["content"][0]["text"], "second");
+            }
+            assert!(requests.next_line().await.unwrap().is_none());
+        };
+        let app = async move {
+            let first = claude_user_input("first".into(), vec![], Some(session.into())).await.unwrap();
+            write.write_all(format!("{first}\n").as_bytes()).await.unwrap();
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), r#"{"type":"stream_event"}"#);
+            let id = queue.enqueue(r#"{"override_model_config":{"permission_mode":"acceptEdits"}}"#);
+            for value in ["auto", "dontAsk"] {
+                next_permissions::save(&queue.conn, queue.cid, CLAUDE_SDK_API_TYPE, 3, session, "permission_mode", value).unwrap();
+            }
+            edited.send(()).unwrap();
+            assert_eq!(lines.next_line().await.unwrap().unwrap(), r#"{"type":"result"}"#);
+            let row = queue.dequeue(id);
+            let payload: Value = serde_json::from_str(&row.request_json).unwrap();
+            let mut config = extract_claude_sdk_config(&[], &[], None, vec![]).unwrap();
+            config.instance_id = Some(3);
+            config.turn_permission_mode = Some(payload["override_model_config"]["permission_mode"].as_str().unwrap().into());
+            config.apply_saved_turn_permission(&queue.conn, row.conversation_id).unwrap();
+            let permissions = ClaudeTurnPermissions { configured: None, selected: config.turn_permission_mode.take() };
+            let mode = permissions.desired(&None).unwrap();
+            let result = apply_claude_permission_mode(&mut config, mode, &mut write, &mut lines, &mut VecDeque::new()).await;
+            match result {
+                Ok(()) => {
+                    let frame = claude_user_input(row.prompt, vec![], Some(session.into())).await.unwrap();
+                    write.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+                }
+                Err(error) => assert!(reject && error.to_string().contains("fixture rejected dontAsk"), "{error}"),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(cli, app) }).await.unwrap();
+    }
+}
+
 fn entry(id: i64, run_id: &str) -> ClaudeSessionEntry {
     let (handle, _receiver) = handle_channel(run_id);
     ClaudeSessionEntry::new(handle, id, "signature".into(), None, None, None)

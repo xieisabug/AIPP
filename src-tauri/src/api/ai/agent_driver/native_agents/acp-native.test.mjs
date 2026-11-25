@@ -1,45 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { openAcpNative, antigravityLaunch, authorizationUrl } from './acp-native.mjs';
+import { antigravityLaunch, authorizationUrl } from './acp-native.mjs';
 import { RequestRejected } from './common.mjs';
-import { processFixture, tick } from './test-helpers.mjs';
+import { tick } from './test-helpers.mjs';
 
-const select = (id, values, currentValue = values[0]) => ({ id, name: id, category: id, type: 'select', currentValue, options: values.map(value => ({ value, name: value })) });
-function fixture({ respond, options = [select('model', ['auto', 'model-a']), select('mode', ['default', 'review']), select('autopilot', ['on', 'off']), select('effortLevel', ['low', 'high'])], capabilities = { loadSession: true, sessionCapabilities: { resume: {} } } } = {}) {
-  const commands = [], events = [], launches = [];
-  let prompt, cleaned = false;
-  const write = frame => child.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...frame })}\n`);
-  const child = processFixture(frame => {
-    commands.push(frame);
-    if (!frame.method || frame.id === undefined) return;
-    const custom = respond?.(frame, { write, child });
-    if (custom === false) return;
-    if (custom) { write({ id: frame.id, ...custom }); return; }
-    let result = {};
-    if (frame.method === 'initialize') result = { protocolVersion: 1, agentCapabilities: capabilities, authMethods: [{ id: 'oauth-personal' }, { id: 'gemini-api-key' }] };
-    if (['session/new', 'session/resume', 'session/load'].includes(frame.method)) result = { sessionId: 's1', configOptions: options };
-    if (frame.method === 'session/set_config_option') {
-      const option = options.find(option => option.id === frame.params.configId);
-      if (option) option.currentValue = frame.params.value;
-      result = { configOptions: options };
-    }
-    if (frame.method === 'session/prompt') { prompt = frame; return; }
-    write({ id: frame.id, result });
-  });
-  return { child, commands, events, launches,
-    launch: (...args) => { launches.push(args); return child; },
-    antigravityLaunch: async () => ({ command: 'agy', args: ['acp'], env: {}, cleanup: async () => { cleaned = true; } }),
-    get cleaned() { return cleaned; },
-    update: update => write({ method: 'session/update', params: { sessionId: 's1', update } }),
-    permission: (id, toolCall, options) => write({ id, method: 'session/request_permission', params: { sessionId: 's1', toolCall, options } }),
-    finish: (stopReason = 'end_turn', usage) => write({ id: prompt.id, result: { stopReason, usage } }),
-    open: (driver, config = {}) => openAcpNative(driver, { cwd: process.cwd(), ...config }, event => events.push(event), {
-      launch: (...args) => { launches.push(args); return child; },
-      antigravityLaunch: async () => ({ command: 'agy', args: ['acp'], env: {}, cleanup: async () => { cleaned = true; } }),
-    }),
-  };
-}
+import { acpFixture as fixture, select } from './acp-native-test-helpers.mjs';
 
 test('should use Kiro V3 cli auth and disable Autopilot before selecting agent and model', async () => {
   const f = fixture(); const runtime = await f.open('kiro', { kiro_agent: 'review', model: 'model-a', kiro_effort: 'high' });

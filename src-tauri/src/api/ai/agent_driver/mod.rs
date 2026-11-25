@@ -22,5 +22,7 @@ pub(crate) mod native_agents;
 
 pub(crate) mod persistence;
 pub(crate) mod next_permissions;
+#[cfg(test)]
+pub(crate) mod queued_permission_fixture;
 
 pub(crate) mod manual_compact;

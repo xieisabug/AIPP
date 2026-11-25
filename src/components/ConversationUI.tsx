@@ -1,4 +1,5 @@
 import { claudePermissionModes } from "@/data/claudePermissionModes";
+import { useClaudeComposerPermissions } from "@/hooks/useClaudeComposerPermissions";
 import { useNextAgentPermissions } from "@/hooks/useNextAgentPermissions";
 import { composerKey, upsertPersistedRow, type ComposerReceipt } from "@/utils/composerMessage";
 import { afterSendMotion } from "./conversation/sendMotion";
@@ -1316,20 +1317,47 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const agentSnapshot = acpSessionState?.conversation_id === Number(conversationId) ? acpSessionState : null;
         const assistantRuntime = configuredAgent?.assistantId === activeAssistantId ? configuredAgent : null;
         const isClaudeComposer = (agentSnapshot?.agent_kind ?? assistantRuntime?.kind) === "claude_sdk";
-        const modeScope = JSON.stringify([conversationId, activeAssistantId]);
-        const [claudeDraft, setClaudeDraft] = useState<{ scope: string; mode: string; plan: boolean } | null>(null);
-        const draft = claudeDraft?.scope === modeScope ? claudeDraft : null;
-        useEffect(() => {
-            setClaudeDraft(previous => previous?.scope === modeScope ? previous : null);
-        }, [modeScope]);
-        const configuredMode = assistantRuntime?.permissionMode ?? "default";
-        const runtimeMode = agentSnapshot?.permission_mode ?? configuredMode;
-        const claudePlan = draft?.plan ?? (runtimeMode === "plan");
-        const claudeMode = draft?.mode ?? (runtimeMode !== "plan" ? runtimeMode
-            : configuredMode !== "plan" ? configuredMode : "default");
-        const chooseClaudeMode = useCallback((mode: string, plan: boolean) => {
-            setClaudeDraft({ scope: modeScope, mode, plan });
-        }, [modeScope]);
+        const handleAcpConfigChange = useCallback(
+            async (option: AcpSessionConfigOption, value: string) => {
+                const conversationIdNum = Number(conversationId);
+                if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                    return false;
+                }
+
+                if (!agentAllowsConfigMutation(acpSessionState?.agent_capabilities)) {
+                    toast.error("当前 Agent 会话不支持修改配置", { position: "bottom-right" });
+                    return false;
+                }
+
+                setAcpMutationKey(`config:${option.id}`);
+                try {
+                    await invoke("set_acp_session_config_option", {
+                        conversationId: conversationIdNum,
+                        configId: option.id,
+                        value,
+                        expectedSessionId: acpSessionState?.session_id,
+                        expectedDriver: acpSessionState?.agent_kind,
+                    });
+                    return true;
+                } catch (error) {
+                    toast.error("更新 Agent 配置失败", {
+                        description: String(error),
+                        position: "bottom-right",
+                    });
+                    return false;
+                } finally {
+                    setAcpMutationKey(null);
+                }
+            },
+            [conversationId, acpSessionState?.agent_capabilities, acpSessionState?.session_id, acpSessionState?.agent_kind]
+        );
+
+        const { mode: claudeMode, plan: claudePlan, choose: chooseClaudeMode, initialOverride } = useClaudeComposerPermissions(
+            JSON.stringify([conversationId, activeAssistantId]),
+            assistantRuntime?.permissionMode ?? "default",
+            isClaudeComposer ? agentSnapshot : null,
+            handleAcpConfigChange,
+        );
 
         // 助手运行时API
         const { assistantRunApi } = useAssistantRuntime({
@@ -1416,7 +1444,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             selectedAgentApprovalPolicy,
             selectedAgentSandbox,
             selectedAgentMode: isClaudeComposer ? undefined : selectedAgentMode,
-            claudePermissionMode: isClaudeComposer && draft ? (draft.plan ? "plan" : draft.mode) : undefined,
+            claudePermissionMode: isClaudeComposer ? initialOverride : undefined,
         });
 
         const mobilePlatform = useIsMobilePlatform();
@@ -1766,41 +1794,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             showAcpConnectionError,
         ]);
 
-        const handleAcpConfigChange = useCallback(
-            async (option: AcpSessionConfigOption, value: string) => {
-                const conversationIdNum = Number(conversationId);
-                if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
-                    return false;
-                }
-
-                if (!agentAllowsConfigMutation(acpSessionState?.agent_capabilities)) {
-                    toast.error("当前 Agent 会话不支持修改配置", { position: "bottom-right" });
-                    return false;
-                }
-
-                setAcpMutationKey(`config:${option.id}`);
-                try {
-                    await invoke("set_acp_session_config_option", {
-                        conversationId: conversationIdNum,
-                        configId: option.id,
-                        value,
-                        expectedSessionId: acpSessionState?.session_id,
-                        expectedDriver: acpSessionState?.agent_kind,
-                    });
-                    return true;
-                } catch (error) {
-                    toast.error("更新 Agent 配置失败", {
-                        description: String(error),
-                        position: "bottom-right",
-                    });
-                    return false;
-                } finally {
-                    setAcpMutationKey(null);
-                }
-            },
-            [conversationId, acpSessionState?.agent_capabilities, acpSessionState?.session_id, acpSessionState?.agent_kind]
-        );
-
         const planModeOption = useMemo(
             () => acpSessionState?.config_options.find((option) =>
                 option.category === "mode" &&
@@ -1831,8 +1824,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             async (enabled: boolean) => {
                 if (enabled === isPlanMode) return true;
                 if (isClaudeComposer) {
-                    chooseClaudeMode(claudeMode, enabled);
-                    return true;
+                    return chooseClaudeMode(claudeMode, enabled);
                 }
                 if (!planModeOption) {
                     setSelectedAgentMode(enabled ? "plan" : "default");
@@ -2607,7 +2599,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             permissionControl={isClaudeComposer && !isMobilePlatform ? (
                                 <select className="input-area-plan-mode" aria-label="Claude Code 权限模式"
                                     title={claudePlan ? "关闭 Plan 模式后可选择权限" : "下一条消息使用的 Claude Code 权限模式"}
-                                    disabled={claudePlan} value={claudeMode} onChange={event => chooseClaudeMode(event.target.value, claudePlan)}>
+                                    disabled={claudePlan || Boolean(acpMutationKey)} value={claudeMode} onChange={event => chooseClaudeMode(event.target.value, claudePlan)}>
                                     {claudePermissionModes.map(choice => (
                                         <option key={choice.value} value={choice.value}>{choice.label}</option>
                                     ))}
