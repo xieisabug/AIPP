@@ -294,7 +294,7 @@ impl PreviewFileRelayState {
         entries.retain(|_, entry| entry.expires_at > now);
     }
 
-    fn register_local_file(
+    pub(crate) fn register_local_file(
         &self,
         file_path: PathBuf,
         file_type: String,

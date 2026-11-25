@@ -1574,6 +1574,8 @@ pub fn run() {
             install_office_preview_plugin,
             enable_office_preview_plugin,
             read_authorized_office_file,
+            #[cfg(desktop)]
+            crate::api::office_api::handle_office_file_link,
             open_office_file_externally,
             register_office_selection_ref,
             get_office_file_ref_status,

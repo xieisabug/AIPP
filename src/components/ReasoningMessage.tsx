@@ -68,7 +68,7 @@ const ReasoningMessage = React.memo(
         );
 
         // Markdown 配置与 MCP 处理（保持与普通消息一致的处理方式）
-        const markdownConfig = useMarkdownConfig();
+        const markdownConfig = useMarkdownConfig({ conversationId });
         const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,

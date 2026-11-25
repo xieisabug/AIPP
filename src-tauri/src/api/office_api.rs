@@ -729,6 +729,64 @@ fn load_office_file_blocking(
         .map_err(|e| OfficePreviewError::new("read_error", e))
 }
 
+#[cfg(desktop)]
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OfficeLinkAction {
+    Preview,
+    OpenExternally,
+    Reveal,
+}
+
+/// 用户操作聊天里的文件链接时才解析路径。相对路径与发送消息的 Agent 共用工作目录。
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn handle_office_file_link(
+    app_handle: AppHandle,
+    path: String,
+    conversation_id: Option<i64>,
+    action: OfficeLinkAction,
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        classify_office_extension(&path).map_err(|e| e.message)?;
+        let mut candidate = PathBuf::from(&path);
+        if !candidate.is_absolute() {
+            let id = conversation_id.ok_or_else(|| format!("缺少会话工作目录，无法定位相对路径：{path}"))?;
+            let root = super::agent_workspace_api::resolve_conversation_working_directory(&app_handle, id)?;
+            candidate = root.join(candidate);
+        }
+        let target = dunce::canonicalize(&candidate)
+            .map_err(|e| format!("无法定位文件 {}：{e}", candidate.display()))?;
+        let metadata = fs::metadata(&target).map_err(|e| format!("读取文件信息失败（{path}）：{e}"))?;
+        if !metadata.is_file() {
+            return Err(format!("链接目标不是文件：{path}"));
+        }
+        let target_name = target.to_str().ok_or_else(|| format!("链接目标路径包含无效字符：{path}"))?;
+        let format = classify_office_extension(target_name).map_err(|e| e.message)?;
+        match action {
+            OfficeLinkAction::Preview => {
+                let limit = office_preview_max_bytes();
+                if metadata.len() > limit {
+                    return Err(file_too_large_error(metadata.len(), limit).message);
+                }
+                let token = app_handle.state::<PreviewFileRelayState>()
+                    .register_local_file(target, format.as_str().into(), conversation_id)?;
+                Ok(Some(token))
+            }
+            OfficeLinkAction::OpenExternally => {
+                app_handle.opener().open_path(target_name, None::<&str>)
+                    .map_err(|e| format!("调用外部程序打开文件失败（{path}）：{e}"))?;
+                Ok(None)
+            }
+            OfficeLinkAction::Reveal => {
+                app_handle.opener().reveal_item_in_dir(&target)
+                    .map_err(|e| format!("打开文件所在文件夹失败（{path}）：{e}"))?;
+                Ok(None)
+            }
+        }
+    }).await.map_err(|e| format!("处理 Office 文件链接时线程异常退出：{e}"))?
+}
+
 /// 只读读取已授权的 Office 文件；不写源文件，不扩大访问范围。
 #[tauri::command]
 pub async fn read_authorized_office_file(

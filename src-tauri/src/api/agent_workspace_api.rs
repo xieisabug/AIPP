@@ -179,7 +179,7 @@ fn in_conversation(conversation_id: i64) -> impl Fn(String) -> String {
 }
 
 /// 会话 → 助手 → Agent 工作目录。只在服务端解析，不接受前端传入的路径。
-fn resolve_conversation_working_directory(
+pub(super) fn resolve_conversation_working_directory(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
 ) -> Result<PathBuf, String> {

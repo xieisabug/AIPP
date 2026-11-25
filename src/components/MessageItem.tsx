@@ -134,6 +134,7 @@ const StableMarkdownChunk = React.memo(function StableMarkdownChunk({
         [displayContent, parseCustomTags, useRawTextRenderer],
     );
     const markdownConfig = useMarkdownConfig({
+        conversationId,
         onCodeRun,
         disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
     });

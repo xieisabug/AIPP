@@ -2,6 +2,7 @@ import { createContext, useContext, useMemo, useCallback } from "react";
 import React from "react";
 import { Components } from "react-markdown";
 import { MarkdownLink } from "@/components/conversation/MarkdownLink";
+import { rehypeLocalOfficeLinks } from "@/react-markdown/localOfficeLink";
 import rehypeRaw from "rehype-raw";
 import rehypeKatex from "rehype-katex";
 import rehypeSanitize from "rehype-sanitize";
@@ -17,6 +18,7 @@ import { useMarkdownRegistrySnapshot } from "@/services/markdownRegistry";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface UseMarkdownConfigOptions {
+    conversationId?: number;
     onCodeRun?: (lang: string, code: string) => void;
     disableMarkdownSyntax?: boolean;
 }
@@ -46,7 +48,7 @@ function extractMarkdownAttributes(props: Record<string, unknown>): Record<strin
     return attributes;
 }
 
-export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
+export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, conversationId }: UseMarkdownConfigOptions = {}) => {
     const registeredMarkdownTags = useMarkdownRegistrySnapshot();
     // 移动平台：宽表格放进局部横向滚动容器，避免列被挤成 1~2 个字（MOB-03）
     const isMobilePlatform = useIsMobilePlatform();
@@ -126,7 +128,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                     </code>
                 );
             },
-            a: MarkdownLink,
+            a: (props) => <MarkdownLink {...props} enableOfficeLinks={!isMobilePlatform} conversationId={conversationId} />,
             img: ({ src, alt, ...props }: any) => <LazyImage src={src} alt={alt} {...props} />,
             ...(isMobilePlatform && !disableMarkdownSyntax
                 ? {
@@ -139,6 +141,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                 : {}),
         }),
         [
+            conversationId,
             isMobilePlatform,
             disableMarkdownSyntax,
             onCodeRun,
@@ -163,18 +166,13 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                 attributes: tag.attributes,
             })),
         );
-        if (disableMarkdownSyntax) {
-            return [
-                rehypeRaw,
-                [rehypeSanitize, sanitizeSchema],
-            ];
-        }
         return [
             rehypeRaw,
+            ...(!isMobilePlatform ? [rehypeLocalOfficeLinks] : []),
             [rehypeSanitize, sanitizeSchema],
-            rehypeKatex,
+            ...(!disableMarkdownSyntax ? [rehypeKatex] : []),
         ];
-    }, [disableMarkdownSyntax, registeredMarkdownTags]);
+    }, [disableMarkdownSyntax, isMobilePlatform, registeredMarkdownTags]);
 
     return useMemo(() => ({
         remarkPlugins,
