@@ -5,28 +5,6 @@ use super::*;
 mod database_fixture;
 
 #[test]
-fn test_claude_background_wake_persists_separate_reply_in_original_conversation() {
-    use crate::api::ai::agent_driver::{response_message, session::AgentSessionKind};
-    use crate::db::conversation_db::MessageRepository;
-    let repo = MessageRepository::new(database_fixture::create_test_db());
-    let identity = AgentEventIdentity::new(CLAUDE_SDK_API_TYPE, 42);
-    let mut previous = response_message(42, AgentSessionKind::Claude);
-    previous.content = "等待截图".into();
-    previous.finish_time = Some(chrono::Utc::now());
-    previous.parent_id = Some(5);
-    let previous = repo.create(&previous).unwrap();
-    let wake = repo.read(insert_reply(&repo, &identity, previous.id).unwrap()).unwrap().unwrap();
-    assert_ne!(wake.id, previous.id);
-    assert_eq!(wake.parent_id, Some(previous.id));
-    assert_eq!(wake.conversation_id, 42);
-    assert!(wake.finish_time.is_none());
-    assert_eq!(serde_json::from_str::<Value>(&wake.metadata_json.unwrap()).unwrap()["origin"], "claude_background_wake");
-    assert_eq!(repo.read(previous.id).unwrap().unwrap().content, "等待截图");
-    let other = AgentEventIdentity::new(CLAUDE_SDK_API_TYPE, 43);
-    assert!(insert_reply(&repo, &other, previous.id).is_err());
-}
-
-#[test]
 fn test_claude_resumed_prompt_waits_for_its_answer_after_background_receipt() {
     use database_fixture::{create_message_test_db, create_test_message};
     use std::ops::ControlFlow::{Break, Continue};

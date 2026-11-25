@@ -243,3 +243,31 @@ fn test_codex_reuse_mismatch_leaves_entry_unchanged_and_entries_are_isolated() {
     assert_eq!(first.handle.run_id, "first-run");
     assert_eq!(serde_json::to_value(&first.snapshot).unwrap(), first_snapshot);
 }
+
+#[test]
+fn test_background_wake_requires_new_parent_thread_turn_start() {
+    let started = json!({"method":"turn/started","params":{"threadId":"parent","turn":{"id":"next"}}});
+    assert_eq!(codex_background_turn(&started, "parent"), Some("next"));
+    assert_eq!(codex_background_turn(&started, "child"), None);
+    for frame in [
+        json!({"method":"item/completed","params":{"threadId":"parent","turnId":"next"}}),
+        json!({"method":"turn/completed","params":{"threadId":"parent","turn":{"id":"next"}}}),
+        json!({"method":"turn/started","params":{"turn":{"id":"next"}}}),
+        json!({"method":"turn/started","params":{"threadId":"parent","turn":{"id":""}}}),
+    ] { assert_eq!(codex_background_turn(&frame, "parent"), None); }
+}
+
+#[tokio::test]
+async fn test_background_wake_reads_live_stdout_with_no_user_prompt() {
+    let (mut server, stdout) = tokio::io::duplex(1024);
+    let mut lines = BufReader::new(stdout).lines();
+    let (_commands, mut receiver) = mpsc::unbounded_channel();
+    let mut buffered = VecDeque::from([json!({"method":"thread/status/changed"})]);
+    server.write_all(b"{\"method\":\"turn/started\",\"params\":{\"threadId\":\"root\",\"turn\":{\"id\":\"next\"}}}\n").await.unwrap();
+    for expected in [None, Some("next")] {
+        let event = tokio::time::timeout(Duration::from_secs(1), next_codex_idle_event(&mut lines, &mut buffered, &mut receiver))
+            .await.unwrap().unwrap().unwrap();
+        let CodexIdleEvent::Frame(frame) = event else { panic!("expected native frame") };
+        assert_eq!(codex_background_turn(&frame, "root"), expected);
+    }
+}

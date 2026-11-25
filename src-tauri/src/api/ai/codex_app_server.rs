@@ -1740,6 +1740,39 @@ fn codex_notification_matches_turn(frame: &Value, thread_id: &str, turn_id: Opti
     !matches!((turn_id, event_turn_id), (Some(active), Some(event)) if active != event)
 }
 
+enum CodexIdleEvent {
+    Frame(Value),
+    Command(CodexSessionCommand),
+}
+
+async fn next_codex_idle_event(
+    lines: &mut Lines<impl tokio::io::AsyncBufRead + Unpin>,
+    pending: &mut VecDeque<Value>,
+    receiver: &mut mpsc::UnboundedReceiver<CodexSessionCommand>,
+) -> Result<Option<CodexIdleEvent>, String> {
+    if let Some(frame) = pending.pop_front() { return Ok(Some(CodexIdleEvent::Frame(frame))); }
+    loop {
+        tokio::select! {
+            // Admit an already-started native turn before sending a racing user prompt.
+            biased;
+            line = lines.next_line() => {
+                let line = line.map_err(|e| format!("读取 Codex 后台事件失败：{e}"))?
+                    .ok_or("等待后台事件时 Codex app-server 关闭了输出")?;
+                match serde_json::from_str(&line) {
+                    Ok(frame) => return Ok(Some(CodexIdleEvent::Frame(frame))),
+                    Err(error) => warn!(%error, "Invalid idle Codex app-server frame"),
+                }
+            }
+            command = receiver.recv() => return Ok(command.map(CodexIdleEvent::Command)),
+        }
+    }
+}
+
+fn codex_background_turn<'a>(frame: &'a Value, thread_id: &str) -> Option<&'a str> {
+    if frame["method"] != "turn/started" || frame["params"]["threadId"] != thread_id { return None; }
+    frame.pointer("/params/turn/id")?.as_str().filter(|id| !id.is_empty())
+}
+
 fn thread_id_from_result(result: &Value) -> Option<String> {
     result
         .pointer("/thread/id")
@@ -2535,12 +2568,44 @@ async fn run_session(
     }
     emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
 
-    while let Some(command) = receiver.recv().await {
+    enum Next { Command(CodexSessionCommand), Wake(i64, tauri::Window, u64, String) }
+    let mut previous: Option<(i64, tauri::Window, u64)> = None;
+    let mut finished_turns = std::collections::HashSet::new();
+    let mut queued_prompts = VecDeque::new();
+    loop {
+        // Keep consuming stdout after a successful reply. Child-thread activity and
+        // terminal output alone do not constitute a new turn on the parent thread.
+        let command = if let Some(command) = queued_prompts.pop_front() {
+            Next::Command(command)
+        } else if let Some((parent, window, generation)) = &previous {
+            match next_codex_idle_event(&mut lines, &mut pending_notifications, &mut receiver).await? {
+                Some(CodexIdleEvent::Frame(frame)) => {
+                    if frame.get("id").is_some() && frame.get("method").is_some() {
+                        write_frame(&mut stdin, &json!({"jsonrpc":"2.0","id":frame["id"],"error":{"code":-32600,"message":"No active AIPP turn for this request"}})).await?;
+                        continue;
+                    }
+                    let Some(id) = codex_background_turn(&frame, &thread_id) else { continue };
+                    if finished_turns.contains(id) { continue; }
+                    if *generation != *request_cancellation.signal.borrow()
+                        || !super::agent_driver::background::can_continue(&app_handle, conversation_id, *parent)? {
+                        return Ok(());
+                    }
+                    let wake_identity = event_identity.clone().with_turn(id);
+                    let message_id = super::agent_driver::background::create_reply(&app_handle, &wake_identity, *parent,
+                        super::agent_driver::session::AgentSessionKind::Codex.into()).map_err(|e|e.to_string())?;
+                    Next::Wake(message_id, window.clone(), *generation, id.to_owned())
+                }
+                Some(CodexIdleEvent::Command(command)) => Next::Command(command),
+                None => break,
+            }
+        } else {
+            match receiver.recv().await { Some(command) => Next::Command(command), None => break }
+        };
         match command {
-            CodexSessionCommand::Steer { response, .. } => {
+            Next::Command(CodexSessionCommand::Steer { response, .. }) => {
                 let _ = response.send(Err("Codex steering target already finished".into()));
             }
-            CodexSessionCommand::SetConfigOption { config_id, value, response } => {
+            Next::Command(CodexSessionCommand::SetConfigOption { config_id, value, response }) => {
                 match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                     Ok(()) => {
                         emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
@@ -2551,14 +2616,22 @@ async fn run_session(
                     }
                 }
             }
-            CodexSessionCommand::CancelCurrentPrompt { response } => {
+            Next::Command(CodexSessionCommand::CancelCurrentPrompt { response }) => {
                 let _ = response.send(Ok(()));
             }
-            CodexSessionCommand::Shutdown { reason } => {
+            Next::Command(CodexSessionCommand::Shutdown { reason }) => {
                 info!(conversation_id, run_id, reason, "Codex session shutdown requested");
                 return Ok(());
             }
-            CodexSessionCommand::Prompt { message_id, prompt, images, window, cancellation_generation } => {
+            next => {
+                let (message_id, window, cancellation_generation, input, native_turn) = match next {
+                    Next::Wake(id, window, generation, turn) => (id, window, generation, None, Some(turn)),
+                    Next::Command(CodexSessionCommand::Prompt { message_id, prompt, images, window, cancellation_generation }) =>
+                        (message_id, window, cancellation_generation, Some((prompt, images)), None),
+                    _ => unreachable!("idle controls handled above"),
+                };
+                *failure_context.lock().unwrap_or_else(|e| e.into_inner()) = Some((message_id, window.clone()));
+
                 let _mcp_prompt = mcp_scope.begin_prompt(message_id)?
                     .watch_cancellation(request_cancellation.signal.subscribe(), cancellation_generation);
                 event_identity.response_message_id = Some(message_id);
@@ -2576,35 +2649,37 @@ async fn run_session(
                 request_cancellation.mcp_prompt = mcp_scope.current_prompt()?;
                 let turn_start_time = chrono::Utc::now();
                 // 手动压缩：改发 thread/compact/start（立即返回 {}，压缩作为一轮 turn 以通知推进）
-                let manual_compact = images.is_empty() && super::agent_driver::manual_compact::is_manual_compact_prompt(&prompt);
-                let (turn_method, turn_params) = if manual_compact {
-                    ("thread/compact/start", json!({ "threadId": thread_id }))
-                } else {
-                    let mut params = codex_turn_start_params(&thread_id, &snapshot, &prompt, &application_context);
-                    params["input"].as_array_mut().unwrap().extend(codex_image_items(images).await?);
-                    ("turn/start", params)
-                };
-                request_id += 1;
-                write_frame(
-                    &mut stdin,
-                    &json_rpc_request(request_id, turn_method, turn_params),
-                )
-                .await?;
-                let turn_result = read_rpc_response_with_approvals(
-                    &app_handle,
-                    conversation_id,
-                    &mut stdin,
-                    &mut lines,
-                    request_id,
-                    &mut pending_notifications,
-                    Some(&request_cancellation),
-                )
-                .await?;
-                let mut turn_id = turn_result
-                    .pointer("/turn/id")
-                    .or_else(|| turn_result.get("turnId"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                let manual_compact = input.as_ref().is_some_and(|(prompt, images)| images.is_empty() && super::agent_driver::manual_compact::is_manual_compact_prompt(prompt));
+                let mut turn_id = if let Some((prompt, images)) = input {
+                    let (turn_method, turn_params) = if manual_compact {
+                        ("thread/compact/start", json!({ "threadId": thread_id }))
+                    } else {
+                        let mut params = codex_turn_start_params(&thread_id, &snapshot, &prompt, &application_context);
+                        params["input"].as_array_mut().unwrap().extend(codex_image_items(images).await?);
+                        ("turn/start", params)
+                    };
+                    request_id += 1;
+                    write_frame(
+                        &mut stdin,
+                        &json_rpc_request(request_id, turn_method, turn_params),
+                    )
+                    .await?;
+                    let turn_result = read_rpc_response_with_approvals(
+                        &app_handle,
+                        conversation_id,
+                        &mut stdin,
+                        &mut lines,
+                        request_id,
+                        &mut pending_notifications,
+                        Some(&request_cancellation),
+                    )
+                    .await?;
+                    turn_result
+                        .pointer("/turn/id")
+                        .or_else(|| turn_result.get("turnId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else { native_turn };
                 snapshot.current_turn_id = turn_id.clone();
                 event_identity.turn_id = turn_id.clone();
                 *failure_stage = AgentFailureStage::Stream;
@@ -2662,7 +2737,7 @@ async fn run_session(
                                         }
                                     }
                                 }
-                                Some(CodexSessionCommand::Prompt { .. }) => warn!(conversation_id, "Codex prompt received while another turn is active; queued prompt is not supported"),
+                                Some(command @ CodexSessionCommand::Prompt { .. }) => queued_prompts.push_back(command),
                                 Some(CodexSessionCommand::SetConfigOption { config_id, value, response }) => {
                                     match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                                         Ok(()) => {
@@ -3025,10 +3100,9 @@ async fn run_session(
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;
                 emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
-                failure_context
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
+                if let Some(id) = turn_id { finished_turns.insert(id); }
+                previous = completed_normally.then(|| (message_id, window.clone(), cancellation_generation));
+                failure_context.lock().unwrap_or_else(|e| e.into_inner()).take_if(|(id, _)| *id == message_id);
                 crate::api::ai_api::native_queue::finish_turn(&app_handle, &window, conversation_id, run_id, completed_normally).await;
             }
         }

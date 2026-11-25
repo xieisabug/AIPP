@@ -4,6 +4,7 @@ pub(crate) mod session;
 mod turn;
 pub(crate) use turn::{send_turn, prompt_with_file_paths, AgentTurnRequest};
 pub(crate) mod failure;
+pub(super) mod background;
 mod dispatch;
 pub(super) use dispatch::response_message;
 

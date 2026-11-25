@@ -304,3 +304,17 @@ fn test_attachment_acp_adds_pdf_link_only_after_capability_negotiation() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_background_wake_acp_rejects_idle_and_foreign_message_updates() {
+    let session = tokio::sync::RwLock::new(None);
+    let notification = acp::SessionNotification::new("one",
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("answer".into())));
+    assert!(acp_notification_guard(&session, &notification).await.is_none());
+    *session.write().await = Some("other".to_owned());
+    assert!(acp_notification_guard(&session, &notification).await.is_none());
+    *session.write().await = Some("one".to_owned());
+    assert!(acp_notification_guard(&session, &notification).await.is_some());
+    *session.write().await = None;
+    assert!(acp_notification_guard(&session, &notification).await.is_none());
+}

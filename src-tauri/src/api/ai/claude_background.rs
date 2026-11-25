@@ -79,16 +79,7 @@ pub(super) async fn read_idle_event(
     }
 }
 
-pub(super) fn can_continue(app: &tauri::AppHandle, conversation: i64, previous: i64) -> Result<bool, String> {
-    let kind = crate::mcp::butler_tools::conversation_kind(app, Some(conversation)).map_err(|e| e.to_string())?;
-    let interactive = match kind.as_str() {
-        "normal" | "butler_contact" => true,
-        "butler_main" => crate::api::butler_api::active_butler_main_conversation_id(app)? == Some(conversation),
-        // Managed runs have their own completion/stop and delivery contract.
-        _ => false,
-    };
-    Ok(interactive && crate::api::ai::events::output_goal_current(app, conversation, Some(previous)))
-}
+pub(super) use super::super::agent_driver::background::can_continue;
 
 pub(super) async fn set_pending(app: &tauri::AppHandle, conversation: i64, run: &str, pending: bool) {
     let state = app.state::<crate::ClaudeSessionState>();
@@ -100,29 +91,9 @@ pub(super) async fn set_pending(app: &tauri::AppHandle, conversation: i64, run: 
 }
 
 pub(super) fn create_reply(app: &tauri::AppHandle, identity: &AgentEventIdentity, previous: i64) -> Result<i64, AppError> {
-    let db = ConversationDatabase::new(app)?;
-    let repo = db.message_repo()?;
-    let mut created = None;
-    super::super::agent_driver::lifecycle::publish_if_current_binding(app, identity.conversation_id,
-        CLAUDE_SDK_API_TYPE, identity.run_id.as_deref(), || {
-            created = Some(insert_reply(&repo, identity, previous));
-        })?;
-    let id = created.ok_or_else(|| AppError::ProviderError("Claude 后台任务所属的会话进程已更换".into()))??;
-    if let Err(error) = emit_to_chat_windows(app, identity.clone().with_response_message(id), ConversationEvent {
-        r#type: "message_add".into(), data: json!({"message_id": id, "message_type": "response"}),
-    }) {
-        tracing::warn!(conversation_id = identity.conversation_id, message_id = id, %error, "Claude wake row saved but window notification failed");
-    }
-    Ok(id)
+    super::super::agent_driver::background::create_reply(app, identity, previous,
+        super::super::agent_driver::session::AgentSessionKind::Claude.into())
 }
-
-fn insert_reply(repo: &crate::db::conversation_db::MessageRepository, identity: &AgentEventIdentity, previous: i64) -> Result<i64, AppError> {
-    let mut message = super::super::agent_driver::response_message(identity.conversation_id,
-        super::super::agent_driver::session::AgentSessionKind::Claude);
-    message.metadata_json = Some(json!({"origin": "claude_background_wake"}).to_string());
-    Ok(repo.create_native_continuation(message, previous)?.id)
-}
-
 #[cfg(test)]
 #[path = "claude_background_tests.rs"]
 mod tests;

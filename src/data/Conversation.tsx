@@ -82,10 +82,11 @@ export function readScheduledTaskMetadata(raw: Message["metadata_json"]): Record
     return result;
 }
 
-export function isClaudeBackgroundWake(message: Message): boolean {
-    if (!message.parent_id || !message.metadata_json?.includes('"claude_background_wake"')) return false;
+export function isNativeBackgroundWake(message: Message): boolean {
+    if (!message.parent_id || !message.metadata_json?.includes('_background_wake"')) return false;
     try {
-        return JSON.parse(message.metadata_json)?.origin === "claude_background_wake";
+        const origin = JSON.parse(message.metadata_json)?.origin;
+        return origin === "claude_background_wake" || origin === "native_background_wake";
     } catch {
         return false;
     }

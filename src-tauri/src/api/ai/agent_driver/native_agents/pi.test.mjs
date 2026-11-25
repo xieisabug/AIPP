@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { fork } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -319,4 +321,84 @@ test('should deliver both native images in attachment order with the file prompt
     await runtime.prompt('review report.zip', 'turn', images);
     assert.deepEqual(f.commands.find(c => c.type === 'prompt').images, images.map(image => ({ type: 'image', ...image })));
   } finally { await runtime.close(); }
+});
+
+test('should route a Pi extension turn after settlement without another prompt', async () => {
+  const f = piFixture(), events = [];
+  const runtime = await openPi({ cwd: process.cwd() }, event => events.push(event), f);
+  try {
+    f.emit({ type: 'agent_start' });
+    await runtime.prompt('task', 'first');
+    f.emit({ type: 'agent_end', messages: [], willRetry: false });
+    f.emit({ type: 'agent_settled' });
+    f.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'late' } });
+    f.emit({ type: 'agent_start' });
+    f.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'finished' } });
+    f.emit({ type: 'agent_end', messages: [], willRetry: false });
+    f.emit({ type: 'agent_settled' });
+    assert.deepEqual(events.map(e => e.type), ['done', 'wake', 'text', 'done']);
+    const wake = events[1];
+    assert.equal(wake.after, 'first');
+    assert.equal(wake.session, runtime.session);
+    assert.notEqual(wake.turn, 'first');
+    assert.equal(events[2].text, 'finished');
+    assert.equal(events[2].turn, wake.turn);
+    assert.equal(events[3].turn, wake.turn);
+    assert.equal(f.commands.filter(c => c.type === 'prompt').length, 1);
+    await runtime.cancel();
+    f.emit({ type: 'agent_start' });
+    assert.equal(events.length, 4);
+  } finally { await runtime.close(); }
+});
+
+test('should deliver a concurrent user prompt after an unsolicited Pi turn on the bridge', { timeout: 10000 }, async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'aipp-pi-wake-'));
+  const peer = join(cwd, 'peer.mjs');
+  await writeFile(peer, `
+    import { createInterface } from 'node:readline';
+    const send = event => console.log(JSON.stringify(event));
+    console.error('AIPP_PI_EXTENSION_READY');
+    for await (const line of createInterface({ input: process.stdin })) {
+      const cmd = JSON.parse(line);
+      send({ type: 'response', id: cmd.id, success: true,
+        data: cmd.type === 'get_state' ? { sessionFile: 'session' } : {} });
+      if (cmd.type === 'prompt') {
+        send({ type: 'agent_end', messages: [{ role: 'assistant', content: cmd.message }] });
+        if (cmd.message === 'first') send({ type: 'agent_start' });
+      } else if (cmd.type === 'steer') {
+        send({ type: 'agent_end', messages: [{ role: 'assistant', content: 'background' }] });
+      }
+    }
+  `);
+  const bridge = fork(new URL('./bridge.mjs', import.meta.url), [], { silent: true, execArgv: [] });
+  const exited = new Promise(resolve => bridge.once('exit', resolve));
+  t.after(async () => {
+    bridge.stdin.end();
+    await exited;
+    await rm(cwd, { recursive: true, force: true });
+  });
+  const frames = createInterface({ input: bridge.stdout })[Symbol.asyncIterator]();
+  const send = frame => bridge.stdin.write(JSON.stringify(frame) + '\n');
+  const seen = [];
+  const readUntil = async predicate => {
+    for (;;) {
+      const next = await frames.next();
+      assert.ok(!next.done, 'bridge closed before the expected event');
+      const frame = JSON.parse(next.value);
+      assert.ok(frame.type !== 'fatal' && frame.ok !== false, frame.error);
+      seen.push(frame);
+      if (predicate(frame)) return frame;
+    }
+  };
+  send({ type: 'init', id: 'init', driver: 'pi', config: { cwd, command: peer } });
+  await readUntil(f => f.id === 'init');
+  send({ type: 'prompt', id: 'p1', turn: '1', text: 'first' });
+  const wake = await readUntil(f => f.type === 'wake');
+  send({ type: 'prompt', id: 'p2', turn: '2', text: 'second' });
+  send({ type: 'steer', id: 'steer', turn: wake.turn, text: 'finish' });
+  await readUntil(f => f.type === 'done' && f.turn === '2');
+  assert.deepEqual(seen.filter(f => f.type === 'done').map(f => [f.turn, f.final_text]),
+    [['1', 'first'], [wake.turn, 'background'], ['2', 'second']]);
+  assert.ok(seen.findIndex(f => f.type === 'prompt_started' && f.turn === '2')
+    > seen.findIndex(f => f.type === 'done' && f.turn === wake.turn));
 });

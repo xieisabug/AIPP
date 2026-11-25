@@ -63,10 +63,20 @@ export async function openOpenCode(config, emit, dependencies = {}) {
     const questions = new Map();
     const waitingParts = new Map();
     let waitingBytes = 0, pendingIdle = false;
+    let previousTurn, wakes = 0;
+    const startTurn = id => {
+      turn = id; cancelling = false; errorMessage = undefined; sawActivity = false; pendingIdle = false;
+      parts.clear(); partTypes.clear(); partOwners.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
+    };
     const processEvent = event => {
       const p = event.properties || {};
       const sid = p.sessionID || p.part?.sessionID || p.info?.sessionID;
-      if (sid !== session || !turn) return;
+      if (sid !== session) return;
+      if (!turn && previousTurn && !closing && event.type === 'session.status' && p.status?.type === 'busy') {
+        startTurn(`wake:${++wakes}`);
+        emit({ type: 'wake', session, after: previousTurn, turn });
+      }
+      if (!turn) return;
       const messageID = p.part?.messageID || p.messageID;
       if (['message.part.updated', 'message.part.delta'].includes(event.type) && !roles.has(messageID)) {
         const size = JSON.stringify(event).length;
@@ -134,6 +144,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       } else if (event.type === 'session.error') {
         errorMessage = JSON.stringify(p.error || { message: 'OpenCode session.error omitted error details' });
         const cancelled = cancelling && p.error?.name === 'MessageAbortedError';
+        previousTurn = undefined;
         emit({ type: 'done', turn, cancelled, error: cancelled ? undefined : errorMessage }); turn = null;
         pendingPermissions.clear(); questions.clear();
       }
@@ -149,7 +160,8 @@ export async function openOpenCode(config, emit, dependencies = {}) {
             if (partTypes.get(id) === 'text') finalText += parts.get(id) ?? '';
           }
         }
-        emit({ type: 'done', turn, error: errorMessage, final_text: finalText }); turn = null; pendingPermissions.clear(); questions.clear();
+        previousTurn = !cancelling && !errorMessage ? turn : undefined;
+        emit({ type: 'done', turn, cancelled: cancelling, error: errorMessage, final_text: finalText }); turn = null; pendingPermissions.clear(); questions.clear();
       }
     };
     const consume = async () => {
@@ -172,8 +184,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
       session,
       async prompt(text, id, images = [], documents = []) {
         if (turn) throw new Error('OpenCode already has an active turn');
-        turn = id; cancelling = false; errorMessage = undefined; sawActivity = false; pendingIdle = false;
-        parts.clear(); partTypes.clear(); partOwners.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
+        startTurn(id);
         await api(`/session/${session}/prompt_async`, 'POST', {
           ...(config.butlerInstructions ? { system: config.butlerInstructions } : {}),
           ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text },
@@ -182,6 +193,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         });
       },
       async cancel() {
+        previousTurn = undefined;
         if (!turn) return;
         cancelling = true;
         try { await api(`/session/${session}/abort`, 'POST'); }

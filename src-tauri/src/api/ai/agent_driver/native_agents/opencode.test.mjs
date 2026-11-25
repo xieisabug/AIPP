@@ -247,3 +247,31 @@ test('should deliver an original PDF file URI with its display name', async () =
     assert.match(parts[1].url, /^file:.*%201\.pdf$/);
   } finally { await runtime.close(); }
 });
+
+test('should resume only the owned OpenCode session on a new busy interval', async () => {
+  const f = openCodeFixture(), events = [];
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, event => events.push(event), f);
+  const busy = sessionID => f.event('session.status', { sessionID, status: { type: 'busy' } });
+  try {
+    await runtime.prompt('task', 'first');
+    busy('s1');
+    f.event('session.idle', { sessionID: 's1' });
+    busy('child');
+    f.event('session.idle', { sessionID: 's1' });
+    busy('s1');
+    busy('s1');
+    f.event('message.updated', { info: { id: 'answer', sessionID: 's1', role: 'assistant' } });
+    f.event('message.part.updated', { part: { id: 'text', messageID: 'answer', sessionID: 's1', type: 'text', text: 'finished' } });
+    f.event('session.idle', { sessionID: 's1' });
+    await tick();
+    assert.deepEqual(events.map(e => e.type), ['done', 'wake', 'text', 'done']);
+    assert.equal(events[1].after, 'first');
+    assert.equal(events[1].session, 's1');
+    assert.equal(events[2].turn, events[1].turn);
+    assert.equal(events[3].final_text, 'finished');
+    await runtime.cancel();
+    busy('s1');
+    await tick();
+    assert.equal(events.length, 4);
+  } finally { await runtime.close(); }
+});

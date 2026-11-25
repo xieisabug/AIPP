@@ -2719,6 +2719,7 @@ pub struct AcpTauriClient {
     /// Accumulated reasoning content buffer for database persistence
     reasoning_content_buffer: Arc<TokioMutex<String>>,
     suppress_updates: Arc<TokioMutex<bool>>,
+    output_session: Arc<tokio::sync::RwLock<Option<String>>>,
     tool_call_id_map: Arc<TokioMutex<HashMap<String, i64>>>,
     terminal_output_limits: Arc<TokioMutex<HashMap<String, usize>>>,
 }
@@ -2752,6 +2753,7 @@ impl AcpTauriClient {
             response_content_buffer: Arc::new(TokioMutex::new(String::new())),
             reasoning_content_buffer: Arc::new(TokioMutex::new(String::new())),
             suppress_updates: Arc::new(TokioMutex::new(false)),
+            output_session: Default::default(),
             tool_call_id_map: Arc::new(TokioMutex::new(HashMap::new())),
             terminal_output_limits: Arc::new(TokioMutex::new(HashMap::new())),
         }
@@ -3436,6 +3438,16 @@ impl AcpTauriClient {
 
 }
 
+async fn acp_notification_guard<'a>(
+    output_session: &'a tokio::sync::RwLock<Option<String>>,
+    args: &acp::SessionNotification,
+) -> Option<tokio::sync::RwLockReadGuard<'a, Option<String>>> {
+    let session = output_session.read().await;
+    let turn_output = matches!(&args.update, acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_)
+        | acp::SessionUpdate::ToolCall(_) | acp::SessionUpdate::ToolCallUpdate(_) | acp::SessionUpdate::Plan(_));
+    (!turn_output || session.as_deref() == Some(args.session_id.0.as_ref())).then_some(session)
+}
+
 impl AcpTauriClient {
     async fn session_notification(
         &self,
@@ -3445,6 +3457,10 @@ impl AcpTauriClient {
             debug!("ACP session_notification suppressed");
             return Ok(());
         }
+
+        // Session settings can change at any time. Message output belongs only
+        // to the session/prompt request that is still open on this client.
+        let Some(_output_guard) = acp_notification_guard(&self.output_session, &args).await else { return Ok(()); };
 
         // Log the notification type for debugging
         let update_type =
@@ -4655,11 +4671,13 @@ async fn process_acp_prompt(
     let prompt_blocks = build_acp_prompt_blocks(prompt, &attachments, &prompt_capabilities, history_prefix, butler_instructions)?;
 
     info!("ACP: Sending prompt (conversation_id={}, message_id={})", conversation_id, message_id);
+    *client_handle.output_session.write().await = Some(session_id.to_owned());
     let prompt_response = cx
         .send_request(acp::PromptRequest::new(session_id.to_string(), prompt_blocks.clone()))
         .block_task()
         .await;
 
+    *client_handle.output_session.write().await = None;
     if let Err(e) = &prompt_response {
         let err_msg = format!("ACP prompt failed: {:?}", e);
         error!("ACP: {}", err_msg);

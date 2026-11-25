@@ -1,5 +1,5 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
-import { isClaudeBackgroundWake, readScheduledTaskMetadata, type Message } from "@/data/Conversation";
+import { isNativeBackgroundWake, readScheduledTaskMetadata, type Message } from "@/data/Conversation";
 import { isButlerInteractionTool, isResultCardTool } from "./ButlerPresentationContext";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
@@ -25,7 +25,7 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
             needLast = false;
         }
         // A native background wake starts a new turn without a user message.
-        if (message.parent_id && isClaudeBackgroundWake(message)) {
+        if (message.parent_id && isNativeBackgroundWake(message)) {
             beforeWake.add(message.parent_id);
             lastResponses.add(message);
         }

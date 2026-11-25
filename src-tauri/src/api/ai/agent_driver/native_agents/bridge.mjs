@@ -9,7 +9,19 @@ const drivers = { pi: openPi, cursor: openCursor, opencode: openOpenCode,
   kiro: (config, emit) => openAcpNative('kiro', config, emit),
   antigravity: (config, emit) => openAcpNative('antigravity', config, emit) };
 
-const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`);
+let wake, reportsPromptStart = false;
+const emit = event => {
+  if (event.type === 'wake') {
+    let finish;
+    const done = new Promise(resolve => { finish = resolve; });
+    wake = { turn: event.turn, done, finish };
+  }
+  process.stdout.write(`${JSON.stringify(event)}\n`);
+  if (event.type === 'done' && wake && wake.turn === event.turn) {
+    wake.finish();
+    wake = undefined;
+  }
+};
 console.log = (...args) => console.error(...args);
 let runtime, initializing = false, fatal = false;
 const fail = error => { if (!fatal) { fatal = true; emit({ type: 'fatal', error: error.message }); } };
@@ -46,13 +58,18 @@ jsonLines(process.stdin, request => {
       initializing = true;
       const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);
+      reportsPromptStart = request.driver === 'pi' || request.driver === 'opencode';
       runtime = await open(request.config, emit);
       data = { session: runtime.session, config_options: runtime.configOptions,
         prompt_capabilities: runtime.promptCapabilities, load_session_supported: runtime.canLoad, session_resume_supported: runtime.canResume };
     } else {
       if (!runtime) throw new Error('Native agent bridge is not initialized');
       switch (request.type) {
-        case 'prompt': await runtime.prompt(request.text, request.turn, request.images, request.documents, request.hasImagePaths); break;
+        case 'prompt':
+          while (wake) await wake.done;
+          if (reportsPromptStart) emit({ type: 'prompt_started', turn: request.turn });
+          await runtime.prompt(request.text, request.turn, request.images, request.documents, request.hasImagePaths);
+          break;
         case 'steer': await runtime.steer(request.turn, request.text, request.images); break;
         case 'cancel': await runtime.cancel(); break;
         case 'config': await runtime.configure(request.key, request.value); break;

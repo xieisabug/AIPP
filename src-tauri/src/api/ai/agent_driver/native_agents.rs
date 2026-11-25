@@ -387,8 +387,29 @@ fn is_native_output(frame: &Value) -> bool {
     }
 }
 
-struct ActiveTurn { id: i64, text: String, window: tauri::Window, activities: HashMap<String, Value>, usage: Option<TurnUsage>, _mcp_prompt: Option<crate::acp_mcp_bridge::provenance::NativeMcpPrompt>, questions: Vec<tauri::async_runtime::JoinHandle<()>> }
+struct ActiveTurn { id: i64, wire_turn: String, text: String, window: tauri::Window, activities: HashMap<String, Value>, usage: Option<TurnUsage>, _mcp_prompt: Option<crate::acp_mcp_bridge::provenance::NativeMcpPrompt>, questions: Vec<tauri::async_runtime::JoinHandle<()>> }
 impl Drop for ActiveTurn { fn drop(&mut self) { for task in &self.questions { task.abort(); } } }
+
+impl ActiveTurn {
+    fn new(id: i64, wire_turn: String, window: tauri::Window) -> Self {
+        Self { id, wire_turn, window, text: String::new(), activities: HashMap::new(),
+            usage: None, _mcp_prompt: None, questions: Vec::new() }
+    }
+
+    fn begin(&mut self, app: &tauri::AppHandle, identity: &mut AgentEventIdentity, prepared: &Prepared,
+        snapshot: &Mutex<Value>, native_session: &str) -> Result<(), String> {
+        identity.response_message_id = Some(self.id);
+        identity.turn_id = Some(self.wire_turn.clone());
+        super::persistence::persist_session_id(app, identity, identity.run_id.as_deref(), native_session)?;
+        self._mcp_prompt = prepared.mcp_scope.as_ref().map(|scope| scope.begin_prompt(self.id)).transpose()?;
+        {
+            let mut state = snapshot.lock().unwrap();
+            state["current_turn_id"] = json!(self.wire_turn);
+            state["is_busy"] = json!(true);
+        }
+        publish_snapshot(app, identity, prepared.driver, snapshot)
+    }
+}
 
 async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: Prepared, session: Option<String>,
     mut commands: mpsc::UnboundedReceiver<Command>, tx: mpsc::UnboundedSender<Command>, busy: Arc<AtomicBool>, snapshot: Arc<Mutex<Value>>, ready: oneshot::Sender<Result<(), String>>) {
@@ -397,6 +418,11 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
     let diagnostics = AgentDiagnosticBuffer::for_environment(&prepared.config.env);
     let mut ready = Some(ready);
     let mut active: Option<ActiveTurn> = None;
+    let supports_wake = matches!(driver.0, "pi" | "opencode");
+    let mut pending_prompt: Option<ActiveTurn> = None;
+    let mut previous: Option<(String, i64, tauri::Window)> = None;
+    // A user may reserve the actor just before its unsolicited wake reaches Rust.
+    let mut user_reserved = false;
     let mut process = None;
     let mut stderr_task = None;
     // Keep bridge-owned unpack directories alive until after process-tree
@@ -456,16 +482,16 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     let mut wire = match command {
                         Command::Shutdown => break,
                         Command::Prompt { id, text, attachments, window } => {
-                            if active.is_some() { return Err("Native session received overlapping prompts".into()); }
-                            identity.response_message_id = Some(id);
-                            active = Some(ActiveTurn { id, text: String::new(), window, activities: HashMap::new(), usage: None, _mcp_prompt: None, questions: Vec::new() });
-                            // Shared acquisition has bound this run before Prompt is queued.
-                            super::persistence::persist_session_id(&app, &identity, Some(&run), &native_session)?;
-                            let mcp_prompt = prepared.mcp_scope.as_ref().map(|scope|scope.begin_prompt(id)).transpose()?;
-                            active.as_mut().unwrap()._mcp_prompt = mcp_prompt;
-                            snapshot.lock().unwrap()["current_turn_id"] = json!(id.to_string());
-                            snapshot.lock().unwrap()["is_busy"] = json!(true);
-                            publish_snapshot(&app, &identity, driver, &snapshot)?;
+                            let prompt = ActiveTurn::new(id, id.to_string(), window);
+                            if supports_wake {
+                                if pending_prompt.is_some() { return Err("Native session received overlapping user prompts".into()); }
+                                pending_prompt = Some(prompt);
+                                user_reserved = true;
+                            } else {
+                                if active.is_some() { return Err("Native session received overlapping prompts".into()); }
+                                active = Some(prompt);
+                                active.as_mut().unwrap().begin(&app, &mut identity, &prepared, &snapshot, &native_session)?;
+                            }
                             let (pdfs, images): (Vec<_>, Vec<_>) = attachments.into_iter().partition(|a|
                                 a.attachment_type == crate::db::conversation_db::AttachmentType::PDF);
                             let documents: Vec<_> = pdfs.iter().filter_map(|a| a.attachment_url.as_ref()).collect();
@@ -481,7 +507,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                                 super::approval::cancel_app_requests_for_scope(&app, &super::approval::AgentRequestScope::native(driver.0, Some(prepared.instance.provider_id), cid, &run)).await;
                             }
                             if wire["type"] == "close" {
-                                if active.is_some() { let _ = reply.send(Err("Cannot replace an active native agent session".into())); continue; }
+                                if active.is_some() || pending_prompt.is_some() { let _ = reply.send(Err("Cannot replace an active native agent session".into())); continue; }
                                 let _ = write_frame(&mut stdin, &json!({"type":"close"})).await;
                                 let _ = reply.send(Ok(Value::Null)); break;
                             }
@@ -531,8 +557,37 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                         })?;
                         continue;
                     }
+                    if supports_wake && frame["type"] == "prompt_started" {
+                        let prompt = pending_prompt.take().ok_or("Unexpected native prompt_started")?;
+                        if active.is_some() || frame["turn"] != prompt.wire_turn {
+                            return Err("Native bridge started a different or overlapping user turn".into());
+                        }
+                        active = Some(prompt);
+                        user_reserved = false;
+                        active.as_mut().unwrap().begin(&app, &mut identity, &prepared, &snapshot, &native_session)?;
+                        continue;
+                    }
+                    if supports_wake && frame["type"] == "wake" {
+                        let Some((parent_turn, parent, window)) = previous.take() else {
+                            return Err("Native bridge reported a background turn without a completed parent".into());
+                        };
+                        let wire_turn = frame["turn"].as_str().filter(|id| id.starts_with("wake:")).ok_or("Invalid native wake turn ID")?;
+                        if active.is_some() || frame["after"] != parent_turn || frame["session"] != native_session {
+                            return Err("Native background turn does not match the completed session and turn".into());
+                        }
+                        if !super::background::can_continue(&app, cid, parent)? {
+                            if pending_prompt.is_some() { return Err(format!("Native session {native_session} lost ownership before the queued prompt started")); }
+                            break;
+                        }
+                        user_reserved |= busy.swap(true, Ordering::SeqCst);
+                        let wake_identity = identity.clone().with_turn(wire_turn);
+                        let id = super::background::create_reply(&app, &wake_identity, parent, driver.metadata()).map_err(|e| e.to_string())?;
+                        active = Some(ActiveTurn::new(id, wire_turn.to_owned(), window));
+                        active.as_mut().unwrap().begin(&app, &mut identity, &prepared, &snapshot, &native_session)?;
+                        continue;
+                    }
                     let Some(turn) = active.as_mut() else { continue; };
-                    if frame["turn"].as_str() != Some(turn.id.to_string().as_str()) { continue; }
+                    if frame["turn"] != turn.wire_turn { continue; }
                     if turn.text.is_empty() && turn.activities.is_empty() && is_native_output(&frame) {
                         app.state::<crate::state::activity_state::ConversationActivityManager>()
                             .set_agent_streaming(&app, &identity, turn.id).await;
@@ -602,18 +657,20 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                             }
                             if let Some(manager) = app.try_state::<crate::state::activity_state::ConversationActivityManager>() { manager.clear_agent_focus(&app, &identity, false).await; }
                             let completed_window = turn.window.clone();
+                            previous = (supports_wake && !cancelled).then(|| (turn.wire_turn.clone(), turn.id, turn.window.clone()));
                             active = None;
-                            busy.store(false, Ordering::SeqCst);
+                            busy.store(user_reserved, Ordering::SeqCst);
                             cancel_deadline = None;
                             super::approval::cancel_app_requests_for_scope(&app, &super::approval::AgentRequestScope::native(driver.0, Some(prepared.instance.provider_id), cid, &run)).await;
-                            snapshot.lock().unwrap()["is_busy"] = json!(false);
+                            snapshot.lock().unwrap()["current_turn_id"] = Value::Null;
+                            snapshot.lock().unwrap()["is_busy"] = json!(user_reserved);
                             publish_snapshot(&app, &identity, driver, &snapshot)?;
                             crate::api::ai_api::native_queue::finish_turn(&app, &completed_window, cid, &run, !cancelled).await;
                         }
                         _ => {}
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(900)), if active.is_none() => { let _ = write_frame(&mut stdin, &json!({"type":"close"})).await; break; }
+                _ = tokio::time::sleep(Duration::from_secs(900)), if active.is_none() && pending_prompt.is_none() => { let _ = write_frame(&mut stdin, &json!({"type":"close"})).await; break; }
                 _ = tokio::time::sleep_until(cancel_deadline.unwrap_or_else(||tokio::time::Instant::now() + Duration::from_secs(86400))), if cancel_deadline.is_some() => {
                     return Err("Native cancel did not reach a terminal event within 20 seconds; terminating its process tree".into());
                 }
@@ -626,13 +683,13 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
     if let Err(detail) = result {
         let detail = diagnostics.sanitize(&detail);
         if let Some(ready) = ready { let _ = ready.send(Err(format!("{detail} [driver={}, conversation_id={cid}, run_id={run}]; {:?}", driver.0, diagnostics.diagnostics(None, None)))); }
-        if let Some(mut turn) = active {
+        for mut turn in active.into_iter().chain(pending_prompt) {
             for activity in turn.activities.values_mut() {
                 if settle_activity(activity, false, Some(&detail)) {
                     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"agent_activity".into(), data:activity.clone() });
                 }
             }
-            let failure = AgentFailure::new(identity.clone().with_response_message(turn.id), AgentFailureStage::NativeSession, detail)
+            let failure = AgentFailure::new(identity.clone().with_response_message(turn.id), AgentFailureStage::NativeSession, detail.clone())
                 .with_process_diagnostics(diagnostics.diagnostics(process.as_mut().and_then(|p|p.try_wait().ok().flatten()).map(|s|s.to_string()), None));
             let activities = ordered_activities(&turn.activities);
             if let Err(error) = emit_normalized_failure_to_sink(&app, &WindowEventSink(&turn.window), failure, driver.metadata().display_name, Some(&activities)) {

@@ -61,7 +61,14 @@ export async function openPi(config, emit, dependencies = {}) {
   const tools = new Map();
   let thinkingId, thinkingSequence = 0;
   const send = data => child.stdin.write(`${JSON.stringify(data)}\n`);
-  const finishTurn = (cancelled = false) => {
+  let previousTurn, wakes = 0, cancelling = false;
+  const startTurn = id => {
+    turn = id; cancelling = false; failure = undefined; modelError = undefined; finalText = undefined;
+    tools.clear(); thinkingId = undefined; thinkingSequence = 0;
+  };
+  const finishTurn = (aborted = false) => {
+    const cancelled = cancelling || aborted;
+    previousTurn = !cancelled && !failure && !modelError ? turn : undefined;
     emit({ type: 'done', turn, cancelled, error: failure || (cancelled ? undefined : modelError), final_text: finalText });
     turn = null; awaitingSettlement = false; questions.clear(); tools.clear(); thinkingId = undefined;
   };
@@ -102,6 +109,10 @@ export async function openPi(config, emit, dependencies = {}) {
       else if (frame.success === true) waiter.resolve(frame.data);
       else waiter.reject(new Error(`Pi ${frame.command} returned an invalid response for request ${frame.id}`));
       return;
+    }
+    if (!turn && previousTurn && !cancelling && !closing && frame.type === 'agent_start') {
+      startTurn(`wake:${++wakes}`);
+      emit({ type: 'wake', session, after: previousTurn, turn });
     }
     if (!turn) return;
     const base = { turn };
@@ -154,7 +165,7 @@ export async function openPi(config, emit, dependencies = {}) {
       else if (Array.isArray(last?.content)) finalText = last.content.filter(block => block.type === 'text').map(block => block.text).join('');
       // Retry-aware Pi closes each attempt with agent_end, then the whole prompt with agent_settled.
       if (typeof frame.willRetry === 'boolean') awaitingSettlement = true;
-      else finishTurn();
+      else finishTurn(last?.stopReason === 'aborted');
     } else if (frame.type === 'agent_settled' && awaitingSettlement) {
       finishTurn(frame.aborted === true);
     }
@@ -177,8 +188,7 @@ export async function openPi(config, emit, dependencies = {}) {
       session,
       async prompt(text, id, images = []) {
         if (turn) throw new Error('Pi already has an active turn');
-        turn = id; failure = undefined; modelError = undefined; finalText = undefined;
-        tools.clear(); thinkingId = undefined; thinkingSequence = 0;
+        startTurn(id);
         const receipt = await request({ type: 'prompt', message: text, ...(images.length ? { images: images.map(image => ({ type: 'image', ...image })) } : {}) });
         if (turn === id && receipt?.disposition === 'handled') {
           const state = await request({ type: 'get_state' });
@@ -189,7 +199,7 @@ export async function openPi(config, emit, dependencies = {}) {
         if (!turn || turn !== expectedTurn) throw new Error('Pi steering target is no longer the active turn');
         await request({ type: 'steer', message: text, ...(images.length ? { images: images.map(image => ({ type: 'image', ...image })) } : {}) });
       },
-      async cancel() { await request({ type: 'abort' }); },
+      async cancel() { previousTurn = undefined; cancelling = true; await request({ type: 'abort' }); },
       async reply(id, value) { send({ type: 'extension_ui_response', id, confirmed: value === 'allow' }); },
       async answer(id, answers) {
         const question = questions.get(id);

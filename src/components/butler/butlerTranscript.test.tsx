@@ -11,7 +11,7 @@ describe("Butler transcript", () => {
         message(4, "tool_result", "原始输出"), message(5, "response", "编号 LT-7042")];
 
     it("should preserve the completed reply when a background wake starts and finishes", () => {
-        const wake = message(6, "response", "截图已完成", {parent_id: 5, metadata_json: '{"origin":"claude_background_wake"}'});
+        const wake = message(6, "response", "截图已完成", {parent_id: 5, metadata_json: '{"origin":"native_background_wake"}'});
         expect(butlerTranscript([...history, {...wake, finish_time: null}])).toEqual([history[0], history[4]]);
         expect(butlerTranscript([...history, wake])).toEqual([history[0], history[4], wake]);
     });
