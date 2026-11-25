@@ -11,6 +11,7 @@ export type SettingsMenuId =
     | "plugins-config"
     | "ai-automation-config"
     | "mobile-tasks"
+    | "device-connections"
     | "vault-config"
     | "data-sync-config"
     | "general-config"
@@ -46,6 +47,7 @@ const CANONICAL_MENUS = new Set<string>([
     "plugins-config",
     "ai-automation-config",
     "mobile-tasks",
+    "device-connections",
     "vault-config",
     "data-sync-config",
     "general-config",

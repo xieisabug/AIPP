@@ -14,6 +14,9 @@ import android.util.Log
 import java.util.concurrent.Executors
 
 class MainActivity : TauriActivity() {
+    // Rust calls this over JNI. The WebView has no command to export a paired device token.
+    @androidx.annotation.Keep
+    fun hostBridgeCredential(id: String): String = HostBridgePlugin(this).readPair(id)
   override val handleBackNavigation: Boolean = false
   private var appWebView: WebView? = null
   private var backPending = false

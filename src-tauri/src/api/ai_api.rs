@@ -1517,6 +1517,17 @@ pub async fn ask_ai(
     // 管家工作记录会话：本轮附加上下文里需要带上当前工作记录（与历史里最近一次相同时不重复）。
     let mut butler_goal_conversation = false;
     // Claim intent before any asynchronous model/plugin preparation. Queued requests
+    #[cfg(desktop)]
+    let remote_chat = crate::host_bridge::chat::is_remote();
+    #[cfg(not(desktop))]
+    let remote_chat = false;
+    #[cfg(desktop)]
+    if let Ok(id) = request.conversation_id.parse::<i64>() {
+        if remote_chat && activity_manager.get_runtime_state(id).await.is_running {
+            return Err(AppError::UnknownError("电脑正在回复，请等待或停止本手机发起的回复后再发送".into()));
+        }
+        crate::host_bridge::chat::begin_turn(id).await;
+    }
     // carry their original version and cannot resurrect an obsolete requirement.
     if let Ok(id) = request.conversation_id.parse::<i64>() {
         let db = ConversationDatabase::new(&app_handle)?;
@@ -1551,7 +1562,7 @@ pub async fn ask_ai(
         .map(|s| s.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{s}；{e}"))))
         .transpose()?;
     let confirmed_proposal = crate::proactive::proposal::ACCEPTANCE.try_with(|_| ()).is_ok();
-    let (actual_assistant_id, cleaned_prompt) = if peer_turn || group_turn.is_some() || confirmed_proposal {
+    let (actual_assistant_id, cleaned_prompt) = if peer_turn || group_turn.is_some() || confirmed_proposal || remote_chat {
         (request.assistant_id, request.prompt.clone())
     } else {
         extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?
@@ -1559,7 +1570,7 @@ pub async fn ask_ai(
     crate::api::mobile_capability::ensure_assistant_execution(
         &app_handle, actual_assistant_id, "send_preflight", &request.conversation_id,
     ).await.map_err(AppError::UnknownError)?;
-    let slash_parse_result = if group_turn.is_some() || confirmed_proposal {
+    let slash_parse_result = if group_turn.is_some() || confirmed_proposal || remote_chat {
         crate::slash::types::SlashParseResult {
             display_prompt: cleaned_prompt.clone(),
             runtime_user_prompt: cleaned_prompt.clone(),
@@ -1590,13 +1601,13 @@ pub async fn ask_ai(
         .run_guard_filter("chat.beforeSend", before_send_context)
         .await
         .map_err(AppError::UnknownError)?;
-    if confirmed_proposal {
+    if confirmed_proposal || remote_chat {
         let filtered=&before_send_result.context;
         if filtered["assistantId"].as_i64()!=Some(request.assistant_id)
             || filtered["prompt"].as_str()!=Some(request.prompt.as_str())
             || filtered["runtimeUserPromptPrefix"].as_str().is_some_and(|prefix|!prefix.is_empty())
             || filtered["attachments"].as_array().is_some_and(|files|!files.is_empty()) {
-            return Err(AppError::UnknownError("插件改变了已确认的建议或执行人，请在目标会话中核对后发送".into()));
+            return Err(AppError::UnknownError("插件改变了已确认的消息或执行人，请在目标会话中核对后发送".into()));
         }
     }
     if let Some(assistant_id) =
@@ -1737,7 +1748,7 @@ pub async fn ask_ai(
     let mut mcp_info = mcp_info;
     let search_servers = deepseek_web::filter_search(&mut mcp_info, web_enabled);
     let _need_generate_title = processed_request.conversation_id.is_empty();
-    let request_prompt_result = if group_turn.is_some() || confirmed_proposal {
+    let request_prompt_result = if group_turn.is_some() || confirmed_proposal || remote_chat {
         processed_request.prompt.clone()
     } else {
         compose_user_message_with_active_skills(
@@ -1747,7 +1758,7 @@ pub async fn ask_ai(
     };
     // 附加上下文不再作为前缀临时拼接：它由 initialize_conversation 接在正文末尾并一起存储。
     let runtime_prompt_result = request_prompt_result.clone();
-    let display_prompt_result = if group_turn.is_some() || confirmed_proposal {
+    let display_prompt_result = if group_turn.is_some() || confirmed_proposal || remote_chat {
         processed_request.prompt.clone()
     } else {
         compose_user_message_with_active_skills(
@@ -1816,6 +1827,11 @@ pub async fn ask_ai(
     if let Some(key) = processed_request.client_request_id {
         user_metadata.get_or_insert_with(|| serde_json::json!({}))["client_request_id"] = serde_json::json!(key);
     }
+    #[cfg(desktop)]
+    if remote_chat {
+        crate::host_bridge::chat::check_before_execution(&app_handle,processed_request.assistant_id).await
+            .map_err(|e| AppError::UnknownError(e.to_string()))?;
+    }
     let (
         conversation_id,
         _new_message_id,
@@ -1842,6 +1858,11 @@ pub async fn ask_ai(
     if request.conversation_id.is_empty() {
         if let Some(key) = request.client_request_id {
             let _ = window.emit_to(window.label(), "composer_conversation_created", serde_json::json!({
+    #[cfg(desktop)]
+    if remote_chat {
+        crate::host_bridge::chat::bind_message(&app_handle,conversation_id,user_message_id,request.conversation_id.is_empty()).await
+            .map_err(|e| AppError::UnknownError(e.to_string()))?;
+    }
                 "client_request_id": key, "conversation_id": conversation_id, "message_id": user_message_id,
             }));
         }
@@ -3411,6 +3432,8 @@ pub async fn regenerate_ai(
     let conversation = db
         .conversation_repo()
         .unwrap()
+    #[cfg(desktop)]
+    crate::host_bridge::chat::begin_turn(conversation_id).await;
         .read(conversation_id)?
         .ok_or(AppError::DatabaseError("未找到对话".to_string()))?;
     // 重新生成开始时，优先让被点击的消息闪亮（可被后续 streaming 覆盖）

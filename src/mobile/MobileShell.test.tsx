@@ -5,7 +5,7 @@ import MobileShell from "./MobileShell";
 import { navigateMobile, popMobile, previewMobile, registerMobileBackHandler } from "./navigation";
 
 const mounts = vi.hoisted(() => ({ chat: 0 }));
-vi.mock("../windows/ChatUIWindow", () => ({
+vi.mock("./MobileEnvironmentChat", () => ({
     default: () => {
         const [draft, setDraft] = useState("");
         useEffect(() => { mounts.chat += 1; }, []);

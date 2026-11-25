@@ -286,7 +286,7 @@ fn extract_labeled_block(content: &str, prefix: &str) -> Option<String> {
     Some(content[start_pos..].to_string())
 }
 
-fn sanitize_plain_text(content: &str) -> Option<String> {
+pub(crate) fn sanitize_plain_text(content: &str) -> Option<String> {
     let tool_comment_regex = Regex::new(r"(?s)<!--\s*MCP_TOOL_CALL:.*?-->").unwrap();
     let file_attachment_regex = Regex::new(
         r#"(?s)<fileattachment\b([^>]*)>.*?</fileattachment>|<fileattachment\b([^>]*)\s*/?>"#,

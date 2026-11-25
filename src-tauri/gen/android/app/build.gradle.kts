@@ -84,6 +84,7 @@ repositories {
 }
 
 dependencies {
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("rustls:rustls-platform-verifier:${verifierPackage["version"]}@aar")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")

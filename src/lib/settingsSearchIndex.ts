@@ -14,6 +14,8 @@ export interface SettingsSearchItem {
 }
 
 export const SETTINGS_SEARCH_INDEX: SettingsSearchItem[] = [
+    { id: "device-connections", menu: "device-connections", title: "设备互联", section: "能力与扩展",
+        description: "在局域网与手机配对，管理设备授权", keywords: ["手机", "配对", "电脑", "二维码"], desktopOnly: true },
     // 核心配置
     {
         id: "providers",

@@ -21,4 +21,5 @@
 #-renamesourcefileattribute SourceFile
 -keep,includedescriptorclasses class org.rustls.platformverifier.** { *; }
 -keep class com.xieisabug.aipp.MobileFilesPlugin { *; }
+-keep class com.xieisabug.aipp.HostBridgePlugin { *; }
 -keep class com.xieisabug.aipp.MobileFileArgs { *; }

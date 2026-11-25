@@ -15,6 +15,7 @@ import {
     LayoutGrid,
     ListChecks,
     Menu,
+    MonitorSmartphone,
     Palette,
     Puzzle,
     Shield,
@@ -70,6 +71,7 @@ const SkillsConfig = React.lazy(() => import("../components/config/SkillsConfig"
 const PluginCenterConfig = React.lazy(() => import("../components/config/PluginCenterConfig"));
 const AiAutomationConfig = React.lazy(() => import("../components/config/pages/AiAutomationConfig"));
 const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTasksConfig"));
+const DeviceConnectionsConfig = React.lazy(() => import("../components/config/DeviceConnectionsConfig"));
 const SecurityVaultConfig = React.lazy(() => import("../components/config/pages/SecurityVaultConfig"));
 const DataSyncConfig = React.lazy(() => import("../components/config/pages/DataSyncConfig"));
 const GeneralAppearanceConfig = React.lazy(() => import("../components/config/pages/GeneralAppearanceConfig"));
@@ -94,6 +96,7 @@ const contentMap: Record<SettingsMenuId, React.ComponentType<any>> = {
     "plugins-config": PluginCenterConfig,
     "ai-automation-config": AiAutomationConfig,
     "mobile-tasks": MobileTasksConfig,
+    "device-connections": DeviceConnectionsConfig,
     "vault-config": SecurityVaultConfig,
     "data-sync-config": DataSyncConfig,
     "general-config": GeneralAppearanceConfig,
@@ -143,6 +146,8 @@ function ConfigWindow() {
         items.push(
             { id: "plugins-config", name: "插件", icon: Puzzle, group: "capabilities" },
             { id: "ai-automation-config", name: "AI 与自动化", icon: WandSparkles, group: "capabilities" },
+        } else {
+            items.push({ id: "device-connections", name: "设备互联", icon: MonitorSmartphone, group: "capabilities" });
         );
         if (isMobilePlatform) {
             items.push({ id: "mobile-tasks", name: "本机任务", icon: ListChecks, group: "capabilities" });

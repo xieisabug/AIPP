@@ -730,6 +730,7 @@ pub fn run() {
         .register_uri_scheme_protocol(OFFICE_PREVIEW_SCHEME, handle_office_preview_protocol_request)
         .plugin(tauri_plugin_notification::init())
         .plugin(mobile_files::init())
+        .plugin(host_bridge::peer::init())
         .plugin(mobile_system_ui::init())
         .plugin(webview_autofill::init())
         .plugin(tauri_plugin_fs::init())
@@ -1146,6 +1147,26 @@ pub fn run() {
             import_llm_provider,
             add_attachment,
             mobile_files::mobile_file_action,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_host_status,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_start,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_stop,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_invite,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_decide,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_revoke,
+            #[cfg(desktop)]
+            host_bridge::commands::bridge_set_chat_permission,
+            #[cfg(target_os = "android")]
+            host_bridge::peer::bridge_pair_phone,
+            #[cfg(target_os = "android")]
+            host_bridge::peer::bridge_environments,
+            #[cfg(target_os = "android")]
+            host_bridge::peer::bridge_connect,
             mobile_system_ui::set_android_status_bar_appearance,
             api::skill_api::install_mobile_skill_archive,
             api::skill_api::get_mobile_skill_compatibility,

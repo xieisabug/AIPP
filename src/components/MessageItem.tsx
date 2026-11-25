@@ -44,6 +44,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 interface MessageItemProps {
+    /** A remote message has no corresponding local DB row or actionable attachments. */
+    remoteTextOnly?: boolean;
     message: Message;
     streamEvent?: StreamEvent;
     onCodeRun?: (lang: string, code: string) => void;
@@ -718,6 +720,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
 // 自定义比较函数，只在关键属性变化时才重新渲染
 const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
+    if (prevProps.remoteTextOnly !== nextProps.remoteTextOnly) return false;
     if (prevProps.message.isSupersededError !== nextProps.message.isSupersededError) return false;
     if (prevProps.message.sendStatus !== nextProps.message.sendStatus || prevProps.message.sendError !== nextProps.message.sendError) return false;
     // 基本消息属性比较
@@ -785,7 +788,11 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 MessageItem.displayName = "MessageItem";
 
 // 让消息内的卡片（preview_file 等）知道自己是否属于最新一轮，进入新一轮后自动收起。
-const MessageItemWithTurn = (props: MessageItemProps) => props.isLastMessage === undefined
+const MessageItemWithTurn = (props: MessageItemProps) => props.remoteTextOnly
+    ? <div data-message-id={props.message.id} className={`flex ${props.message.message_type === "user" ? "justify-end" : "justify-start"}`}>
+        <div className="aipp-mobile-message-bubble min-w-0 max-w-[92%] whitespace-pre-wrap break-words rounded-2xl border border-border bg-background px-3 py-2 text-foreground">{props.message.content}</div>
+      </div>
+    : props.isLastMessage === undefined
     ? <MessageItem {...props} />
     : (
         <MessageTurnContext.Provider value={props.isLastMessage}>

@@ -73,6 +73,8 @@ pub fn send_conversation_event_to_chat_windows<R: tauri::Runtime>(
     event: ConversationEvent,
 ) {
     crate::api::butler_progress::observe(conversation_id, &event, None);
+    #[cfg(desktop)]
+    crate::host_bridge::chat::changed(conversation_id);
     let event_name = format!("conversation_event_{}", conversation_id);
 
     for label in ["ask", "chat_ui", "butler_experiment"] {

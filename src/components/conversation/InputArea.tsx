@@ -95,6 +95,8 @@ export interface InputAreaRef {
 }
 
 interface InputAreaProps {
+    /** Remote text conversations do not complete commands, files or assistants from this device. */
+    plainTextOnly?: boolean;
     permissionConversationIds?: number | readonly number[];
     inputText: string;
     setInputText: React.Dispatch<React.SetStateAction<string>>;
@@ -150,6 +152,7 @@ const InputArea = React.memo(
         (
             {
                 inputText,
+                plainTextOnly = false,
                 setInputText,
                 fileInfoList = null,
                 handleChooseFile,
@@ -624,6 +627,7 @@ const InputArea = React.memo(
             ]);
 
             useEffect(() => {
+                if (plainTextOnly) return;
                 void loadBangList();
                 void loadSlashSkills();
 
@@ -696,16 +700,18 @@ const InputArea = React.memo(
                             .catch(console.warn);
                     }
                 };
-            }, [loadBangList, loadSlashSkills]);
+            }, [loadBangList, loadSlashSkills, plainTextOnly]);
 
             // 监听助手列表变化
             useAssistantListListener({
+                enabled: !plainTextOnly,
                 onAssistantListChanged: useCallback((assistantList: AssistantItem[]) => {
                     setAssistants(assistantList);
                 }, []),
             });
 
             useEffect(() => {
+                if (plainTextOnly) return;
                 const handleSelectionChange = () => {
                     if (textareaRef.current) {
                         const cursorPosition = textareaRef.current.selectionStart;
@@ -897,6 +903,7 @@ const InputArea = React.memo(
                 };
             }, [
                 originalBangList,
+                plainTextOnly,
                 mentionSource,
                 artifacts,
                 placement,
@@ -957,6 +964,7 @@ const InputArea = React.memo(
                 const newValue = e.target.value;
                 const cursorPosition = e.target.selectionStart;
                 setInputText(newValue);
+                if (plainTextOnly) return;
 
                 // Check for symbols
                 const atIndex = newValue.lastIndexOf("@", cursorPosition - 1);

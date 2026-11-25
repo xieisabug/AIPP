@@ -30,7 +30,7 @@ use crate::utils::python_utils::{PythonInfo, PythonUtils};
 use crate::utils::uv_utils::UvUtils;
 
 const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
-const BUTLER_MAIN_SLOT: &str = "default";
+pub(crate) const BUTLER_MAIN_SLOT: &str = "default";
 const BUTLER_KIND_MAIN: &str = "butler_main";
 const BUTLER_KIND_TASK: &str = "butler_task";
 const STATUS_ACCEPTED: &str = "accepted";

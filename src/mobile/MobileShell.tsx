@@ -3,7 +3,7 @@ import LoadingScreen from "../components/LoadingScreen";
 import { isKeyboardCompact, isKeyboardOpen } from "./keyboardViewport";
 import { isMobileRoute, MobileRoute, MobilePreview, runMobileBackHandlers, cancelMobileConfigNavigation } from "./navigation";
 
-const Chat = lazy(() => import("../windows/ChatUIWindow"));
+const Chat = lazy(() => import("./MobileEnvironmentChat"));
 const Config = lazy(() => import("../windows/ConfigWindow"));
 const Collections = lazy(() => import("./MobileCollections"));
 const Preview = lazy(() => import("./MobileArtifactPreview"));
@@ -70,8 +70,8 @@ export default function MobileShell() {
                 panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
                 return true;
             }
-            if (stackRef.current.length <= 1) return false;
             if (runMobileBackHandlers(stackRef.current.at(-1)!)) return true;
+            if (stackRef.current.length <= 1) return false;
             return pop();
         };
         return () => {

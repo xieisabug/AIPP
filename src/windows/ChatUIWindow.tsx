@@ -2,6 +2,7 @@ import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
+import MobileButlerContacts from "../mobile/MobileButlerContacts";
 import ConversationList from "../components/ConversationList";
 import ChatUIInfomation from "../components/ChatUIInfomation";
 import {
@@ -196,7 +197,7 @@ async function sampleInitialScrollSettle(
 
 const EMPTY_INLINE_INTERACTION_ITEMS: InlineInteractionItem[] = [];
 
-function ChatUIWindow() {
+function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: React.ReactNode } = {}) {
     // 集成主题系统
     useTheme("chat_ui");
 
@@ -223,6 +224,8 @@ function ChatUIWindow() {
     const isMobile = isMobilePlatform || isNarrow;
     const platform = usePlatform();
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [mobileList, setMobileList] = useState<"chat" | "butler">("chat");
+    const [conversationKind, setConversationKind] = useState("");
     const [conversationTitle, setConversationTitle] = useState("");
     const [conversationAssistantName, setConversationAssistantName] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
@@ -232,7 +235,8 @@ function ChatUIWindow() {
 
     const [pluginList, setPluginList] = useState<any[]>([]);
 
-    const [selectedConversation, setSelectedConversation] = useState<string>("");
+    const [selectedConversation, setSelectedConversation] = useState<string>(() =>
+        mobileEnvironmentSwitch ? sessionStorage.getItem("aipp.mobile.localConversation") ?? "" : "");
     const conversationUIRef = useRef<ConversationUIRef>(null);
     const selectedConversationRef = useRef(selectedConversation);
     const lastChatPerfResultRef = useRef<ChatScrollPerfTestOutcome | null>(null);
@@ -410,13 +414,15 @@ function ChatUIWindow() {
     }, [isMobile]);
 
     const handleConversationChange = useCallback((conv?: Conversation) => {
+        setConversationKind(conv?.conversation_kind ?? "");
         setConversationTitle(conv?.name || "");
         setConversationAssistantName(conv?.assistant_name || "");
     }, []);
 
     useEffect(() => {
         selectedConversationRef.current = selectedConversation;
-    }, [selectedConversation]);
+        if (mobileEnvironmentSwitch) sessionStorage.setItem("aipp.mobile.localConversation", selectedConversation);
+    }, [selectedConversation, mobileEnvironmentSwitch]);
 
     const runConversationScrollPerfTest = useCallback(
         async (
@@ -893,6 +899,7 @@ function ChatUIWindow() {
 
     // 移动端布局
     if (isMobile) {
+        const mobileButler = isMobilePlatform && (conversationKind === "butler_main" || conversationKind === "butler_contact");
         const mobileTitle = conversationTitle || "新会话";
         const drag = dragRegionProps(framelessTitleBar);
 
@@ -921,6 +928,13 @@ function ChatUIWindow() {
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
                                 <ChatUIInfomation showArtifacts={true} showSchedule={false} isMobile={true} preferInAppNavigation={isMobilePlatform} onNavigate={() => setSidebarOpen(false)} />
+                                {isMobilePlatform && <div className="flex gap-1 px-2">
+                                    {(["chat", "butler"] as const).map(mode => <Button key={mode} variant={mobileList === mode ? "secondary" : "ghost"}
+                                        aria-pressed={mobileList === mode} className="min-h-11 flex-1" onClick={() => setMobileList(mode)}>
+                                        {mode === "chat" ? "聊天" : "管家"}
+                                    </Button>)}
+                                </div>}
+                                {isMobilePlatform && mobileList === "butler" ? <MobileButlerContacts onSelect={handleSelectConversation} /> : <>
                                 <ChatUIToolbar
                                     onNewConversation={handleNewConversation}
                                     onSearch={() => { setSidebarOpen(false); setSearchOpen(true); }}
@@ -929,11 +943,12 @@ function ChatUIWindow() {
                                     conversationId={selectedConversation}
                                     onSelectConversation={handleSelectConversation}
                                 />
+                                </>}
                             </SheetContent>
                         </Sheet>
                         {/* 标题 + 助手名副标题；有会话时点击标题重命名，两侧空白和无会话标题可拖动窗口 */}
                         <div className="mx-1 flex min-w-0 flex-1 items-center justify-center self-stretch" {...drag}>
-                            {selectedConversation ? (
+                            {selectedConversation && !mobileButler ? (
                                 <button
                                     type="button"
                                     className="flex min-h-11 max-w-full flex-col items-center justify-center rounded-md px-2 leading-tight"
@@ -959,6 +974,7 @@ function ChatUIWindow() {
                             )}
                         </div>
                         <div className="flex items-center self-stretch" {...drag}>
+                            {mobileEnvironmentSwitch}
                             {selectedConversation ? (
                                 <Button
                                     variant="ghost"
@@ -987,6 +1003,10 @@ function ChatUIWindow() {
                             conversationId={selectedConversation}
                             onChangeConversationId={setSelectedConversation}
                             isMobile={true}
+                            windowLabel={mobileButler ? "butler_experiment" : "chat_ui"}
+                            allowRename={!mobileButler}
+                            allowDelete={!mobileButler}
+                            busySendBehavior={mobileButler ? "interrupt" : "queue"}
                             onConversationChange={handleConversationChange}
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
