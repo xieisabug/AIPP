@@ -58,37 +58,64 @@ describe("OfficePreviewModal", () => {
         __resetOfficeSelectionReceiversForTests();
     });
 
-    it("should send the request with a registered, fingerprint-checked selection to the conversation", async () => {
+    const fileRef = { refId: "ofr_aaaaaaaaaaaaaaaa", fileName: "报告.docx", format: "docx" };
+
+    function beginSuggestion(text: string) {
+        act(() => paneControl.props!.onSelectionChange({ ...selection, selectedText: text }, { x: 130, y: 110 }));
+    }
+
+    function confirmNote(note: string) {
+        fireEvent.change(screen.getByLabelText("调整意见"), { target: { value: note } });
+        fireEvent.click(screen.getByRole("button", { name: "确定" }));
+    }
+
+    it("should freeze, edit and remove selections and send the remaining badges together without a general request", async () => {
         const send = vi.fn().mockResolvedValue(undefined);
-        registerOfficeSelectionReceiver({ conversationId: 7, label: "当前对话「周报」", send });
-        mockInvoke.mockImplementation(async (cmd: string) => {
-            if (cmd === "register_office_selection_ref") return { refId: "ofr_aaaaaaaaaaaaaaaa", fileName: "报告.docx", format: "docx" };
-            return null;
-        });
+        registerOfficeSelectionReceiver({ conversationId: 7, label: "当前对话", send });
+        mockInvoke.mockResolvedValue(fileRef);
         render(<OfficePreviewModal />);
-        open(7);
-        await screen.findByTestId("fake-pane");
-        expect(screen.getByTestId("fake-pane")).toHaveAttribute("data-require-edit", "true");
-
-        act(() => paneControl.props!.onSelectionChange(selection));
-        fireEvent.click(await screen.findByTestId("office-ask-ai"));
-        // 发送前展示：目标文件、位置、交给助手的原文、发送到哪里
-        expect(screen.getByTestId("office-ai-panel")).toHaveTextContent("报告.docx · Word 正文中选中的文字");
-        expect(screen.getByTestId("office-ai-panel")).toHaveTextContent("发送到：当前对话「周报」");
-        expect(screen.getByTestId("office-ai-target")).toHaveTextContent("旧的说法");
+        open();
         expect(screen.getByTestId("office-ai-send")).toBeDisabled();
-
-        fireEvent.change(screen.getByTestId("office-ai-request"), { target: { value: "改得更正式" } });
+        beginSuggestion("第一处");
+        act(() => paneControl.props!.onSelectionChange(null));
+        confirmNote("精简");
+        beginSuggestion("第二处");
+        confirmNote("删除此处");
+        beginSuggestion("第三处");
+        confirmNote("补充日期");
+        fireEvent.click(screen.getByTitle("删除建议 2"));
+        fireEvent.click(screen.getByRole("button", { name: "建议 1" }));
+        expect(screen.getByLabelText("调整意见")).toHaveValue("精简");
+        confirmNote("精简到一句");
+        beginSuggestion("取消的选区");
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
         fireEvent.click(screen.getByTestId("office-ai-send"));
         await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-        expect(mockInvoke).toHaveBeenCalledWith("register_office_selection_ref", {
-            source: { attachmentId: 3 },
-            expectedSha256: "sha-at-open",
-            conversationId: 7,
+        expect(mockInvoke).toHaveBeenCalledExactlyOnceWith("register_office_selection_ref", {
+            source: { attachmentId: 3 }, expectedSha256: "sha-at-open", conversationId: 7, includeDocumentText: false,
         });
         const prompt = send.mock.calls[0][0] as string;
-        expect(prompt.startsWith("改得更正式\n\n<officeselection refid=\"ofr_aaaaaaaaaaaaaaaa\"")).toBe(true);
+        expect(prompt).toMatch(/建议 1：精简到一句[\s\S]*第一处[\s\S]*建议 3：补充日期[\s\S]*第三处/);
+        expect(prompt).not.toMatch(/第二处|取消的选区/);
         await waitFor(() => expect(screen.queryByTestId("fake-pane")).toBeNull());
+    });
+
+    it.each([true, false])("should attach document text to a general request with suggestions=%s", async (addNote) => {
+        const send = vi.fn();
+        registerOfficeSelectionReceiver({ conversationId: 7, label: "当前对话", send });
+        mockInvoke.mockResolvedValue({ ...fileRef, documentText: "原文件正文" });
+        render(<OfficePreviewModal />);
+        open();
+        if (addNote) {
+            beginSuggestion("某处");
+            confirmNote("改用主动语态");
+        }
+        fireEvent.change(screen.getByLabelText("总意见"), { target: { value: "全文精简" } });
+        fireEvent.click(screen.getByTestId("office-ai-send"));
+        await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+        expect(mockInvoke.mock.calls[0][1].includeDocumentText).toBe(true);
+        expect(send.mock.calls[0][0]).toMatch(/全文精简[\s\S]*原文件正文/);
+        expect(send.mock.calls[0][0].includes("建议 1：改用主动语态")).toBe(addNote);
     });
 
     it("should offer AI edits when a Word file card opens a preview with a descriptive title", async () => {
@@ -102,10 +129,11 @@ describe("OfficePreviewModal", () => {
         expect(await screen.findByTestId("office-mode-badge")).toHaveTextContent("只读预览");
         expect(paneControl.props?.extension).toBe("docx");
         expect(screen.getByTestId("office-enter-edit")).toBeVisible();
+        expect(screen.getByTestId("office-ai-panel")).toHaveTextContent("总管家");
         act(() => paneControl.props!.onSelectionChange(selection));
-        fireEvent.click(await screen.findByTestId("office-ask-ai"));
-        expect(screen.getByTestId("office-ai-panel")).toHaveTextContent("发送到：总管家");
-        expect(screen.getByTestId("office-ai-target")).toHaveTextContent(selection.selectedText);
+        expect(screen.queryByLabelText("调整意见")).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "给选区加建议" }));
+        expect(screen.getByRole("dialog", { name: "建议 1" })).toHaveTextContent(selection.selectedText);
     });
 
     it("should refuse a stale selection and offer to reload instead of sending", async () => {
@@ -118,15 +146,15 @@ describe("OfficePreviewModal", () => {
         render(<OfficePreviewModal />);
         open(7);
         await screen.findByTestId("fake-pane");
-        act(() => paneControl.props!.onSelectionChange(selection));
-        fireEvent.click(await screen.findByTestId("office-ask-ai"));
-        fireEvent.change(screen.getByTestId("office-ai-request"), { target: { value: "改" } });
+        beginSuggestion("原文");
+        confirmNote("改");
         fireEvent.click(screen.getByTestId("office-ai-send"));
         const error = await screen.findByTestId("office-ai-error");
         expect(error).toHaveTextContent("文件已被修改");
         expect(send).not.toHaveBeenCalled();
-        fireEvent.click(screen.getByText("重新加载"));
-        expect(screen.queryByTestId("office-ai-panel")).toBeNull();
+        fireEvent.click(screen.getByText("重新加载并清除旧选区"));
+        expect(screen.queryByRole("button", { name: "建议 1" })).toBeNull();
+        expect(screen.getByTestId("office-ai-send")).toBeDisabled();
     });
 
     it("should not offer AI edits when the preview belongs to a conversation that is not shown here", async () => {
@@ -135,7 +163,7 @@ describe("OfficePreviewModal", () => {
         open(7);
         await screen.findByTestId("fake-pane");
         act(() => paneControl.props!.onSelectionChange(selection));
-        expect(screen.queryByTestId("office-ask-ai")).toBeNull();
+        expect(screen.queryByTestId("office-ai-panel")).toBeNull();
         expect(screen.getByTestId("fake-pane")).toHaveAttribute("data-require-edit", "false");
     });
 

@@ -2,7 +2,7 @@
   "id": "office-preview-plugin",
   "code": "office-preview-plugin",
   "name": "Office 文档预览",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "在 AIPP 内预览、简单编辑 Word (.docx)、Excel (.xlsx)、PowerPoint (.pptx)，支持选中内容交给 AI 修改（结果另存副本），基于 BetterOffice 本地离线渲染，内置简中与拉丁开源字体，文档不上传。",
   "author": "AIPP",
   "entry": "dist/main.js",

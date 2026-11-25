@@ -420,6 +420,7 @@ fn now_secs() -> i64 {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfficeFileRefInfo {
+    pub document_text: Option<String>,
     pub ref_id: String,
     pub file_name: String,
     pub format: String,
@@ -434,22 +435,34 @@ pub async fn register_office_selection_ref(
     source: OfficePreviewSource,
     expected_sha256: String,
     conversation_id: Option<i64>,
+    include_document_text: Option<bool>,
 ) -> Result<OfficeFileRefInfo, String> {
     let (path, file_name) = resolve_authorized_office_path(&app_handle, &source).map_err(|e| e.to_wire_string())?;
     let read_path = path.clone();
     let read_name = file_name.clone();
-    let (bytes, format) = tokio::task::spawn_blocking(move || read_validated(&read_path, &read_name))
+    let (format, sha256, size_bytes, document_text) = tokio::task::spawn_blocking(move || {
+        use crate::db::conversation_db::AttachmentType;
+        let (bytes, format) = read_validated(&read_path, &read_name)?;
+        let sha256 = sha256_hex(&bytes);
+        if !sha256.eq_ignore_ascii_case(expected_sha256.trim()) {
+            return Err(err("stale_selection", format!("「{read_name}」在打开预览后已被修改，请重新加载并核对修改意见")));
+        }
+        let text = if include_document_text == Some(true) {
+            let kind = match format {
+                OfficeFormat::Docx => AttachmentType::Word,
+                OfficeFormat::Xlsx => AttachmentType::Excel,
+                OfficeFormat::Pptx => AttachmentType::PowerPoint,
+            };
+            Some(super::attachment_api::extract_office_text(std::io::Cursor::new(&bytes), kind)
+                .map_err(|e| err("read_error", format!("读取「{read_name}」正文失败：{e:#}")))?)
+        } else {
+            None
+        };
+        Ok((format, sha256, bytes.len() as i64, text))
+    })
         .await
         .map_err(|e| err("read_error", format!("读取线程异常退出：{e}")).to_wire_string())?
         .map_err(|e| e.to_wire_string())?;
-    let sha256 = sha256_hex(&bytes);
-    if !expected_sha256.trim().is_empty() && !sha256.eq_ignore_ascii_case(expected_sha256.trim()) {
-        return Err(err(
-            "stale_selection",
-            format!("「{file_name}」在打开预览后已被修改，选区可能已经对不上，请重新加载后再选择"),
-        )
-        .to_wire_string());
-    }
     let conn = conversation_conn(&app_handle).map_err(|e| e.to_wire_string())?;
     // 再次选中 AI 副本时沿用它的原始路径，另存时仍默认放在用户原文件旁边
     let origin_path = match source.ref_id.as_deref() {
@@ -464,13 +477,14 @@ pub async fn register_office_selection_ref(
         file_name: file_name.clone(),
         format: format.as_str().into(),
         sha256: sha256.clone(),
-        size_bytes: bytes.len() as i64,
+        size_bytes,
         origin_ref: source.ref_id.clone(),
         origin_path,
         created_at: now_secs(),
     };
     office_refs::insert(&conn, &record).map_err(|e| err("read_error", format!("登记文件引用失败：{e}")).to_wire_string())?;
     Ok(OfficeFileRefInfo {
+        document_text,
         ref_id: record.id,
         file_name,
         format: record.format,

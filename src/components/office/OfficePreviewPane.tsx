@@ -64,7 +64,7 @@ export interface OfficePreviewPaneProps {
     mode?: OfficePaneMode;
     /** 需要选区 / 编辑能力（协议 2）时为 true：旧版组件会自动更新。 */
     requireEdit?: boolean;
-    onSelectionChange?: (selection: OfficeSelection | null) => void;
+    onSelectionChange?: (selection: OfficeSelection | null, point?: { x: number; y: number }) => void;
     onDirtyChange?: (dirty: boolean) => void;
     onFileLoaded?: (file: OfficeLoadedFile | null) => void;
     /** 查看器协议版本（2 起支持选区、编辑与 AI 修改）。 */
@@ -381,6 +381,7 @@ export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePrevi
                 message?: string;
                 protocol?: number;
                 selection?: unknown;
+                point?: { x?: number; y?: number } | null;
                 bytes?: unknown;
             } | null;
             if (!data || typeof data.type !== "string") return;
@@ -402,7 +403,15 @@ export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePrevi
             if (data.requestId !== loadSeqRef.current) return;
 
             if (data.type === "aipp-office:selection") {
-                callbacksRef.current.onSelectionChange?.(isOfficeSelection(data.selection) ? data.selection : null);
+                const selection = isOfficeSelection(data.selection) ? data.selection : null;
+                const rect = iframeRef.current?.getBoundingClientRect();
+                const x = data.point?.x;
+                const y = data.point?.y;
+                if (selection && rect && typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+                    callbacksRef.current.onSelectionChange?.(selection, { x: rect.left + x, y: rect.top + y });
+                } else {
+                    callbacksRef.current.onSelectionChange?.(selection);
+                }
                 return;
             }
             if (data.type === "aipp-office:dirty") {

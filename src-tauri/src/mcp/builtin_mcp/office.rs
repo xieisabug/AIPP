@@ -63,6 +63,7 @@ pptx：replace_text{slide?（从 1 开始）, find, replace}。\
                             "find": {"type": "string"},
                             "replace": {"type": "string"},
                             "paragraph": {"type": "string"},
+                            "paragraphOccurrence": {"type": "integer", "minimum": 1, "description": "Word 重复段落：仅在选区提供出现次序时照填，并传完整段落原文"},
                             "text": {"type": "string"},
                             "paragraphs": {"type": "array", "items": {"type": "string"}},
                             "slide": {"type": "integer", "description": "pptx：幻灯片序号，从 1 开始"},
@@ -184,7 +185,7 @@ pub fn normalize_steps(format: OfficeFormat, edits: &[Value]) -> Result<Vec<Valu
             ));
         }
         let invalid = |message: String| ("invalid_edit".to_string(), message);
-        let normalized = match kind {
+        let mut normalized = match kind {
             "replace_text" => {
                 let mut v = json!({
                     "type": kind,
@@ -257,6 +258,14 @@ pub fn normalize_steps(format: OfficeFormat, edits: &[Value]) -> Result<Vec<Valu
             }
             _ => unreachable!(),
         };
+        if let Some(occurrence) = step.get("paragraphOccurrence").filter(|v| !v.is_null()) {
+            if format != OfficeFormat::Docx || normalized["paragraph"].as_str().is_none() {
+                return Err(invalid(format!("第 {} 步的 paragraphOccurrence 需要 Word 段落原文", index + 1)));
+            }
+            let n = occurrence.as_u64().filter(|n| *n > 0)
+                .ok_or_else(|| invalid(format!("第 {} 步的 paragraphOccurrence 必须是正整数", index + 1)))?;
+            normalized["paragraphOccurrence"] = json!(n);
+        }
         out.push(normalized);
     }
     Ok(out)

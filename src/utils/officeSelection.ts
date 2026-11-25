@@ -9,7 +9,7 @@ export const MAX_SELECTION_COLS = 20;
 
 /** 与查看器插件 `protocol.ts` 的 OfficeSelection 一致；只含稳定定位，不含会话级 id。 */
 export type OfficeSelection =
-    | { format: "docx"; selectedText: string; paragraphText: string }
+    | { format: "docx"; selectedText: string; paragraphText: string; paragraphOccurrence?: number; before?: string; after?: string }
     | {
           format: "xlsx";
           sheetName: string;
@@ -131,6 +131,9 @@ function selectionBody(selection: OfficeSelection): string {
                 "",
                 "所在段落全文（选区跨段时为第一段）：",
                 selection.paragraphText,
+                ...(selection.paragraphOccurrence ? [`相同段落中选中第 ${selection.paragraphOccurrence} 处，编辑时传 paragraphOccurrence=${selection.paragraphOccurrence} 和上述段落全文。`] : []),
+                ...(selection.before ? [`选区前文：${selection.before}`] : []),
+                ...(selection.after ? [`选区后文：${selection.after}`] : []),
             ].join("\n");
         case "xlsx": {
             const size = rangeSize(selection.a1);
@@ -157,26 +160,53 @@ export interface OfficeSelectionTagInput {
     selection: OfficeSelection;
 }
 
-export function buildOfficeSelectionTag({ refId, fileName, format, selection }: OfficeSelectionTagInput): string {
+type OfficeReviewFile = Omit<OfficeSelectionTagInput, "selection">;
+
+function officeContextTag(file: OfficeReviewFile, location: string, excerpt: string, body: string): string {
     const attrs = [
-        // 不能叫 ref：渲染时属性会作为 React 的 ref 传给组件
-        `refid="${escapeAttr(refId)}"`,
-        `file="${escapeAttr(fileName)}"`,
-        `format="${format}"`,
-        `location="${escapeAttr(describeSelectionLocation(selection))}"`,
-        `excerpt="${escapeAttr(selectionExcerpt(selection))}"`,
+        // ref 是 React 保留属性。
+        `refid="${escapeAttr(file.refId)}"`,
+        `file="${escapeAttr(file.fileName)}"`,
+        `format="${file.format}"`,
+        `location="${escapeAttr(location)}"`,
+        `excerpt="${escapeAttr(excerpt)}"`,
     ].join(" ");
-    const body = [
-        safeBody(selectionBody(selection)),
-        "",
-        `需要修改时调用 office_edit（ref="${refId}"），结果会另存为新文件，原文件不会被改动。`,
-    ].join("\n");
-    return `<${OFFICE_SELECTION_TAG} ${attrs}>\n${body}\n</${OFFICE_SELECTION_TAG}>`;
+    return `<${OFFICE_SELECTION_TAG} ${attrs}>\n${safeBody(body)}\n</${OFFICE_SELECTION_TAG}>`;
+}
+
+export function buildOfficeSelectionTag(input: OfficeSelectionTagInput): string {
+    const { selection } = input;
+    const body = `${selectionBody(selection)}\n\n需要修改时调用 office_edit（ref="${input.refId}"），结果会另存为新文件，原文件不会被改动。`;
+    return officeContextTag(input, describeSelectionLocation(selection), selectionExcerpt(selection), body);
 }
 
 /** 用户的修改要求 + 选区块，作为一条消息发送。 */
 export function buildOfficeSelectionPrompt(request: string, tag: OfficeSelectionTagInput): string {
     return `${request.trim()}\n\n${buildOfficeSelectionTag(tag)}`;
+}
+
+export interface OfficeSuggestion {
+    id: number;
+    selection: OfficeSelection;
+    comment: string;
+}
+
+export function buildOfficeReviewPrompt(
+    ref: OfficeReviewFile & { documentText?: string | null },
+    general: string,
+    suggestions: OfficeSuggestion[],
+): string {
+    const blocks: string[] = [];
+    const editInstruction = `请将本条消息中的修改意见合并为一次 office_edit（ref="${ref.refId}"）调用，生成一份副本。`;
+    if (general.trim()) {
+        if (!ref.documentText?.trim()) throw new Error("未取得文件正文，无法发送总意见");
+        blocks.push(general.trim(), officeContextTag(ref, "整份文件", "", `${ref.documentText}\n\n${editInstruction}`));
+    }
+    for (const { id, selection, comment } of suggestions) {
+        const body = blocks.length ? selectionBody(selection) : `${selectionBody(selection)}\n\n${editInstruction}`;
+        blocks.push(`建议 ${id}：${comment}`, officeContextTag(ref, describeSelectionLocation(selection), selectionExcerpt(selection), body));
+    }
+    return blocks.join("\n\n");
 }
 
 export interface OfficeSelectionTagAttrs {

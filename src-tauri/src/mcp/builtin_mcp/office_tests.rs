@@ -18,6 +18,10 @@ fn test_normalize_steps_keeps_known_fields_per_format() {
 
     let steps = normalize_steps(OfficeFormat::Pptx, &[json!({"type": "replace_text", "slide": 2, "find": "a", "replace": ""})]).unwrap();
     assert_eq!(steps[0]["slide"], 2);
+
+    let step = json!({"type": "replace_text", "find": "旧", "replace": "新", "paragraph": "旧段落", "paragraphOccurrence": 2});
+    assert_eq!(normalize_steps(OfficeFormat::Docx, &[step.clone()]).unwrap()[0], step);
+    assert!(normalize_steps(OfficeFormat::Pptx, &[step]).is_err());
 }
 
 #[test]

@@ -1,5 +1,6 @@
 #[path = "attachment_office_text.rs"]
 mod office_text;
+pub(super) use office_text::extract as extract_office_text;
 use crate::db::conversation_db::{AttachmentType, Repository};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};

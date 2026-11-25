@@ -9,7 +9,7 @@ vi.mock("@/utils/officeFile", async (importOriginal) => ({
 }));
 
 import RawTextRenderer from "@/components/RawTextRenderer";
-import { buildOfficeSelectionPrompt } from "@/utils/officeSelection";
+import { buildOfficeReviewPrompt, buildOfficeSelectionPrompt } from "@/utils/officeSelection";
 
 const prompt = buildOfficeSelectionPrompt("把这句改正式", {
     refId: "ofr_0123456789abcdef",
@@ -39,5 +39,19 @@ describe("MessageOfficeSelection", () => {
         expect(openModal).toHaveBeenCalledWith(
             expect.objectContaining({ title: "季度报告.docx", source: { refId: "ofr_0123456789abcdef" } }),
         );
+    });
+
+    it("should display each suggestion while keeping document context inside its file card", () => {
+        const selection = { format: "docx" as const, selectedText: "小标题", paragraphText: "段落全文" };
+        const review = buildOfficeReviewPrompt(
+            { refId: "ofr_test", fileName: "报告.docx", format: "docx", documentText: "未选中的文件正文" },
+            "保持简短",
+            [{ id: 1, selection, comment: "改标题" }, { id: 3, selection, comment: "缩短" }],
+        );
+        render(<RawTextRenderer content={review} />);
+        expect(screen.getAllByTestId("message-office-selection")).toHaveLength(3);
+        expect(screen.getByText(/建议 1：改标题/)).toBeInTheDocument();
+        expect(screen.getByText(/建议 3：缩短/)).toBeInTheDocument();
+        expect(screen.queryByText(/未选中的文件正文|office_edit|段落全文/)).not.toBeInTheDocument();
     });
 });

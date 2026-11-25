@@ -173,6 +173,9 @@ export default function ViewerApp() {
   const pptxCtxRef = useRef<PptxPluginContext<null> | null>(null);
   const selectionSeqRef = useRef(0);
   const selectionTimerRef = useRef<number | null>(null);
+  const selectionRead = useRef<(() => Promise<OfficeSelection | null>) | null>(null);
+  const dragStart = useRef<{ id: number; x: number; y: number } | null>(null);
+  const dropPoint = useRef<{ x: number; y: number } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const resetEditors = useCallback(() => {
@@ -184,6 +187,9 @@ export default function ViewerApp() {
     pptxCtxRef.current = null;
     if (selectionTimerRef.current != null) window.clearTimeout(selectionTimerRef.current);
     selectionTimerRef.current = null;
+    selectionRead.current = null;
+    dragStart.current = null;
+    dropPoint.current = null;
   }, []);
 
   const reportLoaded = useCallback((reqId: number, format: OfficeFormat, meta: Record<string, unknown>) => {
@@ -214,6 +220,7 @@ export default function ViewerApp() {
   /** Debounced: selections settle while the user drags. */
   const scheduleSelection = useCallback((reqId: number, read: () => Promise<OfficeSelection | null>) => {
     if (activeDocRef.current?.mode !== "view") return;
+    selectionRead.current = read;
     if (selectionTimerRef.current != null) window.clearTimeout(selectionTimerRef.current);
     const seq = ++selectionSeqRef.current;
     selectionTimerRef.current = window.setTimeout(() => {
@@ -225,7 +232,9 @@ export default function ViewerApp() {
         })
         .then((selection) => {
           if (seq !== selectionSeqRef.current || activeRequestIdRef.current !== reqId) return;
-          postToHost({ type: "aipp-office:selection", requestId: reqId, selection });
+          const point = dropPoint.current;
+          dropPoint.current = null;
+          postToHost({ type: "aipp-office:selection", requestId: reqId, selection, point });
         });
     }, 220);
   }, []);
@@ -277,7 +286,16 @@ export default function ViewerApp() {
         const info = await docxRef.current?.readSelectionInfo();
         const selected = info?.selectedText ?? "";
         if (!info || !selected.trim()) return null;
-        return { format: "docx", selectedText: clip(selected), paragraphText: clip(info.paragraphText || "") };
+        const paragraph = info.paragraphText || "";
+        let paragraphOccurrence: number | undefined;
+        if (info.paraId && paragraph && paragraph.length <= MAX_SELECTION_TEXT) {
+          const matches = await docxRef.current?.findParagraphs(paragraph, { caseSensitive: true, limit: 256 });
+          const exact = matches?.filter(m => !m.before && !m.after && m.match === paragraph) ?? [];
+          const index = exact.findIndex(m => m.paraId === info.paraId);
+          if (exact.length > 1 && index >= 0) paragraphOccurrence = index + 1;
+        }
+        return { format: "docx", selectedText: clip(selected), paragraphText: clip(paragraph), paragraphOccurrence,
+          before: info.before?.slice(-80), after: info.after?.slice(0, 80) };
       });
     };
 
@@ -599,6 +617,25 @@ export default function ViewerApp() {
   return (
     <div
       ref={containerRef}
+      onPointerDownCapture={(event) => {
+        dropPoint.current = null;
+        dragStart.current = null;
+        if (!event.isPrimary || event.button !== 0 || !(event.target as Element).closest("[data-selection-surface]")) return;
+        dragStart.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+      }}
+      onPointerCancelCapture={() => { dragStart.current = null; dropPoint.current = null; }}
+      onDoubleClickCapture={(event) => {
+        if (activeDoc?.format !== "docx" || !(event.target as Element).closest("[data-selection-surface]")) return;
+        dropPoint.current = { x: event.clientX, y: event.clientY };
+        if (selectionRead.current) scheduleSelection(activeRequestIdRef.current, selectionRead.current);
+      }}
+      onPointerUpCapture={(event) => {
+        const start = dragStart.current;
+        dragStart.current = null;
+        if (!start || start.id !== event.pointerId || Math.hypot(event.clientX - start.x, event.clientY - start.y) < 3) return;
+        dropPoint.current = { x: event.clientX, y: event.clientY };
+        if (selectionRead.current) scheduleSelection(activeRequestIdRef.current, selectionRead.current);
+      }}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -654,7 +691,7 @@ export default function ViewerApp() {
               </div>
             </div>
           )}
-          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <div data-selection-surface style={{ flex: 1, minHeight: 0, position: "relative" }}>
             <DocxEditor
               key={`docx-${activeDoc.requestId}`}
               ref={docxRef}
@@ -682,7 +719,7 @@ export default function ViewerApp() {
       )}
 
       {activeDoc?.format === "xlsx" && (
-        <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <div data-selection-surface style={{ flex: 1, minHeight: 0, position: "relative" }}>
           <XlsxEditor
             key={`xlsx-${activeDoc.requestId}`}
             file={activeDoc.bytes}
@@ -742,7 +779,7 @@ export default function ViewerApp() {
               </button>
             </div>
           )}
-          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          <div data-selection-surface style={{ flex: 1, minHeight: 0, position: "relative" }}>
             <PptxEditor
               key={`pptx-${activeDoc.requestId}`}
               file={activeDoc.bytes}

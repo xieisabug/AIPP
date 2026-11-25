@@ -3,8 +3,8 @@
 
 export type OfficeFormat = "docx" | "xlsx" | "pptx";
 
-/** Bumped when the host needs new viewer behaviour. 2 = selection, manual edit, edit jobs. */
-export const VIEWER_PROTOCOL = 2;
+/** 3 adds the pointer release position to selections. Protocol 2 hosts ignore it. */
+export const VIEWER_PROTOCOL = 3;
 
 export type ViewerMode = "view" | "edit" | "job";
 
@@ -30,11 +30,11 @@ export interface SaveRequestMessage {
 }
 
 /** AI-level edit steps; the viewer resolves them against the open document. */
-export type OfficeEditStep =
+export type OfficeEditStep = { paragraphOccurrence?: number } & (
   | { type: "replace_text"; find: string; replace: string; paragraph?: string; slide?: number }
   | { type: "replace_paragraph"; paragraph: string; text: string }
   | { type: "insert_paragraphs_after"; paragraph: string; paragraphs: string[] }
-  | { type: "set_cells"; sheet: string; range: string; values: string[][] };
+  | { type: "set_cells"; sheet: string; range: string; values: string[][] });
 
 export interface EditJobMessage {
   type: "aipp-office:edit-job";
@@ -53,6 +53,9 @@ export type OfficeSelection =
       format: "docx";
       selectedText: string;
       paragraphText: string;
+      paragraphOccurrence?: number;
+      before?: string;
+      after?: string;
     }
   | {
       format: "xlsx";

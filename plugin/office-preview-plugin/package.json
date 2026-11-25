@@ -1,7 +1,7 @@
 {
   "name": "@aipp/office-preview-plugin",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Official AIPP Office preview runtime plugin powered by BetterOffice 0.5.1",
   "scripts": {

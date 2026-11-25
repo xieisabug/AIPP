@@ -90,6 +90,13 @@ export function resolveDocxStep(
     ok: false as const,
     failure: { code, message: `第 ${index + 1} 步：${message}`, stepIndex: index },
   });
+  if (step.paragraphOccurrence != null) {
+    if (!("paragraph" in step) || !step.paragraph) return bad("invalid_step", "按出现次序定位需要完整的段落原文");
+    const exact = paragraphs.filter(p => p.text === step.paragraph);
+    const target = exact[step.paragraphOccurrence - 1];
+    if (!target) return bad("missing_target", `未找到原文完全一致的第 ${step.paragraphOccurrence} 个段落`);
+    paragraphs = [target];
+  }
   switch (step.type) {
     case "replace_text": {
       if (!step.find) return bad("invalid_step", "find 不能为空");

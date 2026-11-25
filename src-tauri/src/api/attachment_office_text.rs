@@ -118,7 +118,7 @@ fn spreadsheet<R: Read + Seek>(parts: &mut Parts<R>, out: &mut String) -> Result
     Ok(())
 }
 
-pub(super) fn extract(reader: impl Read + Seek, kind: crate::db::conversation_db::AttachmentType) -> Result<String> {
+pub(crate) fn extract(reader: impl Read + Seek, kind: crate::db::conversation_db::AttachmentType) -> Result<String> {
     use crate::db::conversation_db::AttachmentType;
     let mut parts = Parts { archive: ZipArchive::new(reader)?, remaining: MAX_XML_BYTES };
     let mut out = String::new();

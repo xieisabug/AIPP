@@ -108,7 +108,7 @@ pub struct OfficePreviewPluginStatus {
     pub local_dev_available: bool,
     /// 已安装但版本低于宿主要求（查看器协议随宿主演进），需要重新下载新版。
     pub update_required: bool,
-    /// 已安装版本支持选区、编辑与 AI 修改（协议 2）。
+    /// 已安装版本支持鼠标位置加建议、编辑与 AI 修改（协议 3）。
     pub edit_supported: bool,
 }
 
@@ -220,7 +220,7 @@ pub fn validate_office_bytes(
 /// 提高此值，已安装的旧版会在下次预览时自动更新。
 pub const OFFICE_PLUGIN_REQUIRED_VERSION: &str = "0.1.1";
 /// 选区、手动编辑与 AI 修改需要的插件版本；只预览时不强制更新，用到这些功能时再更新。
-pub const OFFICE_PLUGIN_EDIT_VERSION: &str = "0.2.0";
+pub const OFFICE_PLUGIN_EDIT_VERSION: &str = "0.3.0";
 
 /// `a.b.c` 数值比较；无法解析的版本视为过旧。
 pub fn office_plugin_version_satisfies(installed: &str, required: &str) -> bool {
@@ -240,7 +240,7 @@ static OFFICE_PLUGIN_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::
 
 /// 官方插件目录不可用时的兜底下载地址（插件发布到 GitHub Releases，避开 Cloudflare 单文件上限）。
 const OFFICE_PLUGIN_FALLBACK_URL: &str =
-    "https://github.com/xieisabug/AIPP/releases/download/plugin-office-preview-plugin-v0.2.0/office-preview-plugin-0.2.0.aipp-plugin.zip";
+    "https://github.com/xieisabug/AIPP/releases/download/plugin-office-preview-plugin-v0.3.0/office-preview-plugin-0.3.0.aipp-plugin.zip";
 
 /// 插件运行时需要的文件；本地开发安装只复制这些，不带 node_modules / 源码。
 const OFFICE_PLUGIN_RUNTIME_ENTRIES: &[&str] = &["plugin.json", "dist", "assets"];
