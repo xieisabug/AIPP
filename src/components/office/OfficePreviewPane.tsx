@@ -23,6 +23,7 @@ import {
     OFFICE_PREVIEW_PLUGIN_CODE,
     officeFormatLabel,
     type OfficeFilePayload,
+    type OfficeExtension,
     type OfficePreviewSource,
     type ParsedOfficePreviewError,
     parseOfficeFileResponse,
@@ -55,6 +56,7 @@ export interface OfficeLoadedFile {
 
 export interface OfficePreviewPaneProps {
     title: string;
+    extension?: OfficeExtension | null;
     source: OfficePreviewSource;
     className?: string;
     heightClassName?: string;
@@ -102,6 +104,7 @@ function formatMiB(bytes?: number | null): string {
 
 export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePreviewPaneProps>(function OfficePreviewPane({
     title,
+    extension,
     source,
     className = "",
     heightClassName = "h-[68vh]",
@@ -115,8 +118,8 @@ export const OfficePreviewPane = forwardRef<OfficePreviewPaneHandle, OfficePrevi
 }, ref) {
     const isMobilePlatform = useIsMobilePlatform();
     const ext = useMemo(
-        () => detectOfficeExtension(title) ?? detectOfficeExtension(source.localPath),
-        [title, source.localPath],
+        () => extension ?? detectOfficeExtension(title) ?? detectOfficeExtension(source.localPath),
+        [extension, title, source.localPath],
     );
     const isLegacy = isLegacyOfficeExtension(ext);
 

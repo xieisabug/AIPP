@@ -17,7 +17,6 @@ import {
 import {
     detectOfficeExtension,
     extractPreviewRelayToken,
-    isOfficeFileName,
     openOfficePreviewModal,
 } from "@/utils/officeFile";
 import OfficePreviewPane, { OfficeFormatIcon } from "@/components/office/OfficePreviewPane";
@@ -471,15 +470,10 @@ export function AskUserQuestionCard({
     );
 }
 
-const isOfficePreviewFile = (file: PreviewFileItem): boolean => {
-    const t = file.type?.toLowerCase();
-    return (
-        t === "docx" ||
-        t === "xlsx" ||
-        t === "pptx" ||
-        isOfficeFileName(file.title) ||
-        isOfficeFileName(file.url)
-    );
+const previewOfficeExtension = (file: PreviewFileItem) => {
+    const type = file.type?.toLowerCase();
+    if (type === "docx" || type === "xlsx" || type === "pptx") return type;
+    return detectOfficeExtension(file.title) ?? detectOfficeExtension(file.url);
 };
 
 const getOfficeSourceFromPreviewFile = (file: PreviewFileItem) => {
@@ -584,10 +578,12 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
         </div>;
     }
 
-    if (isOfficePreviewFile(file)) {
+    const extension = previewOfficeExtension(file);
+    if (extension) {
         return (
             <OfficePreviewPane
                 title={file.title}
+                extension={extension}
                 source={getOfficeSourceFromPreviewFile(file)}
                 heightClassName="h-[60vh]"
             />
@@ -601,16 +597,17 @@ const FileDescription: React.FC<{ text?: string }> = ({ text }) =>
     text ? <div className="px-3 pt-2 text-xs leading-5 text-muted-foreground">{text}</div> : null;
 
 function FileWindowPreviewButton({ file, conversationId }: { file: PreviewFileItem; conversationId?: number }) {
-    const office = file.type !== "html" && isOfficePreviewFile(file);
-    if (!office && file.type !== "html") return null;
+    const extension = file.type === "html" ? null : previewOfficeExtension(file);
+    if (!extension && file.type !== "html") return null;
     const button = (
         <Button
             type="button"
             variant="ghost"
             size="sm"
             className="h-6 gap-1 px-2 text-xs has-[>svg]:px-2"
-            onClick={office ? () => openOfficePreviewModal({
+            onClick={extension ? () => openOfficePreviewModal({
                 title: file.title,
+                extension,
                 source: getOfficeSourceFromPreviewFile(file),
                 conversationId: conversationId ?? null,
             }) : undefined}
@@ -619,7 +616,7 @@ function FileWindowPreviewButton({ file, conversationId }: { file: PreviewFileIt
             窗口预览
         </Button>
     );
-    if (office) return button;
+    if (extension) return button;
     const url = file.url?.trim();
     if (!file.content?.trim() && (!url || url === "about:blank")) return null;
     return (

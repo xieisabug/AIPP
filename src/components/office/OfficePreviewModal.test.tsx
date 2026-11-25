@@ -33,6 +33,8 @@ vi.mock("./OfficePreviewPane", () => {
 });
 
 import OfficePreviewModal from "./OfficePreviewModal";
+import { PreviewFileCard } from "../InlineInteractionCards";
+vi.mock("@/components/UnifiedMarkdown", () => ({ default: () => null }));
 import { openOfficePreviewModal } from "@/utils/officeFile";
 import {
     __resetOfficeSelectionReceiversForTests,
@@ -87,6 +89,23 @@ describe("OfficePreviewModal", () => {
         const prompt = send.mock.calls[0][0] as string;
         expect(prompt.startsWith("改得更正式\n\n<officeselection refid=\"ofr_aaaaaaaaaaaaaaaa\"")).toBe(true);
         await waitFor(() => expect(screen.queryByTestId("fake-pane")).toBeNull());
+    });
+
+    it("should offer AI edits when a Word file card opens a preview with a descriptive title", async () => {
+        registerOfficeSelectionReceiver({ conversationId: 7, label: "总管家", send: vi.fn() });
+        const file = { title: "分析报告", type: "docx", url: "aipp-preview://localhost/report-token" };
+        render(<>
+            <PreviewFileCard request={{ request_id: "report", conversation_id: 7, files: [file] }} isOpen />
+            <OfficePreviewModal />
+        </>);
+        fireEvent.click(screen.getByRole("button", { name: "窗口预览" }));
+        expect(await screen.findByTestId("office-mode-badge")).toHaveTextContent("只读预览");
+        expect(paneControl.props?.extension).toBe("docx");
+        expect(screen.getByTestId("office-enter-edit")).toBeVisible();
+        act(() => paneControl.props!.onSelectionChange(selection));
+        fireEvent.click(await screen.findByTestId("office-ask-ai"));
+        expect(screen.getByTestId("office-ai-panel")).toHaveTextContent("发送到：总管家");
+        expect(screen.getByTestId("office-ai-target")).toHaveTextContent(selection.selectedText);
     });
 
     it("should refuse a stale selection and offer to reload instead of sending", async () => {

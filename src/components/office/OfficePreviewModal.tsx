@@ -118,7 +118,7 @@ export const OfficePreviewModal: React.FC = () => {
         () => (target ? findOfficeSelectionReceiver(target.conversationId) : null),
     );
 
-    const ext = target?.extension ?? detectOfficeExtension(target?.title) ?? detectOfficeExtension(target?.source.localPath);
+    const ext = loadedFile?.format ?? target?.extension ?? detectOfficeExtension(target?.title) ?? detectOfficeExtension(target?.source.localPath);
     const editable = isModernOfficeExtension(ext);
     const canAskAi = Boolean(receiver) && editable && mode === "view";
     const supportsEdit = protocol >= VIEWER_EDIT_PROTOCOL;
@@ -219,7 +219,6 @@ export const OfficePreviewModal: React.FC = () => {
     const sourceKey = target ? officeSourceKey(target.source) : "";
     const location = selection ? describeSelectionLocation(selection) : "";
     const showSelectionBar = canAskAi && supportsEdit && hasSelectionContent(selection) && !aiOpen;
-    const paneHeight = aiOpen || showSelectionBar ? "h-[64vh]" : "h-[78vh]";
 
     const header = useMemo(() => (mode === "edit" ? "编辑中 · 保存为副本" : "只读预览"), [mode]);
 
@@ -227,7 +226,7 @@ export const OfficePreviewModal: React.FC = () => {
         <>
             <Dialog open={Boolean(target)} onOpenChange={(open) => !open && guardDirty(close)}>
                 <DialogContent className="flex max-h-[92vh] w-[95vw] max-w-5xl sm:max-w-5xl flex-col gap-0 overflow-hidden p-0">
-                    <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-2 border-b border-border/60 px-4 py-3 pr-12 text-left">
+                    <DialogHeader className="flex shrink-0 flex-row flex-wrap items-center justify-between gap-2 border-b border-border/60 px-4 py-3 pr-12 text-left">
                         <div className="flex min-w-0 flex-1 items-center gap-2">
                             <OfficeFormatIcon ext={ext} className="h-4 w-4 shrink-0 text-muted-foreground" />
                             <DialogTitle className="truncate text-sm font-medium">
@@ -278,99 +277,102 @@ export const OfficePreviewModal: React.FC = () => {
                             </Button>
                         </div>
                     </DialogHeader>
-                    {target && (
-                        <OfficePreviewPane
-                            key={`${sourceKey}#${paneKey}`}
-                            ref={paneRef}
-                            title={target.title}
-                            source={target.source}
-                            heightClassName={paneHeight}
-                            mode={mode}
-                            requireEdit={Boolean(receiver) || mode === "edit"}
-                            onSelectionChange={setSelection}
-                            onDirtyChange={setDirty}
-                            onFileLoaded={setLoadedFile}
-                            onViewerProtocol={setProtocol}
-                            onSaveShortcut={() => void handleSaveCopy()}
-                        />
-                    )}
-
-                    {showSelectionBar && selection && (
-                        <div className="flex items-center gap-3 border-t border-border/60 px-4 py-2.5" data-testid="office-selection-bar">
-                            <div className="min-w-0 flex-1">
-                                <div className="truncate text-xs font-medium text-foreground">已选：{location}</div>
-                                <div className="truncate text-xs text-muted-foreground">{selectionExcerpt(selection) || "（没有文字）"}</div>
-                            </div>
-                            <Button type="button" size="sm" className="h-8 shrink-0 gap-1.5 text-xs" onClick={() => setAiOpen(true)} data-testid="office-ask-ai">
-                                <Sparkles className="h-3.5 w-3.5" />
-                                让 AI 修改
-                            </Button>
-                        </div>
-                    )}
-
-                    {aiOpen && selection && receiver && (
-                        <div className="space-y-2.5 border-t border-border/60 px-4 py-3" data-testid="office-ai-panel">
-                            <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0 space-y-0.5">
-                                    <div className="truncate text-xs font-medium text-foreground">
-                                        {loadedFile?.fileName ?? target?.title} · {location}
-                                    </div>
-                                    <div className="text-xs text-muted-foreground">
-                                        发送到：{receiver.label}。助手修改后会另存为新文件，原文件不会被改动。
-                                    </div>
-                                </div>
-                                <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => setAiOpen(false)} aria-label="取消">
-                                    <X className="h-3.5 w-3.5" />
-                                </Button>
-                            </div>
-                            <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-muted/30 px-2.5 py-1.5 font-sans text-xs text-muted-foreground" data-testid="office-ai-target">
-                                {selectionPreviewText(selection)}
-                            </pre>
-                            <Textarea
-                                autoFocus
-                                value={aiRequest}
-                                onChange={(e) => setAiRequest(e.target.value)}
-                                onKeyDown={(e) => {
-                                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                                        e.preventDefault();
-                                        void handleSendToAi();
-                                    }
-                                }}
-                                placeholder="写下修改要求，例如：改得更正式，控制在 50 字以内"
-                                className="min-h-[64px] text-sm"
-                                data-testid="office-ai-request"
+                    <div className="flex h-[78vh] min-h-0 flex-col">
+                        {target && (
+                            <OfficePreviewPane
+                                key={`${sourceKey}#${paneKey}`}
+                                ref={paneRef}
+                                title={target.title}
+                                extension={target.extension}
+                                source={target.source}
+                                heightClassName="min-h-0 flex-1"
+                                mode={mode}
+                                requireEdit={Boolean(receiver) || mode === "edit"}
+                                onSelectionChange={setSelection}
+                                onDirtyChange={setDirty}
+                                onFileLoaded={setLoadedFile}
+                                onViewerProtocol={setProtocol}
+                                onSaveShortcut={() => void handleSaveCopy()}
                             />
-                            {aiError && (
-                                <div className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs" data-testid="office-ai-error">
-                                    <span className="min-w-0 break-words text-muted-foreground">
-                                        <span className="font-medium text-foreground">{aiError.title}：</span>
-                                        {aiError.message}
-                                    </span>
-                                    {aiError.stale && (
-                                        <Button type="button" variant="outline" size="sm" className="h-7 shrink-0 text-xs" onClick={reloadAfterExternalChange}>
-                                            重新加载
-                                        </Button>
-                                    )}
+                        )}
+
+                        {showSelectionBar && selection && (
+                            <div className="flex shrink-0 items-center gap-3 border-t border-border/60 px-4 py-2.5" data-testid="office-selection-bar">
+                                <div className="min-w-0 flex-1">
+                                    <div className="truncate text-xs font-medium text-foreground">已选：{location}</div>
+                                    <div className="truncate text-xs text-muted-foreground">{selectionExcerpt(selection) || "（没有文字）"}</div>
                                 </div>
-                            )}
-                            <div className="flex justify-end gap-2">
-                                <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setAiOpen(false)}>
-                                    取消
-                                </Button>
-                                <Button
-                                    type="button"
-                                    size="sm"
-                                    className="h-8 gap-1.5 text-xs"
-                                    disabled={sending || !aiRequest.trim() || !loadedFile}
-                                    onClick={() => void handleSendToAi()}
-                                    data-testid="office-ai-send"
-                                >
-                                    {sending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                                    发送给助手
+                                <Button type="button" size="sm" className="h-8 shrink-0 gap-1.5 text-xs" onClick={() => setAiOpen(true)} data-testid="office-ask-ai">
+                                    <Sparkles className="h-3.5 w-3.5" />
+                                    让 AI 修改
                                 </Button>
                             </div>
-                        </div>
-                    )}
+                        )}
+
+                        {aiOpen && selection && receiver && (
+                            <div className="max-h-[65%] shrink-0 space-y-2.5 overflow-y-auto border-t border-border/60 px-4 py-3" data-testid="office-ai-panel">
+                                <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 space-y-0.5">
+                                        <div className="truncate text-xs font-medium text-foreground">
+                                            {loadedFile?.fileName ?? target?.title} · {location}
+                                        </div>
+                                        <div className="text-xs text-muted-foreground">
+                                            发送到：{receiver.label}。助手修改后会另存为新文件，原文件不会被改动。
+                                        </div>
+                                    </div>
+                                    <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => setAiOpen(false)} aria-label="取消">
+                                        <X className="h-3.5 w-3.5" />
+                                    </Button>
+                                </div>
+                                <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-muted/30 px-2.5 py-1.5 font-sans text-xs text-muted-foreground" data-testid="office-ai-target">
+                                    {selectionPreviewText(selection)}
+                                </pre>
+                                <Textarea
+                                    autoFocus
+                                    value={aiRequest}
+                                    onChange={(e) => setAiRequest(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                                            e.preventDefault();
+                                            void handleSendToAi();
+                                        }
+                                    }}
+                                    placeholder="写下修改要求，例如：改得更正式，控制在 50 字以内"
+                                    className="min-h-[64px] text-sm"
+                                    data-testid="office-ai-request"
+                                />
+                                {aiError && (
+                                    <div className="flex items-center justify-between gap-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs" data-testid="office-ai-error">
+                                        <span className="min-w-0 break-words text-muted-foreground">
+                                            <span className="font-medium text-foreground">{aiError.title}：</span>
+                                            {aiError.message}
+                                        </span>
+                                        {aiError.stale && (
+                                            <Button type="button" variant="outline" size="sm" className="h-7 shrink-0 text-xs" onClick={reloadAfterExternalChange}>
+                                                重新加载
+                                            </Button>
+                                        )}
+                                    </div>
+                                )}
+                                <div className="flex justify-end gap-2">
+                                    <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setAiOpen(false)}>
+                                        取消
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        className="h-8 gap-1.5 text-xs"
+                                        disabled={sending || !aiRequest.trim() || !loadedFile}
+                                        onClick={() => void handleSendToAi()}
+                                        data-testid="office-ai-send"
+                                    >
+                                        {sending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                        发送给助手
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </DialogContent>
             </Dialog>
 
