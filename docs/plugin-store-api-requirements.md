@@ -122,9 +122,18 @@ GET /api/plugins
 
 ### 发布流程
 
+标签只触发 `.github/workflows/package-official-plugins.yml`，不触发应用发版（`release.yml` 只认 `vX.Y.Z`）：
+
+| 标签 | 例子 | 打包范围 |
+|---|---|---|
+| `plugins-vX.Y.Z` | `plugins-v0.2.0` | `plugin/` 下除 Office 预览外的全部插件 |
+| `plugin-<code>-vX.Y.Z` | `plugin-office-preview-plugin-v0.2.0` | 只打这一个插件 |
+
+CI 会建同名 GitHub Release，附带 `<code>-<version>.aipp-plugin.zip`、`official-plugins.json`（含 sha256、previewImages）与预览图。`plugins-v` 后面的号是**批次号**，与各插件自己的版本无关：zip 文件名和客户端判断「可更新」都看 `plugin.json` 的 `version`，没升版本的插件即使重新打包，客户端也不会提示更新。标签推上去不等于发布完成，要完成第 3 步，客户端才会看到新目录。
+
 1. 改 `plugin/<code>/`，提升 `version`；依赖新宿主能力时同时提高 `minAippVersion`。
-2. 推 `plugins-vX.Y.Z` 标签，CI（Package official plugins）打包除 Office 预览外的全部插件，Release 里附带 zip、`official-plugins.json` 与预览图。Office 预览走自己的 `plugin-office-preview-plugin-v*` 标签。
-3. 在 AIPP-helper 执行 `node scripts/sync-plugin-release.mjs plugins-vX.Y.Z`，把 `official-plugins.json` 原样写入 `src/worker/data/official-plugins.json`、预览图写入 `public/plugin-previews/`；跑 `node --test tests/plugins.test.mjs` 后部署。
+2. 推 `plugins-vX.Y.Z` 标签（批次号比上一批大），等 Package official plugins 成功。Office 预览走自己的 `plugin-office-preview-plugin-vX.Y.Z` 标签。
+3. 在 AIPP-helper 执行 `node scripts/sync-plugin-release.mjs plugins-vX.Y.Z`，把 `official-plugins.json` 原样写入 `src/worker/data/official-plugins.json`、预览图写入 `public/plugin-previews/`；跑 `node --test tests/plugins.test.mjs` 后提交并 `npm run deploy`。单插件标签发布时，在 `src/worker/data/plugins.ts` 手工加条目（参考 Office 预览）。
 
 ## 3. source 格式
 
