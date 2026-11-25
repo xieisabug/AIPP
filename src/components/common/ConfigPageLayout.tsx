@@ -178,7 +178,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
         const selectedOption = selectOptions?.find(option => option.id === selectedOptionId);
 
         return (
-            <div className="flex-shrink-0 px-4 pt-6 pb-4">
+            <div className="config-page-top flex-shrink-0 px-4 pt-6 pb-4">
                 {showDropdownSearch && (
                     <div className="relative mb-3">
                         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -270,7 +270,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
 
             {/* 主要内容区域 */}
             {showEmptyState ? (
-                <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 py-6">
+                <div className="config-page-top flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 py-6">
                     {emptyState}
                 </div>
             ) : shouldShowDropdown ? (
@@ -281,7 +281,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                     </div>
                 </ConfigFooterLayout>
             ) : (
-                <div className="flex flex-1 min-h-0 gap-6 px-4 py-6 sm:px-6" data-aipp-slot="config-split">
+                <div className="config-page-top flex flex-1 min-h-0 gap-6 px-4 py-6 sm:px-6" data-aipp-slot="config-split">
                     {/* 左侧列表：固定宽度、占满高度，列表内部独立滚动（工具栏固定） */}
                     <div className="w-64 shrink-0 min-h-0 2xl:w-72" data-aipp-slot="config-list-pane">
                         {sidebar}

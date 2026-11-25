@@ -44,6 +44,17 @@ body {
     font-family: var(--font-sans);
 }
 
+/* Windows 宽屏设置页把顶部留白中的 16px 分给拖拽条。 */
+@scope ([data-aipp-slot="config-content-titlebar"] + *) to ([role="tabpanel"], [role="dialog"]) {
+    .config-page-top {
+        padding-top: calc(var(--spacing) * 6 - 16px);
+    }
+
+    .config-page-top-compact {
+        padding-top: calc(var(--spacing) * 5 - 16px);
+    }
+}
+
 .App {
     display: flex;
     justify-content: center;

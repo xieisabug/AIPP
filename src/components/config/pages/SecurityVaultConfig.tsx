@@ -91,7 +91,7 @@ export const SecurityVaultConfig: React.FC<SecurityVaultConfigProps> = ({
                 onValueChange={(next) => setTab(next as "vault" | "policies")}
                 className="flex min-h-0 flex-1 flex-col gap-0"
             >
-                <div className="shrink-0 border-b border-border px-4 pt-5 pb-3 sm:px-6">
+                <div className="config-page-top-compact shrink-0 border-b border-border px-4 pt-5 pb-3 sm:px-6">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                             <h2 className="text-xl font-semibold tracking-tight">安全与凭据</h2>

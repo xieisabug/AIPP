@@ -542,7 +542,7 @@ export const ButlerConfigCenter: React.FC<ButlerConfigCenterProps> = ({
 
     const bodyContent = (
         <Form {...form}>
-            <div className={embedded ? "flex h-full min-h-0 flex-col" : "w-full space-y-6 px-4 py-6 sm:px-6"}>
+            <div className={embedded ? "flex h-full min-h-0 flex-col" : "config-page-top w-full space-y-6 px-4 py-6 sm:px-6"}>
                 {embedded ? (
                     <div className="shrink-0 space-y-3 border-b border-border/60 px-5 pt-4 pb-3">
                         {headerBar}

@@ -110,11 +110,8 @@ const GROUP_ORDER: SettingsGroupId[] = ["core", "capabilities", "privacy", "syst
 
 const configPageFallback = <ConfigPageLoading />;
 
-/**
- * Windows 宽屏设置窗口的顶部：内容区只留一条窄拖拽条，窗口控制按钮（32px 高）中线在 20，
- * 下半部分落在页面自身的上内边距（py-6）里；页面内容顶边 = 拖拽条 + 24。
- */
-const WINDOWS_CONTENT_DRAG_HEIGHT = 24;
+/** Windows 宽屏设置页顶部 40px 可拖动，窗口按钮居中。 */
+const WINDOWS_CONTENT_DRAG_HEIGHT = 40;
 const WINDOWS_CONTROLS_CENTER_Y = 20;
 
 function ConfigWindow() {
