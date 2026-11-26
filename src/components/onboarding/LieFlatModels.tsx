@@ -17,15 +17,13 @@ interface Props {
 
 export function LieFlatModels({ source, footer, busy, run, onChecked }: Props) {
     const { provider, agent, agentCodes = [], codes, ranked } = source;
-    const [config, setConfig] = useState<Config>(() => ({
-        ...source.config,
-        review: provider.api_type === "deepseek" && codes.includes("deepseek-flash")
-            ? role(provider.id, "deepseek-flash") : source.config.review,
-    }));
+    const [config, setConfig] = useState<Config>(source.config);
+    const [separateReview, setSeparateReview] = useState(!!source.config.review &&
+        roleKey(source.config.review) !== roleKey(source.config.light));
 
     function recommend() {
         const keys = modelRoles.filter(key => key !== "chat" || !agent);
-        setConfig(current => selectRecommendedRoles(current, ranked, keys));
+        setConfig(current => selectRecommendedRoles(current, ranked, keys, !separateReview));
     }
 
     async function apply() {
@@ -69,8 +67,12 @@ export function LieFlatModels({ source, footer, busy, run, onChecked }: Props) {
                                 onChange={e => {
                                     const value = e.target.value;
                                     const selected = agent && agentCodes.find(code => roleKey(role(agent.id, code)) === value);
-                                    setConfig(selectAuxiliaryRole(config, key, selected && agent ? role(agent.id, selected)
-                                        : value ? role(provider.id, value) : null));
+                                    const model = selected && agent ? role(agent.id, selected) : value ? role(provider.id, value) : null;
+                                    const next = selectAuxiliaryRole(config, key, model);
+                                    if (key === "review") setSeparateReview(roleKey(model) !== roleKey(config.light));
+                                    if (key === "light" && !separateReview) {
+                                        setConfig(selectAuxiliaryRole(next, "review", selected ? null : model));
+                                    } else setConfig(next);
                                 }}>
                                 <option value="">不配置</option>
                                 {codes.map(code => <option key={code} value={code}>{code}</option>)}

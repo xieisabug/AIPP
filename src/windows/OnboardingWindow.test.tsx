@@ -35,8 +35,8 @@ const preset = {
     recommendation_catalog: {providers:{deepseek:{endpoints:["https://fixture.test"], models:{
         main:{model:"lab/main",input:2,output:2},small:{model:"lab/small",input:0.2,output:0.2},
     }}}, benchmarks:{
-        "lab/main":[{group:"reasoning",test:"reason",score:90},{group:"unsafeAllowance",test:"risk",score:30,lowerBetter:true}],
-        "lab/small":[{group:"reasoning",test:"reason",score:40},{group:"unsafeAllowance",test:"risk",score:3,lowerBetter:true}],
+        "lab/main":[{group:"agent",test:"arena:agent:fixture",score:90},{group:"factual",test:"arena:text_factuality:fixture",score:3}],
+        "lab/small":[{group:"agent",test:"arena:agent:fixture",score:40},{group:"factual",test:"arena:text_factuality:fixture",score:30}],
     }},
     model_ranking: { main: [], light: [] },
     strip_suffixes: [],
@@ -448,7 +448,7 @@ describe("first-run window", () => {
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
     });
-    it("躺平保留全部型号，审核默认 Flash，点击帮我选后使用角色评分", async () => {
+    it("躺平保留全部型号，审核默认跟随轻量", async () => {
         setup();
         const codes = ["small", "deepseek-flash", "main", "embedding-test"];
         mockInvokeHandler("preview_model_list", () => ({
@@ -460,7 +460,7 @@ describe("first-run window", () => {
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-        expect(await screen.findByLabelText("审核模型")).toHaveValue("deepseek-flash");
+        expect(await screen.findByLabelText("审核模型")).toHaveValue("");
         fireEvent.click(screen.getByRole("button", {name:"帮我选"}));
         expect(screen.getByLabelText("审核模型")).toHaveValue("small");
         fireEvent.click(screen.getByRole("button", {name:"应用"}));
@@ -703,8 +703,8 @@ describe("first-run window", () => {
             recommendation_catalog: {providers:{fixture:{endpoints:["https://fixture.test"],
                 models:Object.fromEntries(codes.map(code=>[code,{model:"lab/"+code,input:1,output:1}]))}},
                 benchmarks:Object.fromEntries(codes.map(code=>["lab/"+code,[
-                    {group:"reasoning",test:"general",score:code==="retired"?99:code==="main"?90:0},
-                    {group:"context",test:"summary",score:code==="mini"?95:0},
+                    {group:"agent",test:"arena:agent:fixture",score:code==="retired"?99:code==="main"?90:0},
+                    {group:"factual",test:"arena:text_factuality:fixture",score:code==="mini"?95:0},
                     {group:"safety",test:"review",score:code==="review"?91:0},
                 ]]))},
         }));
@@ -716,7 +716,7 @@ describe("first-run window", () => {
         mockInvokeHandler("apply_onboarding_config", args => {
             const config = args!.config as Config;
             const applied: OnboardingState = {
-                state: "completed", path: "expert", step: "applied", activeLight: "mini%%6", activeReview: "review%%6",
+                state: "completed", path: "expert", step: "applied", activeLight: "mini%%6", activeReview: "mini%%6",
                 draft: { providers: [], config }, workspacePath: "C:/AIPP", canOpen: true, workspaceLocked: false, rerun: false,
             };
             backend.configure(applied);
@@ -736,7 +736,7 @@ describe("first-run window", () => {
         await screen.findByRole("button", { name: "打开聊天" });
         expect(screen.queryByText(/选择依据/)).toBeNull();
         expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", { config: expect.objectContaining({
-            chat: {providerId:6,code:"main",verified:true}, light:{providerId:6,code:"mini",verified:true}, review:{providerId:6,code:"review",verified:true},
+            chat: {providerId:6,code:"main",verified:true}, light:{providerId:6,code:"mini",verified:true}, review:{providerId:6,code:"mini",verified:true},
         }) });
         fireEvent.click(screen.getByRole("button", { name: "换一个" }));
         expect(screen.queryByText(/选择依据/)).toBeNull();
@@ -745,7 +745,8 @@ describe("first-run window", () => {
         expect(screen.queryByText("选择依据 · 推荐表第 3 名")).toBeNull();
         fireEvent.click(screen.getByRole("button", { name: "应用" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("update_onboarding_roles", expect.objectContaining({
-            light: { providerId: 6, code: "manual", verified: true }, notes: { light: { reason: "手动选择" } },
+            light: { providerId: 6, code: "manual", verified: true }, review: { providerId: 6, code: "manual", verified: true },
+            notes: { light: { reason: "手动选择" }, review: { reason: "手动选择" } },
         })));
     });
     it("should apply a durable source_ready draft directly after restart", async () => {

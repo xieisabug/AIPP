@@ -44,11 +44,11 @@ interface Policy {
     costScale: number; // USD per million mixed tokens at which affordability is 0.5
 }
 const policies: Record<Role, Policy> = {
-    main: {groups: {general: 60, reasoning: 12, agent: 20, instruction: 5, chat: 3},
+    main: {groups: {agent: 20, chat: 3},
         inputShare: 0.80, qualityWeight: 0.90, costScale: 2},
-    light: {groups: {general: 20, instruction: 40, context: 20, factual: 20},
+    light: {groups: {factual: 1},
         inputShare: 0.95, qualityWeight: 0.40, costScale: 0.35},
-    review: {groups: {unsafeAllowance: 45, safety: 20, general: 15, reasoning: 5, instruction: 5, factual: 10},
+    review: {groups: {factual: 1},
         inputShare: 0.90, qualityWeight: 0.80, costScale: 1},
 };
 function endpointKey(raw?: string) {
@@ -62,70 +62,98 @@ function endpointKey(raw?: string) {
 interface Item { providerId: number; code: string; model?: string; offer?: Offer; }
 type Ranked = Candidate & { providerId: number; score: number; quality: number; cost: number; };
 
-function offersForSource(source: Source, preset: OnboardingPreset): Item[] {
-    const catalog = preset.recommendation_catalog;
+function officialOffers(catalog?: RecommendationCatalog) {
+    const official = new Map<string, Offer[]>();
+    for (const [id, provider] of Object.entries(catalog?.providers ?? {})) {
+        for (const offer of Object.values(provider.models)) {
+            if (!offer.model?.startsWith(id + "/")) continue;
+            const entries = official.get(offer.model) ?? [];
+            entries.push(offer);
+            official.set(offer.model, entries);
+        }
+    }
+    return official;
+}
+
+function offersForSource(source: Source, catalog: RecommendationCatalog | undefined, official: Map<string, Offer[]>): Item[] {
     const endpoint = endpointKey(source.endpoint);
     const locations = Object.entries(catalog?.providers ?? {}).map(([id, provider]) => ({
         id, provider, base: Boolean(endpoint && provider.endpoints.some(url => endpointKey(url) === endpoint)),
     }));
     return [...new Set(source.codes)].map(code => {
         const origins = new Set<string>();
-        const hits = locations.filter(({provider, base}) => {
+        const native: Offer[] = [];
+        const hits = locations.filter(({id, provider, base}) => {
             if (!Object.hasOwn(provider.models, code)) return false;
             const offer = provider.models[code];
             if (offer.model) origins.add(offer.model);
+            if (offer.model?.startsWith(id + "/")) native.push(offer);
             return base || Boolean(endpoint && endpointKey(offer.endpoint) === endpoint);
         });
-        // Identical model codes on different gateways can identify the underlying model,
-        // but only a unique endpoint+code match identifies the price this user pays.
-        const hit = hits.length === 1 ? hits[0] : undefined;
-        const offer = hit?.provider.models[code];
-        let model = offer?.model;
-        if (!model && catalog && (Object.hasOwn(catalog.benchmarks, code) || Object.hasOwn(catalog.identities ?? {}, code))) model = code;
-        if (!model && origins.size === 1) model = origins.values().next().value;
+        const exact = hits.length === 1 ? hits[0].provider.models[code] : undefined;
+        const direct = native.length === 1 ? native[0] : undefined;
+        let model = exact?.model ?? direct?.model;
+        if (!model && catalog && (Object.hasOwn(catalog.identities ?? {}, code) || Object.hasOwn(catalog.benchmarks, code)))
+            model = code;
+        if (!model && origins.size === 1) model = [...origins][0];
+        if (!model && origins.size > 1) {
+            // A rolling gateway alias may identify several releases. Only use a unique
+            // lab-listed release when every possible identity belongs to the same family.
+            const ids = [...origins];
+            const family = catalog?.identities?.[ids[0]]?.family;
+            const listed = ids.filter(id => official.has(id));
+            if (family && listed.length === 1 && ids.every(id => id.split("/")[0] === listed[0].split("/")[0] &&
+                catalog?.identities?.[id]?.family === family)) model = listed[0];
+        }
+        const references = official.get(model ?? "") ?? [];
+        const matching = direct?.model === model ? direct : undefined;
+        const lab = model?.split("/")[0];
+        const canonical = model && lab ? catalog?.providers[lab]?.models[model.slice(lab.length + 1)] : undefined;
+        const reference = matching ?? (canonical?.model === model ? canonical : undefined) ?? (references.every(row => row.input === references[0].input &&
+            row.output === references[0].output) ? references[0] : undefined);
+        const pricing = hasPrice(exact) ? exact : reference;
+        const offer = {...(exact ?? reference), input: pricing?.input, output: pricing?.output};
         return {providerId: source.id, code, model, offer};
     }).filter(item => item.offer?.chat !== false);
 }
 
 interface Observation { group: string; percentile: number }
-const indexPrefix = "aa:intelligence:";
+function hasPrice(offer?: Offer): offer is Offer & { input: number; output: number } {
+    return typeof offer?.input === "number" && Number.isFinite(offer.input) && offer.input >= 0 &&
+        typeof offer.output === "number" && Number.isFinite(offer.output) && offer.output >= 0;
+}
 
-// Normalize each test against the full snapshot, independent of the user's candidate list.
+// Compare against the full board at the same effort. Count each test once,
+// using the highest comparable published effort when several exist.
+const efforts = ["minimal", "low", "medium", "high", "xhigh", "max"];
 function calibratedEvidence(catalog: RecommendationCatalog | undefined, wanted: Set<string>) {
     const result = new Map<string, Observation[]>();
     const covered = new Set<string>();
     if (!catalog) return {models: result, covered};
     const boards = new Map<string, Map<string, Benchmark>>();
-    let latestIndex = "";
-    const versions = new Intl.Collator("en", {numeric: true});
-    const ids = new Set([...Object.keys(catalog.benchmarks), ...Object.keys(catalog.independent_benchmarks ?? {})]);
-    for (const id of ids) {
-        for (const row of [...(catalog.benchmarks[id] ?? []), ...(catalog.independent_benchmarks?.[id] ?? [])]) {
-            if (!Number.isFinite(row.score)) continue;
-            // The composite index measures the same tasks and units across efforts.
-            // Give each model one reference observation at its deployed default.
-            const composite = row.test.startsWith(indexPrefix);
-            if (composite && row.effort && row.effort !== catalog.identities?.[id]?.effort) continue;
-            const key = JSON.stringify([row.group, row.test, composite ? "" : row.effort ?? "", !!row.lowerBetter]);
-            const board = boards.get(key) ?? new Map<string, Benchmark>();
-            // If both records exist for a composite, prefer the verified default effort.
-            if (!composite || row.effort || !board.get(id)?.effort) board.set(id, row);
-            boards.set(key, board);
+    for (const data of [catalog.benchmarks, catalog.independent_benchmarks ?? {}]) {
+        for (const [id, rows] of Object.entries(data)) {
+            for (const row of rows) {
+                if (!row.test.startsWith("arena:") || !Number.isFinite(row.score)) continue;
+                const key = JSON.stringify([row.test, row.effort ?? ""]);
+                const board = boards.get(key) ?? new Map<string, Benchmark>();
+                board.set(id, row);
+                boards.set(key, board);
+            }
         }
     }
-    for (const board of boards.values()) {
-        const test = board.values().next().value!.test;
-        if (board.size >= 2 && test.startsWith(indexPrefix) && versions.compare(test, latestIndex) > 0) latestIndex = test;
-    }
-    for (const board of boards.values()) {
+    const used = new Map<string, Set<string>>();
+    const ordered = [...boards.values()].sort((a, b) =>
+        efforts.indexOf(b.values().next().value!.effort ?? "") - efforts.indexOf(a.values().next().value!.effort ?? ""));
+    for (const board of ordered) {
         if (board.size < 2) continue;
-        const first = board.values().next().value!;
-        const composite = first.test.startsWith(indexPrefix);
-        if (composite && first.test !== latestIndex) continue;
-        const group = composite ? "general" : first.group;
+        const {group, test} = board.values().next().value!;
         covered.add(group);
+        const seen = used.get(test) ?? new Set<string>();
+        used.set(test, seen);
         for (const [id, row] of board) {
-            if (!wanted.has(id) || (row.effort && row.effort !== catalog.identities?.[id]?.effort)) continue;
+            if (!wanted.has(id) || seen.has(id)) continue;
+            seen.add(id);
             let wins = 0;
             for (const [otherId, other] of board) {
                 if (otherId === id) continue;
@@ -173,10 +201,8 @@ function rankRole(items: Item[], role: Role, catalog: RecommendationCatalog | un
     const eligible = items.filter(item => role !== "main" || item.offer?.tools !== false);
     const qualityByModel = new Map<string, number>();
     const rows = eligible.map(item => {
-        const {input, output} = item.offer ?? {};
-        const priced = typeof input === "number" && Number.isFinite(input) && input >= 0 &&
-            typeof output === "number" && Number.isFinite(output) && output >= 0;
-        const cost = priced ? input * policy.inputShare + output * (1 - policy.inputShare) : Infinity;
+        const price = item.offer;
+        const cost = hasPrice(price) ? price.input * policy.inputShare + price.output * (1 - policy.inputShare) : Infinity;
         const id = item.model ?? "";
         const identity = catalog?.identities?.[id];
         const quality = qualityByModel.get(id) ?? roleQuality(evidence.models.get(id) ?? [], policy, evidence.covered);
@@ -193,7 +219,9 @@ function rankRole(items: Item[], role: Role, catalog: RecommendationCatalog | un
 
 /** All roles compare the same set of available offers across provider instances. */
 export function rankModels(sources: Source[], preset: OnboardingPreset) {
-    const items = sources.flatMap(source => offersForSource(source, preset));
+    const catalog = preset.recommendation_catalog;
+    const official = officialOffers(catalog);
+    const items = sources.flatMap(source => offersForSource(source, catalog, official));
     const evidence = calibratedEvidence(preset.recommendation_catalog, new Set(items.map(item => item.model ?? "")));
     return { main: rankRole(items, "main", preset.recommendation_catalog, evidence),
         light: rankRole(items, "light", preset.recommendation_catalog, evidence),

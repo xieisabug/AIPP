@@ -24,6 +24,21 @@ describe("onboarding role recommendation probes", () => {
         for (const role of ["chat","light","review"] as const)
             expect(expert[role].map(item => item.model.code).sort()).toEqual([...codes].sort());
     });
+    it("applies the same Arena and reference-price picks on both private gateway paths", async () => {
+        const codes = ["deepseek-v4.1-flash", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol", "kimi-k3.1-pro-highspeed"];
+        const provider = {id:35, name:"Relay", api_type:"openai_api", endpoint:"https://private.test/v1", is_enabled:true};
+        const preset = {...JSON.parse(packedPreset), recommendation_catalog:JSON.parse(packedCatalog)};
+        const models = codes.map((code, i) => ({id:i+1, code, name:code, llm_provider_id:provider.id, request_mode:"responses",
+            description:"", is_selected:true, vision_support:false, audio_support:false, video_support:false}));
+        const source = await prepareSource(provider, preset, deadline(), () => {}, {models});
+        if (!("ranked" in source)) throw new Error("model-selection step missing");
+        for (const ranked of [source.ranked, rankedRoles([provider], models, preset)]) {
+            const keys = ["chat","light","review"] as const;
+            const selected = selectRecommendedRoles(source.config, ranked, [...keys]);
+            expect(keys.map(key => selected[key]?.code)).toEqual(["gpt-6-astra","gpt-6-luna","gpt-6-luna"]);
+            expect(selectRecommendedRoles(source.config, ranked, [...keys], false).review?.code).toBe("kimi-k3.1-pro-highspeed");
+        }
+    });
     it("should still offer native light models when an optional API directory is unavailable", async () => {
         clearAllMockHandlers();
         invoke.mockClear();

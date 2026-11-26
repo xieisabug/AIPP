@@ -48,7 +48,7 @@ export function selectRecommended(config: Config, key: ModelRole, candidate: Rol
     return { ...next, notes: { ...next.notes, [key]: { reason: candidate.reason } } };
 }
 
-export function selectRecommendedRoles(config: Config, ranked: RankedRoles, keys: ModelRole[], followLight = false) {
+export function selectRecommendedRoles(config: Config, ranked: RankedRoles, keys: ModelRole[], followLight = true) {
     let next = config;
     for (const key of keys) {
         if (key === "review" && followLight && keys.includes("light")) continue;

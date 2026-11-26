@@ -56,7 +56,7 @@ fn official_preset(raw: &str) -> Result<Value, String> {
     if matches!(preset["revision"].as_str(), Some("2026-11-25.1" | "2026-11-26.1")) {
         return validate(PACKAGED);
     }
-    if preset["recommendation_catalog"]["scoring_version"].as_u64() != Some(2) {
+    if preset["recommendation_catalog"]["scoring_version"].as_u64() != Some(3) {
         let mut bundled: Value = serde_json::from_str(include_str!("recommendation-catalog.json"))
             .map_err(|e| format!("内置模型评分目录无效：{e}"))?;
         // Keep the current endpoint-specific offers when an older helper lacks the new scores.

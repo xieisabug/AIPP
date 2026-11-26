@@ -515,10 +515,7 @@ export default function OnboardingWindow() {
             if (!rec.chat.length && agent) {
                 defaults = selectRecommended(defaults, "chat", { model: roleOf(agent), reason: "本机已安装智能体" });
             }
-            for (const key of modelRoles) {
-                if (status?.rerun && key !== "chat") continue;
-                if (rec[key][0]) defaults = selectRecommended(defaults, key, rec[key][0]);
-            }
+            defaults = selectRecommendedRoles(defaults, rec, status?.rerun ? ["chat"] : [...modelRoles]);
             setConfig({
                 ...defaults,
                 workspacePath: status?.workspacePath,

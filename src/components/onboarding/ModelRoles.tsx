@@ -106,8 +106,7 @@ export function ModelRoles({
     function suggest(key?: ModelRole) {
         const requested = key ? [key] : modelRoles;
         const nativeChat = providers.some(p => p.id === config.chat.providerId && local(p.api_type));
-        if (!key) setSeparate(true);
-        onRecommend(requested.filter(k => !(k === "chat" && nativeChat)), !!key && !separate);
+        onRecommend(requested.filter(k => !(k === "chat" && nativeChat)), !separate);
     }
     const lightId = config.light?.providerId ?? (!config.clearLight && activeLight ? Number(activeLight.split("%%").pop()) : undefined);
     const localLight = providers.some(p => p.id === lightId && local(p.api_type));

@@ -39,6 +39,6 @@ fn test_legacy_scores_upgrade_preserves_live_offers() {
     data["recommendation_catalog"] = serde_json::json!({"benchmarks":{}, "providers":offers});
     let preset = official_preset(&data.to_string()).unwrap();
     assert_eq!(preset["recommendation_catalog"]["providers"], offers);
-    assert_eq!(preset["recommendation_catalog"]["scoring_version"], 2);
+    assert_eq!(preset["recommendation_catalog"]["scoring_version"], 3);
     assert!(preset["recommendation_catalog"]["independent_benchmarks"].is_object());
 }

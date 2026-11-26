@@ -18,9 +18,9 @@ export const preset: OnboardingPreset = {
 };
 const catalog = {
     benchmarks: {
-        "lab/a": [{group:"reasoning",test:"reason",score:95},{group:"context",test:"summary",score:70},{group:"safety",test:"guard",score:50}],
-        "lab/b": [{group:"reasoning",test:"reason",score:40},{group:"context",test:"summary",score:80},{group:"safety",test:"guard",score:70}],
-        "lab/c": [{group:"reasoning",test:"reason",score:60},{group:"context",test:"summary",score:60},{group:"safety",test:"guard",score:98}],
+        "lab/a": [{group:"agent",test:"arena:agent:fixture",score:95},{group:"factual",test:"arena:text_factuality:fixture",score:70},{group:"safety",test:"guard",score:50}],
+        "lab/b": [{group:"agent",test:"arena:agent:fixture",score:40},{group:"factual",test:"arena:text_factuality:fixture",score:80},{group:"safety",test:"guard",score:70}],
+        "lab/c": [{group:"agent",test:"arena:agent:fixture",score:60},{group:"factual",test:"arena:text_factuality:fixture",score:98},{group:"safety",test:"guard",score:98}],
     },
     providers: { direct: {endpoints:["https://direct.test"],models:{
         a:{model:"lab/a",input:1,output:1},b:{model:"lab/b",input:0.2,output:0.3},c:{model:"lab/c",input:1,output:2},
@@ -70,10 +70,10 @@ describe("catalog recommendations", () => {
     it("balances low prices and measured capability for light tasks", () => {
         const models = {tiny:{input:0.1,output:0.1}, better:{input:0.12,output:0.12}, costly:{input:4,output:4}};
         const data = {...preset, recommendation_catalog:{providers:{direct:{endpoints:["https://direct.test"],models}},
-            benchmarks:{better:[{group:"instruction",test:"i",score:55}],costly:[{group:"instruction",test:"i",score:98}]}}};
+            benchmarks:{better:[{group:"factual",test:"arena:text_factuality:fixture",score:55}],costly:[{group:"factual",test:"arena:text_factuality:fixture",score:98}]}}};
         const picks = recommendModels(Object.keys(models),"openai_api",data,"https://direct.test");
         expect(picks.light.map(row => row.code)).toEqual(["better","tiny","costly"]);
-        expect(picks.main[0].code).toBe("costly");
+        expect(picks.main[0].code).toBe("tiny");
         models.tiny.input = models.tiny.output = 0;
         expect(recommendModels(Object.keys(models),"openai_api",data,"https://direct.test").light[0].code).toBe("tiny");
     });
@@ -87,23 +87,20 @@ describe("catalog recommendations", () => {
         }
     });
 
-    it("uses only the deployed effort and the newest composite version", () => {
-        const aa = (effort: string, score: number, version = "5.0") => ({group:"reasoning",test:"aa:intelligence:"+version,effort,score});
-        const data = {...preset, recommendation_catalog: {
-            providers:catalog.providers, benchmarks:{}, identities:{"lab/a":{effort:"medium"},"lab/b":{effort:"high"}},
+    it("uses the highest comparable Arena effort per board and ignores other benchmarks", () => {
+        const row = (score: number, effort: string) => ({group:"agent", test:"arena:agent:fixture", score, effort});
+        const data = {...preset, recommendation_catalog: {providers:catalog.providers, benchmarks:{},
             independent_benchmarks:{
-                "lab/a":[aa("max",100),aa("medium",20),aa("medium",99,"4.9"),aa("medium",100,"5.1")],
-                "lab/b":[aa("high",75),aa("high",1,"4.9")],
+                "lab/a":[row(100,"max"),row(0,"medium"),{...row(0,"max"),test:"aa:intelligence:5"}],
+                "lab/b":[row(0,"max"),row(100,"medium"),{...row(100,"max"),test:"aa:intelligence:5"}],
             },
         }};
-        const rank = () => recommendModels(["a","b"],"openai_api",data,"https://direct.test").main;
-        expect(rank()[0].code).toBe("b");
-        data.recommendation_catalog.independent_benchmarks["lab/a"][1] = aa("medium",95);
-        expect(rank()[0].code).toBe("a");
+        const picks = recommendModels(["a","b"],"openai_api",data,"https://direct.test");
+        expect(picks.main.map(r => r.quality)).toEqual([2/3,1/3]);
     });
 
     it("treats overlapping Arena confidence intervals as a tie", () => {
-        const measurement = (score:number,low:number,high:number) => ({group:"agent",test:"Arena:Agent",score,low,high});
+        const measurement = (score:number,low:number,high:number) => ({group:"agent",test:"arena:agent:fixture",score,low,high});
         const data = {...preset,recommendation_catalog:{providers:catalog.providers,benchmarks:{
             "lab/a":[measurement(1300,1250,1350)],"lab/b":[measurement(1250,1200,1300)]}}};
         const rank = () => recommendModels(["a","b"],"openai_api",data,"https://direct.test").main;
@@ -125,12 +122,12 @@ describe("catalog recommendations", () => {
         const ranked = recommendModels(["a","b","c"],"openai_api",{...preset,recommendation_catalog:c},"https://direct.test").main;
         expect(ranked[0].score - ranked[1].score).toBeGreaterThan(ranked[1].score - ranked[2].score);
     });
-    it("prioritizes the lower false-allow rate over price and reasoning for tool review", () => {
-        const review = (score: number) => ({group:"unsafeAllowance",test:"false allow",lowerBetter:true,score});
-        const data = {...preset, recommendation_catalog:{...catalog, benchmarks:{
-            "lab/a":[review(1),{group:"reasoning",test:"R",score:30}],
-            "lab/b":[review(20),{group:"reasoning",test:"R",score:99}],
+    it("uses the lab's price on an unlisted gateway, including a known free price", () => {
+        const data = {...preset, recommendation_catalog:{...catalog, providers:{...catalog.providers,
+            lab:{endpoints:["https://lab.test"], models:{a:{model:"lab/a",input:0,output:0}}},
         }}};
-        expect(recommendModels(["b","a"],"openai_api",data,"https://direct.test").review[0].code).toBe("a");
+        const price = (endpoint:string) => recommendModels(["a"],"openai_api",data,endpoint).main[0].cost;
+        expect(price("https://private.test")).toBe(0);
+        expect(price("https://relay.test/v1")).toBeCloseTo(9.8);
     });
 });
