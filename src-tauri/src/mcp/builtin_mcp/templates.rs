@@ -1344,7 +1344,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "entry_file": {
                             "type": "string",
-                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: src/App.tsx）"
+                            "description": "Artifact 入口文件，相对 artifact_key 目录（例如: index.html 或 App.tsx）"
                         },
                         "language": {
                             "type": "string",
