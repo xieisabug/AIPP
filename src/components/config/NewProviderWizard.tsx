@@ -1,3 +1,4 @@
+import { checkAgent, loginAgent, type Provider } from "@/components/onboarding/onboardingService";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -96,6 +97,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     const [step, setStep] = useState<Step>(1);
     const [apiType, setApiType] = useState<ProviderApiTypeOption | null>(null);
     const [name, setName] = useState("");
+    const [agentError, setAgentError] = useState<{message: string; login?: Provider}>();
     const [nameError, setNameError] = useState<string | null>(null);
     const [endpoint, setEndpoint] = useState("");
     const [apiKey, setApiKey] = useState("");
@@ -200,6 +202,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             auto.endpoint = suggested;
         }
         setNameError(null);
+        setAgentError(undefined);
         setApiType(type);
         setStep(2);
         if (LOCAL_AGENT_DEFAULTS_READABLE.has(type.value) && !defaultsByType[type.value]) {
@@ -265,7 +268,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         if (type.kind === "http") await write("api_key", apiKey.trim());
         for (const key of LOCAL_SETTING_KEYS[type.value] ?? []) {
             const value = localValues[key]?.trim();
-            if (value) await write(key, value);
+            if (value || (embedded && key in localValues)) await write(key, value ?? "");
         }
         return id;
     }, [endpoint, apiKey, proxyConfigured, proxyEnabled, localValues, embedded]);
@@ -318,6 +321,18 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         setBusy(true);
         try {
             const id = await saveConnection(apiType, trimmedName);
+            if (embedded && apiType.kind === "local") {
+                setAgentError(undefined);
+                const provider = { id, api_type: apiType.value, name: trimmedName, is_enabled: false };
+                try {
+                    await checkAgent(provider);
+                } catch (error) {
+                    const message = error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
+                    const login = error && typeof error === "object" && "kind" in error && error.kind === "login" ? provider : undefined;
+                    setAgentError({ message, login });
+                    return;
+                }
+            }
             if (!isHttp || embedded === "lie_flat") {
                 await enableProvider(id, apiType, trimmedName);
                 return;
@@ -326,7 +341,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             const keep = new Set(models.filter((model) => model.is_selected).map((model) => model.code));
             void loadModels(id, keep);
         } catch (e) {
-            const detail = String(e);
+            const detail = e && typeof e === "object" && "message" in e ? String(e.message) : String(e);
             const safe = apiKey.trim() ? detail.split(apiKey.trim()).join("[已隐藏]") : detail;
             toast.error(`保存提供商失败: ${safe}`);
         } finally {
@@ -573,6 +588,25 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                             />
                         )}
 
+                        {embedded && apiType.kind === "local" && (
+                            <div className="space-y-2 text-xs text-muted-foreground">
+                                <p>完成时会检查本机配置并读取智能体的模型列表。</p>
+                                {agentError && <div role="alert" className="text-destructive">
+                                    {agentError.message}
+                                    {agentError.login && <Button type="button" size="sm" variant="link" disabled={busy}
+                                        onClick={async () => {
+                                            setBusy(true);
+                                            try {
+                                                await loginAgent(agentError.login!);
+                                                setAgentError(undefined);
+                                            } catch (error) {
+                                                setAgentError({ ...agentError, message: String(error) });
+                                            } finally { setBusy(false); }
+                                        }}>登录 {agentError.login.name}</Button>}
+                                </div>}
+                            </div>
+                        )}
+
                         <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
                             <CollapsibleTrigger asChild>
                                 <button type="button" className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
@@ -759,7 +793,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                         {step === 2 ? (
                             <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={busy} onClick={() => void submitConnection()}>
                                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                                {isHttp && embedded !== "lie_flat" ? "下一步" : "完成"}
+                                {busy && embedded && apiType?.kind === "local" ? "正在验证智能体…" : isHttp && embedded !== "lie_flat" ? "下一步" : "完成"}
                             </Button>
                         ) : (
                             <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={finishDisabled} onClick={() => void finish()}>

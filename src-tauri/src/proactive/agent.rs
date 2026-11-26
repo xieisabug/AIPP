@@ -46,45 +46,22 @@ pub(super) async fn chat_simple(
     let (code, provider) = resolve_llm_selection(app, selection).await?;
     let cfg = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
     let detail = LLMDatabase::new(app)?
-        .get_model_for_request(&provider, &code)
+        .get_light_model(&provider, &code)
         .with_context(|| format!("读取模型 {code} / {provider}"))?;
-    let proxy = ai::config::get_network_proxy_from_config(&cfg);
-    let configs = crate::api::copilot_token_manager::prepare_provider_configs(
-        app,
-        &detail.provider.api_type,
-        &detail.configs,
-        proxy.as_deref(),
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
-    let client = genai_client::create_client_with_config(
-        Some((app, session)),
-        &configs,
-        &code,
-        &detail.provider.api_type,
-        Some(&detail.model.request_mode),
-        proxy.as_deref(),
-        false,
-        Some(ai::config::get_request_timeout_from_config(&cfg)),
-        false,
-        &cfg,
-    )
-    .map_err(|e| anyhow!("创建模型客户端 {code} / {provider}: {e}"))?;
+    let client = ai::light_model::LightClient::new(app, Some(session), &detail, &cfg).await?;
     let request = build_chat_request_from_messages(
         &[("system".into(), system.into(), Vec::new()), ("user".into(), input.into(), Vec::new())],
         ToolCallStrategy::NonNative,
         None,
     )
     .chat_request;
-    let reply = client
-        .exec_chat(&code, request, None)
-        .await
-        .with_context(|| format!("主动整理会话 #{session} 模型 {code} / {provider}"))?;
-    record_usage(app, session, detail.model.id, &detail.model.name, &reply);
-    Ok(reply.first_text().context("模型没有返回正文")?.trim().to_owned())
+    let reply = client.complete(request).await.map_err(anyhow::Error::msg)?;
+    record_usage(app, session, detail.model.id, &detail.model.name, &reply.usage);
+    Ok(reply.text)
+
 }
 
-fn record_usage(app: &AppHandle, session: i64, model_id: i64, model_name: &str, response: &ChatResponse) {
+fn record_usage(app: &AppHandle, session: i64, model_id: i64, model_name: &str, usage: &genai::chat::Usage) {
     if let Ok(db) = ConversationDatabase::new(app) {
         crate::api::token_statistics_api::record_auxiliary_usage(
             &db,
@@ -93,7 +70,7 @@ fn record_usage(app: &AppHandle, session: i64, model_id: i64, model_name: &str, 
                 "butler_proactive",
                 Some(model_id),
                 model_name,
-                &response.usage,
+                usage,
             ),
         );
     }
@@ -149,7 +126,7 @@ struct UsageObserver<'a> {
 
 impl UnattendedLoopObserver for UsageObserver<'_> {
     fn on_response(&self, response: &ChatResponse) {
-        record_usage(self.app, self.session, self.model_id, &self.model_name, response);
+        record_usage(self.app, self.session, self.model_id, &self.model_name, &response.usage);
     }
 }
 

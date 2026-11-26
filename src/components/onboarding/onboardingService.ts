@@ -81,6 +81,7 @@ export interface ProbeResult {
     message: string;
     latency_ms?: number;
 }
+export const localLightWarning = "标题、摘要等后台任务会频繁调用轻量模型。本机智能体每次还会加载自身指令，可能额外消耗大量 token，建议优先选择低成本 API 模型。";
 export const local = isLocalAgentApiType;
 export const role = (providerId: number, code: string): Role => ({ providerId, code, verified: false });
 export const roleKey = (r?: Role | null) => (r ? `${r.code}%%${r.providerId}` : "");
@@ -110,9 +111,9 @@ export function explain(error: unknown, name = "服务商") {
     return text[kind] ?? (/decrypt|解密/i.test(detail(error)) ? "密码不对" : detail(error));
 }
 export function deadline() {
-    const end = Date.now() + 30_000;
+    let remaining = 30_000;
     return async function within<T>(work: () => Promise<T>): Promise<T> {
-        const remaining = end - Date.now();
+        const started = Date.now();
         const timeout = { kind: "timeout", message: "检查已超过 30 秒" };
         if (remaining <= 0) throw timeout;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -125,6 +126,7 @@ export function deadline() {
             ]);
         } finally {
             clearTimeout(timer);
+            remaining -= Math.max(0, Date.now() - started);
         }
     };
 }
@@ -175,7 +177,7 @@ export async function createAgentDraft(type: string, name: string, cli?: string)
     }
     return createDraft(name, type, settings);
 }
-export async function checkAgent(provider: Provider) {
+export async function checkAgent(provider: Provider, code?: string) {
     const providerId = provider.id;
     const settings = await providerSettings(providerId);
     if (
@@ -190,11 +192,10 @@ export async function checkAgent(provider: Provider) {
             providerId,
             settings,
         });
-        if (!env.tool.account?.signed_in) throw { kind: "login", providerId, message: "请先登录 Cursor" };
+        if (!env.tool.uses_api_key && !env.tool.account?.signed_in) throw { kind: "login", providerId, message: "请先登录 Cursor" };
     }
-    if (provider.api_type === "codex_app_server") {
-        await invoke("get_provider_quota", { providerId, force: true });
-    }
+    const model = code === "acp" || code === "__agent_default__" ? undefined : code;
+    return invoke<string[]>("check_onboarding_agent", { providerId, model });
 }
 export async function loginAgent(provider: Provider) {
     const onUrl = new Channel<string>();
@@ -244,18 +245,21 @@ export async function populateImported(provider: Provider, preset: OnboardingPre
             await invoke("add_llm_model", { llmProviderId: provider.id, code });
     if (!codes.length && !existing.length) throw new Error("未匹配到推荐模型，请在提供商详情中选择模型");
 }
-export function probeSession(within: Within, progress: (text: string) => void) {
+export function probeSession(within: Within, progress: (text: string) => void, providers: Provider[] = []) {
     const checked = new Map<string, Promise<ProbeResult>>();
     return async (r: Role) => {
         const key = roleKey(r);
         if (!checked.has(key)) {
-            progress(`正在测试 ${r.code}…`);
-            checked.set(
-                key,
-                within(() =>
+            const provider = providers.find(p => p.id === r.providerId);
+            if (provider && local(provider.api_type)) {
+                progress(`正在读取 ${provider.name} 的模型列表…`);
+                checked.set(key, checkAgent(provider, r.code).then(() => ({ ok: true, kind: "ok", message: "" })));
+            } else {
+                progress(`正在测试 ${r.code}…`);
+                checked.set(key, within(() =>
                     invoke<ProbeResult>("probe_chat_model", { providerId: r.providerId, modelCode: r.code })
-                )
-            );
+                ));
+            }
         }
         const result = await checked.get(key)!;
         if (!result.ok) {

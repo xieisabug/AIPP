@@ -1222,6 +1222,7 @@ pub fn run() {
             open_attachment_with_default_app,
             get_assistants,
             get_assistant,
+            onboarding::check_onboarding_agent,
             get_agent_model_options,
             api::ai::agent_driver::native_agents::auth::login_antigravity,
             api::ai::agent_driver::native_agents::auth::get_antigravity_login_status,

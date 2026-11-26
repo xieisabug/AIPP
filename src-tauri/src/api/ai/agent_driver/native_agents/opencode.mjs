@@ -11,7 +11,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
   if (!['default', 'ask', 'allow', 'deny'].includes(rule)) throw new Error(`Unsupported OpenCode permission: ${rule}`);
   const env = { ...process.env, OPENCODE_SERVER_PASSWORD: password };
   if (rule !== 'default') {
-    const inherited = JSON.parse(env.OPENCODE_PERMISSION || '{}');
+    const inherited = config.textOnly ? {} : JSON.parse(env.OPENCODE_PERMISSION || '{}');
     env.OPENCODE_PERMISSION = JSON.stringify({ '*': rule, ...(inherited && typeof inherited === 'object'
       ? Object.fromEntries(Object.entries(inherited).filter(([key]) => key !== '*')) : {}) });
   }
@@ -203,7 +203,7 @@ export async function openOpenCode(config, emit, dependencies = {}) {
         startTurn(id);
         await api(`/session/${session}/prompt_async`, 'POST', {
           ...(config.butlerInstructions ? { system: config.butlerInstructions } : {}),
-          ...(model ? { model: splitModel(model) } : {}), parts: [{ type: 'text', text },
+          ...(model ? { model: splitModel(model) } : {}), ...(config.textOnly ? { tools: { '*': false } } : {}), parts: [{ type: 'text', text },
             ...images.map(({ mimeType, data }) => ({ type: 'file', mime: mimeType, url: `data:${mimeType};base64,${data}` })),
             ...documents.map(path => ({ type: 'file', mime: 'application/pdf', filename: basename(path), url: pathToFileURL(path).href }))],
         });

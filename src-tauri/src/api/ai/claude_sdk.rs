@@ -262,6 +262,60 @@ pub(crate) async fn discover_claude_models(mut config: ClaudeSdkConfig, provider
     }).await
 }
 
+pub(super) async fn onboarding_models(config: &ClaudeSdkConfig, provider_id: i64) -> Result<Vec<(String, String)>, String> {
+    let cli = official_cli::for_session("claude", &config.cli_command, &config.env_vars).await?;
+    let mut command = Command::from(cli.command(&config.env_vars));
+    let output = command.args(["auth", "status", "--json"]).current_dir(&config.working_directory)
+        .stdin(Stdio::null()).kill_on_drop(true).output().await.map_err(|e| format!("Claude Code auth status：{e}"))?;
+    let account = serde_json::from_slice::<Value>(&output.stdout);
+    if account.as_ref().is_ok_and(|data| data["loggedIn"] == false) {
+        return Err("Claude Code 尚未登录，请先配置账号".into());
+    }
+    if !output.status.success() {
+        let diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
+        return Err(format!("Claude Code auth status（{}）：{}", output.status, diagnostics.sanitize(&String::from_utf8_lossy(&output.stderr))));
+    }
+    if account.map_err(|e| format!("Claude Code auth status 返回无效 JSON：{e}"))?["loggedIn"] != true {
+        return Err("Claude Code auth status 未返回登录状态".into());
+    }
+    discover_claude_models(config.clone(), provider_id).await?;
+    let mut config = config.clone();
+    config.model = None;
+    Ok(claude_model_choices(&config, provider_id, &[], false).into_iter().map(|m| (m.value, m.name)).collect())
+}
+
+pub(super) async fn light_text(mut config: ClaudeSdkConfig, prompt: &str) -> Result<super::light_model::Reply, String> {
+    let resolved = official_cli::for_session("claude", &config.cli_command, &config.env_vars).await?;
+    config.interactive_permissions = false;
+    config.permission_mode = Some("dontAsk".into());
+    let diagnostics = super::agent_driver::failure::AgentDiagnosticBuffer::for_environment(&config.env_vars);
+    let mut command = build_claude_command(&config, None, &resolved.path);
+    command.args(["--no-session-persistence", "--strict-mcp-config", "--tools", "", "--disable-slash-commands"]);
+    let mut child = command.spawn().map_err(|e| format!("启动 Claude Code 单轮请求失败：{e}"))?;
+    let frame = claude_user_input(prompt.to_owned(), Vec::new(), None).await?;
+    let mut stdin = child.stdin.take().ok_or("Claude Code stdin missing")?;
+    // Drain both output streams while writing long summaries.
+    let (written, output) = tokio::join!(async move {
+        stdin.write_all(format!("{frame}\n").as_bytes()).await
+    }, child.wait_with_output());
+    let output = output.map_err(|e| e.to_string())?;
+    let result = output.stdout.split(|b| *b == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok()).filter(|v| v["type"] == "result").last();
+    if !output.status.success() || result.as_ref().is_some_and(|v| v["is_error"] == true) {
+        return Err(diagnostics.sanitize(&format!("Claude Code {}：{} {}", output.status,
+            result.as_ref().and_then(|v| v["result"].as_str()).unwrap_or("缺少 result"),
+            String::from_utf8_lossy(&output.stderr))));
+    }
+    written.map_err(|e| e.to_string())?;
+    let result = result.ok_or("Claude Code 未返回 result")?;
+    let text = result["result"].as_str().ok_or("Claude Code result 缺少正文")?.to_owned();
+    let usage = result.get("usage").map(|value| {
+        let u = claude_usage_counts(value);
+        super::light_model::reported_usage(u.input, u.output, u.cache_read, u.cache_write, None)
+    }).unwrap_or_default();
+    Ok(super::light_model::Reply { text, usage })
+}
+
 fn reported_claude_models(frame: &Value) -> Option<ClaudeModels> {
     let reply = &frame["response"];
     if frame["type"] != "control_response" || reply["request_id"] != MODEL_CATALOG_REQUEST

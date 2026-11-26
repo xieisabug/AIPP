@@ -53,6 +53,11 @@ impl TurnUsage {
         }
     }
 
+    pub fn as_usage(&self) -> genai::chat::Usage {
+        crate::api::ai::light_model::reported_usage(self.input.into(), self.output.into(),
+            self.cached_read.map(i64::from), self.cached_write.map(i64::from), self.thought.map(i64::from))
+    }
+
     pub fn total(&self) -> i32 { self.input.saturating_add(self.output) }
 
     pub fn metadata(&self) -> Value {

@@ -134,3 +134,28 @@ export function readableResult(value) {
   if (Array.isArray(value.files)) return value.files.map(file => typeof file === 'string' ? file : file.path || JSON.stringify(file)).join('\n');
   return JSON.stringify(value);
 }
+
+// A background text request owns one fresh session until the driver's terminal event.
+export async function lightText(open, config, prompt) {
+  let succeed, fail, text = '';
+  const reports = [];
+  const done = new Promise((resolve, reject) => { succeed = resolve; fail = reject; });
+  const event = frame => {
+    if (frame.type === 'fatal' || frame.type === 'permission' || frame.type === 'question')
+      fail(new Error(frame.error || `轻量模型请求了交互操作 ${frame.type}`));
+    if (frame.turn !== 'light') return;
+    if (frame.type === 'usage') reports.push(frame.usage);
+    if (frame.type === 'text') text += frame.text;
+    if (frame.type === 'done') {
+      if (frame.error || frame.cancelled) fail(new Error(frame.error || '轻量模型调用已取消'));
+      else succeed({ text: frame.final_text ?? text, reports });
+    }
+  };
+  // Some drivers report startup failures through both the callback and open().
+  done.catch(() => {});
+  const runtime = await open({ ...config, textOnly: true, pi_approval: 'all', kiro_autopilot: 'off',
+    antigravity_mode: 'plan', opencode_permission: 'deny', cursor_auto_review: 'off' }, event);
+  try {
+    return await Promise.race([done, Promise.resolve(runtime.prompt(prompt, 'light')).then(() => done)]);
+  } finally { await runtime.close(); }
+}

@@ -99,6 +99,7 @@ function setup() {
             ? { ok: false, kind: "rate_limited", message: "429" }
             : { ok: true, kind: "ok", message: "" }
     );
+    mockInvokeHandler("check_onboarding_agent", () => ["agent-small", "agent-large"]);
     mockInvokeHandler("read_local_agent_defaults", () => ({ settings: {} }));
     mockInvokeHandler("get_provider_quota", () => ({ windows: [] }));
     mockInvokeHandler("apply_onboarding_config", (args) => {
@@ -471,11 +472,16 @@ describe("first-run window", () => {
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.click(await screen.findByRole("button", { name: name + " · 已安装" }));
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        fireEvent.change(await screen.findByLabelText("轻量模型"), { target: { value: "agent-small%%44" } });
+        expect(screen.getByText(/额外消耗大量 token/)).toBeVisible();
+        expect(screen.queryByLabelText("审核模型")).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", {
             config: expect.objectContaining({
                 chat: { providerId: 44, code, verified: true },
                 butler: { providerId: 44, code, verified: true },
+                light: { providerId: 44, code: "agent-small", verified: true },
             }),
         });
         expect(invoke.mock.calls.some(([c]) => c === "probe_chat_model")).toBe(false);
@@ -494,10 +500,26 @@ describe("first-run window", () => {
         fireEvent.click(await screen.findByRole("button", { name: "Cursor · 已安装" }));
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
         fireEvent.click(await screen.findByRole("button", { name: "登录 Cursor" }));
+        fireEvent.click(await screen.findByRole("button", { name: "应用" }));
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke).toHaveBeenCalledWith("login_cursor", expect.objectContaining({ providerId: 44 }));
         expect(invoke.mock.calls.filter(([c]) => c === "add_llm_provider")).toHaveLength(1);
         expect(invoke.mock.calls.filter(([c]) => c === "detect_native_agent_environment")).toHaveLength(2);
+    });
+    it("should keep an unconfigured agent out of onboarding until its model check succeeds", async () => {
+        setup();
+        mockInvokeHandler("check_onboarding_agent", () => { throw new Error("Claude Code 未登录"); });
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: "Claude Code · 已安装" }));
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        expect((await screen.findAllByText(/Claude Code 未登录/)).length).toBeGreaterThan(0);
+        expect(screen.queryByLabelText("轻量模型")).toBeNull();
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "apply_onboarding_config")).toBe(false);
+        mockInvokeHandler("check_onboarding_agent", () => ["actual-cli-model"]);
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        expect(await screen.findByRole("option", {name: "actual-cli-model"})).toBeInTheDocument();
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "add_llm_provider")).toHaveLength(1);
     });
     it("should keep the chosen local chat assistant and independent API roles when entering expert chat", async () => {
         setup();

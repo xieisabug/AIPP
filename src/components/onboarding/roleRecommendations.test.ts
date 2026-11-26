@@ -24,6 +24,18 @@ describe("onboarding role recommendation probes", () => {
         for (const role of ["chat","light","review"] as const)
             expect(expert[role].map(item => item.model.code).sort()).toEqual([...codes].sort());
     });
+    it("should still offer native light models when an optional API directory is unavailable", async () => {
+        clearAllMockHandlers();
+        invoke.mockClear();
+        const api = { id: 12, name: "API", api_type: "openai_api", is_enabled: false };
+        const agent = { id: 13, name: "Codex", api_type: "codex_app_server", is_enabled: false };
+        mockInvokeHandler("get_llm_provider_config", () => []);
+        mockInvokeHandler("check_onboarding_agent", () => ["local-small"]);
+        mockInvokeHandler("preview_model_list", () => { throw new Error("模型目录不可用"); });
+        const source = await prepareSource(api, JSON.parse(packedPreset), deadline(), () => {}, { agent });
+        expect(source).toMatchObject({ agentCodes: ["local-small"], codes: [], config: { chat: { providerId: 13, verified: true } } });
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
+    });
     it("should compare offers across enabled sources even when no candidate has a benchmark", () => {
         const providers = ["first", "second"].map((name, index) => ({
             id: index + 1, name, api_type: "openai_api", is_enabled: true, endpoint: "https://"+name+".test",
@@ -74,7 +86,7 @@ describe("onboarding role recommendation probes", () => {
             expect(selection.chat.code).toBe("a");
             expect(invoke).not.toHaveBeenCalled();
             const providers = [{ id: 12, api_type: "ollama", name: "Ollama", is_enabled: true }];
-            const checked = await checkSelected(selection, providers, () => false, () => {}, undefined, picks);
+            const checked = await checkSelected(selection, providers, () => {}, undefined, picks);
             expect(checked.config.chat.code).toBe("b");
             expect(checked.notes.chat?.reason).toBe("推荐表第 2 名");
             expect(checked.notes.review?.error).toBeTruthy();
@@ -90,11 +102,11 @@ describe("onboarding role recommendation probes", () => {
         const providers = [{ id: 12, api_type: "ollama", name: "Ollama", is_enabled: true }];
         const choices = { chat: ranked, light: [] as RoleCandidate[], review: [] as RoleCandidate[] };
         const config: Config = { chat: ranked[0].model, notes: { chat: { reason: ranked[0].reason } }, home: "chat_ui", extras: [] };
-        const checked = await checkSelected(config, providers, () => false, () => {}, undefined, choices);
+        const checked = await checkSelected(config, providers, () => {}, undefined, choices);
         expect(checked.config.chat.code).toBe("b");
         expect(checked.notes.chat?.reason).toBe("推荐表第 2 名");
         invoke.mockClear();
-        await expect(checkSelected({ ...config, notes: { chat: { reason: "手动选择" } } }, providers, () => false, () => {}, undefined, choices)).rejects.toMatchObject(missing);
+        await expect(checkSelected({ ...config, notes: { chat: { reason: "手动选择" } } }, providers, () => {}, undefined, choices)).rejects.toMatchObject(missing);
         expect(invoke.mock.calls.map(([, args]) => args?.modelCode)).toEqual(["a"]);
     });
 });

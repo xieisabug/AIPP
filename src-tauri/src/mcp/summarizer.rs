@@ -1,8 +1,7 @@
 use crate::api::ai::config::{
-    calculate_retry_delay, get_network_proxy_from_config, get_request_timeout_from_config,
+    calculate_retry_delay,
     get_retry_attempts_from_config,
 };
-use crate::api::genai_client;
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPServerTool};
 use crate::db::system_db::FeatureConfig;
@@ -505,28 +504,12 @@ async fn generate_mcp_catalog_summary(
     };
 
     let llm_db = LLMDatabase::new(app_handle)?;
-    let model_detail = match llm_db.get_model_for_request(&provider_id, &model_code) {
+    let model_detail = match llm_db.get_light_model(&provider_id, &model_code) {
         Ok(model) => model,
-        Err(crate::db::llm_db::ModelRequestError::LocalAgent { .. }) => return Ok(()),
         Err(e) => return Err(AppError::DatabaseError(format!("获取 MCP 总结模型失败: {e}"))),
     };
 
-    let network_proxy = get_network_proxy_from_config(&config_map);
-    let request_timeout = get_request_timeout_from_config(&config_map);
-    let provider_configs = crate::vault::config_ref::prepare_provider_configs(app_handle, model_detail.configs.clone())
-        .await.map_err(AppError::ProviderError)?;
-    let client = genai_client::create_client_with_config(
-        None,
-        &provider_configs,
-        &model_detail.model.code,
-        &model_detail.provider.api_type,
-        Some(&model_detail.model.request_mode),
-        network_proxy.as_deref(),
-        false,
-        Some(request_timeout),
-        false,
-        &config_map,
-    )?;
+    let client = crate::api::ai::light_model::LightClient::new(app_handle, None, &model_detail, &config_map).await?;
 
     let user_prompt = build_summary_user_prompt(&server, &tools);
     let message_list: Vec<(String, String, Vec<crate::db::conversation_db::MessageAttachment>)> = vec![
@@ -540,11 +523,11 @@ async fn generate_mcp_catalog_summary(
     )
     .chat_request;
 
-    let max_retry_attempts = get_retry_attempts_from_config(&config_map).max(1);
+    let max_retry_attempts = client.attempts(get_retry_attempts_from_config(&config_map).max(1));
     let mut attempts = 0;
     let response_text = loop {
-        match client.exec_chat(&model_detail.model.code, chat_request.clone(), None).await {
-            Ok(response) => break response.first_text().unwrap_or("").to_string(),
+        match client.complete(chat_request.clone()).await {
+            Ok(response) => break response.text,
             Err(e) => {
                 attempts += 1;
                 if attempts >= max_retry_attempts {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
-import { jsonLines, probeModels, splitModel } from './common.mjs';
+import { jsonLines, lightText, probeModels, splitModel } from './common.mjs';
 import { tick } from './test-helpers.mjs';
 
 test('should reassemble split UTF-8 and several Pi records when native stdout chunks cross frame boundaries', async () => {
@@ -54,4 +54,34 @@ test('should close the agent and surface the error when model discovery fails', 
   const open = async () => ({ async models() { throw new Error('Pi get_available_models timed out'); }, async close() { closed = true; } });
   await assert.rejects(probeModels(open, {}, () => {}, models => answers.push(models)), /timed out/);
   assert.equal(closed, true); assert.deepEqual(answers, []);
+});
+
+test('should wait for the selected model to finish a lightweight request and return its text and usage', async () => {
+  let closed = false;
+  const open = async (config, emit) => ({
+    async prompt(text, turn) {
+      assert.equal(config.model, 'chosen/model');
+      assert.equal(config.textOnly, true);
+      assert.equal(text, 'summarize');
+      queueMicrotask(() => {
+        emit({ type: 'text', turn, text: 'partial' });
+        emit({ type: 'usage', turn, usage: { inputTokens: 12, outputTokens: 2 } });
+        emit({ type: 'done', turn, final_text: 'summary' });
+      });
+    },
+    async close() { closed = true; },
+  });
+  assert.deepEqual(await lightText(open, { model: 'chosen/model' }, 'summarize'),
+    { text: 'summary', reports: [{ inputTokens: 12, outputTokens: 2 }] });
+  assert.equal(closed, true);
+});
+
+test('should release a lightweight session when the driver requires interaction', async () => {
+  let closed = false;
+  const open = async (_config, emit) => ({
+    async prompt(_text, turn) { emit({ type: 'permission', turn }); },
+    async close() { closed = true; },
+  });
+  await assert.rejects(lightText(open, {}, 'summarize'), /permission/);
+  assert.equal(closed, true);
 });

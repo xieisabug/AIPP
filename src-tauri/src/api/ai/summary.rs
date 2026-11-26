@@ -1,8 +1,7 @@
 use crate::api::ai::config::{
-    calculate_retry_delay, get_network_proxy_from_config, get_request_timeout_from_config,
+    calculate_retry_delay,
     get_retry_attempts_from_config,
 };
-use crate::api::genai_client;
 use crate::db::conversation_db::{ConversationDatabase, ConversationSummary, Message, Repository};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
@@ -146,11 +145,10 @@ pub(crate) fn summary_model(
     }
 
     for (model_code, provider_id) in candidates {
-        match db.get_model_for_request(&provider_id, &model_code) {
+        match db.get_light_model(&provider_id, &model_code) {
             Ok(detail) => return Ok(Some(detail)),
             Err(
                 crate::db::llm_db::ModelRequestError::Lookup(rusqlite::Error::QueryReturnedNoRows)
-                | crate::db::llm_db::ModelRequestError::LocalAgent { .. }
                 | crate::db::llm_db::ModelRequestError::Disabled { .. },
             ) => continue,
             Err(e) => {
@@ -303,30 +301,7 @@ pub async fn generate_conversation_summary(
 请用简洁的中文回复，严格按照以下JSON格式（不要添加任何其他内容）：
 {"summary": "对话整体总结（100-200字）", "user_intent": "用户目的（一句话）", "key_outcomes": "关键成果（关键成果点列表，用分号分隔）"}"#;
 
-    // 4) 获取网络代理和超时设置
-    let network_proxy = get_network_proxy_from_config(&config_feature_map);
-    let request_timeout = get_request_timeout_from_config(&config_feature_map);
-    let proxy_enabled = false;
-
-    let client = genai_client::create_client_with_config(
-        Some((app_handle, conversation_id)),
-        &crate::api::copilot_token_manager::prepare_provider_configs(
-            app_handle,
-            &model_detail.provider.api_type,
-            &model_detail.configs,
-            network_proxy.as_deref(),
-        )
-        .await
-        .map_err(|e| AppError::ProviderError(e))?,
-        &model_detail.model.code,
-        &model_detail.provider.api_type,
-        Some(&model_detail.model.request_mode),
-        network_proxy.as_deref(),
-        proxy_enabled,
-        Some(request_timeout),
-        false,
-        &config_feature_map,
-    )?;
+    let client = crate::api::ai::light_model::LightClient::new(app_handle, Some(conversation_id), &model_detail, &config_feature_map).await?;
 
     // 构建消息列表：system + 原始对话 + 总结请求
     let mut summary_message_list: Vec<(
@@ -346,15 +321,14 @@ pub async fn generate_conversation_summary(
         None,
     )
     .chat_request;
-    let model_name = model_detail.model.code.clone();
 
     // 5) 调用 AI 生成总结
-    let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
+    let max_retry_attempts = client.attempts(get_retry_attempts_from_config(&config_feature_map));
 
     let mut attempts = 0;
     let response = loop {
-        match client.exec_chat(&model_name, chat_request.clone(), None).await {
-            Ok(chat_response) => break Ok(chat_response.first_text().unwrap_or("").to_string()),
+        match client.complete(chat_request.clone()).await {
+            Ok(chat_response) => break Ok(chat_response.text),
             Err(e) => {
                 attempts += 1;
                 // 400/422 错误时打印完整请求内容用于调试

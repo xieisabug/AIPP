@@ -7,8 +7,6 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{sleep_until, Duration, Instant};
 use tracing::warn;
 
-use crate::api::ai::config::{get_network_proxy_from_config, get_request_timeout_from_config};
-use crate::api::genai_client;
 use crate::api::ai::events::ConversationEvent;
 use crate::db::llm_db::LLMDatabase;
 use crate::state::activity_state::ConversationActivityManager;
@@ -352,33 +350,10 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
     let prompt = format!("用户请求：{request_text}\n上一句进展：{previous}\n新增内容：{}\n新增步骤：\n{step_lines}", batch.text);
 
     let config_map = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
-    let detail = match LLMDatabase::new(app).map_err(|e| e.to_string())?.get_model_for_request(provider_id, model_code) {
-        Ok(detail) => detail,
-        Err(crate::db::llm_db::ModelRequestError::LocalAgent { .. }) => return Ok(()),
-        Err(e) => return Err(format!("辅助模型不可用: {e}")),
-    };
-    let proxy = get_network_proxy_from_config(&config_map);
-    let configs = crate::api::copilot_token_manager::prepare_provider_configs(
-        app,
-        &detail.provider.api_type,
-        &detail.configs,
-        proxy.as_deref(),
-    )
-    .await?;
-    // 部分供应商（如 OpenCode Go）按会话建立网关 session，必须带上会话标识。
-    let client = genai_client::create_client_with_config(
-        Some((app, conversation_id)),
-        &configs,
-        &detail.model.code,
-        &detail.provider.api_type,
-        Some(&detail.model.request_mode),
-        proxy.as_deref(),
-        false,
-        Some(get_request_timeout_from_config(&config_map)),
-        false,
-        &config_map,
-    )
-    .map_err(|e| e.to_string())?;
+    let detail = LLMDatabase::new(app).map_err(|e| e.to_string())?
+        .get_light_model(provider_id, model_code).map_err(|e| format!("辅助模型不可用：{e}"))?;
+    let client = crate::api::ai::light_model::LightClient::new(app, Some(conversation_id), &detail, &config_map)
+        .await.map_err(|e| e.to_string())?;
     let request = crate::api::ai::conversation::build_chat_request_from_messages(
         &[("system".to_string(), SYSTEM_PROMPT.to_string(), Vec::new()), ("user".to_string(), prompt, Vec::new())],
         crate::api::ai::conversation::ToolCallStrategy::NonNative,
@@ -386,8 +361,8 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
     )
     .chat_request;
     // 进度只在当下有意义：失败不重试，等下一次进展。
-    let response = client.exec_chat(&detail.model.code, request, None).await.map_err(|e| e.to_string())?;
-    let text = clean_summary(response.first_text().unwrap_or(""));
+    let response = client.complete(request).await.map_err(|e| e.to_string())?;
+    let text = clean_summary(&response.text);
     if text.is_empty() {
         warn!(conversation_id, model = %detail.model.code, "butler progress summary model returned empty text");
         return Ok(());

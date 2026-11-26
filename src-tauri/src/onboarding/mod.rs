@@ -1,4 +1,5 @@
 pub mod apply;
+
 pub mod preset;
 pub mod setup;
 
@@ -11,6 +12,43 @@ pub(super) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 static SESSION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tauri::command]
+pub async fn check_onboarding_agent(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    provider_id: i64,
+    model: Option<String>,
+) -> Result<Vec<String>, String> {
+    require_window(&window)?;
+    let llm = LLMDatabase::new(&app).map_err(err)?;
+    let provider = llm.get_llm_provider(provider_id).map_err(err)?;
+    let settings = llm.get_llm_provider_config(provider_id).map_err(err)?;
+    let features = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
+    let channel = crate::api::ai::light_model::LocalChannel::new(&app, &provider, &settings, &features).map_err(err)?;
+    let catalog = tokio::time::timeout(std::time::Duration::from_secs(75), channel.catalog(&app, provider_id)).await
+        .map_err(|_| format!("{} 获取模型列表超过 75 秒", provider.name))?
+        .map_err(|e| format!("{} 获取模型列表失败：{e}", provider.name))?;
+    if catalog.is_empty() {
+        return Err(format!("{} 没有返回可用模型，请检查登录和配置", provider.name));
+    }
+    if let Some(code) = &model {
+        if !catalog.iter().any(|(found, _)| found == code) {
+            return Err(format!("{} 当前未提供模型 {code}", provider.name));
+        }
+    }
+    let tx = llm.conn.unchecked_transaction().map_err(err)?;
+    if llm.get_llm_provider(provider_id).map_err(err)?.api_type != provider.api_type ||
+        llm.get_llm_provider_config(provider_id).map_err(err)? != settings {
+        return Err(format!("验证期间 {} 的配置已变更，请重试", provider.name));
+    }
+    for (code, name) in &catalog {
+        tx.execute("INSERT INTO llm_model(llm_provider_id,code,name,description) SELECT ?1,?2,?3,'' WHERE NOT EXISTS
+            (SELECT 1 FROM llm_model WHERE llm_provider_id=?1 AND code=?2)", params![provider_id, code, name]).map_err(err)?;
+    }
+    tx.commit().map_err(err)?;
+    Ok(catalog.into_iter().map(|(code, _)| code).collect())
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

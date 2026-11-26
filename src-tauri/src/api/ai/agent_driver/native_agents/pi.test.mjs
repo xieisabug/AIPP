@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { lightText } from './common.mjs';
 import { openPi } from './pi.mjs';
 import { piFixture } from './test-helpers.mjs';
 
@@ -405,4 +406,20 @@ test('should deliver a concurrent user prompt after an unsolicited Pi turn on th
     [['1', 'first'], [wake.turn, 'background'], ['2', 'second']]);
   assert.ok(seen.findIndex(f => f.type === 'prompt_started' && f.turn === '2')
     > seen.findIndex(f => f.type === 'done' && f.turn === wake.turn));
+});
+
+test('should send lightweight work to the selected Pi model in a session without persistence or tools', async () => {
+  const fixture = piFixture({ state: { isStreaming: false } });
+  const call = lightText((config, emit) => openPi(config, emit, fixture),
+    { cwd: '.', model: 'provider/small' }, 'Generate a title');
+  for (let i = 0; i < 100 && !fixture.commands.some(command => command.type === 'prompt'); i++) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.ok(fixture.commands.some(command => command.type === 'prompt'));
+  assert.ok(fixture.launches[0][1].includes('--no-tools'));
+  assert.ok(fixture.launches[0][1].includes('--no-session'));
+  assert.deepEqual(fixture.commands.find(command => command.type === 'set_model'),
+    { type: 'set_model', provider: 'provider', modelId: 'small', id: '2' });
+  fixture.emit({ type: 'agent_end', messages: [{ role: 'assistant', content: [{type:'text', text:'A title'}], stopReason: 'stop' }] });
+  assert.equal((await call).text, 'A title');
 });

@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
 
-use crate::api::ai::config::{get_network_proxy_from_config, get_request_timeout_from_config};
-use crate::api::genai_client;
 use crate::artifacts::code_utils::{
     extract_component_name, extract_vue_component_name, is_react_component, is_vue_component,
 };
@@ -438,7 +436,7 @@ pub async fn artifact_autofill_unavailable_reason(app_handle: tauri::AppHandle, 
         Err(_) => return Ok(Some("需要轻量模型".into())),
     };
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    Ok(db.get_model_for_request(&provider, &code).err().map(|_| "需要轻量模型".into()))
+    Ok(db.get_light_model(&provider, &code).err().map(|_| "需要轻量模型".into()))
 }
 
 #[tauri::command]
@@ -474,28 +472,11 @@ pub async fn generate_artifact_metadata(
 
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| format!("数据库连接失败: {}", e))?;
         let model_detail = llm_db
-            .get_model_for_request(&provider_id, &model_code)
+            .get_light_model(&provider_id, &model_code)
             .map_err(|e| format!("模型详情获取失败: {}", e))?;
 
-        let network_proxy = get_network_proxy_from_config(&config_feature_map);
-        let request_timeout = get_request_timeout_from_config(&config_feature_map);
-        let proxy_enabled = false;
-
-        let provider_configs = crate::vault::config_ref::prepare_provider_configs(&app_handle, model_detail.configs.clone()).await?;
-        let client = genai_client::create_client_with_config(
-            None,
-            &provider_configs,
-            &model_detail.model.code,
-            &model_detail.provider.api_type,
-            Some(&model_detail.model.request_mode),
-            network_proxy.as_deref(),
-            proxy_enabled,
-            Some(request_timeout),
-            false,
-            &config_feature_map,
-        )
-        .map_err(|e| format!("AI客户端创建失败: {}", e))?;
-
+        let client = crate::api::ai::light_model::LightClient::new(&app_handle, None, &model_detail, &config_feature_map)
+            .await.map_err(|e| format!("AI 客户端创建失败：{e}"))?;
         let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
             &[
                 ("system".to_string(), system_prompt.to_string(), Vec::new()),
@@ -505,14 +486,7 @@ pub async fn generate_artifact_metadata(
             None,
         )
         .chat_request;
-        let model_name = &model_detail.model.code;
-
-        let response = client
-            .exec_chat(model_name, chat_request.clone(), None)
-            .await
-            .map_err(|e| format!("AI请求失败: {}", e))?;
-
-        let response_text = response.first_text().unwrap_or("").to_string();
+        let response_text = client.complete(chat_request).await?.text;
 
         match serde_json::from_str::<ArtifactMetadata>(&response_text) {
             Ok(metadata) => Ok(metadata),

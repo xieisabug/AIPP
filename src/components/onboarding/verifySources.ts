@@ -32,6 +32,8 @@ export interface Checked {
 export interface ModelSource {
     provider: Provider;
     agent?: Provider;
+    agentCodes?: string[];
+    apiError?: string;
     config: Config;
     codes: string[];
     ranked: RankedRoles;
@@ -55,7 +57,8 @@ export async function prepareSource(
         models?: ModelSelectionResponse["available_models"];
     } = {}
 ): Promise<Checked | ModelSource> {
-    const agent = options.agent;
+    const agent = options.agent ?? (local(provider.api_type) ? provider : undefined);
+    let agentCodes: string[] = [];
     const notes: Notes = {};
     const config: Config = {
         chat: role(provider.id, ""),
@@ -63,7 +66,8 @@ export async function prepareSource(
         extras: ["skills", "office", "bun", "uv"],
     };
     if (agent) {
-        await within(() => checkAgent(agent));
+        progress(`正在读取 ${agent.name} 的模型列表…`);
+        agentCodes = await checkAgent(agent);
         config.chat = {
             ...role(
                 agent.id,
@@ -72,24 +76,26 @@ export async function prepareSource(
             verified: true,
         };
         notes.chat = { reason: "本机已安装智能体" };
-        if (provider.id === agent.id) return { config: { ...config, butler: config.chat }, notes };
+        if (provider.id === agent.id) return {
+            provider, agent, agentCodes, codes: [], config: { ...config, notes, butler: config.chat },
+            ranked: { chat: [], light: [], review: [] },
+        };
     }
+    progress("正在获取模型列表…");
+    const apiDeadline = agent ? deadline() : within;
     let info: Awaited<ReturnType<typeof preview>>;
     try {
-        progress("正在获取模型列表…");
-        info = await within(() => preview(provider, preset, options.models));
-        if (!agent) {
-            progress("正在检查账户余额…");
-            await checkBalance(provider, within);
-        }
-    } catch (e) {
-        if (!agent) throw e;
-        const defaults = preset.recommended_provider.models;
-        for (const key of ["light", "review"] as const) {
-            config[key] = role(provider.id, defaults[key] || defaults.light);
-            notes[key] = { reason: "服务商推荐预设", error: explain(e, provider.name) };
-        }
-        return { config: { ...config, butler: config.chat }, notes };
+        info = await apiDeadline(() => preview(provider, preset, options.models));
+    } catch (error) {
+        if (!agent) throw error;
+        return {
+            provider, agent, agentCodes, codes: [], config: { ...config, notes, butler: config.chat },
+            ranked: { chat: [], light: [], review: [] }, apiError: explain(error, provider.name),
+        };
+    }
+    if (!agent) {
+        progress("正在检查账户余额…");
+        await checkBalance(provider, within);
     }
     const deepSeek = provider.api_type === "deepseek";
     if (deepSeek) config.models = [{ providerId: provider.id, codes: [...new Set(info.availableCodes)] }];
@@ -97,20 +103,19 @@ export async function prepareSource(
         model: role(provider.id, code), reason,
     }));
     return {
-        provider, agent, config, codes: info.codes,
+        provider, agent, agentCodes, config, codes: info.codes,
         ranked: { chat: candidates(info.picks.main), light: candidates(info.picks.light), review: candidates(info.picks.review) },
     };
 }
 export async function checkSelected(
     config: Config,
     providers: Provider[],
-    installed: (p: Provider) => boolean,
     progress: Progress,
     applied?: Config | null,
     ranked?: RankedRoles
 ): Promise<Checked> {
     const within = deadline();
-    const probe = probeSession(within, progress);
+    const probe = probeSession(within, progress, providers);
     const notes: Notes = {};
     const verified = new Map<string, Role>();
     for (const previous of [applied?.chat, applied?.butler, applied?.light, applied?.review]) {
@@ -121,13 +126,7 @@ export async function checkSelected(
         if (verified.has(key)) return verified.get(key)!;
         const p = providers.find((p) => p.id === r.providerId);
         if (!p) throw new Error("找不到所选模型提供商");
-        let result: Role;
-        if (local(p.api_type)) {
-            if (!installed(p)) throw new Error(`${p.name} 尚未安装或缺少可用 Node.js`);
-            progress(`正在检查 ${p.name}…`);
-            await within(() => checkAgent(p));
-            result = { ...r, verified: true };
-        } else result = await probe(r);
+        const result = await probe(r);
         verified.set(key, result);
         return result;
     }

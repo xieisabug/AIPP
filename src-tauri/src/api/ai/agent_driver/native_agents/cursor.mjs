@@ -97,9 +97,9 @@ export async function openCursor(config, emit, dependencies = {}) {
   if (!['on', 'off'].includes(review)) throw new Error(`Unsupported Cursor auto-review: ${review}`);
   const options = {
     model: { id: config.model || 'default' },
-    mode: 'agent',
+    mode: config.textOnly ? 'ask' : 'agent',
     local: { cwd: config.cwd, autoReview: review === 'on',
-      settingSources: ['project', 'user', 'team', 'mdm', 'plugins'], enableAgentRetries: false },
+      settingSources: config.textOnly ? [] : ['project', 'user', 'team', 'mdm', 'plugins'], enableAgentRetries: false },
     ...(config.mcp ? { mcpServers: { aipp: config.mcp } } : {}),
     ...(apiKey ? { apiKey } : {}),
   };

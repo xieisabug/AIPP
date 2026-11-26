@@ -1,4 +1,4 @@
-import { RequestRejected, jsonLines, probeModels } from './common.mjs';
+import { RequestRejected, jsonLines, probeModels, lightText } from './common.mjs';
 import { openPi } from './pi.mjs';
 import { loginCursor, openCursor } from './cursor.mjs';
 import { openOpenCode } from './opencode.mjs';
@@ -50,6 +50,8 @@ jsonLines(process.stdin, request => {
       if (!command) throw new Error('exec request omitted its command');
       data = await run(command, request.args || [], { timeout: request.timeout || 600000,
         onOutput: text => emit({ type: 'log', id: request.id, text }) });
+    } else if (request.type === 'light_text') {
+      data = await lightText(drivers[request.driver], request.config, request.text);
     } else if (request.type === 'probe') {
       const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);

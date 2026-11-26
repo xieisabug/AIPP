@@ -339,7 +339,7 @@ async fn model(app: &AppHandle) -> Result<Option<DispatchModel>, String> {
             Err(rusqlite::Error::QueryReturnedNoRows) => continue,
             Err(e) => return Err(format!("读取{source}提供商 #{provider}：{e}")),
         };
-        if selected.is_enabled && !crate::db::llm_db::is_local_agent_api_type(&selected.api_type) {
+        if selected.is_enabled && (key == "default_light_model" || !crate::db::llm_db::is_local_agent_api_type(&selected.api_type)) {
             return Ok(Some((code, provider, source)));
         }
     }
@@ -440,14 +440,14 @@ async fn query_model(app: &AppHandle, group_id: i64, selection: DispatchModel, c
     let lookup = code.clone();
     let detail = tokio::task::spawn_blocking(move || {
         crate::db::llm_db::LLMDatabase::new(&app_db).map_err(|e| e.to_string())?
-            .get_model_for_request(&provider, &lookup).map_err(|e| e.to_string())
+            .get_light_model(&provider, &lookup).map_err(|e| e.to_string())
     }).await.map_err(|e| format!("读取{source}配置的任务失败：{e}"))?
         .map_err(|e| format!("{source}不可用（provider={provider}, model={code}）：{e}；请在管家设置中检查模型"))?;
-    let proxy = super::ai::config::get_network_proxy_from_config(&config);
-    let provider_config = super::copilot_token_manager::prepare_provider_configs(app, &detail.provider.api_type, &detail.configs, proxy.as_deref())
-        .await.map_err(|e| format!("{source}的供应商配置无效（provider={provider}, model={code}）：{e}"))?;
-
     if crate::decision::is_decision_mode(&detail.model.request_mode) {
+        let proxy = super::ai::config::get_network_proxy_from_config(&config);
+        let provider_config = super::copilot_token_manager::prepare_provider_configs(app, &detail.provider.api_type, &detail.configs, proxy.as_deref())
+            .await.map_err(|e| format!("{source}的供应商配置无效（provider={provider}, model={code}）：{e}"))?;
+
         let decision_req = decision_request(&detail.model.code);
         let (response, _endpoint) = crate::decision::execute_for_provider(
             &detail.provider.api_type,
@@ -478,17 +478,15 @@ async fn query_model(app: &AppHandle, group_id: i64, selection: DispatchModel, c
         return Ok(ModelReply::Decision(response));
     }
 
-    let client = super::genai_client::create_client_with_config(Some((app, group_id)), &provider_config, &detail.model.code,
-        &detail.provider.api_type, Some(&detail.model.request_mode), proxy.as_deref(), false,
-        Some(super::ai::config::get_request_timeout_from_config(&config)), false, &config)
-        .map_err(|e| format!("创建{source}客户端失败（provider={provider}, model={code}）：{e}"))?;
+    let client = super::ai::light_model::LightClient::new(app, Some(group_id), &detail, &config).await
+        .map_err(|e| format!("创建{source}客户端失败：{e}"))?;
     let (system, user) = chat_prompt;
     let request = super::ai::conversation::build_chat_request_from_messages(
         &[("system".to_string(), system, Vec::new()), ("user".to_string(), user, Vec::new())],
         super::ai::conversation::ToolCallStrategy::NonNative,
         None,
     ).chat_request;
-    let response = client.exec_chat(&detail.model.code, request, None).await
+    let response = client.complete(request).await
         .map_err(|e| format!("{source}调用失败（provider={provider}, model={code}）：{e}"))?;
     // 调度调用不产生聊天消息，用量记在群聊自身的会话上，供群聊信息统计。
     match crate::db::conversation_db::ConversationDatabase::new(app) {
@@ -497,8 +495,7 @@ async fn query_model(app: &AppHandle, group_id: i64, selection: DispatchModel, c
                 crate::db::token_stats::PURPOSE_GROUP_DISPATCH, Some(detail.model.id), &detail.model.name, &response.usage)),
         Err(error) => tracing::warn!(group_id, error = %error, "failed to open conversation db for dispatch usage"),
     }
-    let text = response.first_text().unwrap_or_default();
-    Ok(ModelReply::Chat(text.to_string()))
+    Ok(ModelReply::Chat(response.text))
 }
 
 #[cfg(test)]

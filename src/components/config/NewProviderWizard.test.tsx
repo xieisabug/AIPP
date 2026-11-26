@@ -15,6 +15,7 @@ function model(code: string, extra: Record<string, unknown> = {}) {
 }
 
 interface SetupOptions {
+    embedded?: "expert" | "lie_flat";
     proxy?: string;
     existing?: Array<{ id: string; name: string; api_type?: string }>;
     previewError?: string;
@@ -104,6 +105,7 @@ function setup(options: SetupOptions = {}) {
             open
             onClose={onClose}
             apiTypes={PROVIDER_API_TYPES}
+            embedded={options.embedded}
             existingProviders={options.existing ?? [{ id: "1", name: "OpenAI API" }]}
             onCreated={onCreated}
         />,
@@ -294,6 +296,21 @@ describe("NewProviderWizard", () => {
         );
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_llm_provider", { llmProviderId: DRAFT_ID }));
         expect(onCreated).not.toHaveBeenCalled();
+    });
+
+    it("should enable the local provider only after a successful model check in expert onboarding", async () => {
+        const { onCreated } = setup({ embedded: "expert" });
+        mockInvokeHandler("get_llm_provider_config", () => []);
+        mockInvokeHandler("check_onboarding_agent", () => { throw new Error("Codex 需要登录"); });
+        fireEvent.click(screen.getByRole("button", { name: /Codex/ }));
+        fireEvent.click(await screen.findByRole("button", { name: "完成" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent("Codex 需要登录");
+        expect(onCreated).not.toHaveBeenCalled();
+        expect(invoke.mock.calls.some(([cmd, args]) => cmd === "update_llm_provider" && args?.isEnabled)).toBe(false);
+        mockInvokeHandler("check_onboarding_agent", () => ["local-small"]);
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await waitFor(() => expect(onCreated).toHaveBeenCalledWith(DRAFT_ID));
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "add_llm_provider")).toHaveLength(1);
     });
 
     it("should finish at step two for local agents without fetching models", async () => {

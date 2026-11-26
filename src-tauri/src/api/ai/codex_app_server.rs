@@ -981,6 +981,12 @@ pub async fn probe_codex_model_options(
     app_handle: &tauri::AppHandle,
     config: &CodexAppServerConfig,
 ) -> Result<CodexModelProbe, String> {
+    codex_model_catalog(app_handle, config, false).await
+}
+
+pub(super) async fn codex_model_catalog(
+    app_handle: &tauri::AppHandle, config: &CodexAppServerConfig, check_account: bool,
+) -> Result<CodexModelProbe, String> {
     let stderr_buffer = CodexStderrBuffer::default();
     let result = async {
         let (_child, mut stdin, mut lines) =
@@ -988,6 +994,14 @@ pub async fn probe_codex_model_options(
         let mut pending_notifications = VecDeque::new();
         let requests = DesktopCodexServerRequests { app_handle, conversation_id: -1, cancellation: None };
         initialize_codex_transport(&requests, -1, "aipp-model-probe", &mut stdin, &mut lines, &mut pending_notifications).await?;
+        if check_account {
+            write_frame(&mut stdin, &json_rpc_request(4, "account/read", json!({"refreshToken": false}))).await?;
+            let account = read_rpc_response_with_approvals(app_handle, -1, &mut stdin, &mut lines, 4, &mut pending_notifications, None)
+                .await.map_err(|e| format!("Codex account/read 失败：{e}"))?;
+            if account["requiresOpenaiAuth"] == true && account["account"].is_null() {
+                return Err("Codex 尚未登录，请先配置账号".to_owned());
+            }
+        }
         write_frame(
             &mut stdin,
             &json_rpc_request(
@@ -1013,21 +1027,29 @@ pub async fn probe_codex_model_options(
         .map_err(|error| format!("Codex config/read 失败：{error}"))?;
         let (configured_model, configured_effort) = codex_config_model_defaults(&config_result);
 
-        write_frame(&mut stdin, &json_rpc_request(3, "model/list", json!({}))).await?;
-        let model_result = read_rpc_response_with_approvals(
-            app_handle,
-            -1,
-            &mut stdin,
-            &mut lines,
-            3,
-            &mut pending_notifications,
-            None,
-        )
-        .await
-        .map_err(|error| format!("Codex model/list 失败：{error}"))?;
-        let catalog = model_catalog(&model_result);
+        let mut catalog = Vec::new();
+        let mut seen_cursors = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        let mut request_id = 5;
+        loop {
+            let params = match cursor {
+                Some(ref value) => json!({ "cursor": value }),
+                None => json!({}),
+            };
+            write_frame(&mut stdin, &json_rpc_request(request_id, "model/list", params)).await?;
+            let page = read_rpc_response_with_approvals(
+                app_handle, -1, &mut stdin, &mut lines, request_id, &mut pending_notifications, None,
+            ).await.map_err(|error| format!("Codex model/list 失败：{error}"))?;
+            catalog.extend(model_catalog(&page));
+            let Some(next) = page["nextCursor"].as_str().filter(|s| !s.is_empty()) else { break; };
+            if !seen_cursors.insert(next.to_owned()) {
+                return Err("Codex model/list 返回重复的分页游标".to_owned());
+            }
+            cursor = Some(next.to_owned());
+            request_id += 1;
+        }
         if catalog.is_empty() {
-            return Err(format!("Codex model/list 返回空模型列表：{model_result}"));
+            return Err("Codex model/list 返回空模型列表".to_owned());
         }
         let default_model = configured_model.or_else(|| {
             catalog
@@ -1053,6 +1075,66 @@ pub async fn probe_codex_model_options(
     result.map_err(|error| {
         codex_error_with_diagnostics(&error, -1, "model-probe", &stderr_buffer)
     })
+}
+
+struct LightRequests;
+
+#[async_trait::async_trait]
+impl CodexServerRequests for LightRequests {
+    async fn handle(&self, _: &mut tokio::process::ChildStdin, frame: &Value) -> Result<bool, String> {
+        Err(format!("轻量模型请求了交互操作 {}", frame["method"]))
+    }
+}
+
+pub(super) async fn light_text(config: &CodexAppServerConfig, model: Option<&str>, prompt: &str) -> Result<super::light_model::Reply, String> {
+    let stderr = CodexStderrBuffer::default();
+    let result = async {
+        let (_child, mut stdin, mut lines) = spawn_process(config, stderr.clone()).await?;
+        let mut pending = VecDeque::new();
+        initialize_codex_transport(&LightRequests, -1, "aipp-light-model", &mut stdin, &mut lines, &mut pending).await?;
+        write_frame(&mut stdin, &json_rpc_request(2, "thread/start", json!({
+            "model":model, "cwd":config.working_directory, "ephemeral":true, "sandbox":"read-only",
+            "approvalPolicy":"never", "allowProviderModelFallback":false, "selectedCapabilityRoots":[],
+            "baseInstructions":"Complete the supplied text task directly. Do not use tools.",
+            "config":{"features.shell_tool":false, "features.unified_exec":false, "mcp_servers":{}, "web_search":"disabled"}
+        }))).await?;
+        let started = read_codex_rpc_response(&LightRequests, -1, &mut stdin, &mut lines, 2, &mut pending).await?;
+        let thread = started.pointer("/thread/id").and_then(Value::as_str).ok_or("thread/start 缺少 thread.id")?;
+        write_frame(&mut stdin, &json_rpc_request(3, "turn/start", json!({
+            "threadId":thread, "model":model, "input":[{"type":"text","text":prompt}]
+        }))).await?;
+        let started = read_codex_rpc_response(&LightRequests, -1, &mut stdin, &mut lines, 3, &mut pending).await?;
+        let turn = started.pointer("/turn/id").and_then(Value::as_str).ok_or("turn/start 缺少 turn.id")?;
+        let mut text = String::new();
+        let mut usage = CodexTurnUsageTracker::default();
+        loop {
+            let frame = match pending.pop_front() {
+                Some(frame) => frame,
+                None => serde_json::from_str(&lines.next_line().await.map_err(|e| e.to_string())?
+                    .ok_or("Codex 在 turn/completed 前关闭了 stdout")?).map_err(|e| format!("Codex JSON: {e}"))?,
+            };
+            if frame.get("id").is_some() && frame.get("method").is_some() { LightRequests.handle(&mut stdin, &frame).await?; }
+            let params = &frame["params"];
+            if params["threadId"] != thread { continue; }
+            usage.note_notification(frame["method"].as_str().unwrap_or_default(), params);
+            match frame["method"].as_str() {
+                Some("thread/tokenUsage/updated") => usage.observe(params),
+                Some("item/completed") if params["turnId"] == turn && params["item"]["type"] == "agentMessage" => {
+                    text = params["item"]["text"].as_str().unwrap_or_default().to_owned();
+                }
+                Some("turn/completed") if params["turn"]["id"] == turn => {
+                    return if params["turn"]["status"] == "completed" {
+                        let usage = usage.turn_usage().map(|u| super::light_model::reported_usage(u.input_tokens.into(), u.output_tokens.into(),
+                            Some(u.cached_input_tokens.into()), Some(u.cache_write_input_tokens.into()), Some(u.reasoning_tokens.into()))).unwrap_or_default();
+                        Ok(super::light_model::Reply { text, usage })
+                    }
+                        else { Err(format!("turn {turn} {}：{}", params["turn"]["status"], params["turn"]["error"])) };
+                }
+                _ => {}
+            }
+        }
+    }.await;
+    result.map_err(|e| codex_error_with_diagnostics(&e, -1, "light-model", &stderr))
 }
 
 /// Read the provider profile's account limits without opening a thread.

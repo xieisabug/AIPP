@@ -1378,6 +1378,15 @@ fn apply_config_options_to_snapshot(
 pub async fn probe_acp_session_config_options(
     config: &AcpConfig,
 ) -> Result<Vec<AcpSessionConfigOptionPayload>, String> {
+    Ok(short_session(config, None).await?.0)
+}
+
+pub(super) async fn light_text(config: &AcpConfig, model: Option<&str>, prompt: &str) -> Result<super::light_model::Reply, String> {
+    Ok(short_session(config, Some((model, prompt))).await?.1)
+}
+
+async fn short_session(config: &AcpConfig, turn: Option<(Option<&str>, &str)>)
+    -> Result<(Vec<AcpSessionConfigOptionPayload>, super::light_model::Reply), String> {
     if !config.working_directory.exists() {
         return Err(format!(
             "ACP 模型发现失败：工作目录不存在 ({})",
@@ -1432,9 +1441,19 @@ pub async fn probe_acp_session_config_options(
         String::from_utf8_lossy(&output).trim().to_string()
     });
 
+    let response_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let received = response_text.clone();
     let connect_result = agent_client_protocol::Client
         .builder()
-        .name("AIPP model probe")
+        .name("AIPP")
+        .on_receive_notification(async move |notification: acp::SessionNotification, _cx| {
+            if let acp::SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                if let acp::ContentBlock::Text(text) = chunk.content {
+                    received.lock().unwrap().push_str(&text.text);
+                }
+            }
+            Ok(())
+        }, agent_client_protocol::on_receive_notification!())
         .connect_with(
             agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat()),
             async move |cx| {
@@ -1454,7 +1473,7 @@ pub async fn probe_acp_session_config_options(
                 .map_err(|_| to_acp_error("initialize timed out after 15 seconds".to_string()))?
                 .map_err(|error| to_acp_error(format!("initialize failed: {error:?}")))?;
 
-                let session_response = tokio::time::timeout(
+                let mut session_response = tokio::time::timeout(
                     Duration::from_secs(20),
                     cx.send_request(acp::NewSessionRequest::new(config.working_directory.clone()))
                         .block_task(),
@@ -1471,6 +1490,20 @@ pub async fn probe_acp_session_config_options(
                     .filter_map(session_config_option_payload)
                     .collect::<Vec<_>>();
 
+                let mut usage = genai::chat::Usage::default();
+                if let Some((model, prompt)) = turn {
+                    apply_initial_session_config_override(&cx, &session_id, &mut session_response.config_options, "model", model)
+                        .await.map_err(to_acp_error)?;
+                    let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(prompt.to_owned()))];
+                    let reply = cx.send_request(acp::PromptRequest::new(session_id.clone(), blocks)).block_task().await?;
+                    if reply.usage.is_some() {
+                        let u = summarize_acp_prompt_usage(&reply, &[], "", "");
+                        usage = super::light_model::reported_usage(u.input_tokens, u.output_tokens, u.cached_read_tokens, u.cached_write_tokens, u.thought_tokens);
+                    }
+                    if reply.stop_reason != acp::StopReason::EndTurn {
+                        return Err(to_acp_error(format!("ACP prompt 提前结束：{:?}", reply.stop_reason)));
+                    }
+                }
                 if init_response
                     .agent_capabilities
                     .session_capabilities
@@ -1499,7 +1532,7 @@ pub async fn probe_acp_session_config_options(
                     .await;
                 }
 
-                Ok(options)
+                Ok((options, usage))
             },
         )
         .await;
@@ -1508,7 +1541,7 @@ pub async fn probe_acp_session_config_options(
     let _ = child.wait().await;
     let stderr = stderr_task.await.unwrap_or_default();
 
-    connect_result.map_err(|error| {
+    let (options, usage) = connect_result.map_err(|error| {
         let stderr_detail = if stderr.is_empty() {
             "Agent stderr 未提供额外诊断".to_string()
         } else {
@@ -1519,7 +1552,9 @@ pub async fn probe_acp_session_config_options(
             config.cli_command,
             config.working_directory.display()
         )
-    })
+    })?;
+    let text = std::mem::take(&mut *response_text.lock().unwrap());
+    Ok((options, super::light_model::Reply { text, usage }))
 }
 
 async fn apply_initial_session_config_override(

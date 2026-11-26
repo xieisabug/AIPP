@@ -14,6 +14,8 @@ import { DecisionModelProbeButton } from "@/components/config/DecisionModelProbe
 import { ReviewOutputCapability } from "@/components/config/feature/forms/SummaryConfigForm";
 import { SettingsGroup, SettingRowText, settingRowClassName, stackedRowClassName } from "@/components/config/SettingsGroup";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { localLightWarning } from "@/components/onboarding/onboardingService";
+import { useFilteredModels } from "@/hooks/useFilteredModels";
 import { useModels } from "@/hooks/useModels";
 import { useUnsavedLeaveGuard } from "@/hooks/useUnsavedLeaveGuard";
 import { parseSubNav, useSettingsAnchorHighlight } from "@/lib/settingsNavigation";
@@ -118,9 +120,10 @@ export const AiAutomationConfig: React.FC<AiAutomationConfigProps> = ({
     const { models: lightModels, loading: lightLoading } = useModels(true);
     const { models: decisionModels, loading: decisionLoading } = useModels(true, { includeDecision: true });
 
+    const { models: agentModels } = useFilteredModels(4);
     const lightOptions = useMemo(
-        () => lightModels.map((m) => ({ value: `${m.code}%%${m.llm_provider_id}`, label: m.name })),
-        [lightModels]
+        () => [...lightModels, ...agentModels.filter(m => m.id > 0)].map((m) => ({ value: `${m.code}%%${m.llm_provider_id}`, label: m.name })),
+        [agentModels, lightModels]
     );
     const decisionOptions = useMemo(
         () =>
@@ -441,7 +444,7 @@ export const AiAutomationConfig: React.FC<AiAutomationConfigProps> = ({
                     <div className={settingRowClassName}>
                         <SettingRowText
                             label="默认轻量模型"
-                            description="用于标题生成、表单自动填写、对话总结、MCP 摘要、管家状态总结与主动整理初筛。建议选响应快、价格低的小模型。"
+                            description={agentModels.some(m => `${m.code}%%${m.llm_provider_id}` === defaultLightModel) ? localLightWarning : "用于标题生成、表单自动填写、对话总结、MCP 摘要、管家状态总结与主动整理初筛。建议选响应快、价格低的小模型。"}
                         />
                         <div className="w-64 shrink-0">
                             <Select

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { role, selectAuxiliaryRole, type Config } from "./onboardingService";
+import { localLightWarning, roleKey, role, selectAuxiliaryRole, type Config } from "./onboardingService";
 import { modelRoles, selectRecommendedRoles } from "./roleRecommendations";
 import { checkSelected, type Checked, type ModelSource, type Progress } from "./verifySources";
 
@@ -16,7 +16,7 @@ interface Props {
 }
 
 export function LieFlatModels({ source, footer, busy, run, progress, onChecked }: Props) {
-    const { provider, agent, codes, ranked } = source;
+    const { provider, agent, agentCodes = [], codes, ranked } = source;
     const [config, setConfig] = useState<Config>(() => ({
         ...source.config,
         review: provider.api_type === "deepseek" && codes.includes("deepseek-flash")
@@ -30,7 +30,7 @@ export function LieFlatModels({ source, footer, busy, run, progress, onChecked }
 
     async function apply() {
         const providers = agent ? [agent, provider] : [provider];
-        const result = await checkSelected(config, providers, () => true, progress, source.config, ranked);
+        const result = await checkSelected(config, providers, progress, source.config, ranked);
         await onChecked({ ...result, config: { ...result.config, butler: result.config.chat } });
     }
 
@@ -54,21 +54,30 @@ export function LieFlatModels({ source, footer, busy, run, progress, onChecked }
                     </select>
                 </label>
             )}
-            {!codes.length && <p className="text-sm text-muted-foreground">该来源没有可用的聊天模型。</p>}
+            {source.apiError && <p role="alert" className="text-sm text-destructive">{provider.name} 模型列表读取失败：{source.apiError}。仍可选择 {agent?.name} 的轻量模型。</p>}
+            {!agent && !codes.length && <p className="text-sm text-muted-foreground">该来源没有可用的聊天模型。</p>}
             <div className="grid gap-3 sm:grid-cols-2">
-                {(["light", "review"] as const).map(key => (
+                {(["light", "review"] as const).filter(key => key === "light" || codes.length > 0).map(key => (
                     <label key={key} className="grid gap-1.5 text-sm">
                         {key === "light" ? "轻量模型" : "审核模型"}
                         <select className="h-9 w-full min-w-0 rounded-xl border border-input bg-background px-2"
-                            value={config[key]?.code ?? ""} onChange={e => setConfig(selectAuxiliaryRole(
-                                config, key, e.target.value ? role(provider.id, e.target.value) : null
-                            ))}>
+                            value={(agent && config[key]?.providerId === agent.id ? roleKey(config[key]) : config[key]?.code) ?? ""}
+                            onChange={e => {
+                                const value = e.target.value;
+                                const selected = agent && agentCodes.find(code => roleKey(role(agent.id, code)) === value);
+                                setConfig(selectAuxiliaryRole(config, key, selected && agent ? role(agent.id, selected)
+                                    : value ? role(provider.id, value) : null));
+                            }}>
                             <option value="">不配置</option>
                             {codes.map(code => <option key={code} value={code}>{code}</option>)}
+                            {agent && key === "light" && <optgroup label={agent.name}>
+                                {agentCodes.map(code => <option key={code} value={roleKey(role(agent.id, code))}>{code}</option>)}
+                            </optgroup>}
                         </select>
                     </label>
                 ))}
             </div>
+            {agent && config.light?.providerId === agent.id && <p role="status" className="text-xs text-amber-700 dark:text-amber-400">{localLightWarning}</p>}
             {footer && createPortal(
                 <Button data-primary type="button" className="rounded-full px-6" disabled={busy || !config.chat.code}
                     onClick={() => void run(apply)}>应用</Button>, footer

@@ -145,8 +145,9 @@ async fn light_model(app: &AppHandle, cfg: &Config) -> Result<Option<String>> {
     let map = state.config_feature_map.lock().await;
     let configured = |group: &str, key: &str| map.get(group).and_then(|g| g.get(key)).map(|v| v.value.as_str());
     let db = crate::db::llm_db::LLMDatabase::new(app)?;
+    let default_light = configured("conversation_summary", crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY);
     for raw in [Some(cfg.small_model.as_str()), configured("experimental", crate::api::butler_progress::HELPER_MODEL_KEY),
-        configured("conversation_summary", crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY), configured("experimental", "butler_model_id")].into_iter().flatten() {
+        default_light, configured("experimental", "butler_model_id")].into_iter().flatten() {
         if raw.trim().is_empty() { continue; }
         let (_, id) = raw.rsplit_once("%%").context("巡检模型缺少提供商编号")?;
         let provider = match db.get_llm_provider(id.parse()?) {
@@ -154,7 +155,7 @@ async fn light_model(app: &AppHandle, cfg: &Config) -> Result<Option<String>> {
             Err(rusqlite::Error::QueryReturnedNoRows) => continue,
             Err(e) => return Err(e.into()),
         };
-        if provider.is_enabled && !crate::db::llm_db::is_local_agent_api_type(&provider.api_type) { return Ok(Some(raw.to_owned())); }
+        if provider.is_enabled && (Some(raw) == default_light || !crate::db::llm_db::is_local_agent_api_type(&provider.api_type)) { return Ok(Some(raw.to_owned())); }
     }
     Ok(None)
 }

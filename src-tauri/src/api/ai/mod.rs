@@ -17,6 +17,7 @@ mod claude_sdk_tests;
 #[cfg(test)]
 mod agent_session_lifecycle_tests;
 pub mod events;
+pub(crate) mod light_model;
 pub mod summary;
 pub mod title;
 pub mod types;

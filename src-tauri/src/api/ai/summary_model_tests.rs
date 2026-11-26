@@ -1,11 +1,11 @@
 use super::*;
 
 #[test]
-fn test_onboarding_aux_summary_skips_absent_native_and_disabled_models() {
+fn test_onboarding_aux_summary_accepts_registered_native_and_skips_absent_or_disabled_models() {
     let db = LLMDatabase { conn: rusqlite::Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();
     assert!(summary_model(&db, &HashMap::new()).unwrap().is_none());
-    for (kind, enabled, available) in [("claude_sdk", true, false), ("anthropic", false, false), ("anthropic", true, true)] {
+    for (kind, enabled, available) in [("claude_sdk", true, true), ("anthropic", false, false), ("anthropic", true, true)] {
         let id = db.add_llm_provider(kind, kind, "", false, enabled).unwrap();
         db.add_llm_model("Chat", id, "chat", "", false, false, false).unwrap();
         let key = "default_light_model";

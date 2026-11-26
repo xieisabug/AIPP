@@ -537,7 +537,7 @@ export default function OnboardingWindow() {
                 roleKey(c.butler) === roleKey(previous.butler)
             ) {
                 const changes: Partial<Pick<Config, "light" | "review" | "clearLight" | "clearReview" | "notes">> = {};
-                const probe = probeSession(deadline(), setProgress);
+                const probe = probeSession(deadline(), setProgress, providers);
                 const nextNotes = { ...notes };
                 const failed: Partial<Pick<Config, "light" | "review">> = {};
                 for (const key of ["light", "review"] as const) {
@@ -576,7 +576,7 @@ export default function OnboardingWindow() {
                 setPage("done");
                 return;
             }
-            await accept(await checkSelected(c, providers, installed, setProgress, previous));
+            await accept(await checkSelected(c, providers, setProgress, previous));
             return;
         }
         setConfig((c) => ({ ...c, butler: c.butler ?? c.chat }));
@@ -585,7 +585,7 @@ export default function OnboardingWindow() {
     async function retryRole(key: "light" | "review") {
         const value = config[key];
         if (!value) return;
-        const probe = probeSession(deadline(), setProgress);
+        const probe = probeSession(deadline(), setProgress, providers);
         try {
             const verified = await probe(value);
             const update: Partial<Config> = { [key]: verified };
@@ -1101,7 +1101,6 @@ export default function OnboardingWindow() {
                                                         await checkSelected(
                                                             config,
                                                             providers,
-                                                            installed,
                                                             setProgress,
                                                             status?.draft.config
                                                         )
@@ -1248,7 +1247,6 @@ export default function OnboardingWindow() {
                                                             ],
                                                         },
                                                         providers,
-                                                        installed,
                                                         setProgress,
                                                         undefined,
                                                         rankedRoles(providers, models, preset!)

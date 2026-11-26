@@ -29,6 +29,7 @@ import { parseProviderShareMessage } from "@/utils/providerShareMessage";
 import type { OnboardingPreset } from "@/utils/modelRecommend";
 import { prepareSource, type Checked, type ModelSource } from "./verifySources";
 import {
+    checkAgent,
     createAgentDraft,
     createDraft,
     deadline,
@@ -174,19 +175,17 @@ export function SourceForm({
                 if (!parsed) throw new Error("分享码好像不完整，请让对方把整段消息重新复制给你");
                 progress("正在解开分享码…");
                 const imported = await within(() =>
-                    importProvider(parsed.code, parsed.password || password, !expert)
+                    importProvider(parsed.code, parsed.password || password, true)
                 );
                 if (imported.already_exists) toast.info("你已经有这个配置了");
                 p = imported;
-                if (!expert) {
-                    if (!imported.already_exists) importedIds.current.add(p.id);
-                    // 后端核对原子草稿标记，复用其他功能创建的提供商永远不取得所有权。
-                    await invoke("track_onboarding_provider", {
-                        providerId: p.id,
-                        owned: importedIds.current.has(p.id),
-                    });
-                }
+                if (!imported.already_exists) importedIds.current.add(p.id);
+                await invoke("track_onboarding_provider", { providerId: p.id, owned: importedIds.current.has(p.id) });
                 if (expert) {
+                    if (local(imported.api_type)) {
+                        progress(`正在验证 ${imported.name} 并获取模型列表…`);
+                        await checkAgent(imported);
+                    }
                     if (!imported.is_enabled)
                         await invoke("update_llm_provider", {
                             id: imported.id,
@@ -195,6 +194,7 @@ export function SourceForm({
                             description: imported.description ?? "",
                             isEnabled: true,
                         });
+                    await invoke("track_onboarding_provider", { providerId: imported.id, owned: false });
                     try {
                         await within(() => populateImported(imported, preset));
                     } catch (e) {
@@ -580,7 +580,7 @@ export function SourceForm({
                                             />
                                         </label>
                                         <p className="text-xs text-muted-foreground">
-                                            用于自动起标题、安全审核工具和群聊调度；留空可直接点「下一步」跳过。
+                                            引导会检查本机配置并读取智能体的模型列表。可选用其中的型号处理轻量任务，也可填写 Key，使用 API 处理轻量任务和工具审核。
                                         </p>
                                     </div>
                                 )}

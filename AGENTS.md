@@ -61,7 +61,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **助手权限授予**：SuperAdmin 普通通道/工作区动作仅允许不扩大权限的修改。新增可信范围用 `assistant.grant_workspace`，改动 Agent cwd 扩大文件信任范围、放宽沙箱/审批或扩大 Codex workspace-write 目录范围用 `assistant.patch_agent_permissions`；两者是静态用户批准动作，批量与定时入口沿用同一批准边界。批准绑定脱敏的前后权限快照，执行时在助手与 provider 写锁下复核；移除覆盖后的继承变化也参与判断。不要把模型传入的标记当作批准。面向用户的设置界面仍是用户本人操作。
 
-**桌面首次引导**：启动入口、设备本地状态和恢复在 `onboarding/`；`apply_onboarding_config` 统一写入主力助手、轻量/审核模型、首页与管家工作区。按提供商 `api_type` 的共用本机类型表（`is_local_agent_api_type` / `isLocalAgentApiType`）判断智能体，不要复用 `matches_provider` 或 `is_claude_code_provider`；后台辅助角色只使用可用 API。用户流程见 [首次使用引导](./docs/product/23-首次使用引导.md)，各功能缺少模型时的规则见 [PRD 第 12 节](./docs/first-run-onboarding-prd.md)。
+**桌面首次引导**：启动入口、设备本地状态和恢复在 `onboarding/`；`apply_onboarding_config` 统一写入主力助手、轻量/审核模型、首页与管家工作区。按提供商 `api_type` 的共用本机类型表（`is_local_agent_api_type` / `isLocalAgentApiType`）判断智能体，不要复用 `matches_provider` 或 `is_claude_code_provider`；轻量角色允许显式选择通过本机通道验证的具体型号，审核角色只使用可用 API。用户流程见 [首次使用引导](./docs/product/23-首次使用引导.md)，各功能缺少模型时的规则见 [PRD 第 12 节](./docs/first-run-onboarding-prd.md)。
 
 ## Essential Build Commands
 

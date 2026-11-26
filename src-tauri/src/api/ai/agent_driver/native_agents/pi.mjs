@@ -52,7 +52,9 @@ export async function openPi(config, emit, dependencies = {}) {
   // Pass a path so long role/skill instructions do not exceed Windows env limits.
   const contextFile = config.butlerInstructions ? join(config.temp_root, 'pi-butler.txt') : '';
   if (contextFile) await writeFile(contextFile, config.butlerInstructions, { mode: 0o600, flag: 'wx' });
-  const child = (dependencies.launch || launch)(config.command || 'pi', ['--mode', 'rpc', '--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url))],
+  const args = config.textOnly ? ['--no-tools', '--no-extensions', '--no-session'] :
+    ['--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url))];
+  const child = (dependencies.launch || launch)(config.command || 'pi', ['--mode', 'rpc', ...args],
     { cwd: config.cwd, env: { ...process.env, AIPP_PI_APPROVAL: approval, AIPP_PI_CONTEXT_FILE: contextFile, ...(config.mcp ? { AIPP_PI_MCP: JSON.stringify(config.mcp) } : {}) } });
   let sequence = 0, turn = null, failure, session, closing = false;
   let awaitingSettlement = false, modelError, finalText;
@@ -79,6 +81,7 @@ export async function openPi(config, emit, dependencies = {}) {
   };
   child.on('error', fail);
   const extensionReady = new Promise((resolve, reject) => {
+    if (config.textOnly) resolve();
     let buffer = '';
     child.stderr.on('data', data => {
       process.stderr.write(data);
@@ -178,7 +181,7 @@ export async function openPi(config, emit, dependencies = {}) {
     }
     const state = await request({ type: 'get_state' });
     session = state.sessionFile;
-    if (!session) throw new Error('Pi get_state did not return a persisted sessionFile');
+    if (!session && !config.textOnly) throw new Error('Pi get_state did not return a persisted sessionFile');
     if (config.session && session !== config.session) throw new Error('Pi restored a different sessionFile');
     if (config.model) {
       const model = splitModel(config.model);

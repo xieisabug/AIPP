@@ -335,3 +335,15 @@ fn test_lie_flat_quick_appearance_preserves_a_customized_assistant_on_replay() {
     apply_quick_appearance(&sys, &db).unwrap();
     assert_eq!(saved(), "custom");
 }
+
+#[test]
+fn test_onboarding_accepts_registered_local_light_and_preserves_api_only_review() {
+    let (_, db) = super::super::state_tests::databases();
+    let id = db.add_llm_provider("Codex", "codex_app_server", "", false, false).unwrap();
+    let mut c = config(id);
+    assert!(validate(&db, &c).is_err());
+    db.add_llm_model("Small", id, "small", "", false, false, false).unwrap();
+    validate(&db, &c).unwrap();
+    c.review = c.light.clone();
+    assert!(validate(&db, &c).unwrap_err().contains("审核"));
+}

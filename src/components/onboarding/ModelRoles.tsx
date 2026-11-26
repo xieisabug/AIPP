@@ -14,7 +14,7 @@ import { FolderPicker } from "@/components/config/FolderPicker";
 import type { ModelForSelect } from "@/hooks/useFilteredModels";
 import { modelRoles, type ModelRole } from "./roleRecommendations";
 import type { Config, Provider, Role } from "./onboardingService";
-import { local, roleKey, roleOf, selectAuxiliaryRole } from "./onboardingService";
+import { local, localLightWarning, roleKey, roleOf, selectAuxiliaryRole } from "./onboardingService";
 
 export function RoleSelect({
     label,
@@ -106,6 +106,8 @@ export function ModelRoles({
         if (!key) setSeparate(true);
         onRecommend(requested.filter(k => !(k === "chat" && nativeChat)), !!key && !separate);
     }
+    const lightId = config.light?.providerId ?? (!config.clearLight && activeLight ? Number(activeLight.split("%%").pop()) : undefined);
+    const localLight = providers.some(p => p.id === lightId && local(p.api_type));
     const hasLight = Boolean(config.light || (!config.clearLight && activeLight));
     return (
         <div className="space-y-3">
@@ -163,11 +165,14 @@ export function ModelRoles({
                             optional
                             value={config.light}
                             keepExisting={!!activeLight && !config.clearLight}
-                            models={api}
+                            models={models.filter(m => m.id !== 0)}
                             providers={providers}
                             onChange={(r) => {
                                 const next = selectAuxiliaryRole(config, "light", r);
-                                setConfig(separate ? next : selectAuxiliaryRole(next, "review", r));
+                                if (r && providers.some(p => p.id === r.providerId && local(p.api_type))) {
+                                    setSeparate(true);
+                                    setConfig(next);
+                                } else setConfig(separate ? next : selectAuxiliaryRole(next, "review", r));
                             }}
                         />
                         <Button
@@ -181,10 +186,11 @@ export function ModelRoles({
                         </Button>
                     </div>
 
+                    {localLight && <p role="status" className="text-xs text-amber-700 dark:text-amber-400">{localLightWarning}</p>}
                     <p className={`text-xs ${hasLight ? "text-muted-foreground" : "text-amber-700 dark:text-amber-400"}`}>
                         {hasLight
                             ? "用于标题、摘要、群聊调度与进度总结"
-                            : "需要 API 模型。缺少轻量模型时，标题取第一句话，对话总结暂停，群聊可用 @ 指定成员。"}
+                            : "缺少轻量模型时，标题取第一句话，对话总结暂停，群聊可用 @ 指定成员。"}
                     </p>
                 </div>
                 <div className="space-y-2 px-5 py-3.5">
@@ -192,7 +198,8 @@ export function ModelRoles({
                         <input
                             type="checkbox"
                             className="peer sr-only"
-                            checked={separate}
+                            disabled={localLight}
+                            checked={separate || localLight}
                             onChange={(e) => {
                                 setSeparate(e.target.checked);
                                 if (!e.target.checked) {
@@ -213,11 +220,11 @@ export function ModelRoles({
                             {separate && <Check className="h-2.5 w-2.5" strokeWidth={3} />}
                         </span>
                         <span className="text-[13px] font-medium text-foreground">单独指定审核模型</span>
-                        {!separate && (
+                        {!separate && !localLight && (
                             <span className="text-xs text-muted-foreground">同轻量模型</span>
                         )}
                     </label>
-                    {separate && (
+                    {(separate || localLight) && (
                         <>
                             <div className="grid grid-cols-[1fr_auto] items-end gap-2 pt-1">
                                 <RoleSelect

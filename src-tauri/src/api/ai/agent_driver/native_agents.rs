@@ -844,6 +844,24 @@ pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Resu
     let _ = timeout(Duration::from_secs(2), stderr_task).await;
     result.map_err(|e|format!("{}; diagnostics: {:?}", diagnostics.sanitize(&e), diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s|s.to_string()), None)))
 }
+pub(crate) async fn light_text(driver: &str, mut config: NativeConfig, cwd: &std::path::Path, model: Option<&str>, prompt: &str) -> Result<crate::api::ai::light_model::Reply, String> {
+    config.cwd = cwd.to_owned();
+    config.wire["cwd"] = json!(cwd);
+    config.wire["model"] = json!(model);
+    config.wire["temp_root"] = json!(cwd);
+    let node = env::prepare_bridge_launch(driver, &mut config).await?;
+    let result = env::bridge_call(&node, cwd, &config.env,
+        json!({"type":"light_text", "id":"light", "driver":driver, "config":config.wire, "text":prompt}),
+        Duration::from_secs(120), |_| {}).await?;
+    let text = result["text"].as_str().ok_or_else(|| format!("{driver} 未返回文本"))?.to_owned();
+    let reports: Vec<usage::UsageReport> = serde_json::from_value(result["reports"].clone()).map_err(|e| format!("{driver} 用量格式错误：{e}"))?;
+    let mut usage = None;
+    for report in reports {
+        usage.get_or_insert_with(TurnUsage::default).add(driver, report);
+    }
+    Ok(crate::api::ai::light_model::Reply { text, usage: usage.map(|u| u.as_usage()).unwrap_or_default() })
+}
+
 fn publish_text(identity: &AgentEventIdentity, turn: &ActiveTurn, done: bool) {
     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"message_update".into(),
         data: json!({"message_id":turn.id,"message_type":"response","content":turn.text,"is_done":done,

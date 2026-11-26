@@ -138,7 +138,10 @@ impl Config {
     }
 }
 
-fn role_allowed(llm: &LLMDatabase, role: &Role, auxiliary: bool) -> Result<(), String> {
+#[derive(Clone, Copy)]
+enum ModelRole { Chat, Light, Review }
+
+fn role_allowed(llm: &LLMDatabase, role: &Role, purpose: ModelRole) -> Result<(), String> {
     let p = llm
         .get_llm_provider(role.provider_id)
         .map_err(|e| format!("读取提供商 #{} 失败：{e}", role.provider_id))?;
@@ -146,8 +149,13 @@ fn role_allowed(llm: &LLMDatabase, role: &Role, auxiliary: bool) -> Result<(), S
         return Err(format!("提供商「{}」未选择模型", p.name));
     }
     if is_local_agent_api_type(&p.api_type) {
-        if auxiliary {
-            return Err("轻量和审核角色需要 API 聊天模型".into());
+        match purpose {
+            ModelRole::Chat => {}
+            ModelRole::Light => {
+                llm.get_llm_model_detail(&p.id, &role.code)
+                    .map_err(|e| format!("{} 的轻量模型 {} 尚未登记：{e}", p.name, role.code))?;
+            }
+            ModelRole::Review => return Err("审核角色需要 API 聊天模型".into()),
         }
     } else {
         if !has_api_credentials(llm, &p)? {
@@ -173,16 +181,16 @@ fn validate(llm: &LLMDatabase, c: &Config) -> Result<(), String> {
     if !c.chat.verified {
         return Err("聊天主模型尚未通过检查".into());
     }
-    role_allowed(llm, &c.chat, false)?;
+    role_allowed(llm, &c.chat, ModelRole::Chat)?;
     if c.home == "butler_experiment" {
         let b = c.butler.as_ref().unwrap_or(&c.chat);
         if !b.verified {
             return Err("总管家模型尚未通过检查".into());
         }
-        role_allowed(llm, b, false)?;
+        role_allowed(llm, b, ModelRole::Chat)?;
     }
-    for role in [c.light.as_ref(), c.review.as_ref()].into_iter().flatten().filter(|r| r.verified) {
-        role_allowed(llm, role, true)?;
+    for (purpose, role) in [(ModelRole::Light, &c.light), (ModelRole::Review, &c.review)] {
+        if let Some(selected) = role.as_ref().filter(|r| r.verified) { role_allowed(llm, selected, purpose)?; }
     }
     Ok(())
 }
@@ -731,12 +739,7 @@ pub async fn update_onboarding_roles(
     let clear_light = clear_light.unwrap_or(false);
     let clear_review = clear_review.unwrap_or(false);
     validate_clear(light.as_ref(), clear_light, review.as_ref(), clear_review)?;
-    for role in [light.as_ref(), review.as_ref()].into_iter().flatten() {
-        if !role.verified {
-            return Err("辅助角色尚未通过检查，已保留原配置".into());
-        }
-        role_allowed(&llm, role, true)?;
-    }
+    validate_role_change(&llm, light.as_ref(), review.as_ref())?;
     c.clear_light = clear_light;
     c.clear_review = clear_review;
     if clear_light {
@@ -792,6 +795,16 @@ pub(super) struct PendingRoleChange {
     review: bool,
 }
 
+fn validate_role_change(llm: &LLMDatabase, light: Option<&Role>, review: Option<&Role>) -> Result<(), String> {
+    for (role, purpose) in [(light, ModelRole::Light), (review, ModelRole::Review)] {
+        if let Some(role) = role {
+            if !role.verified { return Err("辅助角色尚未通过检查，已保留原配置".into()); }
+            role_allowed(llm, role, purpose)?;
+        }
+    }
+    Ok(())
+}
+
 fn prepare_role_update(
     sys: &SystemDatabase,
     llm: &LLMDatabase,
@@ -799,20 +812,10 @@ fn prepare_role_update(
     c: &mut Config,
 ) -> Result<HashMap<String, String>, String> {
     let change = d.pending_role_change.ok_or("缺少待恢复的角色改动")?;
-    let requested: Vec<_> = [
-        change.light.then_some(c.light.as_ref()).flatten(),
-        change.review.then_some(c.review.as_ref()).flatten(),
-    ]
-    .into_iter()
-    .flatten()
-    .cloned()
-    .collect();
-    for role in &requested {
-        if !role.verified {
-            return Err("辅助角色尚未通过检查，已保留原配置".into());
-        }
-        role_allowed(llm, role, true)?;
-    }
+    let light = c.light.as_ref().filter(|_| change.light);
+    let review = c.review.as_ref().filter(|_| change.review);
+    validate_role_change(llm, light, review)?;
+    let requested: Vec<_> = [light, review].into_iter().flatten().cloned().collect();
     if !requested.is_empty() {
         prepare_providers(sys, llm, d, c, Some(&requested))?;
     }

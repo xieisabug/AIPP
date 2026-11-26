@@ -71,6 +71,7 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
     onOpenCenter: () => void;
 }) {
     const { models, loading: modelsLoading } = useFilteredModels(0);
+    const { models: agentModels, loading: agentsLoading } = useFilteredModels(4);
     const { getConfigValue } = useFeatureConfig();
     const [nativeAgents, setNativeAgents] = useState<AssistantOption[]>([]);
     const [suggestion, setSuggestion] = useState<Center["window"]>();
@@ -113,7 +114,9 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
         getConfigValue("conversation_summary", "default_light_model"),
         getConfigValue("experimental", "butler_model_id"),
     ];
-    const lightPatrolPaused = !modelsLoading && !lightPatrolChain.some(candidate => candidate && apiModelValues.has(candidate));
+    const defaultLight = getConfigValue("conversation_summary", "default_light_model");
+    const nativeLight = agentModels.some(m => m.id > 0 && `${m.code}%%${m.llm_provider_id}` === defaultLight);
+    const lightPatrolPaused = !modelsLoading && !agentsLoading && !nativeLight && !lightPatrolChain.some(candidate => candidate && apiModelValues.has(candidate));
 
     return <>
         <SettingsGroup
@@ -162,8 +165,8 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
                     label="初筛模型"
                     description={
                         lightPatrolPaused
-                            ? "未配置可用的初筛、辅助、轻量或总管家 API 模型，轻巡检已暂停（不记失败）。配置轻量模型或初筛模型后自动恢复。"
-                            : "聊后与定期巡检使用 API 模型初筛。未配置可用的初筛、辅助、轻量或总管家 API 模型时，暂停轻巡检。"
+                            ? "未配置可用的初筛、辅助、轻量或总管家模型，轻巡检已暂停（不记失败）。配置轻量模型或初筛模型后自动恢复。"
+                            : "聊后与定期巡检使用配置的模型初筛。未配置可用的初筛、辅助、轻量或总管家模型时，暂停轻巡检。"
                     }
                 >
                     <Select value={value.small_model || INHERIT} onValueChange={v => set("small_model", v === INHERIT ? "" : v)}>

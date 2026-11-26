@@ -1,9 +1,8 @@
 use crate::api::ai::config::{
-    calculate_retry_delay, get_network_proxy_from_config, get_request_timeout_from_config,
+    calculate_retry_delay,
     get_retry_attempts_from_config,
 };
 use crate::api::ai::events::TITLE_CHANGE_EVENT;
-use crate::api::genai_client;
 use crate::db::conversation_db::{Conversation, ConversationDatabase, Repository};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
@@ -184,7 +183,7 @@ pub async fn generate_title(
         (100, default_prompt.clone())
     };
 
-    // 收集配置的候选模型（按优先级：标题模型 → 旧配置 → 默认轻量模型），跳过本机智能体/禁用/已删除项
+    // 收集配置的候选模型（按优先级：标题模型 → 旧配置 → 默认轻量模型），跳过禁用或已删除项
     let mut config_candidates: Vec<(i64, String)> = Vec::new();
     if let Some(feature_config) = feature_config_opt {
         let provider_id_res = feature_config
@@ -274,18 +273,17 @@ pub async fn generate_title(
         }
     }
 
-    // 2) 获取用于标题生成的模型详情：按配置回退链查找可用 API 模型，再回退到最近回复消息的模型；都没有则截断用户首句
+    // 2) 获取用于标题生成的模型详情：按配置回退链查找可用模型，再回退到最近回复消息的模型；都没有则截断用户首句
     let llm_db = LLMDatabase::new(app_handle).map_err(AppError::from)?;
     let mut resolved_model = None;
     for (provider_id, model_code) in config_candidates {
-        match llm_db.get_model_for_request(&provider_id, &model_code) {
+        match llm_db.get_light_model(&provider_id, &model_code) {
             Ok(detail) => {
                 resolved_model = Some(detail);
                 break;
             }
             Err(
                 crate::db::llm_db::ModelRequestError::Lookup(rusqlite::Error::QueryReturnedNoRows)
-                | crate::db::llm_db::ModelRequestError::LocalAgent { .. }
                 | crate::db::llm_db::ModelRequestError::Disabled { .. },
             ) => continue,
             Err(e) => return Err(AppError::ProviderError(e.to_string())),
@@ -329,32 +327,7 @@ pub async fn generate_title(
         return save_title(app_handle, &window, conversation_id, fallback);
     };
 
-    // 从配置中获取网络代理和超时设置
-    let network_proxy = get_network_proxy_from_config(&config_feature_map);
-    let request_timeout = get_request_timeout_from_config(&config_feature_map);
-
-    // 检查供应商是否启用了代理（标题生成通常不需要代理，设为false）
-    let proxy_enabled = false;
-
-    let client = genai_client::create_client_with_config(
-        Some((app_handle, conversation_id)),
-        &crate::api::copilot_token_manager::prepare_provider_configs(
-            app_handle,
-            &model_detail.provider.api_type,
-            &model_detail.configs,
-            network_proxy.as_deref(),
-        )
-        .await
-        .map_err(|e| AppError::ProviderError(e))?,
-        &model_detail.model.code,
-        &model_detail.provider.api_type,
-        Some(&model_detail.model.request_mode),
-        network_proxy.as_deref(),
-        proxy_enabled,
-        Some(request_timeout),
-        false,
-        &config_feature_map,
-    )?;
+    let client = crate::api::ai::light_model::LightClient::new(app_handle, Some(conversation_id), &model_detail, &config_feature_map).await?;
 
     let chat_request = crate::api::ai::conversation::build_chat_request_from_messages(
         &[
@@ -365,15 +338,14 @@ pub async fn generate_title(
         None,
     )
     .chat_request;
-    let model_name = &model_detail.model.code;
 
     // 从配置中获取最大重试次数
-    let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
+    let max_retry_attempts = client.attempts(get_retry_attempts_from_config(&config_feature_map));
 
     let mut attempts = 0;
     let response = loop {
-        match client.exec_chat(model_name, chat_request.clone(), None).await {
-            Ok(chat_response) => break Ok(chat_response.first_text().unwrap_or("").to_string()),
+        match client.complete(chat_request.clone()).await {
+            Ok(chat_response) => break Ok(chat_response.text),
             Err(e) => {
                 attempts += 1;
                 if attempts >= max_retry_attempts {

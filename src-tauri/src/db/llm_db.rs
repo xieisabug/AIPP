@@ -118,7 +118,7 @@ impl LLMProvider {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LLMProviderConfig {
     pub id: i64,
     pub name: String,
@@ -597,6 +597,10 @@ impl LLMDatabase {
             return Err(ModelRequestError::LocalAgent { name: provider.name });
         }
         Ok(self.model_detail_for_provider(provider, code)?)
+    }
+
+    pub(crate) fn get_light_model(&self, provider_id: &i64, code: &str) -> Result<ModelDetail, ModelRequestError> {
+        Ok(self.model_detail_for_provider(self.get_provider_for_request(*provider_id)?, code)?)
     }
 
     fn model_detail_for_provider(&self, provider: LLMProvider, model_code: &str) -> rusqlite::Result<ModelDetail> {
