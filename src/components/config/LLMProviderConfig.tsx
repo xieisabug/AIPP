@@ -197,20 +197,16 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
 
     // 确认导出（设置密码后）
     const handleConfirmExport = useCallback(async (password: string) => {
-        if (!selectedProvider) return;
-
-        try {
-            const code = await invoke<string>('export_llm_provider', {
-                providerId: selectedProvider.id,
-                password
-            });
-            setShareCode(code);
-            setSharePassword(password);
-            setShareDialogOpen(true);
-        } catch (error) {
-            toast.error('分享失败: ' + error);
-            throw error; // 重新抛出错误给PasswordDialog处理
-        }
+        if (!selectedProvider) return false;
+        const code = await invoke<string | null>('export_llm_provider', {
+            providerId: selectedProvider.id,
+            password
+        });
+        if (code === null) return false;
+        setShareCode(code);
+        setSharePassword(password);
+        setShareDialogOpen(true);
+        return true;
     }, [selectedProvider]);
 
     // 导入提供商

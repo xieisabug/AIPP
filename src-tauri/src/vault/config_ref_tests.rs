@@ -24,6 +24,51 @@ fn items(list: Vec<Resolved>) -> BTreeMap<String, Resolved> {
 
 fn reference(id: &str) -> String { format!("vault://{id}") }
 
+/// Each export prompts separately, reveals only metadata in the prompt, and resolves only after consent.
+#[test]
+fn test_provider_share_requires_consent_and_imports_resolved_key() {
+    let entry = item(ID, TOKEN, &["https://api.example.com"]);
+    let data = || ProviderShareData {
+        name: "示例".into(), api_type: "openai_api".into(), endpoint: Some("https://api.example.com/v1".into()),
+        api_key: format!("Bearer vault://{ID}#token"),
+    };
+    for approve in [false, true, false] {
+        let code = encrypt_provider_share_after_consent(data(), "test-password", &[&entry.meta], |prompt| {
+            assert!(prompt.contains("示例") && prompt.contains(&entry.meta.name));
+            assert!(prompt.contains("https://api.example.com") && prompt.contains("使用你的额度"));
+            assert!(!prompt.contains(TOKEN));
+            approve
+        }, || {
+            assert!(approve, "cancelled export must not read vault values");
+            Ok(items(vec![entry.clone()]))
+        }).unwrap();
+        assert_eq!(code.is_some(), approve);
+        if let Some(code) = code {
+            let imported = crate::utils::share_utils::decrypt_provider_data(&code, "test-password").unwrap();
+            assert_eq!(imported.api_key, format!("Bearer {TOKEN}"));
+            assert_eq!(imported.endpoint, data().endpoint);
+        }
+    }
+}
+
+/// Confirmation cannot authorize an unbound endpoint or a credential changed while the prompt was open.
+#[test]
+fn test_provider_share_rechecks_credential_and_endpoint() {
+    let original = item(ID, TOKEN, &["https://api.example.com"]);
+    let mut changed = original.clone();
+    changed.meta.updated_at += 1;
+    let removed_binding = item(ID, TOKEN, &[]);
+    for (current, expected) in [(changed, "确认期间已变化"), (removed_binding, "没有被确认用于")] {
+        let data = ProviderShareData {
+            name: "示例".into(), api_type: "openai_api".into(), endpoint: Some("https://api.example.com/v1".into()),
+            api_key: reference(ID),
+        };
+        let error = encrypt_provider_share_after_consent(data, "test-password", &[&original.meta], |_| true,
+            || Ok(items(vec![current]))).unwrap_err();
+        assert!(error.contains(expected) && !error.contains(TOKEN));
+    }
+}
+
 #[test]
 fn test_parse_finds_references_with_prefix_and_rejects_malformed_ones() {
     assert!(parse("plain-value").unwrap().is_empty());

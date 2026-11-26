@@ -15,10 +15,11 @@ vi.mock("@/hooks/use-platform", () => ({
 
 // 详情表单与本测试无关，避免其加载配置的副作用
 vi.mock("./LLMProviderConfigForm", () => ({
-    default: ({ name, enabled, index, onToggleEnabled }: {
-        name: string; enabled: boolean; index: number; onToggleEnabled: (index: number) => void;
+    default: ({ name, enabled, index, onToggleEnabled, onShare }: {
+        name: string; enabled: boolean; index: number; onToggleEnabled: (index: number) => void; onShare: () => void;
     }) => <div data-testid="provider-form">{name}
         <button role="switch" aria-label="启用提供商" aria-checked={enabled} onClick={() => onToggleEnabled(index)} />
+        <button onClick={onShare}>分享提供商</button>
     </div>,
 }));
 
@@ -53,6 +54,27 @@ describe("LLMProviderConfig new provider wizard", () => {
         await waitFor(() => expect(toggle).not.toBeChecked());
         fireEvent.click(toggle);
         await waitFor(() => expect(toggle).toBeChecked());
+    });
+
+    it("should only show a share code after a completed export", async () => {
+        mockBackend([openai]);
+        const exportProvider = vi.fn().mockReturnValueOnce(null).mockReturnValueOnce("test-share-code");
+        mockInvokeHandler("export_llm_provider", exportProvider);
+        render(<LLMProviderConfig />);
+        for (const completed of [false, true]) {
+            fireEvent.click(await screen.findByRole("button", { name: "分享提供商" }));
+            fireEvent.change(screen.getByLabelText(/设置密码/), { target: { value: "test-password" } });
+            fireEvent.change(screen.getByLabelText(/确认密码/), { target: { value: "test-password" } });
+            fireEvent.click(screen.getByRole("button", { name: "确认导出" }));
+            await waitFor(() => expect(screen.queryByRole("button", { name: "确认导出" })).not.toBeInTheDocument());
+            if (completed) {
+                expect((screen.getByLabelText("分享消息") as HTMLTextAreaElement).value).toContain("test-share-code");
+            } else {
+                expect(screen.queryByLabelText("分享消息")).not.toBeInTheDocument();
+                expect(toast.success).not.toHaveBeenCalledWith("导出成功");
+            }
+        }
+        expect(exportProvider).toHaveBeenCalledTimes(2);
     });
 
     it("should keep the saved state and explain the error when disabling fails", async () => {

@@ -2,14 +2,15 @@
 //! environment variables, and a provider's API key.
 //!
 //! The configuration stores `vault://<id>` (development builds wrote `vault://<id>#<field>`; the
-//! suffix is accepted and ignored). The real value is substituted only when a request
-//! is sent or a process starts, and only toward a destination the user confirmed by saving that
-//! configuration in Settings. SuperAdmin tools write the same tables directly and never record a
+//! suffix is accepted and ignored). Requests and processes receive values only for a destination
+//! the user confirmed by saving that configuration in Settings. An encrypted provider share also
+//! requires explicit one-time consent in a native dialog. SuperAdmin tools never record a
 //! confirmation, so a model that changes a URL, a launch command or a provider type cannot redirect a
 //! secret. This module and `placeholder.rs` are the only places that decide where a vault value may go.
 use crate::db::llm_db::LLMProviderConfig;
 use crate::db::mcp_db::MCPServer;
 use crate::sync::personal_vault::{self, normalize_origin, ConfigBinding, Resolved};
+use crate::utils::share_utils::{encrypt_provider_data, ProviderShareData};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -311,6 +312,44 @@ pub fn confirm_mcp(app: &AppHandle, id: i64, name: &str, transport_type: &str, c
 }
 
 fn provider_context(name: &str) -> String { format!("Provider「{name}」") }
+
+/// The prompt and the encrypted payload use the same provider snapshot. Only metadata is read
+/// before consent. The caller receives an encrypted share code or a cancellation.
+pub(crate) fn export_provider_share(
+    app: &AppHandle, data: ProviderShareData, password: &str, confirm: impl FnOnce(String) -> bool,
+) -> Result<Option<String>, String> {
+    let refs = ids(&parse(&data.api_key).map_err(|e| e.message)?);
+    let metadata = personal_vault::metas(app, &refs)?;
+    let mut entries = Vec::new();
+    for id in &refs {
+        let (meta, _) = metadata.get(id).ok_or("引用的凭据已不在保险箱中，请重新选择")?;
+        entries.push(meta);
+    }
+    encrypt_provider_share_after_consent(data, password, &entries, confirm, || {
+        personal_vault::resolve_ids(app, &refs).map_err(|e| e.message)
+    })
+}
+
+fn encrypt_provider_share_after_consent(
+    mut data: ProviderShareData, password: &str, entries: &[&personal_vault::ItemMeta],
+    confirm: impl FnOnce(String) -> bool,
+    resolve: impl FnOnce() -> Result<BTreeMap<String, Resolved>, String>,
+) -> Result<Option<String>, String> {
+    let target = provider_target(&data.api_type, data.endpoint.as_deref()).map_err(|e| e.message)?;
+    let names = entries.iter().map(|meta| format!("「{}」", meta.name)).collect::<Vec<_>>().join("、");
+    let prompt = format!("分享提供商「{}」（{}）时，将一并分享保险箱凭据{}。\n\n拿到分享码和密码的人可以取得 API Key 并使用你的额度。删除本机凭据也无法撤回已分享的 Key。", data.name, target.detail(), names);
+    if !confirm(prompt) { return Ok(None); }
+    let items = resolve()?;
+    for meta in entries {
+        let item = items.get(&meta.id).ok_or("引用的凭据已不在保险箱中，请重新选择")?;
+        if item.meta.updated_at != meta.updated_at || item.meta.name != meta.name {
+            return Err("保险箱凭据在确认期间已变化，请重新分享".into());
+        }
+    }
+    data.api_key = substitute(&data.api_key, &items, &provider_context(&data.name), Some(&target), &mut Vec::new())
+        .map_err(|e| e.message)?;
+    encrypt_provider_data(&data, password).map(Some).map_err(|e| e.to_string())
+}
 
 /// The site a provider's requests go to, before a model is chosen.
 pub fn provider_target(api_type: &str, endpoint: Option<&str>) -> Result<Target, RefError> {

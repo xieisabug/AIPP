@@ -16,7 +16,7 @@ interface PasswordDialogProps {
     title: string;
     isOpen: boolean;
     onClose: () => void;
-    onConfirm: (password: string) => Promise<void>;
+    onConfirm: (password: string) => Promise<boolean>;
 }
 
 const isEnterSubmit = (event: React.KeyboardEvent) =>
@@ -41,14 +41,14 @@ const PasswordDialog: React.FC<PasswordDialogProps> = ({
 
         setLoading(true);
         try {
-            await onConfirm(password);
+            const exported = await onConfirm(password);
 
             setPassword('');
             setConfirmPassword('');
             onClose();
-            toast.success('导出成功');
+            if (exported) toast.success('导出成功');
         } catch (error) {
-            toast.error(error instanceof Error ? error.message : '导出失败');
+            toast.error('分享失败：' + (error instanceof Error ? error.message : String(error)));
         } finally {
             setLoading(false);
         }

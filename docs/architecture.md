@@ -226,7 +226,7 @@ Members keep Butler-mode SuperAdmin tools, `butler_memory` (group scope + global
 " + env 原文)`。确认只在设置页保存命令（`add/update_mcp_server`、`update_llm_provider_config`、`update_llm_provider`）与 `vault_confirm_reference` 中写入，按来源（`mcp:{id}`/`provider:{id}`）替换旧目标；SuperAdmin 直接写库不会产生确认。接入点：
 - `http_transport` 普通路径用 `resolve_http_server` 解析请求头与 env，敏感头发送，`build_plain_client` 遇到残留 `vault://` 拒绝发送；
 - stdio 的测试、能力检测与 `execute_stdio_tool` 用 `stdio_env`，结果、错误与 stderr 诊断用 `executor::redactor_for` 脱敏；
-- Provider：`copilot_token_manager::prepare_provider_configs` 先调用 `config_ref::prepare_provider_configs` 解析 api_key，并附一条仅在内存中的 `__aipp_vault_guard`。`create_client_with_config` 算出最终 endpoint 后，用 `check_provider_destination` 核对 origin；api_key 仍含引用时 fail-closed。`claude_sdk` 与 `export_llm_provider` 拒绝引用。
+- Provider：`copilot_token_manager::prepare_provider_configs` 先调用 `config_ref::prepare_provider_configs` 解析 api_key，并附一条仅在内存中的 `__aipp_vault_guard`。`create_client_with_config` 算出最终 endpoint 后，用 `check_provider_destination` 核对 origin；api_key 仍含引用时 fail-closed。`claude_sdk` 拒绝引用。设置页的 `export_llm_provider` 通过原生对话框逐次确认，`config_ref::export_provider_share` 核对接口授权并在后端生成加密分享码。
 
 `vault_references` 扫描 mcp.db 与 llm.db 中的引用，并给出当前目标与是否已确认，供保险箱页展示和确认。
 

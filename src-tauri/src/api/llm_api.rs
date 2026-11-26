@@ -911,9 +911,10 @@ pub async fn update_llm_model_request_mode(
 #[tauri::command]
 pub async fn export_llm_provider(
     app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     provider_id: i64,
     password: String,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Get provider information
@@ -935,21 +936,27 @@ pub async fn export_llm_provider(
     if api_key.is_empty() {
         return Err("API Key is required for export".to_string());
     }
-    // Exporting would hand the real value to whoever holds the share password.
-    if crate::vault::config_ref::contains(&api_key) {
-        return Err("此 Provider 的 API Key 来自凭据保险箱，不能导出分享".to_string());
-    }
-
-    // Create share data
     let share_data =
         ProviderShareData { name: provider.name, api_type: provider.api_type, endpoint, api_key };
-
-    // Encrypt with password
-    let encrypted_data =
-        encrypt_provider_data(&share_data, &password).map_err(|e| e.to_string())?;
-
-    // Return the base64 encoded string directly
-    Ok(encrypted_data)
+    if !crate::vault::config_ref::contains(&share_data.api_key) {
+        return encrypt_provider_data(&share_data, &password).map(Some).map_err(|e| e.to_string());
+    }
+    if cfg!(desktop) && window.label() != "config" {
+        return Err("请在设置的模型提供商页面分享保险箱凭据".into());
+    }
+    if password.encode_utf16().count() < 6 {
+        return Err("分享密码至少需要 6 个字符".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+        crate::vault::config_ref::export_provider_share(&app_handle, share_data, &password, |message| {
+            let dialog = app_handle.dialog().message(message).title("确认分享保险箱凭据")
+                .buttons(MessageDialogButtons::OkCancelCustom("包含 API Key 并生成分享码".into(), "取消".into()));
+            #[cfg(desktop)]
+            let dialog = dialog.parent(&window);
+            dialog.blocking_show()
+        })
+    }).await.map_err(|e| format!("生成保险箱凭据分享码失败：{e}"))?
 }
 
 #[derive(Serialize)]
