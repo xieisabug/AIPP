@@ -67,7 +67,7 @@ export function useSetupItems() {
 export function useOnboardingEntry(desktop: boolean) {
     const [canOpen, setCanOpen] = useState(false);
     useDataRefresh({
-        events: ["feature_config_changed", "onboarding-state-changed"],
+        events: ["llm_provider_changed", "assistant_list_changed", "feature_config_changed", "onboarding-state-changed"],
         initial: true,
         paused: !desktop,
         refresh: async (current) => {

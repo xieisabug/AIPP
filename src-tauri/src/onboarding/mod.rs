@@ -135,6 +135,34 @@ fn butler_configured(db: &SystemDatabase) -> Result<bool, String> {
         && !experiment(db, "butler_main_workspace_path")?.trim().is_empty())
 }
 
+fn has_manual_configuration(llm: &LLMDatabase, assistants: &AssistantDatabase) -> Result<bool, String> {
+    // Older installations can contain empty, disabled official providers.
+    let has_provider: bool = llm.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM llm_provider p
+         WHERE NOT EXISTS (SELECT 1 FROM onboarding_draft_provider d WHERE d.provider_id=p.id)
+           AND (p.is_official=0 OR p.is_enabled=1
+             OR EXISTS (SELECT 1 FROM llm_model m WHERE m.llm_provider_id=p.id)
+             OR EXISTS (SELECT 1 FROM llm_provider_config c WHERE c.llm_provider_id=p.id AND trim(c.value)<>'')))",
+        [], |r| r.get(0),
+    ).map_err(err)?;
+    if has_provider {
+        return Ok(true);
+    }
+    // Assistant 1 is preinstalled with an empty model binding.
+    assistants.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant a WHERE a.id<>1
+         OR EXISTS (SELECT 1 FROM assistant_model m WHERE m.assistant_id=a.id AND m.provider_id>0))",
+        [], |r| r.get(0),
+    ).map_err(err)
+}
+
+fn can_open_manual_entry(app: &AppHandle, db: &SystemDatabase) -> Result<bool, String> {
+    Ok(cfg!(desktop) && !butler_configured(db)? && !has_manual_configuration(
+        &LLMDatabase::new(app).map_err(err)?,
+        &AssistantDatabase::new(app).map_err(err)?,
+    )?)
+}
+
 fn put(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute("INSERT INTO system_config(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value]).map_err(err)?;
     Ok(())
@@ -185,7 +213,7 @@ pub fn get_onboarding_state(app: AppHandle) -> Result<Status, String> {
         rerun: state.as_deref() == Some("completed") && step.as_deref() != Some("applied"),
         debug: cfg!(debug_assertions),
         workspace_locked: workspace_locked(state.as_deref(), &workspace),
-        can_open: cfg!(desktop) && !butler_configured(&db)?,
+        can_open: can_open_manual_entry(&app, &db)?,
         state,
         path: local(&db, "onboarding_path")?,
         step,
@@ -401,8 +429,8 @@ pub async fn open_onboarding_window(app: AppHandle) -> Result<(), String> {
         let _guard = SESSION.lock().await;
         let db = db(&app)?;
         let step = local(&db, "onboarding_step")?;
-        if butler_configured(&db)? && step.as_deref() != Some("source_ready") {
-            return Err("管家模型和主工作区已配置，可在设置中调整。".into());
+        if step.as_deref() != Some("source_ready") && !can_open_manual_entry(&app, &db)? {
+            return Err("已有提供商、助手或总管家配置，请在设置中调整。".into());
         }
         if app.get_webview_window("onboarding").is_none()
             && local(&db, "onboarding_state")?.as_deref() == Some("completed")

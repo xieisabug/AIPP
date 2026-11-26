@@ -5,6 +5,8 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { Check } from "lucide-react";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import { openOnboarding, useOnboardingEntry } from "@/components/onboarding/OnboardingSetup";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SettingsGroup, SettingRowText, settingRowClassName } from "@/components/config/SettingsGroup";
 import { ConfigPageLoading } from "@/components/common";
@@ -38,6 +40,7 @@ export const GeneralAppearanceConfig: React.FC<GeneralAppearanceConfigProps> = (
     onSubNavConsumed,
 }) => {
     const isMobilePlatform = useIsMobilePlatform();
+    const canOpenOnboarding = useOnboardingEntry(!isMobilePlatform);
     const autostartAvailable = useFeatureAvailableOnPlatform("autostart");
     const { featureConfig, saveFeatureConfig, loading } = useFeatureConfig();
     const { themes, themeInfo } = useSyntectThemes();
@@ -316,6 +319,12 @@ export const GeneralAppearanceConfig: React.FC<GeneralAppearanceConfigProps> = (
         >
             {!isMobilePlatform ? (
                 <SettingsGroup id="startup" title="启动与窗口" description="控制应用启动方式与默认主界面。">
+                    {canOpenOnboarding && (
+                        <div className={settingRowClassName}>
+                            <SettingRowText label="首次使用引导" description="跟随引导配置模型、助手和工作区。" />
+                            <Button variant="outline" size="sm" onClick={openOnboarding}>打开引导</Button>
+                        </div>
+                    )}
                     <div className={settingRowClassName}>
                         <SettingRowText
                             label="默认主页窗口"

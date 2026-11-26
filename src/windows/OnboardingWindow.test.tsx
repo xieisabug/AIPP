@@ -130,6 +130,27 @@ describe("first-run window", () => {
         clearAllMockHandlers();
         invoke.mockClear();
     });
+    it("should preserve the current form until the user confirms manual setup", async () => {
+        setup();
+        const skip = vi.fn();
+        mockInvokeHandler("skip_onboarding", skip);
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /我用的是其他服务商/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /OpenAI API/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
+
+        fireEvent.click(screen.getByRole("button", { name: "我自己填" }));
+        expect(await screen.findByRole("alertdialog")).toHaveTextContent("设置 → 常规与外观 → 首次使用引导");
+        expect(screen.getByRole("button", { name: "继续引导" })).toHaveFocus();
+        fireEvent.click(screen.getByRole("button", { name: "继续引导" }));
+        expect(screen.getByLabelText("API Key")).toHaveValue("synthetic");
+        expect(skip).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByRole("button", { name: "我自己填" }));
+        fireEvent.click(await screen.findByRole("button", { name: "确认自己填" }));
+        expect(skip).toHaveBeenCalledTimes(1);
+    });
     it("should resume a failed role-only save in the current window", async () => {
         const backend = setup();
         const model = { providerId: 6, code: "main", verified: true };

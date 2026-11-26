@@ -13,6 +13,32 @@ pub(super) fn databases() -> (SystemDatabase, LLMDatabase) {
 }
 
 #[test]
+fn test_manual_entry_requires_both_provider_and_assistant_to_be_unconfigured() {
+    let (_, llm) = databases();
+    let assistants = AssistantDatabase {
+        conn: Connection::open_in_memory().unwrap(),
+        mcp_conn: Connection::open_in_memory().unwrap(),
+    };
+    assistants.create_tables().unwrap();
+    let transient = llm.add_llm_provider("草稿", "deepseek", "", false, false).unwrap();
+    llm.mark_onboarding_draft(transient).unwrap();
+    assert!(!has_manual_configuration(&llm, &assistants).unwrap());
+
+    llm.release_onboarding_draft(transient).unwrap();
+    assert!(has_manual_configuration(&llm, &assistants).unwrap());
+    llm.conn.execute("DELETE FROM llm_provider WHERE id=?", [transient]).unwrap();
+    llm.update_llm_provider_config(30, "api_key", "sample").unwrap();
+    assert!(has_manual_configuration(&llm, &assistants).unwrap());
+    llm.conn.execute("DELETE FROM llm_provider_config", []).unwrap();
+    assistants.add_assistant_model(1, 30, "chat", "").unwrap();
+    assert!(has_manual_configuration(&llm, &assistants).unwrap());
+    assistants.conn.execute("DELETE FROM assistant_model WHERE provider_id=30", []).unwrap();
+    assert!(!has_manual_configuration(&llm, &assistants).unwrap());
+    assistants.add_assistant("我的助手", "", Some(0), false).unwrap();
+    assert!(has_manual_configuration(&llm, &assistants).unwrap());
+}
+
+#[test]
 fn test_startup_requires_enabled_chat_model_and_credentials() {
     let (sys, llm) = databases();
     assert!(should_show(&sys, &llm).unwrap());

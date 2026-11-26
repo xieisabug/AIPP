@@ -21,6 +21,10 @@ import { WindowTopBar } from "@/components/window/WindowTitleBar";
 import { useTheme } from "@/hooks/useTheme";
 import { Button } from "@/components/ui/button";
 import {
+    AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+    AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
     Dialog,
     CompactDialogContent,
     CompactDialogHeader,
@@ -650,7 +654,7 @@ export default function OnboardingWindow() {
                     e.key !== "Enter" ||
                     e.nativeEvent.isComposing ||
                     e.defaultPrevented ||
-                    target.closest("textarea,button,select,summary,[role=dialog],form") ||
+                    target.closest("textarea,button,select,summary,[role=dialog],[role=alertdialog],form") ||
                     embedded || page === "models" || (page === "sources" && path === "lie_flat" && !addingApi)
                 )
                     return;
@@ -1134,28 +1138,45 @@ export default function OnboardingWindow() {
                         </p>
                     )}
                     <div className="flex items-center gap-2">
-                        {page !== "done" && (
+                        {page !== "done" && (editing || addingApi ? (
                             <Button
                                 variant="ghost"
                                 size="sm"
                                 className="rounded-full text-xs text-muted-foreground hover:text-foreground"
                                 disabled={busy}
-                                onClick={() =>
-                                    void run(async () => {
-                                        if (editing || addingApi) {
-                                            if (status?.draft.config) setConfig(status.draft.config);
-                                            setEditing(false);
-                                            setAddingApi(false);
-                                            setPage("done");
-                                            return;
-                                        }
-                                        await invoke("skip_onboarding");
-                                    })
-                                }
+                                onClick={() => void run(async () => {
+                                    if (status?.draft.config) setConfig(status.draft.config);
+                                    setEditing(false);
+                                    setAddingApi(false);
+                                    setPage("done");
+                                })}
                             >
-                                {editing || addingApi ? "取消" : "稍后再说"}
+                                取消
                             </Button>
-                        )}
+                        ) : (
+                            <AlertDialog>
+                                <AlertDialogTrigger asChild>
+                                    <Button variant="ghost" size="sm" disabled={busy} className="rounded-full text-xs text-muted-foreground hover:text-foreground">
+                                        我自己填
+                                    </Button>
+                                </AlertDialogTrigger>
+                                <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                        <AlertDialogTitle>退出引导，自己填写配置？</AlertDialogTitle>
+                                        <AlertDialogDescription>
+                                            退出后会清除本次引导草稿并打开聊天窗口。下次启动时不会自动打开引导，你需要在设置中自行配置模型。
+                                            如果提供商和助手都还没配置，可以从「设置 → 常规与外观 → 首次使用引导」重新开始。
+                                        </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                        <AlertDialogCancel>继续引导</AlertDialogCancel>
+                                        <AlertDialogAction disabled={busy} onClick={() => void run(() => invoke("skip_onboarding"))}>
+                                            确认自己填
+                                        </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                </AlertDialogContent>
+                            </AlertDialog>
+                        ))}
                         {(page === "welcome" || (page === "sources" && !embedded && !addingApi)) && (
                             <Button
                                 variant="ghost"
