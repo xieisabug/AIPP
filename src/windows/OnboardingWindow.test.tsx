@@ -278,6 +278,47 @@ describe("first-run window", () => {
             }
         }
     );
+    async function selectRecommendedAndApply() {
+        await screen.findByRole("heading", { name: "选择模型" });
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
+        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        const apply = screen.getByRole("button", { name: "应用" });
+        await waitFor(() => expect(apply).toBeEnabled());
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "apply_onboarding_config")).toBe(false);
+        fireEvent.click(apply);
+    }
+    it("来源页点下一步可浏览 13 个模型、返回并手动选择，应用时仅验证所选型号", async () => {
+        setup();
+        const codes = Array.from({ length: 13 }, (_, index) => `chat-${index + 1}`);
+        mockInvokeHandler("preview_model_list", () => ({
+            available_models: codes.map(code => ({ code, request_mode: "chat_completions" })),
+        }));
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /我用的是其他服务商/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /OpenAI API/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await screen.findByText("已获取 13 个模型");
+        expect(screen.queryByRole("button", { name: "帮我选" })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        const list = await screen.findByLabelText("主力模型");
+        expect([...list.querySelectorAll("option")].map(option => option.value).filter(Boolean)).toEqual(codes);
+        expect(screen.getByRole("button", { name: "应用" })).toBeDisabled();
+        fireEvent.click(screen.getByRole("button", { name: "上一步" }));
+        await screen.findByText("已获取 13 个模型");
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        fireEvent.change(await screen.findByLabelText("搜索模型"), { target: { value: "chat-13" } });
+        fireEvent.change(screen.getByLabelText("主力模型"), { target: { value: "chat-13" } });
+        fireEvent.change(screen.getByLabelText("轻量模型"), { target: { value: "chat-7" } });
+        fireEvent.change(screen.getByLabelText("审核模型"), { target: { value: "chat-7" } });
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "preview_model_list")).toHaveLength(1);
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model").map(([,args]) => args?.modelCode))
+            .toEqual(["chat-13", "chat-7"]);
+    });
     it.each([false, true])("躺平添加提供商只获取列表，点击帮我选才试调用（首次列表失败：%s）", async (listFailsOnce) => {
         setup();
         if (listFailsOnce) {
@@ -299,13 +340,14 @@ describe("first-run window", () => {
         if (listFailsOnce) await screen.findByText("连不上 OpenAI API，检查网络或代理设置");
         else await screen.findByText("已获取 2 个模型");
         expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model" || cmd === "apply_onboarding_config")).toBe(false);
-        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        await selectRecommendedAndApply();
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "preview_model_list")).toHaveLength(listFailsOnce ? 2 : 1);
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "add_llm_provider")).toHaveLength(1);
         expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
     });
-    it("躺平粘贴完整分享消息后等待点击帮我选", async () => {
+    it("躺平分享码在下一步导入，进入模型页后才可试调用", async () => {
         setup();
         mockInvokeHandler("import_llm_provider", () => ({ id: 17, api_type: "openai_api", name: "示例", is_enabled: false }));
         render(<OnboardingWindow />);
@@ -313,10 +355,11 @@ describe("first-run window", () => {
         fireEvent.click(await screen.findByRole("button", { name: /有人发给我分享码/ }));
         const code = btoa(JSON.stringify({ type: "provider", encrypted_data: "fixture", nonce: "test" }));
         fireEvent.change(screen.getByLabelText("分享消息"), { target: { value: `分享码：${code}\n密码：example` } });
-        const select = screen.getByRole("button", { name: "帮我选" });
+        const select = screen.getByRole("button", { name: "下一步" });
         expect(select).toBeEnabled();
         expect(invoke.mock.calls.some(([cmd]) => cmd === "import_llm_provider" || cmd === "probe_chat_model")).toBe(false);
         fireEvent.click(select);
+        await selectRecommendedAndApply();
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
     });
@@ -331,7 +374,8 @@ describe("first-run window", () => {
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
-        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        await selectRecommendedAndApply();
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", { config: expect.objectContaining({
             models: [{ providerId: 44, codes }],
@@ -345,7 +389,8 @@ describe("first-run window", () => {
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
-        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        await selectRecommendedAndApply();
         expect(await screen.findByRole("heading", { name: "好了，可以开始了" })).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "开始使用" })).toBeEnabled();
         expect(invoke.mock.calls.filter(([c]) => c === "probe_chat_model")).toHaveLength(2);
@@ -373,13 +418,14 @@ describe("first-run window", () => {
         const first = render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
-        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
         fireEvent.click(await screen.findByRole("button", { name: "保存配置，稍后充值" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_onboarding_recharge", { providerId: 44 }));
         first.unmount();
         backend.balance(5);
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: "我已充值，重新检查" }));
+        await selectRecommendedAndApply();
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.filter(([c]) => c === "add_llm_provider")).toHaveLength(1);
     });

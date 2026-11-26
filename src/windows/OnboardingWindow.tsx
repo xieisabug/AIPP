@@ -65,7 +65,7 @@ import {
 } from "@/components/onboarding/onboardingService";
 import type { OnboardingPreset } from "@/utils/modelRecommend";
 
-type Page = "welcome" | "sources" | "roles" | "home" | "extras" | "applying" | "done";
+type Page = "welcome" | "sources" | "models" | "roles" | "home" | "extras" | "applying" | "done";
 const allExtras = Object.keys(setupNames) as SetupId[];
 const extraInfo = {
     skills: "扩展助手可用的技能",
@@ -82,6 +82,7 @@ const extraIcons: Record<SetupId, React.ReactNode> = {
 const titles: Record<Page, string> = {
     welcome: "欢迎使用 AIPP",
     sources: "你的 AI 从哪来？",
+    models: "选择模型",
     roles: "模型分工",
     home: "选择主界面",
     extras: "顺手装上这些？",
@@ -595,7 +596,7 @@ export default function OnboardingWindow() {
     const steps: Page[] =
         path === "expert"
             ? ["welcome", "sources", "roles", "home", "extras", "done"]
-            : ["welcome", "sources", "done"];
+            : ["welcome", "sources", "models", "done"];
     const startHome = () => invoke<void>("finish_onboarding");
     const effectiveRoles = [
         ["light", "轻量模型", status?.activeLight],
@@ -616,7 +617,7 @@ export default function OnboardingWindow() {
                     e.nativeEvent.isComposing ||
                     e.defaultPrevented ||
                     target.closest("textarea,button,select,summary,[role=dialog],form") ||
-                    embedded || (page === "sources" && path === "lie_flat" && !addingApi)
+                    embedded || page === "models" || (page === "sources" && path === "lie_flat" && !addingApi)
                 )
                     return;
                 const button = e.currentTarget.querySelector<HTMLButtonElement>("footer [data-primary]");
@@ -663,7 +664,7 @@ export default function OnboardingWindow() {
             )}
             <main className={`min-h-0 flex-1 overflow-y-auto ${page === "welcome" ? "flex flex-col justify-center" : ""}`}>
                 <div
-                    key={page}
+                    key={page === "models" ? "sources" : page}
                     className="aipp-onboarding-enter mx-auto w-full max-w-3xl space-y-4 px-8 py-3"
                 >
                     {!preset || !status ? (
@@ -703,7 +704,7 @@ export default function OnboardingWindow() {
                                     </div>
                                 </div>
                             )}
-                            {page === "sources" && (
+                            {(page === "sources" || page === "models") && (
                                 <SourceForm
                                     key={sourceRevision}
                                     path={addingApi ? "expert" : path}
@@ -718,6 +719,8 @@ export default function OnboardingWindow() {
                                             : undefined
                                     }
                                     onChecked={accept}
+                                    showingModels={page === "models"}
+                                    onModels={() => setPage("models")}
                                     busy={busy}
                                     run={run}
                                     refresh={refresh}
@@ -1147,15 +1150,16 @@ export default function OnboardingWindow() {
                         )}
                         {page !== "welcome" && (
                         <div className="ml-auto flex items-center gap-2">
-                            {["roles", "home", "extras"].includes(page) && !editing && (
+                            {["models", "roles", "home", "extras"].includes(page) && !editing && (
                                 <Button
                                     variant="ghost"
                                     size="sm"
                                     className="rounded-full text-xs text-muted-foreground hover:text-foreground"
                                     disabled={busy}
-                                    onClick={() =>
-                                        setPage(page === "roles" ? "sources" : page === "home" ? "roles" : "home")
-                                    }
+                                    onClick={() => {
+                                        setError("");
+                                        setPage(page === "models" || page === "roles" ? "sources" : page === "home" ? "roles" : "home");
+                                    }}
                                 >
                                     <ChevronLeft className="h-3.5 w-3.5" />
                                     上一步

@@ -14,13 +14,11 @@ import {
     History,
     KeyRound,
     Plus,
-    Search,
     Share2,
     Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Textarea } from "@/components/ui/textarea";
 import NewProviderWizard from "@/components/config/NewProviderWizard";
@@ -29,7 +27,7 @@ import { PROVIDER_API_TYPES, suggestProviderName } from "@/components/config/pro
 import type { useLocalAgentDetection } from "@/components/config/useLocalAgentDetection";
 import { parseProviderShareMessage } from "@/utils/providerShareMessage";
 import type { OnboardingPreset } from "@/utils/modelRecommend";
-import { autoCheck, type Checked, type ManualModels } from "./verifySources";
+import { prepareSource, type Checked, type ModelSource } from "./verifySources";
 import {
     createAgentDraft,
     createDraft,
@@ -47,6 +45,8 @@ import {
     type Path,
     type Provider,
 } from "./onboardingService";
+
+import { LieFlatModels } from "./LieFlatModels";
 
 type Source = "share" | "key" | "agent" | "other" | "existing";
 const apiTypes = PROVIDER_API_TYPES.filter((t) => t.kind !== "local");
@@ -66,6 +66,8 @@ interface Props {
     progress: (s: string) => void;
     refresh: () => Promise<void>;
     onNext: () => void;
+    showingModels: boolean;
+    onModels: () => void;
     onControls: (hidden: boolean) => void;
 }
 export function SourceForm({
@@ -83,6 +85,8 @@ export function SourceForm({
     progress,
     refresh,
     onNext,
+    showingModels,
+    onModels,
     onControls,
 }: Props) {
     const expert = path === "expert";
@@ -98,10 +102,7 @@ export function SourceForm({
     const [optional, setOptional] = useState("");
     const [agent, setAgent] = useState<{ type: string; name: string; cli?: string }>();
     const [existing, setExisting] = useState<number | null>(recharge ?? null);
-    const [manual, setManual] = useState<ManualModels>();
-    const [main, setMain] = useState("");
-    const [light, setLight] = useState("");
-    const [search, setSearch] = useState("");
+    const [modelSource, setModelSource] = useState<ModelSource>();
     const [failure, setFailure] = useState<{ kind?: string; message: string; raw: string }>();
     const [rechargeSaved, setRechargeSaved] = useState(!!recharge);
     const [reusable, setReusable] = useState<Provider[]>([]);
@@ -118,7 +119,7 @@ export function SourceForm({
     const pick = (s: Source) => {
         setSource(s);
         setFailure(undefined);
-        setManual(undefined);
+        setModelSource(undefined);
         setLogin(undefined);
         setBalanceId(null);
         setRechargeSaved(false);
@@ -169,7 +170,6 @@ export function SourceForm({
                 cache.current.set("key:" + value, saved);
                 return saved;
             }
-            if (manual && !p) p = manual.provider;
             if (!p && source === "share") {
                 if (!parsed) throw new Error("分享码好像不完整，请让对方把整段消息重新复制给你");
                 progress("正在解开分享码…");
@@ -227,8 +227,6 @@ export function SourceForm({
                 setLogin(p);
                 if (optional.trim()) p = await within(() => apiKeyProvider(optional.trim()));
             }
-            if (manual && source === "agent" && agent)
-                agentProvider = cache.current.get(agent.type + ":" + (agent.cli ?? ""));
             if (!p && source === "existing" && existing)
                 p = (await within(providerList)).find((i) => i.id === existing);
             if (!p && source === "key" && key.trim()) p = await within(() => apiKeyProvider(key.trim()));
@@ -243,16 +241,13 @@ export function SourceForm({
                     value: String(proxy),
                 });
             }
-            const result = await autoCheck(p, preset, within, progress, {
+            const result = await prepareSource(p, preset, within, progress, {
                 agent: agentProvider,
-                manual: manual ? { main, light } : undefined,
-                checkMainBalance: true,
                 models: source === "other" ? otherSource?.models : undefined,
             });
             if ("codes" in result) {
-                setManual(result);
-                setMain("");
-                setLight(result.light);
+                setModelSource(result);
+                onModels();
                 return;
             }
             await onChecked(result);
@@ -260,9 +255,7 @@ export function SourceForm({
             handleError(e);
         }
     }
-    const ready = manual
-        ? !!main
-        : source === "key"
+    const ready = source === "key"
           ? !!key.trim()
           : source === "share"
             ? !!share.trim() && !!(parsed?.password || password.trim())
@@ -271,6 +264,9 @@ export function SourceForm({
               : source === "other"
                 ? !!otherSource
                 : source === "agent" && !!agent;
+    if (showingModels && modelSource) {
+        return <LieFlatModels source={modelSource} footer={footer} busy={busy} run={run} progress={progress} onChecked={onChecked} />;
+    }
     if (catalog)
         return (
             <NewProviderWizard
@@ -389,60 +385,7 @@ export function SourceForm({
             }}
         >
             <fieldset className="min-w-0 space-y-3" disabled={busy}>
-                {manual ? (
-                    <div className="space-y-3.5 rounded-2xl bg-muted/30 p-5">
-                        <div>
-                            <h3 className="text-base font-semibold">选一个主力模型</h3>
-                            <p className="mt-0.5 text-xs text-muted-foreground">
-                                服务商返回了 {manual.codes.length} 个模型，未能自动匹配，请选择用于聊天的模型。
-                            </p>
-                        </div>
-                        <div className="relative">
-                            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                            <Input
-                                aria-label="搜索模型"
-                                className="rounded-xl bg-background/90 pl-9"
-                                placeholder="搜索模型…"
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                            />
-                        </div>
-                        <select
-                            aria-label="主力模型"
-                            className="w-full rounded-xl border border-border/70 bg-background/90 p-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                            size={6}
-                            value={main}
-                            onChange={(e) => setMain(e.target.value)}
-                        >
-                            {manual.codes
-                                .filter((c) => c.toLowerCase().includes(search.toLowerCase()))
-                                .map((c) => (
-                                    <option className="rounded px-2 py-1" key={c}>{c}</option>
-                                ))}
-                        </select>
-                        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                            <label className="flex flex-1 items-center gap-2 text-sm">
-                                <span className="shrink-0 text-xs text-muted-foreground">打杂用的小模型（可选）</span>
-                                <div className="relative flex-1 max-w-xs">
-                                    <select
-                                        className="h-9 w-full appearance-none rounded-xl border border-border/70 bg-background/90 pl-3 pr-8 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                                        value={light}
-                                        onChange={(e) => setLight(e.target.value)}
-                                    >
-                                        <option value="">不配置</option>
-                                        {manual.codes.map((c) => (
-                                            <option key={c}>{c}</option>
-                                        ))}
-                                    </select>
-                                    <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                                </div>
-                            </label>
-                            <Button type="button" size="sm" variant="ghost" className="rounded-full text-xs" onClick={() => setManual(undefined)}>
-                                改选来源
-                            </Button>
-                        </div>
-                    </div>
-                ) : expert ? (
+                {expert ? (
                     <div className="space-y-3.5">
                         <div className="rounded-2xl bg-muted/60 dark:bg-muted/35">
                             <div className="flex items-center justify-between border-b border-border/40 px-5 py-3">
@@ -848,11 +791,7 @@ export function SourceForm({
                     >
                         {failure?.kind === "insufficient_balance" || rechargeSaved
                             ? "我已充值，重新检查"
-                            : failure && !(source === "other" && !otherSource?.models)
-                              ? "重试"
-                              : expert || (source === "agent" && !optional.trim())
-                                ? "下一步"
-                                : manual ? "验证所选模型" : "帮我选"}
+                            : "下一步"}
                     </Button>,
                     footer
                 )}

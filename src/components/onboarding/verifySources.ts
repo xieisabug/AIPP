@@ -27,10 +27,12 @@ export interface Checked {
     config: Config;
     notes: Notes;
 }
-export interface ManualModels {
+export interface ModelSource {
     provider: Provider;
+    agent?: Provider;
+    config: Config;
     codes: string[];
-    light: string;
+    ranked: RankedRoles;
 }
 export type Progress = (text: string) => void;
 export async function checkBalance(provider: Provider, within: Within) {
@@ -41,21 +43,18 @@ export async function checkBalance(provider: Provider, within: Within) {
     if (!balance.available || Number(balance.total) <= 0)
         throw { kind: "insufficient_balance", message: "DeepSeek 余额为 0" };
 }
-export async function autoCheck(
+export async function prepareSource(
     provider: Provider,
     preset: OnboardingPreset,
     within: Within,
     progress: Progress,
     options: {
         agent?: Provider;
-        manual?: { main: string; light: string };
-        checkMainBalance?: boolean;
         models?: ModelSelectionResponse["available_models"];
     } = {}
-): Promise<Checked | ManualModels> {
+): Promise<Checked | ModelSource> {
     const agent = options.agent;
     const notes: Notes = {};
-    const probe = probeSession(within, progress);
     const config: Config = {
         chat: role(provider.id, ""),
         home: "butler_experiment",
@@ -77,7 +76,7 @@ export async function autoCheck(
     try {
         progress("正在获取模型列表…");
         info = await within(() => preview(provider, preset, options.models));
-        if (options.checkMainBalance && !agent) {
+        if (!agent) {
             progress("正在检查账户余额…");
             await checkBalance(provider, within);
         }
@@ -92,47 +91,16 @@ export async function autoCheck(
     }
     const deepSeek = provider.api_type === "deepseek";
     if (deepSeek) config.models = [{ providerId: provider.id, codes: [...new Set(info.availableCodes)] }];
-    const manual = options.manual;
-    const manualLight = manual?.light ? [{ code: manual.light, reason: "手动选择" }] : [];
-    const candidates = {
-        chat: manual ? [{ code: manual.main, reason: "手动选择" }] : info.picks.main,
-        light: manual ? manualLight : info.picks.light,
-        review: manual ? manualLight : info.picks.review,
+    const candidates = (rows: Candidate[]) => rows.map(({code, reason}) => ({
+        model: role(provider.id, code), reason,
+    }));
+    const review = deepSeek && info.codes.includes("deepseek-flash")
+        ? [{ code: "deepseek-flash", reason: "自动选择" }, ...info.picks.review.filter(row => row.code !== "deepseek-flash")]
+        : info.picks.review;
+    return {
+        provider, agent, config, codes: info.codes,
+        ranked: { chat: candidates(info.picks.main), light: candidates(info.picks.light), review: candidates(review) },
     };
-    if (deepSeek && info.codes.includes("deepseek-flash")) {
-        candidates.review = [
-            { code: "deepseek-flash", reason: "自动选择" },
-            ...candidates.review.filter(candidate => candidate.code !== "deepseek-flash"),
-        ];
-    }
-    const fallback = { provider, codes: info.codes, light: info.picks.light[0]?.code ?? "" };
-    if (!agent && !candidates.chat.length) return fallback;
-    async function select(key: ModelRole, list: Candidate[]) {
-        if (!list.length) return null;
-        const candidates = list.map(candidate => ({ model: role(provider.id, candidate.code), reason: candidate.reason }));
-        try {
-            const selected = await firstVerified(candidates, probe);
-            notes[key] = { reason: selected.reason };
-            return selected.model;
-        } catch (error) {
-            if (key === "chat") throw error;
-            notes[key] = { reason: candidates[0].reason, error: explain(error, provider.name) };
-            return candidates[0].model;
-        }
-    }
-    if (!agent) {
-        try {
-            config.chat = (await select("chat", candidates.chat))!;
-        } catch (e) {
-            if (!manual && e && typeof e === "object" && "kind" in e && e.kind === "model_not_found")
-                return fallback;
-            throw e;
-        }
-    }
-    config.light = await select("light", candidates.light);
-    config.review = await select("review", candidates.review);
-    config.butler = config.chat;
-    return { config, notes };
 }
 export async function checkSelected(
     config: Config,
