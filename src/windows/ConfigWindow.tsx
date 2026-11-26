@@ -1,3 +1,5 @@
+import { toast } from "sonner";
+import { takeSettingsRoute, type SettingsRouteRequest } from "@/lib/pendingSettingsRoute";
 import React, { Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -143,11 +145,11 @@ function ConfigWindow() {
         items.push(
             { id: "plugins-config", name: "插件", icon: Puzzle, group: "capabilities" },
             { id: "ai-automation-config", name: "AI 与自动化", icon: WandSparkles, group: "capabilities" },
-        } else {
-            items.push({ id: "device-connections", name: "设备互联", icon: MonitorSmartphone, group: "capabilities" });
         );
         if (isMobilePlatform) {
             items.push({ id: "mobile-tasks", name: "本机任务", icon: ListChecks, group: "capabilities" });
+        } else {
+            items.push({ id: "device-connections", name: "设备互联", icon: MonitorSmartphone, group: "capabilities" });
         }
         // 隐私与数据
         items.push(
@@ -245,10 +247,18 @@ function ConfigWindow() {
     }, [isMobilePlatform, navigateResolved]);
 
     useEffect(() => {
-        const unlistenNav = listen<{ menu: string; subNav?: string }>("config-navigate-to", (event) => {
-            navigateResolved(event.payload.menu, event.payload.subNav);
-        });
+        let active = true;
+        const consume = (event?: SettingsRouteRequest) => {
+            if (!active) return;
+            const route = takeSettingsRoute(event);
+            if (!route) return;
+            navigateResolved(route.menu, route.subNav);
+            if (route.notice) toast.info(route.notice);
+        };
+        const unlistenNav = listen<SettingsRouteRequest>("config-navigate-to", (event) => consume(event.payload));
+        void unlistenNav.then(() => consume());
         return () => {
+            active = false;
             unlistenNav.then((fn) => fn());
         };
     }, [navigateResolved]);

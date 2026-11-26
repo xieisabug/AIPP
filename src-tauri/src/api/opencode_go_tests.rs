@@ -40,17 +40,13 @@ fn test_catalog_protocols_and_media() {
 }
 
 #[test]
-fn test_seed_collision_upgrade_and_permanent_deletion() {
+fn test_new_install_has_no_providers_and_reopening_preserves_manual_rows() {
     let db = LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();
-    let initial_id = db.conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1", [PROVIDER], |r| r.get(0)).unwrap();
-    let initial = db.get_llm_provider(initial_id).unwrap();
-    assert_eq!(initial.api_type, PROVIDER);
-    assert!(!initial.is_enabled);
-    db.conn.execute_batch("DELETE FROM llm_provider WHERE api_type='opencode_go';
-        DELETE FROM builtin_provider_migrations;
-        INSERT INTO llm_provider (id,name,api_type,description) VALUES (31,'mine','openai_api','');").unwrap();
+    assert!(db.get_llm_providers().unwrap().is_empty());
+    db.conn.execute_batch("INSERT INTO llm_provider (id,name,api_type,description) VALUES (31,'mine','openai_api','');").unwrap();
     db.create_tables().unwrap();
+    assert_eq!(db.get_llm_providers().unwrap().len(), 1);
     assert_eq!(db.get_llm_provider(31).unwrap().name, "mine");
     db.conn.execute("DELETE FROM llm_provider WHERE api_type=?1",[PROVIDER]).unwrap();
     db.create_tables().unwrap();
@@ -62,7 +58,7 @@ fn test_seed_collision_upgrade_and_permanent_deletion() {
 fn test_catalog_supersedes_stale_preferences() {
     let db = LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();
-    let id = db.conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1", [PROVIDER], |r| r.get(0)).unwrap();
+    let id = db.add_llm_provider("OpenCode Go", PROVIDER, "", false, true).unwrap();
     db.upsert_model_request_mode(id, "example", "responses").unwrap();
     assert_eq!(db.effective_model_mode(PROVIDER, id, "example").unwrap(), "responses");
     db.conn.execute("INSERT INTO opencode_go_protocols(model,mode) VALUES ('example','anthropic_messages')", []).unwrap();

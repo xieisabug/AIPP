@@ -1,3 +1,4 @@
+import { ReviewModelHint } from "./mcp-tool-components/ReviewModelHint";
 import {
     AlertDialog,
     AlertDialogContent,
@@ -299,6 +300,7 @@ function McpApprovalDetails({ server, meta }: { server: string; meta: Record<str
 }
 
 function PermissionReviewNotice({ review }: { review: NonNullable<AcpPermissionRequest["review"]> }) {
+    if (review.verdict === "manual") return <ReviewModelHint />;
     const timeout = review.reason.match(/自动审核模型超时（(\d+)秒）$/);
     return <div role="status" className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-foreground">
         {timeout ? <>
@@ -395,7 +397,7 @@ export function AcpPermissionDialog({
                 </div>
             }>
             <div className={permissionDialogBodyClassName}>
-                {request.review && <PermissionReviewNotice review={request.review} />}
+                {request.review && request.review.verdict !== "manual" && <PermissionReviewNotice review={request.review} />}
                 {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
                     <div className="flex items-start gap-2 text-sm">
                         <span className="shrink-0 font-medium text-foreground">标题:</span>
@@ -427,6 +429,7 @@ export function AcpPermissionDialog({
                 {errorMessage ? (
                     <p className="text-xs text-destructive">{errorMessage}</p>
                 ) : null}
+                {request.review?.verdict === "manual" && <ReviewModelHint />}
             </div>
         </PermissionSurface>
     );

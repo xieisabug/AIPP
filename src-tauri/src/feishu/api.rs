@@ -1183,13 +1183,17 @@ async fn render_preview_message_tool_result_for_feishu(
     let params = crate::external_channels::presentation::successful_preview_message_parameters(
         &delivery_message.content,
     )?;
-    let preview = match crate::api::message_preview::reference_from_args(&params) {
+    Some(render_message_preview(app_handle, delivery_message.conversation_id, &params).await)
+}
+
+async fn render_message_preview(app_handle: &AppHandle, conversation_id: i64, params: &Value) -> Vec<String> {
+    let preview = match crate::api::message_preview::reference_from_args(params) {
         Ok(reference) => {
-            crate::api::message_preview::build(app_handle, delivery_message.conversation_id, reference).await
+            crate::api::message_preview::build(app_handle, conversation_id, reference).await
         }
         Err(error) => Err(error),
     };
-    Some(match preview {
+    match preview {
         Ok(preview) => crate::external_channels::presentation::render_previewed_message_for_external_channel(
             params.get("title").and_then(Value::as_str),
             &preview.author,
@@ -1198,7 +1202,7 @@ async fn render_preview_message_tool_result_for_feishu(
             "feishu",
         ),
         Err(error) => vec![format!("❌ 引用的消息无法展示：{error}")],
-    })
+    }
 }
 
 pub(super) fn render_inline_preview_tool_result_parts_for_feishu(
@@ -1229,6 +1233,27 @@ pub(super) async fn render_message_for_feishu_delivery(
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
     if metadata.as_ref().and_then(|value| value["origin"].as_str()) == Some("butler_proactive") {
         return Ok(Vec::new());
+    }
+    if matches!(delivery_message.message_type.as_str(), "response" | "assistant") {
+        let mut parts = Vec::new();
+        if metadata.as_ref().is_some_and(|value| value.get("agent_final").is_some() || value.get("agent_activities").is_some()) {
+            let parameters = {
+                let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle)
+                    .and_then(|db| db.get_connection()).map_err(|e| e.to_string())?;
+                crate::db::butler_interactions::native_message_previews(&conn, delivery_message.conversation_id, delivery_message.id)
+                    .map_err(|e| format!("读取消息 {} 的引用记录失败：{e}", delivery_message.id))?
+            };
+            for params in parameters {
+                parts.extend(render_message_preview(app_handle, delivery_message.conversation_id, &params).await);
+            }
+        }
+        if crate::api::butler_api::is_butler_silent_reply(&delivery_message.content) {
+            return Ok(parts);
+        }
+        if !parts.is_empty() {
+            parts.extend(render_message_for_external_channel(delivery_message, &RenderContext { channel: CHANNEL_FEISHU, relay_origin }));
+            return Ok(parts);
+        }
     }
     if let Some(rendered) = render_preview_message_tool_result_for_feishu(app_handle, delivery_message).await {
         return Ok(rendered);

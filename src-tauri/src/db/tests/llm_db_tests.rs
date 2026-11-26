@@ -280,7 +280,12 @@ fn test_native_agents_provider_and_model_filters() {
     let regular_models = db.get_filtered_models_for_select(0).unwrap();
     assert_eq!(regular_models.len(), 1);
     assert_eq!(regular_models[0].3, regular[0].0);
-    assert_eq!(db.get_filtered_models_for_select(4).unwrap().len(), 5);
+    let discovered = db.get_filtered_models_for_select(4).unwrap();
+    assert_eq!(discovered.len(), 10);
+    for (_, code, _, provider_id) in placeholders {
+        assert!(discovered.iter().any(|row| row.1 == code && row.2 == 0 && row.3 == provider_id));
+        assert!(discovered.iter().any(|row| row.1 == "model-id" && row.2 > 0 && row.3 == provider_id));
+    }
     let kiro = agents.iter().find(|provider|provider.2 == "kiro").unwrap().0;
     db.update_llm_provider(kiro, "kiro", "kiro", "", false).unwrap();
     assert!(!db.get_filtered_models_for_select(4).unwrap().iter().any(|model|model.3 == kiro));
@@ -601,4 +606,18 @@ fn test_cascade_delete_legacy_llm_schema_without_preferences() {
     db.delete_llm_model(provider,"missing".into()).unwrap();
     db.delete_llm_model_by_provider(provider).unwrap();
     db.delete_llm_provider(provider).unwrap();
+}
+
+#[test]
+fn test_onboarding_aux_model_list_excludes_native_models_and_keeps_anthropic_api() {
+    let db = create_llm_db();
+    for kind in ["claude_sdk", "anthropic", "opencode", "opencode_go"] {
+        let id = db.add_llm_provider(kind, kind, "", false, true).unwrap();
+        db.add_llm_model("chat", id, "chat", "", false, false, false).unwrap();
+    }
+    for decisions in [true, false] {
+        let rows = db.get_models_for_select_with_mode(decisions).unwrap();
+        assert!(rows.iter().any(|m| m.0.starts_with("anthropic /")));
+        assert!(rows.iter().all(|m| !m.0.starts_with("claude_sdk /") && !m.0.starts_with("opencode /")));
+    }
 }

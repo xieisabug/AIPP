@@ -2065,7 +2065,9 @@ pub async fn execute_tool_by_transport_on_large_stack(
     let thread_tool_name = tool_name.clone();
     crate::utils::async_thread::run_on_large_stack("aipp-tool-transport", move || async move {
         let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-        let preview_params = (server.command.as_deref() == Some("aipp:ui_interaction") && matches!(thread_tool_name.as_str(), "preview_file" | "preview_code")).then_some(parameters.as_str());
+        let preview_params = matches!((server.command.as_deref(), thread_tool_name.as_str()),
+            (Some("aipp:ui_interaction"), "preview_file" | "preview_code") | (Some("aipp:agent"), "preview_message"))
+            .then_some(parameters.as_str());
         let transport = locals.scope(execute_tool_by_transport(
                 &app_handle,
                 &feature_config_state,

@@ -631,9 +631,8 @@ async fn execute_run_inner(
     // ── 1. 开始前检查 ────────────────────────────────────────────────
     let assistant_detail = get_assistant(app_handle.clone(), task.assistant_id)
         .map_err(|e| RunError::Preflight(format!("执行助手 #{} 不存在或读取失败：{e}", task.assistant_id)))?;
-    if assistant_detail.assistant.assistant_type.unwrap_or(0) != 0 {
-        return Err(RunError::Preflight(format!("「{}」不是普通对话助手，不能执行定时任务", assistant_detail.assistant.name)));
-    }
+    service::validate_executor_type(assistant_detail.assistant.assistant_type, &assistant_detail.assistant.name)
+        .map_err(RunError::Preflight)?;
     if assistant_detail.model.is_empty() {
         return Err(RunError::Preflight(format!("执行助手「{}」没有配置模型", assistant_detail.assistant.name)));
     }

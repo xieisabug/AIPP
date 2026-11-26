@@ -369,17 +369,8 @@ pub fn get_artifacts_for_completion(
     get_artifacts_collection(app_handle, None)
 }
 
-#[tauri::command]
-pub async fn generate_artifact_metadata(
-    app_handle: tauri::AppHandle,
-    feature_config_state: State<'_, FeatureConfigState>,
-    artifact_type: String,
-    code: String,
-) -> Result<ArtifactMetadata, String> {
-    let config_feature_map = feature_config_state.config_feature_map.lock().await;
-    let feature_config = config_feature_map.get("conversation_summary");
-
-    if let Some(config) = feature_config {
+fn form_autofill_model(config_feature_map: &std::collections::HashMap<String, std::collections::HashMap<String, crate::db::system_db::FeatureConfig>>) -> Result<(i64, String), String> {
+    let config = config_feature_map.get("conversation_summary").ok_or("需要轻量模型")?;
         // 检查表单自动填写功能是否启用
         let autofill_enabled = config
             .get("form_autofill_enabled")
@@ -434,6 +425,32 @@ pub async fn generate_artifact_metadata(
                     .to_string(),
             );
         };
+
+    Ok((provider_id, model_code))
+}
+
+#[tauri::command]
+pub async fn artifact_autofill_unavailable_reason(app_handle: tauri::AppHandle, feature_config_state: State<'_, FeatureConfigState>) -> Result<Option<String>, String> {
+    let map = feature_config_state.config_feature_map.lock().await;
+    let (provider, code) = match form_autofill_model(&map) {
+        Ok(model) => model,
+        Err(reason) if reason.contains("已禁用") => return Ok(Some("表单自动填写已关闭".into())),
+        Err(_) => return Ok(Some("需要轻量模型".into())),
+    };
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    Ok(db.get_model_for_request(&provider, &code).err().map(|_| "需要轻量模型".into()))
+}
+
+#[tauri::command]
+pub async fn generate_artifact_metadata(
+    app_handle: tauri::AppHandle,
+    feature_config_state: State<'_, FeatureConfigState>,
+    artifact_type: String,
+    code: String,
+) -> Result<ArtifactMetadata, String> {
+    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    if config_feature_map.contains_key("conversation_summary") {
+        let (provider_id, model_code) = form_autofill_model(&config_feature_map)?;
 
         let system_prompt = r#"你是一个专业的代码分析助手。提供的代码是某个工具的核心组件，请根据代码对该工具生成适当的元数据。
 你需要返回一个JSON格式的响应，包含以下字段：

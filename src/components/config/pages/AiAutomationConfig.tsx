@@ -83,7 +83,7 @@ export const AiAutomationConfig: React.FC<AiAutomationConfigProps> = ({
     const [toolErrorContinue, setToolErrorContinue] = useState(true);
 
     // 上下文自动压缩
-    const [contextCompactionEnabled, setContextCompactionEnabled] = useState(false);
+    const [contextCompactionEnabled, setContextCompactionEnabled] = useState(true);
     const [contextMaxInputTokens, setContextMaxInputTokens] = useState("128000");
     const [contextCompactionThreshold, setContextCompactionThreshold] = useState("0.80");
     const [contextTailRatio, setContextTailRatio] = useState("0.30");
@@ -214,7 +214,7 @@ export const AiAutomationConfig: React.FC<AiAutomationConfigProps> = ({
             dynamicMcpEnabled: ec.get("dynamic_mcp_loading_enabled") === "true",
             mcpSummarizerModel: ec.get("mcp_summarizer_model_id") || "",
             toolErrorContinue: (tec.get("enabled") ?? "true") !== "false" && (tec.get("enabled") ?? "true") !== "0",
-            contextCompactionEnabled: ec.get("context_compaction_enabled") === "true",
+            contextCompactionEnabled: ["true", "1"].includes(ec.get("context_compaction_enabled") ?? "true"),
             contextMaxInputTokens: ec.get("context_max_input_tokens") || "128000",
             contextCompactionThreshold: ec.get("context_compaction_threshold") || "0.80",
             contextTailRatio: ec.get("context_tail_ratio") || "0.30",
@@ -846,7 +846,11 @@ export const AiAutomationConfig: React.FC<AiAutomationConfigProps> = ({
                                 <span className="text-xs text-muted-foreground">
                                     {summaryTasks.conversation_running
                                         ? `后台运行中：${summaryTasks.conversation_running_count || 1} 个总结任务`
-                                        : "空闲，保存不会阻塞后台总结任务。"}
+                                        : lightLoading
+                                            ? "正在检查轻量模型配置…"
+                                            : lightOptions.some(o => o.value === (conversationSummaryModel || defaultLightModel))
+                                                ? "空闲，保存不会阻塞后台总结任务。"
+                                                : "未配置轻量模型，已暂停"}
                                 </span>
                                 <Button
                                     type="button"
@@ -856,7 +860,8 @@ export const AiAutomationConfig: React.FC<AiAutomationConfigProps> = ({
                                         saving ||
                                         runningAction.conversation ||
                                         summaryTasks.conversation_running ||
-                                        (!conversationSummaryModel && !defaultLightModel)
+                                        lightLoading ||
+                                        !lightOptions.some(o => o.value === (conversationSummaryModel || defaultLightModel))
                                     }
                                     onClick={() => void handleTriggerTask("conversation")}
                                 >

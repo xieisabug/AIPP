@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { CheckCircle2, ChevronLeft, ChevronRight } from "lucide-react";
@@ -10,7 +10,8 @@ import {
     CompactDialogBody,
     CompactDialogFooter,
 } from "@/components/ui/dialog";
-import { useModels } from "@/hooks/useModels";
+import { useFilteredModels } from "@/hooks/useFilteredModels";
+import { saveButlerModel } from "./ButlerModelOptions";
 import type { SaveFeatureConfigFn } from "@/components/config/feature/forms/experimentalConfigShared";
 import { useButlerOnboarding } from "./useButlerOnboarding";
 import {
@@ -92,17 +93,11 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
         existingFeishuBaseUrl,
     });
 
-    const { models, loading: modelsLoading } = useModels(true);
-    const modelOptions = useMemo(
-        () =>
-            models.map((model) => ({
-                value: `${model.code}%%${model.llm_provider_id}`,
-                label: model.name,
-            })),
-        [models]
-    );
+    const api = useFilteredModels(0, open);
+    const agents = useFilteredModels(4, open);
 
     const persistWizard = useCallback(async (closeAfterSave: boolean) => {
+        if (!closeAfterSave && !state.mainWorkspacePath.trim()) return true;
         setSaving(true);
         try {
             const workspaceConfig = serializeButlerWorkspaceConfig({
@@ -110,7 +105,7 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                 mainWorkspaceDescription: state.mainWorkspaceDescription,
                 trustedWorkspaces: state.trustedWorkspaces,
             });
-            await saveFeatureConfig("experimental", {
+            if (!await saveButlerModel(state.modelId, () => saveFeatureConfig("experimental", {
                 butler_experiment_enabled: "true",
                 butler_model_id: state.modelId,
                 butler_display_name: state.displayName || "总管家",
@@ -121,7 +116,10 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                 butler_feishu_enabled: String(state.feishuEnabled),
                 butler_feishu_app_id: state.feishuAppId,
                 butler_feishu_base_url: state.feishuBaseUrl,
-            }, true);
+            }, true))) {
+                setModelId(existingModelId ?? "");
+                return false;
+            }
 
             // Save Feishu secret separately if provided
             if (state.feishuEnabled && state.feishuAppSecret.trim()) {
@@ -233,8 +231,9 @@ export const ButlerOnboardingWizard: React.FC<ButlerOnboardingWizardProps> = ({
                         <StepModelConfig
                             modelId={state.modelId}
                             displayName={state.displayName}
-                            modelOptions={modelOptions}
-                            modelsLoading={modelsLoading}
+                            apiModels={api.models}
+                            agentModels={agents.models}
+                            modelsLoading={api.loading || agents.loading}
                             onModelChange={setModelId}
                             onDisplayNameChange={setDisplayName}
                         />

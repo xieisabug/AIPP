@@ -1031,6 +1031,15 @@ pub(crate) async fn review_permission(app: tauri::AppHandle, event: crate::api::
     use crate::api::ai::acp::AcpPermissionState;
     use super::approval::{AgentInteractionReply, AgentPermissionReply, AgentReplyTarget};
     let conversation_id = event.conversation_id.unwrap_or_default();
+    if crate::mcp::tool_review::needs_manual_review_without_model(&app).await {
+        let mut payload = json!(event);
+        payload["review"] = json!({"verdict": "manual", "reason": crate::mcp::tool_review::REVIEW_SETUP_HINT});
+        if let Err(error) = present_permission(&app, &event, payload).await {
+            tracing::warn!(conversation_id, %error, "Failed to present native permission");
+            app.state::<AcpPermissionState>().remove_request(&event.request_id).await;
+        }
+        return;
+    }
     let draft = crate::mcp::tool_review::review_agent_permission(&app, conversation_id, turn, agent,
         event.title.as_deref().unwrap_or("未命名操作"), event.parameters.as_deref().unwrap_or_default(), &working_directory).await;
     let state = app.state::<AcpPermissionState>();

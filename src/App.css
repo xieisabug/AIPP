@@ -126,6 +126,28 @@ body {
     .aipp-window-controls-enter { animation: none; }
 }
 
+/* 首次使用引导：苹果初始设置风格的柔和淡入与微幅上浮 */
+@keyframes aipp-onboarding-in {
+    from {
+        opacity: 0;
+        transform: translateY(14px) scale(0.985);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+.aipp-onboarding-enter {
+    animation: aipp-onboarding-in 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.aipp-onboarding-stagger {
+    animation: aipp-onboarding-in 520ms cubic-bezier(0.22, 1, 0.36, 1) var(--stagger-delay, 0ms) both;
+}
+@media (prefers-reduced-motion: reduce) {
+    .aipp-onboarding-enter,
+    .aipp-onboarding-stagger { animation: none; }
+}
+
 @keyframes fadeInOut {
 
     0%,

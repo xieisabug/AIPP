@@ -16,7 +16,7 @@ import { VaultInputCard } from "@/components/conversation/VaultInputCard";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker, toChatMessage } from "./ButlerGroupMessageRow";
-import { ButlerQuoteJumpContext } from "./ButlerQuote";
+import { ButlerQuoteButton, ButlerQuoteJumpContext, quoteExcerpt } from "./ButlerQuote";
 import { HelperSummaryRow, LiveReportBubbles } from "./ButlerProgressRow";
 import { useButlerProgress } from "./butlerProgress";
 import { formatDivider, showTimeDivider } from "./butlerGroupModel";
@@ -175,12 +175,15 @@ export default function ButlerGroupTranscript({ groupId, historyLoaded = false, 
             : null;
         const events = before.get(message.seq)?.map(renderResult);
         if (message.kind !== "message") {
-            return <div>
+            return <div data-group-message-seq={message.seq}>
                 {events}
                 {time}
                 <div className="flex justify-center" data-aipp-slot={`butler-group-${message.kind}`}>
                     <span className={`max-w-[80%] whitespace-pre-wrap break-words rounded-lg px-3 py-1 text-center text-xs ${message.kind === "error" ? "bg-destructive/5 text-destructive" : "text-muted-foreground"}`}>
                         {message.body}
+                        {message.kind === "notice" && <ButlerQuoteButton target={{
+                            kind: "message", id: message.seq, label: "群提示", excerpt: quoteExcerpt(message.body),
+                        }} />}
                     </span>
                 </div>
             </div>;

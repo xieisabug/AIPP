@@ -31,6 +31,7 @@ import { describeBalance, useDeepSeekBalance, type BalanceState } from "./useDee
 
 export interface NewProviderWizardProps {
     open: boolean;
+    embedded?: "expert" | "lie_flat";
     onClose: () => void;
     /** 当前平台可新建的类型。 */
     apiTypes: readonly ProviderApiTypeOption[];
@@ -51,7 +52,9 @@ type FetchState = { status: "idle" | "loading" | "done" } | { status: "error"; m
  * `preview_model_list`（保险箱引用、代理、各类型路由都沿用设置页链路）；完成时写入模型并启用。
  * 未完成就关闭（取消、Esc、离开设置页）会删除草稿。
  */
-const NewProviderWizard: React.FC<NewProviderWizardProps> = ({ open, onClose, ...rest }) => (
+const NewProviderWizard: React.FC<NewProviderWizardProps> = ({ open, onClose, embedded, ...rest }) => embedded ? (
+    open ? <WizardContent embedded={embedded} onClose={onClose} {...rest} /> : null
+) : (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
         <DialogContent
             showCloseButton={false}
@@ -89,7 +92,7 @@ const normalizeModels = (models: ModelForSelection[], keepSelected: ReadonlySet<
         return keepSelected.has(model.code) && base.request_mode !== "unsupported" ? { ...base, is_selected: true } : base;
     });
 
-const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose, apiTypes, existingProviders, onCreated }) => {
+const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose, apiTypes, existingProviders, onCreated, embedded }) => {
     const [step, setStep] = useState<Step>(1);
     const [apiType, setApiType] = useState<ProviderApiTypeOption | null>(null);
     const [name, setName] = useState("");
@@ -137,7 +140,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     }, []);
 
     const isHttp = apiType?.kind === "http";
-    const totalSteps = apiType && !isHttp ? 2 : 3;
+    const totalSteps = embedded === "lie_flat" || (apiType && !isHttp) ? 2 : 3;
     const stepLabel = step === 1
         ? "选择 API 类型"
         : step === 2
@@ -240,7 +243,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             setFetchState({ status: "done" });
         } catch (error) {
             if (seq !== fetchSeqRef.current) return;
-            setFetchState({ status: "error", message: String(error) });
+            setFetchState({ status: "error", message: typeof error === "object" && error && "message" in error ? String(error.message) : String(error) });
         }
     }, []);
 
@@ -248,8 +251,9 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
     const saveConnection = useCallback(async (type: ProviderApiTypeOption, trimmedName: string): Promise<number> => {
         let id = draftRef.current?.id;
         if (id === undefined) {
-            id = await invoke<number>("add_llm_provider", { name: trimmedName, apiType: type.value });
+            id = await invoke<number>("add_llm_provider", { name: trimmedName, apiType: type.value, ...(embedded ? {onboardingDraft:true} : {}) });
             draftRef.current = { id, apiType: type.value };
+            if (embedded) await invoke("track_onboarding_provider", {providerId:id,owned:true});
         } else {
             await invoke("update_llm_provider", { id, name: trimmedName, apiType: type.value, description: "", isEnabled: false });
         }
@@ -264,15 +268,20 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             if (value) await write(key, value);
         }
         return id;
-    }, [endpoint, apiKey, proxyConfigured, proxyEnabled, localValues]);
+    }, [endpoint, apiKey, proxyConfigured, proxyEnabled, localValues, embedded]);
 
     const enableProvider = useCallback(async (id: number, type: ProviderApiTypeOption, trimmedName: string, close = true) => {
-        await invoke("update_llm_provider", { id, name: trimmedName, apiType: type.value, description: "", isEnabled: true });
+        if (embedded !== "lie_flat") {
+            await invoke("update_llm_provider", { id, name: trimmedName, apiType: type.value, description: "", isEnabled: true });
+            if (embedded) await invoke("track_onboarding_provider", { providerId: id, owned: false });
+        }
         finishedRef.current = true;
-        toast.success("添加大模型提供商成功");
+        if (embedded !== "lie_flat") {
+            toast.success("添加大模型提供商成功");
+        }
         onCreated(id);
         if (close) onClose();
-    }, [onCreated, onClose]);
+    }, [onCreated, onClose, embedded]);
 
     const isDeepSeek = apiType?.value === "deepseek";
     // 第三步时草稿与 Key 已保存：查余额同时验证 Key 是否可用
@@ -309,7 +318,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         setBusy(true);
         try {
             const id = await saveConnection(apiType, trimmedName);
-            if (!isHttp) {
+            if (!isHttp || embedded === "lie_flat") {
                 await enableProvider(id, apiType, trimmedName);
                 return;
             }
@@ -323,7 +332,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         } finally {
             setBusy(false);
         }
-    }, [apiType, busy, name, otherNames, isHttp, endpointStatus.kind, saveConnection, enableProvider, models, loadModels, apiKey]);
+    }, [apiType, busy, name, otherNames, isHttp, embedded, endpointStatus.kind, saveConnection, enableProvider, models, loadModels, apiKey]);
 
     const selectedCount = models.filter((model) => model.is_selected).length + customCodes.length;
     const finishDisabled = busy || fetchState.status === "loading" || (!finishedRef.current && selectedCount === 0);
@@ -402,12 +411,12 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
         <>
             {/* 紧凑标题栏：标题 + 当前步骤，底边是进度条 */}
             <div className="relative flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5 sm:px-5">
-                <DialogTitle className="truncate text-base font-semibold">新增模型提供商</DialogTitle>
+                {embedded ? <h3 className="text-sm font-semibold">添加提供商</h3> : <DialogTitle className="truncate text-base font-semibold">新增模型提供商</DialogTitle>}
                 <span className="truncate text-xs text-muted-foreground" data-testid="wizard-step">
                     {step}/{totalSteps} · {stepLabel}
                 </span>
-                <DialogDescription className="sr-only">选择 API 类型，填写连接信息并选择模型</DialogDescription>
-                <DialogClose asChild>
+                {!embedded && <DialogDescription className="sr-only">选择 API 类型，填写连接信息并选择模型</DialogDescription>}
+                {embedded ? <Button variant="ghost" size="sm" className="ml-auto" onClick={onClose}>返回</Button> : <DialogClose asChild>
                     <button
                         title="关闭"
                         type="button"
@@ -416,7 +425,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                     >
                         <X className="h-4 w-4" />
                     </button>
-                </DialogClose>
+                </DialogClose>}
                 <div
                     aria-hidden
                     className="absolute bottom-[-1px] left-0 h-0.5 bg-foreground/70 transition-[width] duration-300"
@@ -580,7 +589,8 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                                         checked={proxyEnabled}
                                         onCheckedChange={setProxyEnabled}
                                         busy={busy}
-                                        onLeaveWizard={onClose}
+                                        externalWindow={!!embedded}
+                                        onLeaveWizard={embedded ? undefined : onClose}
                                     />
                                 </div>
                             </CollapsibleContent>
@@ -749,7 +759,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
                         {step === 2 ? (
                             <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={busy} onClick={() => void submitConnection()}>
                                 {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                                {isHttp ? "下一步" : "完成"}
+                                {isHttp && embedded !== "lie_flat" ? "下一步" : "完成"}
                             </Button>
                         ) : (
                             <Button type="button" className="min-h-11 px-5 sm:min-h-9" disabled={finishDisabled} onClick={() => void finish()}>

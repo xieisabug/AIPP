@@ -1,3 +1,4 @@
+import { openOnboarding, useOnboardingEntry } from "./onboarding/OnboardingSetup";
 import AskWindowPrepare from "./AskWindowPrepare";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
@@ -88,6 +89,7 @@ interface SetupGuideNoticeProps {
 
 /** 配置不完整时紧贴助手选择器显示的提示卡：说明原因 + 修复入口。 */
 function SetupGuideNotice({ guide, touchFriendly, onConfigureProviders, onConfigureAssistant }: SetupGuideNoticeProps) {
+    const canOpen = useOnboardingEntry(!touchFriendly);
     const buttonClassName = touchFriendly ? "min-h-11" : undefined;
     const primary = guide.primary === "providers"
         ? { label: "配置模型提供商", onClick: onConfigureProviders }
@@ -110,6 +112,7 @@ function SetupGuideNotice({ guide, touchFriendly, onConfigureProviders, onConfig
                 </div>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
+                {canOpen && <Button size="sm" variant="outline" onClick={openOnboarding}>首次使用引导</Button>}
                 {showProviderShortcut ? (
                     <Button type="button" size="sm" variant="outline" className={buttonClassName} onClick={onConfigureProviders}>
                         配置模型提供商

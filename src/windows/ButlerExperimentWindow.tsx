@@ -14,6 +14,7 @@ import { ConversationDraftContext, createConversationDraftStore } from "@/hooks/
 import ButlerContactList, { ButlerAppActions, type ContactPreview } from "@/components/butler/ButlerContactList";
 import { useContactRailWidth } from "@/components/butler/useContactRailWidth";
 import { cn } from "@/utils/utils";
+import { OnboardingSetupChip } from "@/components/onboarding/OnboardingSetup";
 import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, WindowControls, dragRegionProps, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
@@ -1180,6 +1181,7 @@ function ButlerExperimentWindow() {
                                     <Badge variant="outline" className="shrink-0 text-[10px] font-normal" {...drag}>只读</Badge>
                                 </div>
                                 <div className="flex min-w-0 items-center justify-end gap-1 self-stretch" {...drag}>
+                                    <OnboardingSetupChip />
                                     <IconButton
                                         icon={detailsConversation === activeConversationId
                                             ? <MessageSquareText className="h-4 w-4 text-icon" />
@@ -1213,6 +1215,7 @@ function ButlerExperimentWindow() {
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1 self-stretch" {...drag}>
+                                    <OnboardingSetupChip />
                                     <DeepSeekBalanceBadge
                                         conversationId={Number(activeConversationId) || null}
                                         assistantId={contact?.assistantId ?? null}

@@ -10,7 +10,7 @@ use crate::db::system_db::SystemDatabase;
 fn fresh_install() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     let llm = LLMDatabase { conn };
-    llm.create_tables().unwrap(); // seeds the official providers
+    llm.create_tables().unwrap();
     let assistant = AssistantDatabase { conn: llm.conn, mcp_conn: Connection::open_in_memory().unwrap() };
     assistant.create_tables().unwrap(); // seeds the quick assistant + prompt/model/configs
     let system = SystemDatabase { conn: assistant.conn };

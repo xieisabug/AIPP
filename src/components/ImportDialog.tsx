@@ -12,18 +12,21 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { PasswordInput } from './ui/password-input';
 import { Textarea } from './ui/textarea';
+import { parseProviderShareMessage } from "@/utils/providerShareMessage";
 import { toast } from 'sonner';
 
 interface ImportDialogProps {
     title: string;
+    provider?: boolean;
     isOpen: boolean;
     requiresPassword?: boolean;
     onClose: () => void;
-    onImport: (shareCode: string, password?: string, newName?: string) => Promise<void>;
+    onImport: (shareCode: string, password?: string, newName?: string) => Promise<boolean | void>;
 }
 
 const ImportDialog: React.FC<ImportDialogProps> = ({
     title,
+    provider,
     isOpen,
     requiresPassword = false,
     onClose,
@@ -34,22 +37,24 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
     const [newName, setNewName] = useState('');
     const [loading, setLoading] = useState(false);
 
+    const parsed = provider ? parseProviderShareMessage(shareCode) : null;
     const handleSubmit = useCallback(async () => {
         if (!shareCode.trim()) {
             toast.error('请输入分享码');
             return;
         }
 
-        if (requiresPassword && !password.trim()) {
+        if (provider && !parsed) { toast.error("分享码好像不完整，请让对方把整段消息重新复制给你"); return; }
+        if (requiresPassword && !parsed?.password && !password.trim()) {
             toast.error('请输入密码');
             return;
         }
 
         setLoading(true);
         try {
-            await onImport(
-                shareCode.trim(),
-                password.trim() || undefined,
+            const imported = await onImport(
+                parsed?.code ?? shareCode.trim(),
+                parsed?.password || password.trim() || undefined,
                 newName.trim() || undefined,
             );
 
@@ -57,13 +62,15 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
             setPassword('');
             setNewName('');
             onClose();
-            toast.success('导入成功');
+            if (imported !== false) {
+                toast.success('导入成功');
+            }
         } catch (error) {
-            toast.error(error instanceof Error ? error.message : '导入失败');
+            toast.error(error instanceof Error ? error.message : String(error));
         } finally {
             setLoading(false);
         }
-    }, [shareCode, password, newName, requiresPassword, onImport, onClose]);
+    }, [shareCode, password, newName, requiresPassword, onImport, onClose, provider, parsed]);
 
     const handleClose = useCallback(() => {
         if (loading) return;
@@ -90,7 +97,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                             id="import-share-code"
                             value={shareCode}
                             onChange={(e) => setShareCode(e.target.value)}
-                            placeholder="请粘贴分享码..."
+                            placeholder={provider ? "粘贴整段分享消息或分享码" : "请粘贴分享码..."}
                             disabled={loading}
                             autoCapitalize="none"
                             autoFocus
@@ -98,7 +105,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                         />
                     </div>
 
-                    {requiresPassword && (
+                    {requiresPassword && (!provider || (!!shareCode && !parsed?.password)) && (
                         <div className="space-y-1.5">
                             <Label htmlFor="import-password">密码 *</Label>
                             <PasswordInput
@@ -131,7 +138,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                             <ul className="space-y-0.5">
                                 <li>• 请确保分享码完整且正确</li>
                                 {requiresPassword && <li>• Provider 配置需要输入正确的密码</li>}
-                                <li>• 导入的配置会作为新项目添加，不会覆盖现有配置</li>
+                                <li>{provider ? "相同配置会复用已有提供商" : "导入的配置会作为新项目添加，不会覆盖现有配置"}</li>
                             </ul>
                         </div>
                     </div>

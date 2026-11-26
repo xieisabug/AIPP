@@ -35,6 +35,20 @@ fn test_provider_switch_controls_native_agent_turns() {
 }
 
 #[test]
+fn test_onboarding_aux_chief_native_default_uses_provider_model_unless_explicitly_selected() {
+    let mut chief = assistant();
+    chief.model[0].model_code.clear();
+    let registry = registry();
+    for api_type in ["codex_app_server", "claude_sdk"] {
+        let resolve = |selection| load_agent_instance(&registry, &chief, Some(selection),
+            |_| Ok((api_type.to_string(), vec![]))).unwrap().1;
+        assert_eq!(resolve("acp%%1"), None);
+        assert_eq!(resolve("__agent_default__%%1"), None);
+        assert_eq!(resolve("selected%%1"), Some("selected".into()));
+    }
+}
+
+#[test]
 fn test_turn_selection_invalid_override_never_reads_provider_or_defaults() {
     let registry = registry(); let assistant = assistant();
     for override_id in ["wrong", "model%%0", "model%%-2", "%%3"] {

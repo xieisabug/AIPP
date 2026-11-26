@@ -280,12 +280,57 @@ pub async fn inspect_skill_install_recipe(
     build_install_plan(recipe, &archive.repo_root, skills_dir, &archive.download_url)
 }
 
+static ARCHIVE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(desktop)]
+#[path = "official_skill_readiness.rs"]
+mod official_skill_readiness;
+#[cfg(desktop)]
+pub(crate) use official_skill_readiness::{official_skills_ready, read_official_archive_manifest, OfficialSkillEntry};
+
+/// Install missing official skills without overwriting a local directory. Keep a source marker
+/// alongside new installations so the next run can also recognize locally edited copies.
+#[cfg(desktop)]
+pub(crate) async fn install_missing_archive(
+    source: &SkillInstallRecipeSource,
+    dirs: Option<&[SkillInstallRecipeDir]>,
+    skills_dir: &Path,
+    proxy: Option<&str>,
+) -> Result<(usize, Vec<String>), String> {
+    let archive = download_and_extract_source(source, proxy, skills_dir).await?;
+    let _guard = ARCHIVE_INSTALL.lock().await;
+    let skills = build_archive_plan_skills(source, dirs, &archive.repo_root, skills_dir)?;
+    if skills.is_empty() { return Err(format!("{} 中未找到 SKILL.md", source.source_label())); }
+    let mut installed = 0;
+    let mut targets = Vec::new();
+    for skill in skills {
+        let expected = OfficialSkillEntry::from_plan(source, &skill, &archive.repo_root)?;
+        targets.push(skill.to.clone());
+        match expected.installed_at(skills_dir) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(reason) => return Err(reason),
+        }
+        let target = skills_dir.join(&skill.to);
+        let from = resolve_recipe_dir(&archive.repo_root, &skill.from)?;
+        let staged = tempfile::tempdir_in(skills_dir).map_err(|e| e.to_string())?;
+        let copy = staged.path().join("skill");
+        copy_dir_recursive(&from, &copy)?;
+        normalize_selected_entry_file(&copy, &skill.detected_entry_file, &skill.normalized_entry_file)?;
+        fs::write(copy.join(".aipp-install-source"), expected.source_id).map_err(|e| e.to_string())?;
+        fs::rename(copy, &target).map_err(|e| format!("安装 {}：{e}", skill.to))?;
+        installed += 1;
+    }
+    Ok((installed, targets))
+}
+
 pub async fn install_skill_install_recipe(
     recipe: &SkillInstallRecipe,
     skills_dir: &Path,
     proxy_url: Option<&str>,
 ) -> Result<SkillInstallResult, String> {
     let archive = download_and_extract_source(&recipe.source, proxy_url, skills_dir).await?;
+    let _guard = ARCHIVE_INSTALL.lock().await;
     install_recipe_from_repo_root(recipe, &archive.repo_root, skills_dir, &archive.download_url)
 }
 
@@ -328,6 +373,7 @@ pub async fn install_skill_archive(
     recipe.validate()?;
 
     let archive = download_and_extract_source(source, proxy_url, skills_dir).await?;
+    let _guard = ARCHIVE_INSTALL.lock().await;
     let result = install_recipe_from_repo_root(
         &recipe,
         &archive.repo_root,

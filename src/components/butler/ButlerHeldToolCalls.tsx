@@ -1,3 +1,4 @@
+import { ReviewModelHint } from "../mcp-tool-components/ReviewModelHint";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -217,6 +218,7 @@ function HeldToolCallCard({ call, review }: { call: MCPToolCallUpdateEvent; revi
                     允许执行
                 </Button>
             </div>
+            {review?.phase === "done" && review.verdict === "manual" && <ReviewModelHint />}
         </div>
     );
 }

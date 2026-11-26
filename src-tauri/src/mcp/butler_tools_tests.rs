@@ -55,6 +55,20 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
 }
 
 #[test]
+fn test_onboarding_aux_native_chief_scoped_tools_include_main_capabilities() {
+    let mut tools = Vec::new();
+    merge_tools(&mut tools, vec![server(1, "aipp:agent"), server(2, "aipp:superadmin")], "butler_main");
+    let payload = crate::api::ai::acp::selected_tools_payload(tools).unwrap();
+    let native: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    let names: Vec<_> = native.as_array().unwrap().iter().flat_map(|s| s["tools"].as_array().unwrap())
+        .map(|tool| tool["tool_name"].as_str().unwrap()).collect();
+    for expected in ["spawn_task_conversation", "task_conversation_operation", "report_progress",
+        "preview_message", "superadmin_execute", "schedule_task"] {
+        assert!(names.contains(&expected), "原生管家缺少 {expected}");
+    }
+}
+
+#[test]
 fn test_butler_tools_group_member_has_same_permissions_as_other_butler_assistants() {
     // 管家模式下所有助手与总管家权限一致，群成员也能协作、管理定时任务；只有独立任务工具留在主会话。
     let mut configured=vec![server(1,"aipp:agent")];

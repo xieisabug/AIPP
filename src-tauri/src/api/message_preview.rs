@@ -4,7 +4,7 @@ use anyhow::Context;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::db::conversation_db::ConversationDatabase;
 use crate::db::message_preview::{self, MessageRef, PreviewRow};
@@ -142,6 +142,20 @@ pub(crate) fn reference_from_args(args: &Value) -> Result<MessageRef, String> {
 pub async fn tool(app: &AppHandle, current: i64, args: &Value) -> anyhow::Result<Value> {
     let reference = reference_from_args(args).map_err(anyhow::Error::msg)?;
     let preview = build(app, current, reference).await.map_err(anyhow::Error::msg)?;
+    // HTTP calls already render their own result. Native MCP calls carry the original
+    // turn anchor and need a timeline row so reopening the window restores the card.
+    if crate::mcp::execution_api::INTERACTION_CALL_ID.try_with(|_| ()).is_err() {
+        if let Ok(Some(anchor)) = super::butler_peer::TOOL_MESSAGE.try_with(|id| *id) {
+            let conn = ConversationDatabase::new(app)?.get_connection()?;
+            let original = crate::db::butler_interactions::PREVIEW_ARGUMENTS
+                .try_with(|raw| serde_json::from_str::<Value>(raw).ok()).ok().flatten();
+            let title = original.as_ref().and_then(|value| value["title"].as_str());
+            let payload = json!({"message_id": preview.message_id, "title": title});
+            crate::db::butler_interactions::save_event(&conn, current, anchor, "message_preview",
+                &uuid::Uuid::new_v4().to_string(), &payload.to_string())?;
+            app.emit("butler_interactions_changed", current)?;
+        }
+    }
     Ok(json!({
         "status": "preview_shown",
         "message_id": preview.message_id,

@@ -227,12 +227,8 @@ async fn deliver(
         Destination::Existing { conversation } => conversation.to_string(),
     };
     let model = if kind == "butler_main" {
-        Some(
-            butler_api::get_butler_model_selection(app)
-                .await
-                .map_err(anyhow::Error::msg)?
-                .raw_value,
-        )
+        let selection = butler_api::get_butler_model_selection(app).await.map_err(anyhow::Error::msg)?;
+        (!selection.local_agent).then_some(selection.raw_value)
     } else {
         None
     };

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 
 use super::butler_group::RosterEntry;
-use crate::db::butler_group::{Member, Message, RelayReview, MAX_DISCUSSION_ROUNDS};
+use crate::db::butler_group::{Member, Message, RelayPause, RelayReview, MAX_DISCUSSION_ROUNDS};
 
 pub const GROUP_DISPATCH_MODEL_KEY: &str = "butler_group_dispatch_model_id";
 
@@ -317,41 +317,47 @@ pub(super) fn plan_from_decision_response(
     Ok(build(responders))
 }
 
-async fn model(app: &AppHandle) -> Result<(String, i64, &'static str), String> {
-    let dispatch = super::butler_api::get_experimental_config_value(app, GROUP_DISPATCH_MODEL_KEY)
-        .await
-        .filter(|value| !value.trim().is_empty());
-    if let Some(raw) = dispatch {
-        let (code, provider) = parse_model(&raw)
-            .ok_or_else(|| format!("决策模型配置无效：{raw}；请在管家设置中重新选择"))?;
-        return Ok((code, provider, "决策模型"));
+type DispatchModel = (String, i64, &'static str);
+
+async fn model(app: &AppHandle) -> Result<Option<DispatchModel>, String> {
+    let state = app.state::<crate::FeatureConfigState>();
+    let map = state.config_feature_map.lock().await;
+    let experimental = map.get("experimental");
+    let summary = map.get("conversation_summary");
+    let db = crate::db::llm_db::LLMDatabase::new(app).map_err(|e| e.to_string())?;
+    for (group, key, source) in [
+        (experimental, GROUP_DISPATCH_MODEL_KEY, "决策模型"),
+        (summary, "default_decision_model", "默认决策模型"),
+        (experimental, super::butler_progress::HELPER_MODEL_KEY, "小型辅助模型"),
+        (summary, "default_light_model", "默认轻量模型"),
+        (experimental, "butler_model_id", "总管家模型"),
+    ] {
+        let Some(raw) = group.and_then(|g| g.get(key)).map(|v| v.value.trim()).filter(|v| !v.is_empty()) else { continue };
+        let (code, provider) = parse_model(raw).ok_or_else(|| format!("{source}配置无效：{raw}"))?;
+        let selected = match db.get_llm_provider(provider) {
+            Ok(selected) => selected,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(e) => return Err(format!("读取{source}提供商 #{provider}：{e}")),
+        };
+        if selected.is_enabled && !crate::db::llm_db::is_local_agent_api_type(&selected.api_type) {
+            return Ok(Some((code, provider, source)));
+        }
     }
-    let feature_map = app
-        .state::<crate::FeatureConfigState>()
-        .config_feature_map
-        .lock()
-        .await
-        .clone();
-    if let Some((code, provider)) = crate::api::ai::config::resolve_default_decision_model(&feature_map) {
-        return Ok((code, provider, "默认决策模型"));
+    Ok(None)
+}
+
+fn route_without_model(fixed: Option<&[i64]>) -> Result<Plan, String> {
+    match fixed {
+        Some(ids) if !ids.is_empty() => Ok(Plan { responders: ids.to_vec(), rounds: 1 }),
+        _ => Ok(Plan { responders: Vec::new(), rounds: 1 }),
     }
-    let helper = super::butler_api::get_experimental_config_value(app, super::butler_progress::HELPER_MODEL_KEY).await
-        .filter(|value| !value.trim().is_empty());
-    if let Some(raw) = helper {
-        let (code, provider) = parse_model(&raw).ok_or_else(|| format!("小型辅助模型配置无效：{raw}；请在管家设置中重新选择"))?;
-        return Ok((code, provider, "小型辅助模型"));
-    }
-    if let Some((code, provider)) = crate::api::ai::config::resolve_default_light_model(&feature_map) {
-        return Ok((code, provider, "默认轻量模型"));
-    }
-    let selection = super::butler_api::get_butler_model_selection(app).await?;
-    Ok((selection.model_code, selection.provider_id, "总管家模型"))
 }
 
 pub(super) async fn choose(app: &AppHandle, group_id: i64, group: &str, members: &[Member],
     roster: &HashMap<i64, RosterEntry>, recent: &[Message], latest: &Message, fixed: Option<&[i64]>) -> Result<Plan, String> {
     let candidates = members.iter().map(|member| Candidate { member, entry: roster.get(&member.assistant_id) }).collect::<Vec<_>>();
-    match query_model(app, group_id, build_prompt(group, &candidates, recent, latest, fixed),
+    let Some(selection) = model(app).await? else { return route_without_model(fixed) };
+    match query_model(app, group_id, selection, build_prompt(group, &candidates, recent, latest, fixed),
         |code| build_decision_dispatch_request(code, group, &candidates, recent, latest, fixed)).await? {
         ModelReply::Chat(text) => parse_plan(&text, &candidates, fixed),
         ModelReply::Decision(response) => plan_from_decision_response(&response, &candidates, fixed),
@@ -394,11 +400,12 @@ fn parse_loop_review(text: &str, review: &RelayReview) -> Result<Option<String>,
     Ok(Some(format!("{reason}（参见群消息 #{}）", prior.seq)))
 }
 
-pub(super) async fn review_relay(app: &AppHandle, group_id: i64, review: &RelayReview) -> Result<Option<String>, String> {
+pub(super) async fn review_relay(app: &AppHandle, group_id: i64, review: &RelayReview) -> Result<Option<RelayPause>, String> {
     use crate::decision::{ChoiceOption, DecisionQuestion, DecisionRequest};
     let transcript = review_transcript(review);
     let system = format!("{RELAY_CRITERIA} 只输出 JSON，looping 为布尔值，reason 为一句中文理由。确认循环时，说明重复了什么、卡在哪里，并在 repeated_seq 填入本分支中被重复的先前消息序号。");
-    match query_model(app, group_id, (system, transcript.clone()), |model| {
+    let Some(selection) = model(app).await? else { return Ok(Some(RelayPause::AskUser)); };
+    match query_model(app, group_id, selection, (system, transcript.clone()), |model| {
         let mut evidence = vec![ChoiceOption::new("none", "没有足够证据")];
         for m in review.history.iter().take(review.history.len().saturating_sub(1)) {
             evidence.push(ChoiceOption::new(m.seq.to_string(), format!("群消息 #{}，{}", m.seq, m.sender_name)));
@@ -408,14 +415,14 @@ pub(super) async fn review_relay(app: &AppHandle, group_id: i64, review: &RelayR
             DecisionQuestion::choice("repeated", "这次给指定成员的交接重复了哪条先前的请求，且中间没有进展？无法确认选 none。", evidence),
         ])
     }).await? {
-        ModelReply::Chat(text) => parse_loop_review(&text, review),
+        ModelReply::Chat(text) => parse_loop_review(&text, review).map(|reason| reason.map(RelayPause::Loop)),
         ModelReply::Decision(response) => {
             let probability = response.bool_probability("looping").ok_or("接力审核结果缺少 looping")?;
             if probability < 0.9 { return Ok(None); }
             let (repeated, _) = response.choice("repeated").ok_or("接力审核结果缺少重复交接的依据")?;
             if repeated == "none" { return Ok(None); }
             let message = repeated_message(review, repeated.parse().map_err(|_| "接力审核返回了无效的历史消息序号")?)?;
-            Ok(Some(format!("这次交接重复了 {} 在消息 #{} 的请求「{}」，期间没有新的进展", message.sender_name, message.seq, excerpt(&message.body, 100))))
+            Ok(Some(RelayPause::Loop(format!("这次交接重复了 {} 在消息 #{} 的请求「{}」，期间没有新的进展", message.sender_name, message.seq, excerpt(&message.body, 100)))))
         }
     }
 }
@@ -425,9 +432,9 @@ enum ModelReply {
     Decision(crate::decision::DecisionResponse),
 }
 
-async fn query_model(app: &AppHandle, group_id: i64, chat_prompt: (String, String),
+async fn query_model(app: &AppHandle, group_id: i64, selection: DispatchModel, chat_prompt: (String, String),
     decision_request: impl FnOnce(&str) -> crate::decision::DecisionRequest) -> Result<ModelReply, String> {
-    let (code, provider, source) = model(app).await?;
+    let (code, provider, source) = selection;
     let config = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
     let app_db = app.clone();
     let lookup = code.clone();

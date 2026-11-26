@@ -485,10 +485,16 @@ pub fn validate_assistant(app: &tauri::AppHandle, assistant_id: i64) -> Result<S
         .map_err(|e| e.to_string())?
         .get_assistant(assistant_id)
         .map_err(|_| format!("执行助手 #{assistant_id} 不存在"))?;
-    if assistant.assistant_type.unwrap_or(0) != 0 {
-        return Err(format!("「{}」不是普通对话助手，不能执行定时任务", assistant.name));
-    }
+    validate_executor_type(assistant.assistant_type, &assistant.name)?;
     Ok(assistant.name)
+}
+
+pub(crate) fn validate_executor_type(kind: Option<i64>, name: &str) -> Result<(), String> {
+    match kind.unwrap_or(0) {
+        0 => Ok(()),
+        4 => Err(format!("「{name}」使用本机智能体通道，无法保证每项操作都经过定时任务的无人值守审核。请选择绑定 API 模型的普通助手执行任务；只有本机智能体时，请先添加 API 模型并绑定普通助手。")),
+        _ => Err(format!("「{name}」不是普通对话助手，不能执行定时任务")),
+    }
 }
 
 /// 按名称或编号找助手（模型常只知道名字）。

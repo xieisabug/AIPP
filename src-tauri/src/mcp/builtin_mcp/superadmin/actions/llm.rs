@@ -633,7 +633,7 @@ impl ActionHandler for LlmGetModelsHandler {
         let provider_id = provider_id_arg(&args)?;
 
         if dry_run {
-            let preview = preview_model_list(app_handle.clone(), provider_id).await?;
+            let preview = preview_model_list(app_handle.clone(), provider_id).await.map_err(|error| error.message)?;
             let models: Vec<Value> = preview
                 .available_models
                 .iter()

@@ -88,6 +88,7 @@ pub async fn get_deepseek_chat_balance_provider(
                 resolved_provider_id = crate::api::butler_api::get_butler_model_selection(&app_handle)
                     .await
                     .ok()
+                    .filter(|selection| !selection.local_agent)
                     .map(|selection| selection.provider_id)
                     .filter(|id| *id > 0);
             }

@@ -93,11 +93,21 @@ pub async fn get_all_feature_config(
 
 // Several settings pages own different keys in the same group. A save from
 // one page must leave the other pages' values and sync identities intact.
-fn persist_feature_settings(
+pub(crate) fn persist_feature_settings(
+    db: &mut SystemDatabase,
+    feature_code: &str,
+    changes: HashMap<String, String>,
+    partial: bool,
+) -> Result<HashMap<String, String>, String> {
+    persist_feature_settings_and_reset(db, feature_code, changes, partial, None)
+}
+
+fn persist_feature_settings_and_reset(
     db: &mut SystemDatabase,
     feature_code: &str,
     mut changes: HashMap<String, String>,
     partial: bool,
+    reset_from: Option<i64>,
 ) -> Result<HashMap<String, String>, String> {
     let tx = db.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
@@ -132,6 +142,10 @@ fn persist_feature_settings(
              ON CONFLICT(feature_code, key) DO UPDATE SET value = excluded.value",
             (feature_code, key, value),
         ).map_err(|e| e.to_string())?;
+    }
+    if let Some(id) = reset_from {
+        tx.execute("INSERT INTO system_config(key,value) VALUES('butler_channel_reset_from',?1)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value", [id.to_string()]).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(changes)
@@ -197,7 +211,18 @@ pub async fn save_feature_config(
     let mut config_feature_map = state.config_feature_map.lock().await;
     let partial = partial.unwrap_or(false);
     let mut db = SystemDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let config = persist_feature_settings(&mut db, &feature_code, config, partial)?;
+    let mut reset_from = None;
+    if let Some(next) = config.get("butler_model_id").filter(|_| feature_code == "experimental") {
+        let previous = config_feature_map.get("experimental").and_then(|g| g.get("butler_model_id"))
+            .map(|v| v.value.as_str()).unwrap_or("");
+        if !previous.is_empty() && previous != next {
+            let llm = crate::db::llm_db::LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+            if crate::api::butler_api::butler_channel_changed(&llm, previous, next)? {
+                reset_from = crate::api::butler_api::active_butler_main_conversation_id(&app_handle)?;
+            }
+        }
+    }
+    let config = persist_feature_settings_and_reset(&mut db, &feature_code, config, partial, reset_from)?;
 
     let model_key = "mcp_summarizer_model_id";
     let explicit_summary_model_changed = feature_code == "experimental"
@@ -250,8 +275,13 @@ pub async fn save_feature_config(
             .or_insert(HashMap::new())
             .insert(key.clone(), new_config);
     }
+    let butler_enabled = feature_code == "experimental" && config_feature_map.get("experimental")
+        .and_then(|g| g.get("butler_experiment_enabled")).is_some_and(|v| matches!(v.value.as_str(),"1" | "true"));
     drop(config_feature_map);
     drop(configs);
+    if butler_enabled {
+        crate::api::butler_api::finish_pending_channel_change(&app_handle).await?;
+    }
     if summary_model_changed {
         crate::mcp::summarizer::trigger_pending_app_summaries(&app_handle);
     }

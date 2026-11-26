@@ -36,6 +36,18 @@ pub fn save_event(conn: &Connection, cid: i64, anchor: i64, kind: &str, request_
     Ok(())
 }
 
+pub fn native_message_previews(conn: &Connection, cid: i64, anchor: i64) -> Result<Vec<Value>> {
+    schema(conn)?;
+    let mut stmt = conn.prepare("SELECT payload FROM butler_interaction_event
+        WHERE conversation_id=?1 AND anchor=?2 AND kind='message_preview' ORDER BY occurred_ms,id")?;
+    let mut rows = stmt.query(params![cid, anchor])?;
+    let mut previews = Vec::new();
+    while let Some(row) = rows.next()? {
+        previews.push(serde_json::from_str(&row.get::<_, String>(0)?)?);
+    }
+    Ok(previews)
+}
+
 pub fn save_preview(conn: &Connection, cid: i64, anchor: i64, request: &str, occurred_ms: f64, raw: &str) -> Result<()> {
     schema(conn)?;
     conn.execute("INSERT INTO butler_file_preview(conversation_id,anchor,request_id,occurred_ms,parameters)

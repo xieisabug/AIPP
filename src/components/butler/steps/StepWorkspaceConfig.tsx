@@ -32,6 +32,33 @@ interface StepWorkspaceConfigProps {
     onUpdateDescription: (path: string, description: string) => void;
 }
 
+export function MainWorkspaceFields({mainWorkspacePath, mainWorkspaceDescription, onMainWorkspacePathChange, onMainWorkspaceDescriptionChange, locked = false}:
+    Pick<StepWorkspaceConfigProps, "mainWorkspacePath" | "mainWorkspaceDescription" | "onMainWorkspacePathChange" | "onMainWorkspaceDescriptionChange"> & {locked?: boolean}) {
+    return (
+                <div className="space-y-3 rounded-lg border border-primary/20 bg-background p-4">
+                    <p className="text-sm font-medium">主工作区</p>
+                    <p className="text-xs text-muted-foreground">
+                        {locked ? "沿用已配置的主工作区。可在总管家设置中修改路径。" : "总管家会优先把任务组织到这里。未填写描述时使用默认说明。"}
+                    </p>
+                    <FolderPicker
+                        disabled={locked}
+                        value={mainWorkspacePath}
+                        onChange={onMainWorkspacePathChange}
+                        placeholder="选择或输入主工作区目录路径"
+                    />
+                    <Input
+                        value={mainWorkspaceDescription}
+                        onChange={(e) => onMainWorkspaceDescriptionChange(e.target.value)}
+                        placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
+                        className="text-sm"
+                    />
+                    {!mainWorkspacePath.trim() ? (
+                        <p className="text-xs text-destructive">请先配置主工作区</p>
+                    ) : null}
+                </div>
+    );
+}
+
 const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
     mainWorkspacePath,
     mainWorkspaceDescription,
@@ -104,26 +131,8 @@ const StepWorkspaceConfig: React.FC<StepWorkspaceConfigProps> = ({
             </div>
 
             <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-4">
-                <div className="space-y-3 rounded-lg border border-primary/20 bg-background p-4">
-                    <p className="text-sm font-medium">主工作区</p>
-                    <p className="text-xs text-muted-foreground">
-                        主工作区为必填。总管家会优先把任务组织到这里；未填写描述时默认使用预设说明。
-                    </p>
-                    <FolderPicker
-                        value={mainWorkspacePath}
-                        onChange={onMainWorkspacePathChange}
-                        placeholder="选择或输入主工作区目录路径"
-                    />
-                    <Input
-                        value={mainWorkspaceDescription}
-                        onChange={(e) => onMainWorkspaceDescriptionChange(e.target.value)}
-                        placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
-                        className="text-sm"
-                    />
-                    {!mainWorkspacePath.trim() ? (
-                        <p className="text-xs text-destructive">请先配置主工作区</p>
-                    ) : null}
-                </div>
+                <MainWorkspaceFields mainWorkspacePath={mainWorkspacePath} mainWorkspaceDescription={mainWorkspaceDescription}
+                    onMainWorkspacePathChange={onMainWorkspacePathChange} onMainWorkspaceDescriptionChange={onMainWorkspaceDescriptionChange} />
 
                 {!trustAllWorkspaces && (
                     <>

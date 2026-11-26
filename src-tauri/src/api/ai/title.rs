@@ -184,47 +184,34 @@ pub async fn generate_title(
         (100, default_prompt.clone())
     };
 
-    // 解析 provider_id 与 model_code，若缺失/非法，则回退为"使用当前对话的回复消息模型"
-    enum ModelSource {
-        FromConfig { provider_id: i64, model_code: String },
-        FromConversationMessage,
-    }
-
-    let model_source = if let Some(feature_config) = feature_config_opt {
-        // 优先读取新配置键
+    // 收集配置的候选模型（按优先级：标题模型 → 旧配置 → 默认轻量模型），跳过本机智能体/禁用/已删除项
+    let mut config_candidates: Vec<(i64, String)> = Vec::new();
+    if let Some(feature_config) = feature_config_opt {
         let provider_id_res = feature_config
             .get("title_provider_id")
             .or(feature_config.get("provider_id"))
             .map(|c| c.value.clone())
             .and_then(|v| v.parse::<i64>().ok());
         let model_code_opt = feature_config.get("title_model").map(|c| c.value.clone());
-        // 兼容旧配置
+        if let (Some(pid), Some(mcode)) = (provider_id_res, model_code_opt) {
+            if !mcode.trim().is_empty() {
+                config_candidates.push((pid, mcode));
+            }
+        }
         let legacy_model_code_opt = feature_config.get("model_code").map(|c| c.value.clone());
         let legacy_provider_id_res = feature_config
             .get("provider_id")
             .map(|c| c.value.clone())
             .and_then(|v| v.parse::<i64>().ok());
-
-        match (provider_id_res, model_code_opt) {
-            (Some(pid), Some(mcode)) if !mcode.is_empty() => {
-                ModelSource::FromConfig { provider_id: pid, model_code: mcode }
-            }
-            _ => {
-                // 回退到旧配置，再回退到默认轻量模型
-                match (legacy_provider_id_res, legacy_model_code_opt) {
-                    (Some(pid), Some(mcode)) if !mcode.is_empty() => {
-                        ModelSource::FromConfig { provider_id: pid, model_code: mcode }
-                    }
-                    _ => match crate::api::ai::config::resolve_default_light_model(&config_feature_map) {
-                        Some((mcode, pid)) => ModelSource::FromConfig { provider_id: pid, model_code: mcode },
-                        None => ModelSource::FromConversationMessage,
-                    },
-                }
+        if let (Some(pid), Some(mcode)) = (legacy_provider_id_res, legacy_model_code_opt) {
+            if !mcode.trim().is_empty() {
+                config_candidates.push((pid, mcode));
             }
         }
-    } else {
-        ModelSource::FromConversationMessage
-    };
+        if let Some((mcode, pid)) = crate::api::ai::config::resolve_default_light_model(&config_feature_map) {
+            config_candidates.push((pid, mcode));
+        }
+    }
 
     let mut context = String::new();
     if summary_length == -1 {
@@ -287,41 +274,60 @@ pub async fn generate_title(
         }
     }
 
-    // 2) 获取用于标题生成的模型详情：优先配置，其次回退到最近的一条 response 消息所用模型
+    // 2) 获取用于标题生成的模型详情：按配置回退链查找可用 API 模型，再回退到最近回复消息的模型；都没有则截断用户首句
     let llm_db = LLMDatabase::new(app_handle).map_err(AppError::from)?;
-    let model_detail = match model_source {
-        ModelSource::FromConfig { provider_id, model_code } => llm_db
-            .get_llm_model_detail(&provider_id, &model_code)
-            .map_err(|e| AppError::DatabaseError(format!("获取模型配置失败: {}", e)))?,
-        ModelSource::FromConversationMessage => {
-            // 从当前对话中找出最近的一条 response 消息，读取其 llm_model_id
-            let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
-            let messages = conversation_db
-                .message_repo()
-                .map_err(AppError::from)?
-                .list_by_conversation_id(conversation_id)
-                .map_err(AppError::from)?;
-            // 选取 id 最大的 response 消息（通常是最新的）
-            let last_response_model_id = messages
-                .iter()
-                .filter(|(m, _)| m.message_type == "response")
-                .max_by_key(|(m, _)| m.id)
-                .and_then(|(m, _)| m.llm_model_id);
-
-            if let Some(model_id) = last_response_model_id {
-                llm_db.get_llm_model_detail_by_id(&model_id).map_err(|e| {
-                    AppError::DatabaseError(format!("获取标题模型失败(根据消息推断): {}", e))
-                })?
-            } else {
-                return Err(AppError::UnknownError(
-                    "未配置会话标题生成且无法从对话消息推断模型，请在设置中为辅助AI-总结标题选择模型"
-                        .to_string(),
-                ));
+    let mut resolved_model = None;
+    for (provider_id, model_code) in config_candidates {
+        match llm_db.get_model_for_request(&provider_id, &model_code) {
+            Ok(detail) => {
+                resolved_model = Some(detail);
+                break;
+            }
+            Err(
+                crate::db::llm_db::ModelRequestError::Lookup(rusqlite::Error::QueryReturnedNoRows)
+                | crate::db::llm_db::ModelRequestError::LocalAgent { .. }
+                | crate::db::llm_db::ModelRequestError::Disabled { .. },
+            ) => continue,
+            Err(e) => return Err(AppError::ProviderError(e.to_string())),
+        }
+    }
+    if resolved_model.is_none() {
+        let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+        let messages = conversation_db
+            .message_repo()
+            .map_err(AppError::from)?
+            .list_by_conversation_id(conversation_id)
+            .map_err(AppError::from)?;
+        let last_response_model_id = messages
+            .iter()
+            .filter(|(m, _)| m.message_type == "response")
+            .max_by_key(|(m, _)| m.id)
+            .and_then(|(m, _)| m.llm_model_id);
+        if let Some(model_id) = last_response_model_id {
+            match llm_db.get_llm_model_detail_by_id(&model_id) {
+                Ok(detail)
+                    if detail.provider.is_enabled
+                        && !crate::db::llm_db::is_local_agent_api_type(&detail.provider.api_type) =>
+                {
+                    resolved_model = Some(detail);
+                }
+                Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(e) => {
+                    return Err(AppError::DatabaseError(format!(
+                        "获取标题模型失败(根据消息推断): {}",
+                        e
+                    )));
+                }
             }
         }
+    }
+    let Some(model_detail) = resolved_model else {
+        let fallback = first_line_title(&user_prompt);
+        if fallback.is_empty() {
+            return Ok(());
+        }
+        return save_title(app_handle, &window, conversation_id, fallback);
     };
-
-    model_detail.provider.ensure_enabled().map_err(|e| AppError::ProviderError(e.to_string()))?;
 
     // 从配置中获取网络代理和超时设置
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
@@ -393,40 +399,56 @@ pub async fn generate_title(
         }
         Ok(response_text) => {
             debug!(conversation_id, response_text, "generated title successfully");
-            let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
-            if let Err(e) =
-                conversation_db.conversation_repo().unwrap().update_name(&Conversation {
-                    id: conversation_id,
-                    name: response_text.clone(),
-                    assistant_id: None,
-                    created_time: chrono::Utc::now(),
-                    updated_time: chrono::Utc::now(),
-                    conversation_kind: "normal".to_string(),
-                    parent_butler_conversation_id: None,
-                    source_task_title: None,
-                    is_hidden_from_normal_chat_list: false,
-                    channel_source: None,
-                    butler_task_status: None,
-                    butler_task_summary: None,
-                    butler_task_finalized_at: None,
-                })
-            {
-                error!(error = %e, conversation_id, "failed to update conversation name after title generation");
-                return Err(AppError::DatabaseError("更新对话标题失败".to_string()));
-            }
-            if let Err(e) =
-                window.emit(TITLE_CHANGE_EVENT, (conversation_id, response_text.clone()))
-            {
-                warn!(error = %e, conversation_id, "failed to emit TITLE_CHANGE_EVENT");
-            }
+            save_title(app_handle, &window, conversation_id, response_text)?;
         }
     }
     Ok(())
 }
 
+fn save_title(app_handle: &tauri::AppHandle, window: &tauri::Window, conversation_id: i64, response_text: String) -> Result<(), AppError> {
+    let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    if let Err(e) =
+        conversation_db.conversation_repo()?.update_name(&Conversation {
+            id: conversation_id,
+            name: response_text.clone(),
+            assistant_id: None,
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
+            conversation_kind: "normal".to_string(),
+            parent_butler_conversation_id: None,
+            source_task_title: None,
+            is_hidden_from_normal_chat_list: false,
+            channel_source: None,
+            butler_task_status: None,
+            butler_task_summary: None,
+            butler_task_finalized_at: None,
+        })
+    {
+        error!(error = %e, conversation_id, "failed to update conversation name after title generation");
+        return Err(AppError::DatabaseError(format!("更新会话 {conversation_id} 的标题失败：{e}")));
+    }
+    if let Err(e) =
+        window.emit(TITLE_CHANGE_EVENT, (conversation_id, response_text))
+    {
+        warn!(error = %e, conversation_id, "failed to emit TITLE_CHANGE_EVENT");
+    }
+    Ok(())
+}
+
+fn first_line_title(prompt: &str) -> String {
+    crate::utils::turn_context::visible(prompt).trim().lines().next().unwrap_or("").chars().take(20).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{should_auto_generate_title, DEFAULT_CONVERSATION_TITLE};
+
+    #[test]
+    fn test_onboarding_aux_title_without_api_truncates_first_line_by_unicode_character() {
+        let title = super::first_line_title("  测试标题😀一二三四五六七八九十一二三四五六七八九十\n后续内容");
+        assert_eq!(title.chars().count(), 20);
+        assert_eq!(super::first_line_title("  第一行\n第二行"), "第一行");
+    }
 
     #[test]
     fn should_generate_for_default_titles() {

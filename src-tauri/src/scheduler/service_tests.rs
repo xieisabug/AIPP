@@ -139,3 +139,10 @@ fn test_status_text_maps_legacy_success_by_notify() {
     assert_eq!(status_text(RUN_LEGACY_SUCCESS, false), "无新内容");
     assert_eq!(status_text(RUN_SKIPPED, false), "跳过");
 }
+
+#[test]
+fn test_onboarding_aux_native_scheduled_executor_is_rejected_before_creation() {
+    assert!(validate_executor_type(Some(0), "API").is_ok());
+    let message = validate_executor_type(Some(4), "总管家").unwrap_err();
+    assert!(message.contains("本机智能体") && message.contains("绑定 API 模型的普通助手"));
+}

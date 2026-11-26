@@ -83,9 +83,7 @@ fn text<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
 pub(crate) fn validate_binding(llm: &LLMDatabase, assistant_type: i64, provider: i64, code: &str) -> Result<(), String> {
     let p = llm.get_llm_provider(provider).map_err(|e| format!("模型提供商 #{provider} 不存在：{e}"))?;
     if !p.is_enabled { return Err(format!("模型提供商 #{provider} 已禁用")); }
-    let configs = llm.get_llm_provider_config(provider).map_err(|e| e.to_string())?;
-    let agent = crate::api::ai::agent_driver::registry::registry().drivers().map_err(|e| e.to_string())?
-        .iter().any(|driver| driver.matches_provider(&p.api_type, &configs));
+    let agent = crate::db::llm_db::is_local_agent_api_type(&p.api_type);
     if (assistant_type == 4) != agent {
         return Err(format!("助手类型 {assistant_type} 与提供商通道 {} 不兼容", p.api_type));
     }

@@ -5,6 +5,8 @@
  * 或者当前助手绑定的模型已删除 / 所属提供商被停用。这里统一判定，给出对应引导。
  */
 
+import { isLocalAgentApiType } from "@/components/config/providerApiTypes";
+
 export type SetupGuideKind =
     | "no_provider"
     | "providers_disabled"
@@ -23,7 +25,7 @@ export interface SetupGuide {
 }
 
 export interface SetupGuideInput {
-    providers: Array<{ id: number; is_enabled?: boolean }>;
+    providers: Array<{ id: number; is_enabled?: boolean; api_type?: string }>;
     /** get_models_for_select 的结果：只包含已启用提供商下的模型 */
     models: Array<{ code: string; llm_provider_id: number }>;
     assistantCount: number;
@@ -43,7 +45,7 @@ export function resolveSetupGuide(input: SetupGuideInput): SetupGuide | null {
     if (!providers.some((provider) => provider.is_enabled !== false)) {
         return { kind: "providers_disabled", title: "模型提供商都已停用", detail: "请至少启用一个提供商", primary: "providers" };
     }
-    if (models.length === 0) {
+    if (models.length === 0 && !providers.some(p => p.is_enabled !== false && isLocalAgentApiType(p.api_type ?? ""))) {
         return { kind: "no_models", title: "已启用的提供商下还没有模型", detail: "请先获取或添加模型", primary: "providers" };
     }
     if (assistantCount === 0) {

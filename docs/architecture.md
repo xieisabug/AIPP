@@ -18,6 +18,7 @@
 
 The application uses multiple Tauri windows for different features:
 
+-   **Onboarding Window** (`onboarding`): Desktop first-run source selection, model roles, workspace and background setup
 -   **Ask Window**: Quick AI query interface
 -   **Config Window**: Settings and configuration
 -   **ChatUI Window**: Main chat interface

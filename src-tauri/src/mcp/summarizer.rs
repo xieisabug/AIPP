@@ -505,9 +505,11 @@ async fn generate_mcp_catalog_summary(
     };
 
     let llm_db = LLMDatabase::new(app_handle)?;
-    let model_detail = llm_db
-        .get_model_for_request(&provider_id, &model_code)
-        .map_err(|e| AppError::DatabaseError(format!("获取 MCP 总结模型失败: {}", e)))?;
+    let model_detail = match llm_db.get_model_for_request(&provider_id, &model_code) {
+        Ok(model) => model,
+        Err(crate::db::llm_db::ModelRequestError::LocalAgent { .. }) => return Ok(()),
+        Err(e) => return Err(AppError::DatabaseError(format!("获取 MCP 总结模型失败: {e}"))),
+    };
 
     let network_proxy = get_network_proxy_from_config(&config_map);
     let request_timeout = get_request_timeout_from_config(&config_map);

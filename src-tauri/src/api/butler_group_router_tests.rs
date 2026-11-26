@@ -125,3 +125,9 @@ fn test_decision_group_router_selects_speakers_and_rounds_without_hallucination(
     let fixed_plan = plan_from_decision_response(&resp, &candidates, Some(&[1, 3])).unwrap();
     assert_eq!(fixed_plan, Plan { responders: vec![1, 3], rounds: 3 });
 }
+
+#[test]
+fn test_onboarding_aux_group_route_without_api_model_uses_mentions_for_one_round() {
+    assert_eq!(route_without_model(Some(&[3, 1])).unwrap(), Plan { responders: vec![3, 1], rounds: 1 });
+    assert!(route_without_model(None).unwrap().responders.is_empty());
+}

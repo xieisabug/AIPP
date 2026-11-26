@@ -248,7 +248,7 @@ fn test_group_member_mentions_review_each_tenth_relay_and_only_pause_confirmed_b
             let sibling = finished.relayed[1];
             let Start::Review(review) = start_turn(&mut conn, sibling).unwrap() else { panic!("missing sibling review") };
             assert_eq!(review.target, "王五");
-            finish_relay_review(&mut conn, sibling, Ok(Some("重复请求核对同一版本".into()))).unwrap();
+            finish_relay_review(&mut conn, sibling, Ok(Some(RelayPause::Loop("重复请求核对同一版本".into())))).unwrap();
             assert!(matches!(start_turn(&mut conn, sibling).unwrap(), Start::Skipped));
             let notice = last_message(&conn, group.id).unwrap().unwrap();
             assert!(notice.body.contains("王五") && notice.body.contains("重复请求核对同一版本"));
@@ -272,7 +272,7 @@ fn test_group_member_mentions_review_each_tenth_relay_and_only_pause_confirmed_b
                     assert!(last_message(&conn, group.id).unwrap().unwrap().body.contains("调度模型请求超时"));
                 }
                 // 重复回执不能推翻已经生效的结果。
-                finish_relay_review(&mut conn, current, Ok(Some("迟到的结论".into()))).unwrap();
+                finish_relay_review(&mut conn, current, Ok(Some(RelayPause::Loop("迟到的结论".into())))).unwrap();
             }
         }
     }
@@ -589,4 +589,26 @@ fn test_credential_anchor_is_stable_for_running_turn_and_exact_for_published_rep
         Some(RequestAnchor { group_id: room.id, seq: published.seq }));
     assert!(credential_request_anchor(&conn, member.conversation_id, source).unwrap().is_none(), "never attach an unpublished source to a later reply");
     assert_eq!(anchor.seq, question.seq, "queued requests retain the captured anchor after turn completion");
+}
+
+#[test]
+fn test_onboarding_aux_group_relay_confirmation_resumes_original_branch_once() {
+    let mut conn = setup();
+    let (group, members) = group_with(&mut conn, &["张三", "李四"]);
+    let question = post_user(&mut conn, group.id, "task", "开始", None).unwrap();
+    let turn_id = route(&mut conn, group.id, question.seq, &[members[0].id], 1).unwrap()[0];
+    conn.execute("UPDATE butler_chat_group_turn SET depth=11,relay_review_pending=1 WHERE id=?1", [turn_id]).unwrap();
+    finish_relay_review(&mut conn, turn_id, Ok(Some(RelayPause::AskUser))).unwrap();
+    assert!(matches!(start_turn(&mut conn, turn_id).unwrap(), Start::Skipped));
+    let confirmation = last_message(&conn, group.id).unwrap().unwrap();
+    assert!(confirmation.body.contains("已经接力 10 轮"));
+    // Another branch delivered the original handoff to this member while it was waiting.
+    conn.execute("UPDATE butler_chat_group_member SET delivered_through=?1 WHERE id=?2",
+        params![confirmation.seq, members[0].id]).unwrap();
+    let answer = post_user(&mut conn, group.id, "yes", "继续", Some(confirmation.seq)).unwrap();
+    assert!(pending_routes(&conn).unwrap().is_empty());
+    assert_eq!(post_user(&mut conn, group.id,"yes","继续",Some(confirmation.seq)).unwrap().seq,answer.seq);
+    let (resumed, member, input) = run(&mut conn, turn_id);
+    assert!(input.contains("开始"));
+    assert_eq!((resumed.depth, resumed.origin_seq, member.id), (11, question.seq, members[0].id));
 }

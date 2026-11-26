@@ -14,6 +14,7 @@ const OfficePreviewModal = lazy(() => import("./components/office/OfficePreviewM
 
 // 按需加载各个窗口，避免一次性打包全部页面导致移动端首屏加载过慢
 const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {
+    onboarding: () => import("./windows/OnboardingWindow"),
     ask: () => import("./windows/AskWindow"),
     config: () => import("./windows/ConfigWindow"),
     chat_ui: () => import("./windows/ChatUIWindow"),

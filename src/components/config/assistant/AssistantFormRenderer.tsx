@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
     Brain,
     Copy,
@@ -162,6 +164,23 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
     const { models, loading: modelsLoading, error: modelsError } = useFilteredModels(assistantType, hasModelSelect);
     const { providers, loading: providersLoading, error: providersError } = useFilteredProviders(assistantType, hasProviderSelect);
     const { mcpServers, loading: mcpServersLoading, error: mcpServersError } = useMcpServers(hasMcpSelect);
+    const [defaultNewChatAssistantId, setDefaultNewChatAssistantId] = useState<number | null>(null);
+    useEffect(() => {
+        if (mobile) return;
+        let active = true;
+        invoke<number | null>("get_default_new_chat_assistant")
+            .then((id) => {
+                if (active) setDefaultNewChatAssistantId(id ?? null);
+            })
+            .catch(() => undefined);
+        const sub = listen<number>("default-new-chat-assistant-changed", (event) => {
+            if (active) setDefaultNewChatAssistantId(event.payload);
+        });
+        return () => {
+            active = false;
+            void sub.then((stop) => stop()).catch(() => undefined);
+        };
+    }, [mobile]);
 
     const fieldData = useMemo<FieldOptionsData>(
         () => ({
@@ -291,6 +310,24 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
                     </div>
 
                     <div className="flex shrink-0 items-center gap-1.5">
+                        {!mobile && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={defaultNewChatAssistantId === currentAssistant.assistant.id}
+                                onClick={() => {
+                                    void invoke("set_default_new_chat_assistant", { assistantId: currentAssistant.assistant.id })
+                                        .then(() => {
+                                            setDefaultNewChatAssistantId(currentAssistant.assistant.id);
+                                            toast.success("已设为新对话默认助手");
+                                        })
+                                        .catch(error => toast.error(`保存新对话默认助手失败：${String(error)}`));
+                                }}
+                            >
+                                {defaultNewChatAssistantId === currentAssistant.assistant.id ? "当前新对话默认" : "设为新对话默认"}
+                            </Button>
+                        )}
                         {onEdit ? (
                             <Button type="button" variant="outline" size="sm" onClick={onEdit} className="gap-1.5">
                                 <Pencil className="h-3.5 w-3.5" />

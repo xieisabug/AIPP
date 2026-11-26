@@ -99,7 +99,70 @@ fn resolve_group(replacements: &HashMap<String, String>, group_id: &str) -> Stri
     current
 }
 
-/// 生成对话总结
+pub(crate) fn summary_model(
+    db: &LLMDatabase, config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
+) -> Result<Option<crate::db::llm_db::ModelDetail>, AppError> {
+    let feature_config_opt = get_conversation_summary_config(config_feature_map);
+    // 解析 provider_id 与 model_code，支持分开存储和组合格式；遇到不可用项时回退到默认轻量模型
+    // 格式1（分开存储）: conversation_summary_model + conversation_summary_provider_id
+    // 格式2（组合值）: conversation_summary_model = "model_code%%provider_id"
+    let mut candidates: Vec<(String, i64)> = Vec::new();
+    {
+        let model_value = feature_config_opt
+            .and_then(|fc| fc.get("conversation_summary_model"))
+            .map(|c| c.value.clone())
+            .unwrap_or_default();
+
+        let provider_id_value = feature_config_opt
+            .and_then(|fc| fc.get("conversation_summary_provider_id"))
+            .map(|c| c.value.clone())
+            .unwrap_or_default();
+
+        // 优先使用分开存储的配置
+        if !model_value.is_empty() && !provider_id_value.is_empty() {
+            let provider_id = provider_id_value.parse::<i64>().map_err(|_| {
+                AppError::UnknownError("对话总结模型 provider_id 解析失败".to_string())
+            })?;
+            candidates.push((model_value, provider_id));
+        } else if !model_value.is_empty() {
+            // 回退到组合格式 "model_code%%provider_id"
+            let parts: Vec<&str> = model_value.split("%%").collect();
+            if parts.len() < 2 {
+                return Err(AppError::UnknownError(
+                    "对话总结模型配置格式错误，应为 model_code%%provider_id".to_string(),
+                ));
+            }
+            let model_code = parts[0].to_string();
+            let provider_id = parts[1].parse::<i64>().map_err(|_| {
+                AppError::UnknownError("对话总结模型 provider_id 解析失败".to_string())
+            })?;
+            candidates.push((model_code, provider_id));
+        }
+        if let Some((fallback_code, fallback_pid)) =
+            crate::api::ai::config::resolve_default_light_model(config_feature_map)
+        {
+            candidates.push((fallback_code, fallback_pid));
+        }
+    }
+
+    for (model_code, provider_id) in candidates {
+        match db.get_model_for_request(&provider_id, &model_code) {
+            Ok(detail) => return Ok(Some(detail)),
+            Err(
+                crate::db::llm_db::ModelRequestError::Lookup(rusqlite::Error::QueryReturnedNoRows)
+                | crate::db::llm_db::ModelRequestError::LocalAgent { .. }
+                | crate::db::llm_db::ModelRequestError::Disabled { .. },
+            ) => continue,
+            Err(e) => {
+                return Err(AppError::DatabaseError(format!(
+                    "读取对话总结模型 {model_code} / {provider_id}：{e}"
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub async fn generate_conversation_summary(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
@@ -116,6 +179,8 @@ pub async fn generate_conversation_summary(
         debug!("对话总结功能已禁用，跳过总结生成");
         return Ok(());
     }
+
+    let Some(model_detail) = summary_model(&LLMDatabase::new(app_handle)?, &config_feature_map)? else { return Ok(()) };
 
     // Butler 主会话不参与对话总结；派发任务会话允许总结
     let conversation_db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
@@ -226,60 +291,6 @@ pub async fn generate_conversation_summary(
         save_empty_summary_to_db(&conversation_db, conversation_id)?;
         return Ok(());
     }
-
-    // 2) 获取总结模型配置（同步获取，避免捕获非 Send 类型）
-    let llm_db = LLMDatabase::new(app_handle).map_err(AppError::from)?;
-
-    // 解析 provider_id 与 model_code，支持分开存储和组合格式
-    // 格式1（分开存储）: conversation_summary_model + conversation_summary_provider_id
-    // 格式2（组合值）: conversation_summary_model = "model_code%%provider_id"
-    let (model_code, provider_id) = {
-        let model_value = feature_config_opt
-            .and_then(|fc| fc.get("conversation_summary_model"))
-            .map(|c| c.value.clone())
-            .unwrap_or_default();
-
-        let provider_id_value = feature_config_opt
-            .and_then(|fc| fc.get("conversation_summary_provider_id"))
-            .map(|c| c.value.clone())
-            .unwrap_or_default();
-
-        // 优先使用分开存储的配置
-        if !model_value.is_empty() && !provider_id_value.is_empty() {
-            let provider_id = provider_id_value.parse::<i64>().map_err(|_| {
-                AppError::UnknownError("对话总结模型 provider_id 解析失败".to_string())
-            })?;
-            (model_value, provider_id)
-        } else if !model_value.is_empty() {
-            // 回退到组合格式 "model_code%%provider_id"
-            let parts: Vec<&str> = model_value.split("%%").collect();
-            if parts.len() < 2 {
-                return Err(AppError::UnknownError(
-                    "对话总结模型配置格式错误，应为 model_code%%provider_id".to_string(),
-                ));
-            }
-            let model_code = parts[0].to_string();
-            let provider_id = parts[1].parse::<i64>().map_err(|_| {
-                AppError::UnknownError("对话总结模型 provider_id 解析失败".to_string())
-            })?;
-            (model_code, provider_id)
-        } else if let Some((fallback_code, fallback_pid)) =
-            crate::api::ai::config::resolve_default_light_model(&config_feature_map)
-        {
-            (fallback_code, fallback_pid)
-        } else {
-            return Err(AppError::UnknownError(
-                "对话总结模型未配置，请在「设置 → AI 与自动化」中配置对话总结模型或默认轻量模型".to_string(),
-            ));
-        }
-    };
-
-    let model_detail = llm_db.get_model_for_request(&provider_id, &model_code).map_err(|e| {
-        AppError::DatabaseError(format!(
-            "配置的对话总结模型不可用 (model_code={}, provider_id={})，请检查设置: {}",
-            model_code, provider_id, e
-        ))
-    })?;
 
     // 3) 构建对话消息序列（system + user/assistant 对话 + 总结请求）
     let system_prompt = r#"你是一个对话总结助手。你的任务是阅读用户与AI助手之间的对话，然后根据要求生成结构化的总结。请认真理解对话内容，准确提取关键信息。"#;
@@ -627,3 +638,7 @@ fn save_empty_summary_to_db(
     info!(conversation_id, "已为空对话创建占位总结记录");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "summary_model_tests.rs"]
+mod summary_model_tests;

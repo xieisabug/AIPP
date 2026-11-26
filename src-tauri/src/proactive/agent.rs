@@ -127,7 +127,13 @@ pub(super) async fn execute(
     system: &str,
     user_input: &str,
 ) -> Result<ExecutionOutput> {
-    if let Some(assistant_id) = parse_native_assistant_id(&cfg.deep_model) {
+    let native = if cfg.deep_model.trim().is_empty()
+        && butler_api::get_butler_model_selection(app).await.map_err(anyhow::Error::msg)?.local_agent {
+        Some(chief)
+    } else {
+        parse_native_assistant_id(&cfg.deep_model)
+    };
+    if let Some(assistant_id) = native {
         execute_native_agent(app, session, assistant_id, system, user_input).await
     } else {
         execute_llm_loop(app, session, cfg, chief, system, user_input).await

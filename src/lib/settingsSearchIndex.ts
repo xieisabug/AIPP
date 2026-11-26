@@ -262,6 +262,8 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchItem[] = [
         subNav: "#sync-maintenance",
     },
 
+    { id: "first-run-onboarding", title:"首次使用引导", section:"常规与外观", description:"配置聊天、管家与模型分工", keywords:["首次","引导","躺平","专家"], menu:"general-config", subNav:"#onboarding", desktopOnly:true },
+    { id: "onboarding-setup", title:"后台准备任务", section:"常规与外观", description:"查看或重试 Skills、Office、bun 和 uv 安装", keywords:["安装","准备","重试"], menu:"general-config", subNav:"#onboarding", desktopOnly:true },
     // 通用与系统
     {
         id: "startup-window",

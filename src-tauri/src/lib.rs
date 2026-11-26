@@ -25,6 +25,7 @@ mod utils;
 mod vault;
 mod webview_autofill;
 mod window;
+mod onboarding;
 
 pub use crate::feishu::{
     debug_build_feishu_interactive_payload, debug_build_feishu_markdown_card,
@@ -822,7 +823,9 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        open_default_home_window(&app_handle_for_click);
+                        if !onboarding::intercept_home(&app_handle_for_click) {
+                            open_default_home_window(&app_handle_for_click);
+                        }
                     }
                 });
 
@@ -994,6 +997,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 register_global_shortcuts(&app_handle);
+                onboarding::setup::resume(&app_handle);
             }
 
             if app.get_webview_window("main").is_none() {
@@ -1010,7 +1014,28 @@ pub fn run() {
                     if is_butler_experiment_enabled(&app_handle) {
                         create_butler_experiment_window_hidden(&app_handle);
                     }
-                    match preferred_home_window_label(&app_handle).as_str() {
+                    let show_onboarding = match onboarding::startup(&app_handle) {
+                        Ok(show) => show,
+                        Err(error) => {
+                            tracing::error!(%error, "Failed to evaluate first-run onboarding state; falling back to default home");
+                            false
+                        }
+                    };
+                    let mut home = if show_onboarding {
+                        "onboarding".into()
+                    } else {
+                        preferred_home_window_label(&app_handle)
+                    };
+                    if home == "onboarding" {
+                        if let Err(error) = window::create_onboarding_window(&app_handle) {
+                            tracing::error!(%error, "Failed to create onboarding window; falling back to default home");
+                            home = preferred_home_window_label(&app_handle);
+                        }
+                    }
+                    match home.as_str() {
+                        "onboarding" => {
+                            create_ask_window_hidden(&app_handle);
+                        }
                         "chat_ui" => {
                             create_ask_window_hidden(&app_handle);
                             if let Some(chat_window) = app_handle.get_webview_window("chat_ui") {
@@ -1071,6 +1096,26 @@ pub fn run() {
     let app = app.manage(CopilotTokenManagerState::new());
     let app = app
         .invoke_handler(tauri::generate_handler![
+            onboarding::get_onboarding_state,
+            onboarding::open_onboarding_window,
+            onboarding::choose_onboarding_path,
+            onboarding::track_onboarding_provider,
+            onboarding::discard_onboarding_provider,
+            onboarding::save_onboarding_recharge,
+            onboarding::skip_onboarding,
+            onboarding::finish_onboarding,
+            onboarding::check_onboarding_sync,
+            onboarding::reset_onboarding_state,
+            onboarding::get_default_new_chat_assistant,
+            onboarding::set_default_new_chat_assistant,
+            onboarding::apply::apply_onboarding_config,
+            onboarding::apply::update_onboarding_roles,
+            onboarding::preset::get_onboarding_preset,
+            onboarding::preset::onboarding_provider_endpoints,
+            onboarding::setup::get_onboarding_setup_status,
+            onboarding::setup::check_onboarding_skills_ready,
+            onboarding::setup::retry_onboarding_setup,
+            api::llm_api::probe_chat_model,
             ask_ai,
             api::ai_api::context_commands::run_conversation_context_command,
             enqueue_conversation_message,
@@ -1085,6 +1130,7 @@ pub fn run() {
             get_shine_state,
             regenerate_conversation_title,
             generate_artifact_metadata,
+            artifacts::collection_api::artifact_autofill_unavailable_reason,
             cancel_ai,
             get_selected,
             open_config_window,
@@ -1277,6 +1323,7 @@ pub fn run() {
             list_butler_tasks_paginated,
             get_butler_task_detail,
             reset_butler_main_conversation,
+            api::butler_api::butler_channel_change_required,
             spawn_butler_task_conversation,
             conversation_exists,
             get_conversation_message,
@@ -1723,6 +1770,9 @@ pub(crate) fn register_global_shortcuts(app_handle: &tauri::AppHandle) {
                     }
 
                     // macOS：使用“先复制，再延迟聚焦，再后台读取剪贴板”的策略，绕过慢速 crate
+                    if onboarding::intercept_home(_app) {
+                        return;
+                    }
                     #[cfg(target_os = "macos")]
                     {
                         use std::thread;

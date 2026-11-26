@@ -3,6 +3,8 @@ import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import ConfirmDialog from "../ConfirmDialog";
+import { importProvider, populateImported, detail, explain } from "@/components/onboarding/onboardingService";
+import type { OnboardingPreset } from "@/utils/modelRecommend";
 import NewProviderWizard from "./NewProviderWizard";
 import { PROVIDER_API_TYPES } from "./providerApiTypes";
 import ShareDialog from "../ShareDialog";
@@ -161,6 +163,8 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
     const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
     const [shareCode, setShareCode] = useState('');
 
+    const [sharePassword, setSharePassword] = useState("");
+
     // 重命名提供商
     const handleRenameProvider = useCallback(async (newName: string) => {
         if (!selectedProvider) return;
@@ -201,6 +205,7 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
                 password
             });
             setShareCode(code);
+            setSharePassword(password);
             setShareDialogOpen(true);
         } catch (error) {
             toast.error('分享失败: ' + error);
@@ -218,20 +223,31 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
             throw new Error('请输入密码');
         }
 
-        await invoke('import_llm_provider', {
-            shareCode,
-            password,
-            newName
+        const provider = await importProvider(shareCode, password, false, newName).catch(error => {
+            throw new Error(explain(error));
         });
+        let showDefaultSuccess = true;
+        if (provider.already_exists) {
+            toast.info("你已经有这个配置了");
+            showDefaultSuccess = false;
+        }
+        try {
+            await populateImported(provider, await invoke<OnboardingPreset>("get_onboarding_preset"));
+        } catch (error) {
+            toast.warning(`已导入，但没能获取或保存模型列表：${detail(error)}`);
+            showDefaultSuccess = false;
+        }
 
         // 导入成功后重新获取提供商列表
         getLLMProviderList();
+        return showDefaultSuccess;
     }, [getLLMProviderList]);
 
     // 关闭分享对话框
     const closeShareDialog = useCallback(() => {
         setShareDialogOpen(false);
         setShareCode('');
+        setSharePassword('');
     }, []);
 
     // 关闭导入对话框
@@ -516,6 +532,7 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
             {/* 分享对话框 */}
             <ShareDialog
                 title="提供商配置"
+                provider={{name:selectedProvider?.name ?? "提供商", password:sharePassword}}
                 shareCode={shareCode}
                 isOpen={shareDialogOpen}
                 onClose={closeShareDialog}
@@ -525,6 +542,7 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
             <ImportDialog
                 title="提供商配置"
                 isOpen={importDialogOpen}
+                provider
                 requiresPassword={true}
                 onClose={closeImportDialog}
                 onImport={handleImportProvider}

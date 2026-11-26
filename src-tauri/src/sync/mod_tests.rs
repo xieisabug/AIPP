@@ -801,7 +801,7 @@ fn test_magpie_seed_pull_preserves_local_provider_ids() {
     let sync = sync_db();
     let data = crate::db::llm_db::LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     data.create_tables().unwrap();
-    let local: i64 = data.conn.query_row("SELECT id FROM llm_provider WHERE api_type='magpie'", [], |r| r.get(0)).unwrap();
+    let local = data.add_llm_provider("Magpie", "magpie", "", true, false).unwrap();
     let id = crate::api::magpie::BUILTIN_SYNC_ID;
     let event = change("llm.provider", id, 1, json!({"fields":{"name":"Magpie","api_type":"magpie","is_official":1,"is_enabled":1},"refs":{}}));
     apply_change_to_db(&sync, &data.conn, &spec("llm.provider"), &event, "local", |_| Ok(())).unwrap();
@@ -814,7 +814,7 @@ fn test_opencode_go_seed_pull_preserves_local_provider_ids() {
     let sync = sync_db();
     let data = crate::db::llm_db::LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     data.create_tables().unwrap();
-    let local: i64 = data.conn.query_row("SELECT id FROM llm_provider WHERE api_type='opencode_go'", [], |r| r.get(0)).unwrap();
+    let local = data.add_llm_provider("OpenCode Go", "opencode_go", "", true, false).unwrap();
     let id = crate::api::opencode_go::BUILTIN_SYNC_ID;
     let event = change("llm.provider", id, 1, json!({"fields":{"name":"Go","api_type":"opencode_go","is_official":1,"is_enabled":1},"refs":{}}));
     apply_change_to_db(&sync, &data.conn, &spec("llm.provider"), &event, "local", |_| Ok(())).unwrap();

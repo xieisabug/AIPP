@@ -258,10 +258,11 @@ pub fn build_selected_mcp_tools_with_catalog(
         dynamic_catalog = collect_native_dynamic_mcp_catalog(&servers);
     }
     crate::mcp::butler_tools::inject(app_handle, &mut servers, &kind).map_err(|e| e.to_string())?;
-    // 原生智能体的工具调用显示为活动记录，不会渲染引用卡片；不提供 preview_message，
-    // 避免模型以为用户已经看到原文而省略交付。
-    for server in &mut servers {
-        server.tools.retain(|tool| tool.name != "preview_message");
+    // The main conversation displays native references through its interaction timeline.
+    if kind != "butler_main" {
+        for server in &mut servers {
+            server.tools.retain(|tool| tool.name != "preview_message");
+        }
     }
     // Ordinary chats must not inherit administration just because it was configured on the assistant.
     if !crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind) {

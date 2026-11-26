@@ -915,6 +915,19 @@ pub(crate) fn has_configured_review_model(features: &HashMap<String, HashMap<Str
     configured_review_model(features).is_ok_and(|(_, provider_id)| provider_id > 0)
 }
 
+/// Only a missing role or a legacy local-agent selection goes straight to manual confirmation.
+pub(crate) async fn needs_manual_review_without_model(app: &tauri::AppHandle) -> bool {
+    let features = load_feature_config_map(app).await;
+    match configured_review_model(&features) {
+        Ok((_, id)) => crate::db::llm_db::LLMDatabase::new(app).ok()
+            .and_then(|db| db.get_llm_provider(id).ok())
+            .is_some_and(|p| crate::db::llm_db::is_local_agent_api_type(&p.api_type)),
+        Err(reason) => reason == unconfigured_model_reason(),
+    }
+}
+
+pub(crate) const REVIEW_SETUP_HINT: &str = "配置审核模型后，安全的操作会自动通过";
+
 pub(crate) fn agent_permission_uses_model(mode: Option<&str>, review_model_configured: bool) -> bool {
     match mode.map(str::trim) {
         None | Some("") => review_model_configured,
@@ -1400,6 +1413,10 @@ async fn review_decision(
         }
     }
 
+    if needs_manual_review_without_model(app_handle).await {
+        emit_tool_review_status(app_handle, conversation_id, call_id, "done", Some("manual"), REVIEW_SETUP_HINT);
+        return ReviewDecision::Hold;
+    }
     let cancel_token = register_review_cancel_token(call_id).await;
     emit_tool_review_status(app_handle, conversation_id, call_id, "reviewing", None, "");
     let review_result = tokio::select! {

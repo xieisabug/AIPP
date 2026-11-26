@@ -50,6 +50,9 @@ pub async fn run_summary_task(
         return Ok(());
     }
 
+    if crate::api::ai::summary::summary_model(&crate::db::llm_db::LLMDatabase::new(app_handle)?, &config_map)?.is_none() {
+        return Ok(());
+    }
     // 获取需要总结的对话列表
     let conversations_to_summarize =
         get_conversations_needing_summary(app_handle, scheduler_state).await?;
@@ -86,6 +89,26 @@ pub async fn run_summary_task(
             )
             .await;
 
+            match &result {
+                Ok(()) => {
+                    let cleared = ConversationDatabase::new(&app_handle_clone).and_then(|db| {
+                        let conn = db.get_connection()?;
+                        clear_failure(&conn, conversation_id)?;
+                        Ok(())
+                    });
+                    if let Err(error) = cleared {
+                        warn!(conversation_id, %error, "清理对话总结重试记录失败");
+                    }
+                }
+                Err(error) => {
+                    let saved = ConversationDatabase::new(&app_handle_clone).and_then(|db| {
+                        let conn = db.get_connection()?;
+                        record_failure(&conn, conversation_id, &error.to_string())?;
+                        Ok(())
+                    });
+                    if let Err(error) = saved { warn!(conversation_id, %error, "记录对话总结重试时间失败"); }
+                }
+            }
             // 无论成功失败，都从正在总结集合中移除
             {
                 let mut summarizing = scheduler_state_clone.summarizing_conversations.lock().await;
@@ -118,6 +141,19 @@ async fn get_feature_config_map(
     Ok(config_map)
 }
 
+fn clear_failure(conn: &rusqlite::Connection, conversation: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM conversation_summary_retry WHERE conversation_id = ?1", [conversation])?;
+    Ok(())
+}
+
+fn record_failure(conn: &rusqlite::Connection, conversation: i64, reason: &str) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO conversation_summary_retry(conversation_id, retry_after, last_error)
+        VALUES (?1, unixepoch()+3600, ?2) ON CONFLICT(conversation_id)
+        DO UPDATE SET retry_after=excluded.retry_after,last_error=excluded.last_error",
+        rusqlite::params![conversation, reason])?;
+    Ok(())
+}
+
 /// 检查对话总结功能是否启用
 fn is_summary_enabled(config_map: &HashMap<String, HashMap<String, FeatureConfig>>) -> bool {
     get_conversation_summary_config(config_map)
@@ -144,7 +180,10 @@ async fn get_conversations_needing_summary(
         let summarizing = scheduler_state.summarizing_conversations.lock().await;
         summarizing.iter().copied().collect()
     };
+    eligible_conversations(&conn, &summarizing_ids)
+}
 
+fn eligible_conversations(conn: &rusqlite::Connection, summarizing_ids: &[i64]) -> Result<Vec<i64>, AppError> {
     // 构建排除条件
     let exclude_clause = if summarizing_ids.is_empty() {
         String::new()
@@ -166,6 +205,7 @@ async fn get_conversations_needing_summary(
         INNER JOIN message m ON m.conversation_id = c.id
         LEFT JOIN conversation_summary cs ON cs.conversation_id = c.id
         WHERE cs.id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM conversation_summary_retry r WHERE r.conversation_id=c.id AND r.retry_after>unixepoch())
           AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'scheduled_run')
           AND (
               SELECT MAX(m2.created_time)
@@ -195,3 +235,7 @@ async fn get_conversations_needing_summary(
 
     Ok(conversation_ids)
 }
+
+#[cfg(test)]
+#[path = "summary_task_tests.rs"]
+mod tests;

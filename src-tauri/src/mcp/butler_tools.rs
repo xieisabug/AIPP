@@ -20,6 +20,7 @@ pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
         Some("aipp:agent") if tool == "read_group_history" => kind == super::builtin_mcp::templates::GROUP_MEMBER_KIND,
         Some("aipp:agent") => crate::api::butler_memory::is_tool(tool)
             || crate::api::butler_peer::is_peer_tool(tool)
+            || (kind == "butler_main" && super::builtin_mcp::templates::is_butler_main_only_agent_tool(tool))
             || tool == "schedule_task",
         // 受托助手在自己的会话里向用户提问，问题绑定当前回合（即当前这项委托或任务）。
         Some("aipp:ui_interaction") => matches!(tool, "ask_user_question" | "present_choices"),

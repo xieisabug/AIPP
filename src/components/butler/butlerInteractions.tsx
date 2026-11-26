@@ -6,6 +6,7 @@ import type { InlineInteractionItem } from "@/components/ConversationUI";
 import type { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import ButlerInteractionResult from "./ButlerInteractionResult";
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
+import MessagePreviewToolCall from "@/components/mcp-tool-components/MessagePreviewToolCall";
 import InlineChoicesCard from "@/components/choices/InlineChoicesCard";
 
 type Position = { id: number; request_id: string; anchor: number | null; occurred_ms: number };
@@ -13,6 +14,7 @@ export type InteractionRow = Position & (
     { kind: "question"; request: AskUserQuestionRequest; answers: Record<string, string> | null }
     | { kind: "file" | "choices" }
     | { kind: "code"; request: { parameters: string; status?: string } }
+    | { kind: "message_preview"; request: { message_id: number } }
     | { kind: "task" }
     | { kind: "report"; request: { text: string; call_id?: number } }
 );
@@ -58,6 +60,8 @@ function HistoricalFile({ requestId, conversationId }: { requestId: string; conv
 }
 
 export function interactionContent(row: InteractionRow, live: InlineInteractionItem | undefined, conversationId: number) {
+    if (row.kind === "message_preview") return <MessagePreviewToolCall key={row.request_id}
+        conversationId={conversationId} parameters={JSON.stringify(row.request)} status="success" />;
     if (row.kind === "choices") return <InlineChoicesCard key={row.request_id} conversationId={conversationId} requestId={row.request_id} />;
     if (row.kind === "question" && row.answers) {
         return <AskUserQuestionCard request={row.request} isOpen readOnly viewMode="summary"

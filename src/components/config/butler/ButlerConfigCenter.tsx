@@ -52,6 +52,8 @@ import { useButlerProactiveConfig } from "@/components/butler/useButlerProactive
 import { appearanceKey, defaultAppearance, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import { isDecisionRequestMode } from "@/components/config/llmModelTypes";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { ButlerModelOptions, saveButlerModel } from "@/components/butler/ButlerModelOptions";
+import { useFilteredModels } from "@/hooks/useFilteredModels";
 import { useModels } from "@/hooks/useModels";
 import { useUnsavedLeaveGuard } from "@/hooks/useUnsavedLeaveGuard";
 import { parseSubNav, useSettingsAnchorHighlight } from "@/lib/settingsNavigation";
@@ -189,7 +191,8 @@ export const ButlerConfigCenter: React.FC<ButlerConfigCenterProps> = ({
     const trustAllWorkspaces = isEnabledValue(watched.butler_trust_all_workspaces);
     const trustedPathsRaw = String(watched.butler_trusted_workspaces || "");
 
-    const { models, loading: modelsLoading, error: modelsError } = useModels(butlerEnabled);
+    const { models, loading: modelsLoading, error: modelsError } = useFilteredModels(0, butlerEnabled);
+    const agents = useFilteredModels(4, butlerEnabled);
     const { models: dispatchModels, loading: dispatchModelsLoading } = useModels(butlerEnabled, {
         includeDecision: true,
     });
@@ -312,7 +315,10 @@ export const ButlerConfigCenter: React.FC<ButlerConfigCenterProps> = ({
         setIsSaving(true);
         try {
             const values = form.getValues();
-            await saveExperimentalConfigValues(saveFeatureConfig, values, "butler");
+            if (!await saveButlerModel(butlerModelId, () => saveExperimentalConfigValues(saveFeatureConfig, values, "butler"))) {
+                form.setValue("butler_model_id", featureConfig.get("experimental")?.get("butler_model_id") || "");
+                return;
+            }
             if (butlerEnabled && feishuEnabled && feishuAppSecret.trim()) {
                 await invoke("save_butler_feishu_secret", {
                     appSecret: feishuAppSecret.trim(),
@@ -345,6 +351,7 @@ export const ButlerConfigCenter: React.FC<ButlerConfigCenterProps> = ({
         feishuStatus?.secret_configured,
         form,
         saveFeatureConfig,
+        featureConfig,
         proactive,
         onSaved,
     ]);
@@ -642,9 +649,7 @@ export const ButlerConfigCenter: React.FC<ButlerConfigCenterProps> = ({
                                                             />
                                                         </SelectTrigger>
                                                         <SelectContent>
-                                                            {modelOptions.map((o) => (
-                                                                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                                                            ))}
+                                                            <ButlerModelOptions api={models} agents={agents.models} />
                                                         </SelectContent>
                                                     </Select>
                                                 </FormControl>

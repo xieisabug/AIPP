@@ -352,10 +352,11 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64, turn: &Turn, mode
     let prompt = format!("用户请求：{request_text}\n上一句进展：{previous}\n新增内容：{}\n新增步骤：\n{step_lines}", batch.text);
 
     let config_map = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
-    let detail = LLMDatabase::new(app)
-        .map_err(|e| e.to_string())?
-        .get_model_for_request(provider_id, model_code)
-        .map_err(|e| format!("辅助模型不可用: {e}"))?;
+    let detail = match LLMDatabase::new(app).map_err(|e| e.to_string())?.get_model_for_request(provider_id, model_code) {
+        Ok(detail) => detail,
+        Err(crate::db::llm_db::ModelRequestError::LocalAgent { .. }) => return Ok(()),
+        Err(e) => return Err(format!("辅助模型不可用: {e}")),
+    };
     let proxy = get_network_proxy_from_config(&config_map);
     let configs = crate::api::copilot_token_manager::prepare_provider_configs(
         app,

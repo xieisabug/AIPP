@@ -321,6 +321,7 @@ async fn cached_butler_dev_tools_prompt(app_handle: &AppHandle) -> String {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ButlerModelSelection {
+    pub(crate) local_agent: bool,
     pub(crate) raw_value: String,
     pub(crate) model_code: String,
     pub(crate) provider_id: i64,
@@ -951,16 +952,48 @@ pub(crate) async fn get_butler_model_selection(
     }
 
     let llm_db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let model_detail = llm_db
-        .get_llm_model_detail(&provider_id, &model_code)
-        .map_err(|e| format!("无法读取总管家模型配置: {}", e))?;
+    let provider = llm_db.get_provider_for_request(provider_id).map_err(|e| e.to_string())?;
+    let local_agent = crate::db::llm_db::is_local_agent_api_type(&provider.api_type);
+    let (model_code, display_name) = if local_agent {
+        let (name, code, id, _) = llm_db.get_filtered_models_for_select(4)?.into_iter()
+            .find(|(_, code, _, owner)| owner == &provider_id && code == &model_code)
+            .ok_or_else(|| format!("智能体提供商「{}」未提供已选择的模型 {model_code}", provider.name))?;
+        (if id == 0 { String::new() } else { code }, name)
+    } else {
+        let detail = llm_db.get_llm_model_detail(&provider_id, &model_code)
+            .map_err(|e| format!("无法读取总管家模型配置：{e}"))?;
+        (model_code, detail.model.name)
+    };
+    Ok(ButlerModelSelection { raw_value, model_code, provider_id, display_name, local_agent })
+}
 
-    Ok(ButlerModelSelection {
-        raw_value,
-        model_code,
-        provider_id,
-        display_name: model_detail.model.name,
-    })
+pub(crate) fn butler_channel_changed(db: &LLMDatabase, previous: &str, next: &str) -> Result<bool, String> {
+    if previous.trim().is_empty() || next.trim().is_empty() || previous == next { return Ok(false); }
+    let parse_provider_id = |value: &str| value.rsplit_once("%%").and_then(|(_, id)| id.parse::<i64>().ok());
+    let new = parse_provider_id(next).ok_or_else(|| format!("总管家模型配置无效：{next}"))?;
+    let Some(old) = parse_provider_id(previous) else {
+        // Legacy or malformed previous value must not block saving a valid replacement.
+        return db.get_llm_provider(new)
+            .map(|p| crate::db::llm_db::is_local_agent_api_type(&p.api_type))
+            .map_err(|e| e.to_string());
+    };
+    if old == new { return Ok(false); }
+    let is_local = |id| db.get_llm_provider(id).map(|p| crate::db::llm_db::is_local_agent_api_type(&p.api_type));
+    // A deleted provider may own a native session; ask before replacing it.
+    Ok(is_local(old).or_else(|err| match err {
+        rusqlite::Error::QueryReturnedNoRows => Ok(true),
+        err => Err(err),
+    }).map_err(|e| e.to_string())? || is_local(new).map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+pub async fn butler_channel_change_required(app_handle: AppHandle, previous: Option<String>, next: String) -> Result<bool, String> {
+    let previous = match previous {
+        Some(value) => value,
+        None => get_experimental_config_value(&app_handle, "butler_model_id").await.unwrap_or_default(),
+    };
+    let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    butler_channel_changed(&db, &previous, &next)
 }
 
 fn visible_executor_candidates(assistants: Vec<Assistant>) -> Vec<Assistant> {
@@ -1079,13 +1112,18 @@ static BUTLER_ASSISTANT_INIT: Mutex<()> = Mutex::const_new(());
 async fn ensure_butler_system_assistant(app_handle: &AppHandle) -> Result<Assistant, String> {
     let _guard = BUTLER_ASSISTANT_INIT.lock().await;
     let model_selection = get_butler_model_selection(app_handle).await?;
+    let workdir = if model_selection.local_agent {
+        Some(load_butler_workspace_config(app_handle).await.main_workspace
+            .ok_or("请先设置总管家主工作区")?.path)
+    } else { None };
+    let output = get_experimental_config_value(app_handle, "butler_max_output_tokens").await;
     let system_prompt = build_butler_system_prompt(app_handle).await?;
     let app = app_handle.clone();
     tokio::task::spawn_blocking(move || {
         let assistant_db =
             AssistantDatabase::new(&app).map_err(|e| format!("打开总管家配置数据库失败：{e}"))?;
         assistant_db.conn.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
-        let assistant = assistant_profile::sync(&assistant_db, &model_selection, &system_prompt)
+        let assistant = assistant_profile::sync(&assistant_db, &model_selection, &system_prompt, workdir.as_deref(), output.as_deref())
             .map_err(|e| {
                 format!("更新总管家配置事务失败（model={}）：{e}", model_selection.raw_value)
             })?;
@@ -2429,6 +2467,7 @@ pub(crate) async fn load_or_create_butler_main_internal(
     app_handle: &AppHandle,
 ) -> Result<Conversation, String> {
     ensure_butler_enabled(app_handle).await?;
+    finish_pending_channel_change(app_handle).await?;
     let butler_assistant = ensure_butler_system_assistant(app_handle).await?;
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -4028,6 +4067,25 @@ pub async fn load_butler_main_conversation(
 pub(crate) async fn reopen_butler_main_conversation(
     app_handle: tauri::AppHandle,
 ) -> Result<(Conversation, Option<i64>), String> {
+    reopen_butler_main_if_current(app_handle, None).await
+}
+
+/// Consume the local reset marker only after the new main has been installed.
+/// A disabled Butler resumes this step when next opened.
+pub(crate) async fn finish_pending_channel_change(app: &AppHandle) -> Result<(), String> {
+    let db = crate::db::system_db::SystemDatabase::new(app).map_err(|e| e.to_string())?;
+    let raw = db.get_config("butler_channel_reset_from").map_err(|e| e.to_string())?;
+    if raw.is_empty() { return Ok(()); }
+    let expected = raw.parse::<i64>().map_err(|e| format!("待切换的管家会话编号无效：{e}"))?;
+    reopen_butler_main_if_current(app.clone(), Some(expected)).await?;
+    db.conn.execute("DELETE FROM system_config WHERE key='butler_channel_reset_from' AND value=?1", [raw])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn reopen_butler_main_if_current(
+    app_handle: AppHandle, expected: Option<i64>,
+) -> Result<(Conversation, Option<i64>), String> {
     // The window and multiple assistants can request a reset concurrently. Finish moving
     // the previous main conversation's task ownership before starting another reset.
     static RESET: Mutex<()> = Mutex::const_new(());
@@ -4041,6 +4099,11 @@ pub(crate) async fn reopen_butler_main_conversation(
     let mut previous_main_conversation_id = None;
 
     if let Some(state) = butler_repo.get_main_state(BUTLER_MAIN_SLOT).map_err(|e| e.to_string())? {
+        if expected.is_some_and(|id| id != state.butler_conversation_id) {
+            if let Some(current) = conversation_repo.read(state.butler_conversation_id).map_err(|e| e.to_string())? {
+                return Ok((current, None));
+            }
+        }
         previous_main_conversation_id = Some(state.butler_conversation_id);
         if let Some(mut current_main) =
             conversation_repo.read(state.butler_conversation_id).map_err(|e| e.to_string())?

@@ -140,9 +140,9 @@ function useWindowMaximized(enabled: boolean): boolean {
  * 关闭走 `close()`，与系统关闭按钮一样触发 CloseRequested（主窗口会被隐藏而不是退出）。
  * 其他平台不渲染。
  */
-export function WindowControls({ className }: { className?: string }) {
+export function WindowControls({ className, maximizable = true }: { className?: string; maximizable?: boolean }) {
     const enabled = useCustomWindowControls();
-    const maximized = useWindowMaximized(enabled);
+    const maximized = useWindowMaximized(enabled && maximizable);
     if (!enabled) return null;
     const appWindow = () => getCurrentWindow();
     return (
@@ -151,10 +151,12 @@ export function WindowControls({ className }: { className?: string }) {
                 onClick={() => void appWindow().minimize()} data-aipp-slot="window-controls-minimize">
                 <Minus className="size-4" strokeWidth={1.5} />
             </button>
-            <button type="button" className={controlButtonClass} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}
-                onClick={() => void appWindow().toggleMaximize()} data-aipp-slot="window-controls-maximize">
-                {maximized ? <Copy className="size-3.5 -scale-x-100" strokeWidth={1.5} /> : <Square className="size-3.5" strokeWidth={1.5} />}
-            </button>
+            {maximizable && (
+                <button type="button" className={controlButtonClass} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}
+                    onClick={() => void appWindow().toggleMaximize()} data-aipp-slot="window-controls-maximize">
+                    {maximized ? <Copy className="size-3.5 -scale-x-100" strokeWidth={1.5} /> : <Square className="size-3.5" strokeWidth={1.5} />}
+                </button>
+            )}
             <button type="button" className={cn(controlButtonClass, "hover:bg-destructive hover:[--button-ink:var(--destructive-foreground)]")} aria-label="关闭" title="关闭"
                 onClick={() => void appWindow().close()} data-aipp-slot="window-controls-close">
                 <X className="size-4" strokeWidth={1.5} />
@@ -168,6 +170,10 @@ interface WindowTopBarProps {
     icon?: ReactNode;
     /** 标题右侧、窗口控制按钮之前的操作按钮。 */
     children?: ReactNode;
+    /** 是否显示最大化按钮（不可调整大小的弹窗窗口应设为 false）。 */
+    maximizable?: boolean;
+    /** 无标题、无底部分割线的极简拖拽顶栏（用于首次引导等沉浸式窗口）。 */
+    bare?: boolean;
     "data-aipp-slot"?: string;
 }
 
@@ -176,7 +182,7 @@ interface WindowTopBarProps {
  * 与主窗口头部同高（`WINDOW_HEADER_HEIGHT`），macOS 左侧让出红黄绿按钮，Windows 右侧排窗口控制按钮，
  * 空白处与标题可拖动窗口。Linux 保留系统标题栏，这里只作为页面标题行；非桌面平台不渲染。
  */
-export function WindowTopBar({ title, icon, children, "data-aipp-slot": slot = "window-top-bar" }: WindowTopBarProps) {
+export function WindowTopBar({ title, icon, children, maximizable = true, bare = false, "data-aipp-slot": slot = "window-top-bar" }: WindowTopBarProps) {
     const enabled = useWindowTitleBarLayout();
     const mac = useMacOverlayTitleBar();
     const frameless = useFramelessTitleBar();
@@ -186,14 +192,20 @@ export function WindowTopBar({ title, icon, children, "data-aipp-slot": slot = "
         <div
             {...drag}
             data-aipp-slot={slot}
-            className="flex shrink-0 select-none items-center gap-2 border-b border-border pr-3"
-            style={{ height: WINDOW_HEADER_HEIGHT, paddingLeft: mac ? MAC_TRAFFIC_LIGHTS_SAFE_LEFT : 20 }}
+            className={cn(
+                "flex shrink-0 select-none items-center gap-2 pr-3",
+                !bare && "border-b border-border",
+            )}
+            style={{
+                height: bare ? 44 : WINDOW_HEADER_HEIGHT,
+                paddingLeft: mac ? MAC_TRAFFIC_LIGHTS_SAFE_LEFT : 20,
+            }}
         >
-            {icon && <span className="flex shrink-0 text-muted-foreground [&>svg]:pointer-events-none [&>svg]:size-4" {...drag}>{icon}</span>}
-            <span className="min-w-0 truncate text-sm font-medium" {...drag} data-aipp-slot={`${slot}-title`}>{title}</span>
+            {!bare && icon && <span className="flex shrink-0 text-muted-foreground [&>svg]:pointer-events-none [&>svg]:size-4" {...drag}>{icon}</span>}
+            {!bare && title && <span className="min-w-0 truncate text-sm font-medium" {...drag} data-aipp-slot={`${slot}-title`}>{title}</span>}
             <div className="min-w-0 flex-1 self-stretch" {...drag} />
             {children}
-            <WindowControls className="ml-2" />
+            <WindowControls className="ml-2" maximizable={maximizable} />
         </div>
     );
 }

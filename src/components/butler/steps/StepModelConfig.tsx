@@ -1,17 +1,16 @@
 import React from "react";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Bot, Sparkles } from "lucide-react";
 
-interface ModelOption {
-    value: string;
-    label: string;
-}
+import type { ModelForSelect } from "@/hooks/useFilteredModels";
+import { ButlerModelOptions } from "../ButlerModelOptions";
 
 interface StepModelConfigProps {
     modelId: string;
     displayName: string;
-    modelOptions: ModelOption[];
+    apiModels: ModelForSelect[];
+    agentModels: ModelForSelect[];
     modelsLoading: boolean;
     onModelChange: (modelId: string) => void;
     onDisplayNameChange: (name: string) => void;
@@ -20,7 +19,7 @@ interface StepModelConfigProps {
 const StepModelConfig: React.FC<StepModelConfigProps> = ({
     modelId,
     displayName,
-    modelOptions,
+    apiModels, agentModels,
     modelsLoading,
     onModelChange,
     onDisplayNameChange,
@@ -55,11 +54,7 @@ const StepModelConfig: React.FC<StepModelConfigProps> = ({
                             />
                         </SelectTrigger>
                         <SelectContent>
-                            {modelOptions.map((option) => (
-                                <SelectItem key={option.value} value={option.value}>
-                                    {option.label}
-                                </SelectItem>
-                            ))}
+                            <ButlerModelOptions api={apiModels} agents={agentModels} />
                         </SelectContent>
                     </Select>
                     {!modelId && (

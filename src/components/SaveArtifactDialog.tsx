@@ -43,6 +43,7 @@ export default function SaveArtifactDialog({
 }: SaveArtifactDialogProps) {
     const [isLoading, setIsLoading] = useState(false);
     const [isGeneratingMetadata, setIsGeneratingMetadata] = useState(false);
+    const [autofillReason, setAutofillReason] = useState<string | null>("正在读取模型设置");
     const [assistants, setAssistants] = useState<AssistantBasicInfo[]>([]);
 
     const form = useForm({
@@ -59,9 +60,14 @@ export default function SaveArtifactDialog({
     // 加载可用的助手列表
     useEffect(() => {
         if (isOpen) {
+            let current = true;
+            invoke<string | null>("artifact_autofill_unavailable_reason")
+                .then(reason => { if (current) setAutofillReason(reason); })
+                .catch(error => { if (current) setAutofillReason(String(error)); });
             invoke<AssistantBasicInfo[]>("artifact_get_assistants")
                 .then(setAssistants)
                 .catch(console.error);
+            return () => { current = false; };
         }
     }, [isOpen]);
 
@@ -174,11 +180,12 @@ export default function SaveArtifactDialog({
                             variant="ghost"
                             size="sm"
                             onClick={handleGenerateMetadata}
-                            disabled={isGeneratingMetadata || isLoading}
+                            disabled={isGeneratingMetadata || isLoading || !!autofillReason}
+                            title={autofillReason || undefined}
                             className="h-8 gap-1 px-2 text-xs"
                         >
                             <Sparkles className={`h-3.5 w-3.5 ${isGeneratingMetadata ? "animate-pulse" : ""}`} />
-                            {isGeneratingMetadata ? "生成中..." : "智能填写"}
+                            {isGeneratingMetadata ? "生成中..." : autofillReason || "智能填写"}
                         </Button>
                     }
                 />

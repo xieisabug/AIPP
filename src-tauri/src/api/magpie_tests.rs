@@ -30,7 +30,7 @@ fn test_catalog_keeps_chat_models_and_native_protocol_first() {
 fn test_catalog_refresh_preserves_model_identity_and_protocol() {
     let db = LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();
-    let provider_id: i64 = db.conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1", [PROVIDER], |row| row.get(0)).unwrap();
+    let provider_id: i64 = db.add_llm_provider("Magpie", PROVIDER, "", false, false).unwrap();
     db.add_llm_model("Claude", provider_id, "mine/claude", "mine", false, false, false).unwrap();
     let model_id = db.conn.last_insert_rowid();
     db.upsert_model_request_mode(provider_id, "mine/claude", "responses").unwrap();
@@ -57,14 +57,10 @@ fn test_catalog_refresh_preserves_model_identity_and_protocol() {
 }
 
 #[test]
-fn test_seed_is_official_disabled_and_deletion_stays() {
+fn test_manual_magpie_deletion_stays() {
     let db = LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();
-    let id: i64 = db.conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1", [PROVIDER], |row| row.get(0)).unwrap();
-    let provider = db.get_llm_provider(id).unwrap();
-    assert_eq!(provider.name, "Magpie");
-    assert!(!provider.is_enabled);
-    assert!(provider.is_official);
+    db.add_llm_provider("Magpie", PROVIDER, "", false, true).unwrap();
     db.conn.execute("DELETE FROM llm_provider WHERE api_type=?1", [PROVIDER]).unwrap();
     db.create_tables().unwrap();
     assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM llm_provider WHERE api_type=?1",
@@ -75,7 +71,7 @@ fn test_seed_is_official_disabled_and_deletion_stays() {
 fn test_protocol_order_is_per_provider_and_defaults_before_refresh() {
     let db = LLMDatabase { conn: Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();
-    let id: i64 = db.conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1", [PROVIDER], |row| row.get(0)).unwrap();
+    let id: i64 = db.add_llm_provider("Magpie", PROVIDER, "", false, false).unwrap();
     assert_eq!(db.effective_model_mode(PROVIDER, id, "anthropic/claude").unwrap(), "chat_completions");
     for (position, mode) in ["anthropic_messages", "chat_completions", "responses", "google_gemini"].iter().enumerate() {
         db.conn.execute("INSERT INTO magpie_protocols(provider_id,model,mode,position) VALUES (?1,'anthropic/claude',?2,?3)",

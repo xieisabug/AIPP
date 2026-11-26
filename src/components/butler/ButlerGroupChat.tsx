@@ -28,6 +28,7 @@ import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { useFocusedWindow } from "@/hooks/useFocusedWindow";
 import { FloatingWindowControls, WINDOW_HEADER_HEIGHT, WindowControls, dragRegionProps, useFramelessTitleBar } from "@/components/window/WindowTitleBar";
+import { OnboardingSetupChip } from "@/components/onboarding/OnboardingSetup";
 import { groupReadKey, mentionTargets, mergeMessages } from "./butlerGroupModel";
 
 interface Props {
@@ -261,6 +262,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                 </span>
             </button>
             <div className="flex items-center justify-end gap-1 self-stretch" {...drag}>
+                <OnboardingSetupChip />
                 <ConversationStatsDialog groupId={groupId} />
                 <IconButton icon={<Users className="h-4 w-4 text-icon" />} ghost title="群成员"
                     onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }} />

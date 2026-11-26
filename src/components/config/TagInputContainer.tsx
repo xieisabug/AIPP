@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import TagInput from '../TagInput';
 import { invoke } from "@tauri-apps/api/core";
+import { getErrorMessage } from "@/utils/error";
 import { toast } from 'sonner';
 import {
     LLMModel,
@@ -96,7 +97,7 @@ const TagInputContainer: React.FC<TagInputContainerProps> = ({
             onFetchModels(modelData);
         } catch (e) {
             toast.error(
-                "获取模型列表失败，请检查接口地址和 API 密钥配置: " + e,
+                "获取模型列表失败，请检查接口地址和 API 密钥配置：" + getErrorMessage(e),
             );
         } finally {
             setIsFetchingModels(false);

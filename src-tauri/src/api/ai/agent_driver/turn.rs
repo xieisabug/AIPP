@@ -46,6 +46,12 @@ pub(super) fn load_agent_instance(
         .ok_or_else(|| AppError::UnknownError("Agent 助手尚未配置模型提供商".into()))?;
     let (api_type, configs) = load(provider_id)?;
     let instance = registry.resolve_provider(provider_id, &api_type, configs)?;
+    // The Butler UI also sends its saved selection as a per-turn override. A
+    // placeholder for the bound provider means "let the driver select a model".
+    let model_override = model_override.filter(|(code, id)| {
+        !(matches!(*code, "acp" | "__agent_default__") && assistant.model.first().is_some_and(|binding|
+            binding.provider_id == *id && binding.model_code.is_empty()))
+    });
     Ok((instance, model_override.map(|(model, _)| model.to_string())))
 }
 

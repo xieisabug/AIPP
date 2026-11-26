@@ -2323,6 +2323,13 @@ impl ConversationDatabase {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_summary_retry (
+                conversation_id INTEGER PRIMARY KEY REFERENCES conversation(id) ON DELETE CASCADE,
+                retry_after INTEGER NOT NULL, last_error TEXT NOT NULL
+            )", [],
+        )?;
+
         // 创建对话Todo表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS conversation_todo (

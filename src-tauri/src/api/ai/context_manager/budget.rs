@@ -40,7 +40,7 @@ impl ContextBudget {
     pub fn effective_input_limit(&self) -> usize {
         self.context_window_size
             .saturating_sub(self.output_reserve)
-            .saturating_sub(self.tool_call_reserve)
+            .saturating_sub(self.tool_call_reserve.min(self.context_window_size / 4))
     }
 
     /// Token count at which compaction should trigger.

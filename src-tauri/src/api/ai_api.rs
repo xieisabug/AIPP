@@ -1858,14 +1858,14 @@ pub async fn ask_ai(
         user_metadata.as_ref().map(|value| value.to_string()),
     )
     .await?;
-    if request.conversation_id.is_empty() {
-        if let Some(key) = request.client_request_id {
-            let _ = window.emit_to(window.label(), "composer_conversation_created", serde_json::json!({
     #[cfg(desktop)]
     if remote_chat {
         crate::host_bridge::chat::bind_message(&app_handle,conversation_id,user_message_id,request.conversation_id.is_empty()).await
             .map_err(|e| AppError::UnknownError(e.to_string()))?;
     }
+    if request.conversation_id.is_empty() {
+        if let Some(key) = request.client_request_id {
+            let _ = window.emit_to(window.label(), "composer_conversation_created", serde_json::json!({
                 "client_request_id": key, "conversation_id": conversation_id, "message_id": user_message_id,
             }));
         }
@@ -3432,11 +3432,11 @@ pub async fn regenerate_ai(
         .ok_or(AppError::DatabaseError("未找到消息".to_string()))?;
 
     let conversation_id = message.conversation_id;
+    #[cfg(desktop)]
+    crate::host_bridge::chat::begin_turn(conversation_id).await;
     let conversation = db
         .conversation_repo()
         .unwrap()
-    #[cfg(desktop)]
-    crate::host_bridge::chat::begin_turn(conversation_id).await;
         .read(conversation_id)?
         .ok_or(AppError::DatabaseError("未找到对话".to_string()))?;
     // 重新生成开始时，优先让被点击的消息闪亮（可被后续 streaming 覆盖）

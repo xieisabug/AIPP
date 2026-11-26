@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button } from '../ui/button';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { invoke } from "@tauri-apps/api/core";
+import { getErrorMessage } from "@/utils/error";
 import { toast } from 'sonner';
 import ModelTagBadge from './ModelTagBadge';
 import {
@@ -55,7 +56,7 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
                 }
             }
         } catch (e) {
-            toast.error("获取模型列表失败: " + e);
+            toast.error("获取模型列表失败：" + getErrorMessage(e));
         } finally {
             setIsFetchingModels(false);
         }

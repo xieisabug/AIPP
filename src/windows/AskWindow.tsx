@@ -6,6 +6,8 @@ import UnifiedMarkdown from "../components/UnifiedMarkdown";
 import { useTheme } from "../hooks/useTheme";
 import { Copy, Check, Plus, Settings, Expand } from "lucide-react";
 
+import { askModel, openSettings } from "@/components/onboarding/onboardingService";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import AskWindowPrepare from "../components/AskWindowPrepare";
 import AskAIHint from "../components/AskAIHint";
 import IconButton from "../components/IconButton";
@@ -34,6 +36,10 @@ function AskWindow() {
     // 集成主题系统
     useTheme("ask");
 
+    const [missingModel, setMissingModel] = useState(false);
+    useDataRefresh({events:["llm_provider_changed","assistant_list_changed"], initial:true, refresh:async current => {
+        const model = await askModel(); if (current()) setMissingModel(!model);
+    }});
     const [query, setQuery] = useState<string>("");
     const [response, setResponse] = useState<string>("");
     const [messageId, setMessageId] = useState<number>(-1);
@@ -425,7 +431,7 @@ function AskWindow() {
                             </UnifiedMarkdown>
                         )
                     ) : (
-                        <AskWindowPrepare selectedText={selectedText} />
+                        <><AskWindowPrepare selectedText={selectedText} />{missingModel && <p className="text-center text-sm text-muted-foreground">Ask 需要一个 API 模型，<button className="text-foreground underline" onClick={() => void openSettings("assistant-config","1")}>配置</button></p>}</>
                     )}
                 </div>
                 <div

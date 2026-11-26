@@ -131,13 +131,16 @@ pub fn decrypt_provider_data(share_code: &str, password: &str) -> Result<Provide
 
     // 解码nonce和加密数据
     let nonce_bytes = general_purpose::STANDARD.decode(&shared_provider.nonce)?;
+    if shared_provider.data_type != "provider" || nonce_bytes.len() != 12 {
+        return Err(anyhow!("提供商分享码不完整或类型不匹配"));
+    }
     let nonce = Nonce::from_slice(&nonce_bytes);
     let encrypted_data = general_purpose::STANDARD.decode(&shared_provider.encrypted_data)?;
 
     // 解密数据
     let decrypted = cipher
         .decrypt(nonce, encrypted_data.as_ref())
-        .map_err(|e| anyhow!("Decryption failed: {}", e))?;
+.map_err(|_| anyhow!("分享码密码不对或内容已损坏"))?;
 
     // 反序列化
     let json_data = String::from_utf8(decrypted)?;

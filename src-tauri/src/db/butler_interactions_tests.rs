@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn test_onboarding_aux_native_preview_delivery_reads_only_anchored_message_references() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY);
+        CREATE TABLE message(id INTEGER PRIMARY KEY, conversation_id INTEGER);
+        INSERT INTO conversation VALUES(1),(2); INSERT INTO message VALUES(10,1),(11,2);").unwrap();
+    save_event(&conn, 1, 10, "message_preview", "p", r#"{"message_id":7,"title":"交付"}"#).unwrap();
+    save_event(&conn, 1, 10, "report", "r", "{}").unwrap();
+    save_event(&conn, 2, 11, "message_preview", "other", r#"{"message_id":8}"#).unwrap();
+    let previews = native_message_previews(&conn, 1, 10).unwrap();
+    assert_eq!(previews, vec![serde_json::json!({"message_id":7,"title":"交付"})]);
+    assert!(native_message_previews(&conn, 1, 11).unwrap().is_empty());
+}
+
+#[test]
 fn test_list_restores_group_progress_answers_and_native_code_for_the_original_conversation() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY,conversation_kind TEXT);

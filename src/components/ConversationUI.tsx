@@ -1569,10 +1569,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 clearStreamingMessages();
                 clearShiningMessages();
 
-                invoke<Array<AssistantListItem>>("get_assistants").then((assistantList) => {
+                Promise.all([invoke<Array<AssistantListItem>>("get_assistants"), invoke<number | null>("get_default_new_chat_assistant").catch(() => null)]).then(([assistantList, defaultId]) => {
+                    if (loadRequestIdRef.current !== requestId) return;
                     setAssistants(assistantList);
                     if (assistantList.length > 0) {
-                        setSelectedAssistant(assistantList[0].id);
+                        setSelectedAssistant(assistantList.find(a => a.id === defaultId)?.id ?? assistantList[0].id);
                     }
                 });
                 return;
@@ -1692,6 +1693,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
             };
         }, [conversation]);
+
+        // 引导可能在预先创建的聊天窗口背后完成。收到明确的默认助手变更时更新空白新对话。
+        useEffect(() => {
+            if (conversationId) return;
+            let active = true;
+            const subscription = listen<number>("default-new-chat-assistant-changed", ({ payload }) => {
+                if (active && payload > 0) setSelectedAssistant(payload);
+            });
+            return () => { active = false; void subscription.then(stop => stop()); };
+        }, [conversationId]);
 
         // 监听助手列表变化
         useAssistantListListener({

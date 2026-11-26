@@ -166,11 +166,20 @@ pub async fn add_llm_provider(
     app: tauri::AppHandle,
     name: String,
     api_type: String,
+    onboarding_draft: Option<bool>,
 ) -> Result<i64, String> {
     let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
     // 新建向导在创建后立即写入连接信息并获取模型列表，因此返回新 ID；完成向导时再启用。
-    let id = db.add_llm_provider(&*name, &*api_type, "", false, false).map_err(|e| e.to_string())?;
-    crate::sync::schedule_sync_after_local_change(&app);
+    let tx = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let id = db.add_llm_provider(&name, &api_type, "", false, false).map_err(|e| e.to_string())?;
+    let draft = onboarding_draft.unwrap_or(false);
+    if draft {
+        db.mark_onboarding_draft(id).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    if !draft {
+        crate::sync::schedule_sync_after_local_change(&app);
+    }
     emit_llm_provider_changed(&app);
     Ok(id)
 }
@@ -243,7 +252,9 @@ pub async fn update_llm_provider_config(
         "endpoint" => confirm_vault_key(&app_handle, llm_provider_id),
         _ => {}
     }
-    crate::sync::schedule_sync_after_local_change(&app_handle);
+    if !db.is_onboarding_draft(llm_provider_id).unwrap_or(false) {
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+    }
     emit_llm_provider_changed(&app_handle);
     Ok(())
 }
@@ -524,11 +535,105 @@ pub struct ModelSelectionResponse {
     pub missing_models: Vec<String>, // 在数据库中但远程不存在的模型
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProviderCheckError {
+    pub kind: &'static str,
+    pub message: String,
+}
+
+impl From<String> for ProviderCheckError {
+    fn from(message: String) -> Self { classify_provider_error(None, message) }
+}
+
+fn classify_provider_error(status: Option<u16>, message: String) -> ProviderCheckError {
+    let lower = message.to_lowercase();
+    let kind = match status {
+        Some(402) => "insufficient_balance",
+        _ if lower.contains("insufficient balance")
+            || lower.contains("insufficient_balance")
+            || lower.contains("insufficient_quota")
+            || lower.contains("exceeded your current quota")
+            || lower.contains("credit balance is too low")
+            || lower.contains("余额不足") => "insufficient_balance",
+        Some(401 | 403) => "auth",
+        Some(404) => "model_not_found",
+        Some(429) => "rate_limited",
+        Some(408 | 504) => "timeout",
+        _ if lower.contains("timed out") || lower.contains("timeout") || lower.contains("超时") => "timeout",
+        _ if lower.contains("connect") || lower.contains("dns") || lower.contains("网络连接") => "network",
+        _ => "other",
+    };
+    ProviderCheckError { kind, message }
+}
+
+fn classify_genai_error(error: genai::Error) -> ProviderCheckError {
+    classify_provider_error(error.status().map(|s| s.as_u16()), error.to_string())
+}
+
+/// OpenCode Go binds each request to a persistent conversation identity. Use one
+/// device-local hidden conversation for setup probes; it contains no user messages.
+fn onboarding_probe_conversation(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    conn.execute("INSERT INTO conversation(name,conversation_kind,is_hidden_from_normal_chat_list)
+        SELECT '模型连接检查','onboarding_probe',1 WHERE NOT EXISTS
+        (SELECT 1 FROM conversation WHERE conversation_kind='onboarding_probe')", [])?;
+    conn.query_row("SELECT id FROM conversation WHERE conversation_kind='onboarding_probe' ORDER BY id LIMIT 1", [], |r| r.get(0))
+}
+
+async fn probe_request(client: &genai_client::Client, code: &str) -> Result<(), ProviderCheckError> {
+    use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
+    let request = ChatRequest::new(vec![ChatMessage::user("hi")]);
+    let options = ChatOptions::default().with_max_tokens(32);
+    client.exec_chat(code, request, Some(&options)).await.map(|_| ()).map_err(classify_genai_error)
+}
+
+#[derive(Serialize)]
+pub struct ProbeResult {
+    ok: bool,
+    kind: &'static str,
+    message: String,
+    latency_ms: u64,
+}
+
+#[tauri::command]
+pub async fn probe_chat_model(app: tauri::AppHandle, provider_id: i64, model_code: String) -> ProbeResult {
+    let started = std::time::Instant::now();
+    let probe = async {
+        let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
+        let provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        if crate::db::llm_db::is_local_agent_api_type(&provider.api_type) {
+            return Err(ProviderCheckError::from("本机智能体需通过对应通道检查".to_owned()));
+        }
+        let configs = db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+        let saved = db.get_model_request_mode(provider_id, &model_code).map_err(|e| e.to_string())?;
+        let (_, mode) = protocol_choice(&db, &provider.api_type, provider_id, &model_code, saved.as_ref())?;
+        let features = app.state::<FeatureConfigState>().config_feature_map.lock().await.clone();
+        let use_proxy = provider_setting(&configs, "proxy_enabled") == Some("true");
+        let proxy = get_network_proxy_from_config(&features).filter(|_| use_proxy);
+        let prepared = crate::api::copilot_token_manager::prepare_provider_configs(
+            &app, &provider.api_type, &configs, proxy.as_deref()).await?;
+        let session = if provider.api_type == crate::api::opencode_go::PROVIDER {
+            let db = crate::db::conversation_db::ConversationDatabase::new(&app).map_err(|e| e.to_string())?;
+            let connection = db.get_connection().map_err(|e| e.to_string())?;
+            Some((&app, onboarding_probe_conversation(&connection).map_err(|e| e.to_string())?))
+        } else { None };
+        let client = genai_client::create_client_with_config(session, &prepared, &model_code, &provider.api_type,
+            Some(&mode), proxy.as_deref(), use_proxy, Some(15), false, &features).map_err(|e| e.to_string())?;
+        probe_request(&client, &model_code).await
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), probe).await
+        .unwrap_or_else(|_| Err(ProviderCheckError { kind: "timeout", message: "模型试调用超过 15 秒".into() }));
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(()) => ProbeResult { ok: true, kind: "ok", message: String::new(), latency_ms },
+        Err(e) => ProbeResult { ok: false, kind: e.kind, message: e.message, latency_ms },
+    }
+}
+
 #[tauri::command]
 pub async fn preview_model_list(
     app_handle: tauri::AppHandle,
     llm_provider_id: i64,
-) -> Result<ModelSelectionResponse, String> {
+) -> Result<ModelSelectionResponse, ProviderCheckError> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     if llm_provider.api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
@@ -552,7 +657,7 @@ pub async fn preview_model_list(
 
     // 获取代理配置
     let feature_config_state = app_handle.state::<FeatureConfigState>();
-    let config_feature_map = feature_config_state.config_feature_map.lock().await;
+    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
     let proxy_enabled = llm_provider_config
         .iter()
@@ -568,7 +673,6 @@ pub async fn preview_model_list(
     );
 
     if llm_provider.api_type == "opencode_go" || llm_provider.api_type == crate::api::magpie::PROVIDER {
-        drop(config_feature_map);
         let models = if llm_provider.api_type == crate::api::magpie::PROVIDER {
             crate::api::magpie::catalog(&app_handle, llm_provider_id,
                 provider_setting(&llm_provider_config, "endpoint"),
@@ -605,12 +709,11 @@ pub async fn preview_model_list(
         None,
         effective_network_proxy.as_deref(),
         proxy_enabled,
-        None,
+        Some(15),
         false,
         &config_feature_map,
     )
     .map_err(|e| e.to_string())?;
-    tracing::info!(llm_provider_id, "created client for preview_model_list: {:?}", client);
 
     let adapter_kind = genai_client::infer_adapter_kind_simple(&llm_provider.api_type);
     tracing::info!(llm_provider_id, "preview_model_list with adapter_kind: {:?}", adapter_kind);
@@ -654,9 +757,7 @@ pub async fn preview_model_list(
             Ok(ModelSelectionResponse { available_models, missing_models })
         }
         Err(e) => {
-            tracing::error!(error = ?e, "获取模型列表错误（详细）");
-            tracing::error!(error = %e, "获取模型列表错误");
-            Err(e.to_string())
+            Err(classify_genai_error(e))
         }
     }
 }
@@ -851,54 +952,62 @@ pub async fn export_llm_provider(
     Ok(encrypted_data)
 }
 
+#[derive(Serialize)]
+pub struct ImportedProvider {
+    #[serde(flatten)]
+    provider: LlmProvider,
+    already_exists: bool,
+}
+
+fn import_provider_record(db: &LLMDatabase, data: ProviderShareData, new_name: Option<String>, draft: bool) -> Result<ImportedProvider, String> {
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    let incoming_endpoint = data.endpoint.as_deref().unwrap_or("").trim().trim_end_matches('/');
+    let incoming_key = data.api_key.trim();
+    for (id, name, api_type, description, is_official, is_enabled) in db.get_llm_providers().map_err(|e| e.to_string())? {
+        if api_type != data.api_type { continue; }
+        let configs = db.get_llm_provider_config(id).map_err(|e| e.to_string())?;
+        let endpoint = provider_setting(&configs, "endpoint").or_else(|| provider_setting(&configs, "base_url")).unwrap_or("").trim().trim_end_matches('/');
+        if endpoint == incoming_endpoint
+            && provider_setting(&configs, "api_key").map(str::trim) == Some(incoming_key) {
+            let mut enabled = is_enabled;
+            if !draft && !enabled {
+                db.update_llm_provider(id, &name, &api_type, &description, true).map_err(|e| e.to_string())?;
+                db.release_onboarding_draft(id).map_err(|e| e.to_string())?;
+                tx.commit().map_err(|e| e.to_string())?;
+                enabled = true;
+            }
+            return Ok(ImportedProvider { provider: LlmProvider { id, name, api_type, description, is_official, is_enabled: enabled }, already_exists: true });
+        }
+    }
+    let name = new_name.unwrap_or_else(|| format!("{} (导入)", data.name));
+    let description = "Imported provider";
+    let id = db.add_llm_provider(&name, &data.api_type, description, false, !draft).map_err(|e| e.to_string())?;
+    if let Some(endpoint) = data.endpoint {
+        db.add_llm_provider_config(id, "endpoint", endpoint.trim(), "header", false).map_err(|e| e.to_string())?;
+    }
+    db.add_llm_provider_config(id, "api_key", incoming_key, "header", false).map_err(|e| e.to_string())?;
+    if draft { db.mark_onboarding_draft(id).map_err(|e| e.to_string())?; }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(ImportedProvider { provider: LlmProvider { id, name, api_type: data.api_type, description: description.into(), is_official: false, is_enabled: !draft }, already_exists: false })
+}
+
 #[tauri::command]
 pub async fn import_llm_provider(
     app_handle: tauri::AppHandle,
     share_code: String,
     password: String,
     new_name: Option<String>,
-) -> Result<LlmProvider, String> {
-    // Decrypt data directly from share code
-    let provider_data = decrypt_provider_data(&share_code, &password)
-        .map_err(|e| format!("Decryption failed: {}", e))?;
-
+    as_draft: Option<bool>,
+) -> Result<ImportedProvider, String> {
+    let data = decrypt_provider_data(&share_code, &password).map_err(|e| e.to_string())?;
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-
-    // Use provided name or original name with suffix
-    let provider_name = new_name.unwrap_or_else(|| format!("{} (导入)", provider_data.name));
-
-    // Create new provider
-    db.add_llm_provider(&provider_name, &provider_data.api_type, "Imported provider", false, true)
-        .map_err(|e| e.to_string())?;
-
-    // Get the newly created provider ID
-    let providers = db.get_llm_providers().map_err(|e| e.to_string())?;
-    let new_provider = providers
-        .iter()
-        .find(|(_, name, _, _, _, _)| name == &provider_name)
-        .ok_or("Failed to find newly created provider")?;
-
-    let provider_id = new_provider.0;
-
-    // Add endpoint config if provided
-    if let Some(endpoint) = provider_data.endpoint {
-        db.add_llm_provider_config(provider_id, "endpoint", &endpoint, "header", false)
-            .map_err(|e| e.to_string())?;
+    let draft = as_draft.unwrap_or(false);
+    let result = import_provider_record(&db, data, new_name, draft)?;
+    if !draft && (!result.already_exists || result.provider.is_enabled) {
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+        emit_llm_provider_changed(&app_handle);
+    } else if !result.already_exists {
+        emit_llm_provider_changed(&app_handle);
     }
-
-    // Add API key config
-    db.add_llm_provider_config(provider_id, "api_key", &provider_data.api_key, "header", false)
-        .map_err(|e| e.to_string())?;
-
-    // Return the created provider
-    crate::sync::schedule_sync_after_local_change(&app_handle);
-    emit_llm_provider_changed(&app_handle);
-    Ok(LlmProvider {
-        id: provider_id,
-        name: provider_name,
-        api_type: provider_data.api_type,
-        description: "Imported provider".to_string(),
-        is_official: false,
-        is_enabled: true,
-    })
+    Ok(result)
 }

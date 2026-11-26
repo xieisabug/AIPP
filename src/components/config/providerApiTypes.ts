@@ -5,6 +5,12 @@
  * - `copilot`：GitHub 账号授权，创建后在详情页完成授权。
  * - `local`：本机 CLI / SDK 智能体，创建后在详情页检测运行环境；移动端不可新建。
  */
+import localAgentApiTypes from "./localAgentApiTypes.json";
+
+export function isLocalAgentApiType(value: string): boolean {
+    return localAgentApiTypes.includes(value);
+}
+
 export type ProviderApiTypeKind = "http" | "copilot" | "local";
 
 export interface ProviderApiTypeOption {

@@ -1,3 +1,4 @@
+import { ReviewModelHint } from "./ReviewModelHint";
 import React from "react";
 import { Loader2 } from "lucide-react";
 import { useToolReview } from "@/hooks/toolReviewStore";
@@ -28,6 +29,8 @@ export const ToolReviewNotice: React.FC<{ callId?: number | null }> = ({ callId 
     if (review.phase === "done" && review.verdict === "cancelled") {
         return null;
     }
+
+    if (review.phase === "done" && review.verdict === "manual") return <ReviewModelHint />;
 
     if (review.phase === "reviewing") {
         return (

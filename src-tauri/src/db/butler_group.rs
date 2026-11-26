@@ -186,6 +186,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // 早期版本按顺序串行回复（after_turn），现在同一轮并发回复、多轮讨论按 round/rounds 推进。
     ensure_column(conn, "butler_chat_group_turn", "round", "INTEGER NOT NULL DEFAULT 1")?;
     ensure_column(conn, "butler_chat_group_turn", "rounds", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(conn, "butler_chat_group_turn", "relay_confirmation_seq", "INTEGER")?;
+    ensure_column(conn, "butler_chat_group_turn", "relay_confirmed", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "butler_chat_group_turn", "relay_review_pending", "INTEGER NOT NULL DEFAULT 0")?;
     // 成员发言对应它执行会话里的那条最终回复，界面据此复用私聊的消息信息、代码预览与附件。
     ensure_column(conn, "butler_chat_group_message", "source_conversation_id", "INTEGER")?;
@@ -478,9 +480,9 @@ pub fn running_turns(conn: &Connection) -> Result<Vec<Turn>> {
 pub fn runnable_turns(conn: &Connection) -> Result<Vec<Turn>> {
     collect(conn, &format!("SELECT {} FROM butler_chat_group_turn t
         JOIN butler_chat_group_member m ON m.id=t.member_id AND m.active=1
-        WHERE t.state='queued'
+        WHERE t.state='queued' AND t.relay_confirmation_seq IS NULL
           AND NOT EXISTS(SELECT 1 FROM butler_chat_group_turn o WHERE o.member_id=t.member_id
-              AND (o.state='running' OR (o.state='queued' AND o.id<t.id)))
+              AND (o.state='running' OR (o.state='queued' AND o.relay_confirmation_seq IS NULL AND o.id<t.id)))
         ORDER BY t.id", TURN_COLUMNS.split(',').map(|c| format!("t.{c}")).collect::<Vec<_>>().join(",")), [], turn_row)
 }
 
@@ -673,7 +675,21 @@ pub fn post_user(conn: &mut Connection, group: i64, request_key: &str, body: &st
     if let Some(seq) = reply_to {
         message(&tx, group, seq)?;
     }
-    let result = append(&tx, group, Sender::User, "message", body, reply_to, Some(key), true)?;
+    // A short answer continues only the quoted prompt (or the immediately preceding
+    // notice). It cannot wake another branch, a stopped turn, or a departed member.
+    let reply = match body.trim_end_matches(['。','！','!']) {
+        "继续" | "继续接力" => Some("queued"),
+        "停止" | "不继续" => Some("skipped"),
+        _ => None,
+    };
+    let answered = if let Some(state) = reply {
+        let seq = reply_to.or(last_message(&tx, group)?.map(|m| m.seq));
+        tx.execute("UPDATE butler_chat_group_turn SET relay_confirmation_seq=NULL,state=?3,relay_confirmed=(?3='queued'),updated_at=CURRENT_TIMESTAMP
+            WHERE group_id=?1 AND relay_confirmation_seq=?2 AND state='queued'
+            AND EXISTS(SELECT 1 FROM butler_chat_group_member m WHERE m.id=member_id AND m.active=1)",
+            params![group, seq, state])? == 1
+    } else { false };
+    let result = append(&tx, group, Sender::User, "message", body, reply_to, Some(key), !answered)?;
     tx.commit()?;
     Ok(result)
 }
@@ -718,6 +734,12 @@ pub fn route(conn: &mut Connection, group: i64, seq: i64, responders: &[i64], ro
         if !selected.contains(id) && active.iter().any(|m| m.id == *id) {
             selected.push(*id);
         }
+    }
+    if responders.is_empty() {
+        tx.execute("UPDATE butler_chat_group_message SET route_state='done' WHERE group_id=?1 AND seq=?2", params![group, seq])?;
+        notice(&tx, group, "notice", "请 @ 一位成员来回复（配置轻量模型后可以自动安排）")?;
+        tx.commit()?;
+        return Ok(Vec::new());
     }
     ensure!(!selected.is_empty(), "调度结果没有有效的群成员");
     let rounds = if selected.len() > 1 { rounds.clamp(1, MAX_DISCUSSION_ROUNDS) } else { 1 };
@@ -769,17 +791,23 @@ fn relay_review(conn: &Connection, t: &Turn, target: String) -> Result<RelayRevi
 }
 
 /// 审核结果只作用于仍在排队的这一项。停止、移出、重复回执均不会重新发起接力。
-pub fn finish_relay_review(conn: &mut Connection, id: i64, verdict: Result<Option<String>, String>) -> Result<()> {
+pub enum RelayPause { Loop(String), AskUser }
+
+pub fn finish_relay_review(conn: &mut Connection, id: i64, verdict: Result<Option<RelayPause>, String>) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let t = turn(&tx, id)?;
-    let paused = matches!(verdict, Ok(Some(_)));
+    let paused = matches!(verdict, Ok(Some(RelayPause::Loop(_))));
     let updated = tx.execute("UPDATE butler_chat_group_turn SET relay_review_pending=0, state=?2, updated_at=CURRENT_TIMESTAMP
         WHERE id=?1 AND state='queued' AND relay_review_pending=1", params![id, if paused { "skipped" } else { "queued" }])?;
     if updated > 0 {
         let target = member(&tx, t.member_id)?.name;
         let round = t.depth - 1;
         match verdict {
-            Ok(Some(reason)) => {
+            Ok(Some(RelayPause::AskUser)) => {
+                let prompt = notice(&tx, t.group_id, "notice", &format!("已暂停给 {target} 的交接。已经接力 {round} 轮，继续吗？回复「继续」或「不继续」。群里有新消息后，可以引用这条提示作答。"))?;
+                tx.execute("UPDATE butler_chat_group_turn SET relay_confirmation_seq=?2 WHERE id=?1", params![id,prompt.seq])?;
+            }
+            Ok(Some(RelayPause::Loop(reason))) => {
                 notice(&tx, t.group_id, "notice", &format!("第 {round} 轮接力审核确认出现循环，已暂停这次给 {target} 的接力。{reason}。需要继续时可以直接 @ 对方。"))?;
             }
             Err(error) => {
@@ -797,7 +825,10 @@ pub fn finish_relay_review(conn: &mut Connection, id: i64, verdict: Result<Optio
 pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let t = turn(&tx, id)?;
-    if t.state != "queued" {
+    let (waiting, confirmed): (bool, bool) = tx.query_row(
+        "SELECT relay_confirmation_seq IS NOT NULL, relay_confirmed FROM butler_chat_group_turn WHERE id=?1",
+        [id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    if t.state != "queued" || waiting {
         return Ok(Start::Skipped);
     }
     let mut m = member(&tx, t.member_id)?;
@@ -825,7 +856,7 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
         tx.commit()?;
         return Ok(Start::Skipped);
     }
-    if m.delivered_through >= t.trigger_seq {
+    if !confirmed && m.delivered_through >= t.trigger_seq {
         skip(&tx, "skipped")?;
         tx.commit()?;
         return Ok(Start::Skipped);
@@ -837,8 +868,13 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
         return Ok(Start::Review(review));
     }
     let room = get(&tx, t.group_id)?;
-    let delta = messages_between(&tx, room.id, m.delivered_through.max(m.joined_after), room.seq)?
+    let mut delta = messages_between(&tx, room.id, m.delivered_through.max(m.joined_after), room.seq)?
         .into_iter().filter(|message| message.sender_member != Some(m.id)).collect::<Vec<_>>();
+    // A member may have answered another thread while waiting. Replay the authorized
+    // handoff so that its original sender, task and instructions remain visible.
+    if confirmed && m.delivered_through >= t.trigger_seq {
+        delta.insert(0, message(&tx, room.id, t.trigger_seq)?);
+    }
     if delta.is_empty() {
         skip(&tx, "skipped")?;
         tx.commit()?;
@@ -1080,7 +1116,7 @@ fn relay(tx: &Connection, t: &Turn, from: &Member, reply: &Message) -> Result<Ve
     let mut created = Vec::new();
     let review_due = t.depth > 0 && t.depth % RELAY_REVIEW_INTERVAL == 0;
     for target in parse_mentions(&reply.body, &others) {
-        let waiting: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE member_id=?1 AND state='queued' AND relay_review_pending=0)",
+        let waiting: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE member_id=?1 AND state='queued' AND relay_review_pending=0 AND relay_confirmation_seq IS NULL)",
             [target], |r| r.get(0))?;
         if waiting || discussing.contains(&target) {
             continue;

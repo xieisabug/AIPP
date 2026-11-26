@@ -1,10 +1,18 @@
 use rusqlite::{params, Connection};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use super::get_db_path;
 
 pub const DEFAULT_MODEL_REQUEST_MODE: &str = "chat_completions";
 pub const PROVIDER_MODE_MISMATCH: &str = "provider_mode_mismatch";
+
+const LOCAL_AGENT_TYPES: &str = include_str!("../../../src/components/config/localAgentApiTypes.json");
+
+pub fn is_local_agent_api_type(api_type: &str) -> bool {
+    static TYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(||
+        serde_json::from_str(LOCAL_AGENT_TYPES).expect("bundled local agent API types"));
+    TYPES.iter().any(|kind| kind == api_type)
+}
 
 pub fn http_provider_modes(api_type: &str) -> Option<&'static [&'static str]> {
     use crate::decision::{MODE_GEMINI_DECISIONS, MODE_JEV_SYSTEMONE, MODE_OPENAI_DECISIONS};
@@ -87,6 +95,8 @@ pub enum ModelRequestError {
     Lookup(#[from] rusqlite::Error),
     #[error("模型提供商「{name}」（ID {id}）已停用，请在「设置 → 模型提供商」中重新启用，或选择其他已启用的提供商。")]
     Disabled { id: i64, name: String },
+    #[error("本机智能体「{name}」需要通过 Agent 助手使用，请为此功能选择 API 模型。")]
+    LocalAgent { name: String },
 }
 
 impl LLMProvider {
@@ -215,29 +225,13 @@ impl LLMDatabase {
             DELETE FROM provider_quota_cache WHERE owner=OLD.id;
         END;")?;
 
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS llm_provider_init_state (id INTEGER PRIMARY KEY CHECK (id = 1))",
-            [],
-        )?;
-
-        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS builtin_provider_migrations (name TEXT PRIMARY KEY);
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS onboarding_draft_provider(provider_id INTEGER PRIMARY KEY);
+            CREATE TRIGGER IF NOT EXISTS forget_onboarding_provider AFTER DELETE ON llm_provider
+              BEGIN DELETE FROM onboarding_draft_provider WHERE provider_id=OLD.id; END;
+            CREATE TRIGGER IF NOT EXISTS adopt_onboarding_provider AFTER UPDATE OF is_enabled ON llm_provider
+              WHEN NEW.is_enabled=1 BEGIN DELETE FROM onboarding_draft_provider WHERE provider_id=NEW.id; END;
             CREATE TABLE IF NOT EXISTS opencode_go_protocols (model TEXT NOT NULL, mode TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(model, mode));
             CREATE TABLE IF NOT EXISTS magpie_protocols (provider_id INTEGER NOT NULL, model TEXT NOT NULL, mode TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(provider_id, model, mode));")?;
-        if let Err(err) = self.init_llm_provider() {
-            warn!(error = ?err, "init_llm_provider failed (may already be initialized)");
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        if tx.execute("INSERT OR IGNORE INTO builtin_provider_migrations VALUES ('opencode_go')", [])? == 1 {
-            tx.execute("INSERT INTO llm_provider (name,api_type,description,is_official)
-                SELECT 'OpenCode Go','opencode_go','OpenCode Go API',1
-                WHERE NOT EXISTS (SELECT 1 FROM llm_provider WHERE api_type='opencode_go' AND is_official=1)", [])?;
-        }
-        if tx.execute("INSERT OR IGNORE INTO builtin_provider_migrations VALUES ('magpie')", [])? == 1 {
-            tx.execute("INSERT INTO llm_provider (name,api_type,description,is_official)
-                SELECT 'Magpie','magpie','本机 Magpie 网关',1
-                WHERE NOT EXISTS (SELECT 1 FROM llm_provider WHERE api_type='magpie' AND is_official=1)", [])?;
-        }
-        tx.commit()?;
         Ok(())
     }
 
@@ -256,6 +250,25 @@ impl LLMDatabase {
         )?;
         debug!("llm provider inserted");
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Called only for a newly inserted, disabled provider inside the creation transaction.
+    pub(crate) fn mark_onboarding_draft(&self, provider_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("INSERT INTO onboarding_draft_provider(provider_id) VALUES(?1)", [provider_id])?;
+        Ok(())
+    }
+
+    pub(crate) fn is_onboarding_draft(&self, provider_id: i64) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM onboarding_draft_provider WHERE provider_id=?1)",
+            [provider_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub(crate) fn release_onboarding_draft(&self, provider_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM onboarding_draft_provider WHERE provider_id=?1", [provider_id])?;
+        Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -286,10 +299,10 @@ impl LLMDatabase {
     ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool, Option<String>)>> {
         let where_clause = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
-            "api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity')"
+            "api_type IN (SELECT value FROM json_each(?1))"
         } else {
             // 普通助手：排除 ACP 及纯决策类提供商
-            "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity', 'typesafe_jev')"
+            "api_type != 'typesafe_jev' AND api_type NOT IN (SELECT value FROM json_each(?1))"
         };
 
         let sql = format!(
@@ -302,7 +315,7 @@ impl LLMDatabase {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let llm_providers = stmt.query_map([], |row| {
+        let llm_providers = stmt.query_map([LOCAL_AGENT_TYPES], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
         })?;
 
@@ -570,6 +583,9 @@ impl LLMDatabase {
     /// An assistant's saved model binding survives disabling its provider.
     pub fn get_model_for_request(&self, provider_id: &i64, code: &str) -> Result<ModelDetail, ModelRequestError> {
         let provider = self.get_provider_for_request(*provider_id)?;
+        if is_local_agent_api_type(&provider.api_type) {
+            return Err(ModelRequestError::LocalAgent { name: provider.name });
+        }
         Ok(self.model_detail_for_provider(provider, code)?)
     }
 
@@ -775,7 +791,7 @@ impl LLMDatabase {
             let mode =
                 resolve_request_mode_or_default(&api_type, &code, saved_mode.as_deref()).to_string();
             let is_decision = crate::decision::is_decision_mode(&mode);
-            if mode == PROVIDER_MODE_MISMATCH || (!include_decision && is_decision) {
+            if is_local_agent_api_type(&api_type) || mode == PROVIDER_MODE_MISMATCH || (!include_decision && is_decision) {
                 continue;
             }
             result.push((name, code, id, provider_id, mode, is_decision));
@@ -796,31 +812,26 @@ impl LLMDatabase {
                 .conn
                 .prepare(
                     "
-                    SELECT
-                        CASE
-                            WHEN m.id IS NULL THEN p.name
-                            ELSE (p.name || ' / ' || m.name)
-                        END AS name,
-                        COALESCE(NULLIF(m.code, ''), CASE
-                            WHEN p.api_type IN ('pi', 'cursor', 'opencode', 'kiro', 'antigravity') THEN '__agent_default__'
-                            ELSE 'acp'
-                        END) AS code,
-                        COALESCE(m.id, 0) AS id,
-                        p.id AS llm_provider_id
-                    FROM
-                        llm_provider p
-                    LEFT JOIN
-                        llm_model m ON m.llm_provider_id = p.id
-                    WHERE
-                        p.is_enabled = 1 AND p.api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity')
-                    ORDER BY
-                        p.id, m.id
+                    WITH agents AS (
+                        SELECT id, name, CASE WHEN api_type IN ('acp', 'codex_app_server', 'claude_sdk')
+                            THEN 'acp' ELSE '__agent_default__' END AS default_code
+                        FROM llm_provider WHERE is_enabled=1 AND api_type IN (SELECT value FROM json_each(?1))
+                    )
+                    SELECT CASE WHEN EXISTS(SELECT 1 FROM llm_model m WHERE m.llm_provider_id=p.id)
+                            THEN p.name || ' / 通道默认模型' ELSE p.name END AS name,
+                        p.default_code AS code, 0 AS id, p.id AS llm_provider_id
+                    FROM agents p
+                    UNION ALL
+                    SELECT p.name || ' / ' || m.name, m.code, m.id, p.id
+                    FROM agents p JOIN llm_model m ON m.llm_provider_id=p.id
+                    WHERE m.code != '' AND m.code != p.default_code
+                    ORDER BY llm_provider_id, id
                     ",
                 )
                 .map_err(|e| e.to_string())?;
 
             let models = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                .query_map([LOCAL_AGENT_TYPES], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
                 .map_err(|e| e.to_string())?;
 
             let mut result = Vec::new();
@@ -830,7 +841,7 @@ impl LLMDatabase {
             return Ok(result);
         }
 
-        let where_clause = "p.is_enabled = 1 AND p.api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity', 'typesafe_jev')";
+        let where_clause = "p.is_enabled = 1 AND p.api_type != 'typesafe_jev' AND p.api_type NOT IN (SELECT value FROM json_each(?1))";
 
         let sql = format!(
             "
@@ -858,7 +869,7 @@ impl LLMDatabase {
             Err(e) => return Err(e.to_string()),
         };
 
-        let models = match stmt.query_map([], |row| {
+        let models = match stmt.query_map([LOCAL_AGENT_TYPES], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -888,37 +899,7 @@ impl LLMDatabase {
         Ok(result)
     }
 
-    #[instrument(level = "debug", skip(self), err)]
-    pub fn init_llm_provider(&self) -> rusqlite::Result<()> {
-        let initialized: bool = self
-            .conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM llm_provider_init_state WHERE id = 1)", [], |row| row.get(0))?;
-        if initialized {
-            return Ok(());
-        }
 
-        // Seed the built-in rows once. Deleting an official provider must remain permanent.
-        self.conn.execute(
-            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (1, 'OpenAI', 'openai_api', 'OpenAI API', 1)",
-            [],
-        )?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (10, 'Ollama', 'ollama', 'Ollama API', 1)",
-            [],
-        )?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (20, 'Anthropic', 'anthropic', 'Anthropic API', 1);",
-            [],
-        )?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (30, 'DeepSeek', 'deepseek', 'DeepSeek API', 1);",
-            [],
-        )?;
-
-        self.conn.execute("INSERT OR IGNORE INTO llm_provider_init_state (id) VALUES (1)", [])?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]

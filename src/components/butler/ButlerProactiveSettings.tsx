@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { SettingRowText, SettingsGroup, settingRowClassName, stackedRowClassName } from "@/components/config/SettingsGroup";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredModels } from "@/hooks/useFilteredModels";
 import { center, type Center, type ProactiveConfig } from "./proactiveApi";
 
@@ -69,7 +70,8 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
     onChange: (next: ProactiveConfig) => void;
     onOpenCenter: () => void;
 }) {
-    const { models } = useFilteredModels(0);
+    const { models, loading: modelsLoading } = useFilteredModels(0);
+    const { getConfigValue } = useFeatureConfig();
     const [nativeAgents, setNativeAgents] = useState<AssistantOption[]>([]);
     const [suggestion, setSuggestion] = useState<Center["window"]>();
     const [customCadence, setCustomCadence] = useState(false);
@@ -103,6 +105,15 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
     // 只有建议与当前时间不同、且没开自动调整时，才提供一键采用
     const adoptable = !value.adaptive_window && suggestion
         && (suggestion.release !== value.release || suggestion.digest !== value.digest) ? suggestion : undefined;
+
+    const apiModelValues = new Set(models.map(m => `${m.code}%%${m.llm_provider_id}`));
+    const lightPatrolChain = [
+        value.small_model,
+        getConfigValue("experimental", "butler_helper_model_id"),
+        getConfigValue("conversation_summary", "default_light_model"),
+        getConfigValue("experimental", "butler_model_id"),
+    ];
+    const lightPatrolPaused = !modelsLoading && !lightPatrolChain.some(candidate => candidate && apiModelValues.has(candidate));
 
     return <>
         <SettingsGroup
@@ -147,7 +158,14 @@ export default function ButlerProactiveSettings({ value, error, onChange, onOpen
                         onChange={e => set("custom_instructions", e.target.value)}
                     />
                 </div>
-                <Row label="初筛模型" description="聊后与定期巡检时判断有没有值得介入的新动态，适合用小模型。">
+                <Row
+                    label="初筛模型"
+                    description={
+                        lightPatrolPaused
+                            ? "未配置可用的初筛、辅助、轻量或总管家 API 模型，轻巡检已暂停（不记失败）。配置轻量模型或初筛模型后自动恢复。"
+                            : "聊后与定期巡检使用 API 模型初筛。未配置可用的初筛、辅助、轻量或总管家 API 模型时，暂停轻巡检。"
+                    }
+                >
                     <Select value={value.small_model || INHERIT} onValueChange={v => set("small_model", v === INHERIT ? "" : v)}>
                         <SelectTrigger aria-label="初筛模型" className="w-64"><SelectValue /></SelectTrigger>
                         <SelectContent>

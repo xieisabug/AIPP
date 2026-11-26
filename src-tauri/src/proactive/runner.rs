@@ -140,7 +140,27 @@ fn collect_context_snapshot(
     Ok((memories, tracked, existing_schedules, recent_notes))
 }
 
+async fn light_model(app: &AppHandle, cfg: &Config) -> Result<Option<String>> {
+    let state = app.state::<crate::FeatureConfigState>();
+    let map = state.config_feature_map.lock().await;
+    let configured = |group: &str, key: &str| map.get(group).and_then(|g| g.get(key)).map(|v| v.value.as_str());
+    let db = crate::db::llm_db::LLMDatabase::new(app)?;
+    for raw in [Some(cfg.small_model.as_str()), configured("experimental", crate::api::butler_progress::HELPER_MODEL_KEY),
+        configured("conversation_summary", crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY), configured("experimental", "butler_model_id")].into_iter().flatten() {
+        if raw.trim().is_empty() { continue; }
+        let (_, id) = raw.rsplit_once("%%").context("巡检模型缺少提供商编号")?;
+        let provider = match db.get_llm_provider(id.parse()?) {
+            Ok(provider) => provider,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if provider.is_enabled && !crate::db::llm_db::is_local_agent_api_type(&provider.api_type) { return Ok(Some(raw.to_owned())); }
+    }
+    Ok(None)
+}
+
 async fn light_triage(
+    selection: &str,
     app: &AppHandle,
     session: i64,
     cfg: &Config,
@@ -151,34 +171,13 @@ async fn light_triage(
     if rows.iter().all(|s| s.text.is_empty()) {
         return Ok(false);
     }
-    let mut selection = cfg.small_model.clone();
-    if selection.is_empty() {
-        let map = app
-            .state::<crate::FeatureConfigState>()
-            .config_feature_map
-            .lock()
-            .await
-            .clone();
-        selection = map
-            .get("experimental")
-            .and_then(|m| m.get(crate::api::butler_progress::HELPER_MODEL_KEY))
-            .map(|c| c.value.clone())
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| {
-                map.get("conversation_summary")
-                    .and_then(|m| m.get(crate::api::ai::config::DEFAULT_LIGHT_MODEL_KEY))
-                    .map(|c| c.value.clone())
-                    .filter(|v| !v.trim().is_empty())
-            })
-            .unwrap_or_default();
-    }
     let input = serde_json::to_string(&json!({
         "today": Local::now().date_naive().to_string(),
         "new_messages": rows,
         "tracked_items": tracked,
         "existing_schedules": existing_schedules,
     }))?;
-    let verdict = agent::chat_simple(app, session, &selection, &prompt::light_triage_prompt(cfg), &input).await?;
+    let verdict = agent::chat_simple(app, session, selection, &prompt::light_triage_prompt(cfg), &input).await?;
     let trimmed = verdict.trim().to_uppercase();
     if trimmed.starts_with("ACT") {
         Ok(true)
@@ -237,6 +236,10 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
     let waking = topics::pending(&conn, &cfg)? || topics::review_before_delivery(&conn, &cfg)?;
     let kind = if waking && !matches!(kind, "digest" | "manual") { "milestone" } else { kind };
     let deep = matches!(kind, "digest" | "manual" | "milestone");
+    let selection = if deep { None } else {
+        let Some(selection) = light_model(app, &cfg).await? else { return Ok(String::new()); };
+        Some(selection)
+    };
     let rows = delta::read(&conn, &cfg, deep)?;
     if !manual {
         if !app
@@ -296,8 +299,8 @@ pub async fn run(app: &AppHandle, manual: bool) -> Result<String> {
     };
 
     // 轻巡检：聊后/定期巡检先用小模型决定是否值得唤醒深层 Agent
-    if !deep {
-        match light_triage(app, session, &cfg, &rows, &tracked, &existing_schedules).await {
+    if let Some(selection) = selection {
+        match light_triage(&selection, app, session, &cfg, &rows, &tracked, &existing_schedules).await {
             Ok(false) => {
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 delta::advance(&tx, &rows, false)?;

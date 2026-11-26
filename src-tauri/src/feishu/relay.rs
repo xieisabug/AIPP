@@ -642,13 +642,10 @@ async fn flush_feishu_relay_scope(
         .await?;
         last_processed_message_id = message.id;
 
-        // 管家内部回合的静默回复不外发，按空消息记为 skipped 以推进投递进度。
-        let silent = matches!(message.message_type.as_str(), "response" | "assistant")
-            && crate::api::butler_api::is_butler_silent_reply(&message.content);
         let non_empty_parts: Vec<&str> = rendered_parts
             .iter()
             .map(String::as_str)
-            .filter(|s| !silent && !s.trim().is_empty())
+            .filter(|s| !s.trim().is_empty())
             .collect();
 
         if non_empty_parts.is_empty() {

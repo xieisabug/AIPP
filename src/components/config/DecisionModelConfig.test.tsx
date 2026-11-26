@@ -170,6 +170,9 @@ describe("Decision model UI configuration (#340)", () => {
                 { id: 1, name: "OpenAI / GPT-4o", code: "gpt-4o", llm_provider_id: 1, request_mode: "chat_completions", is_decision: false },
             ];
         });
+        mockInvokeHandler("get_filtered_models_for_select", args => (args as { assistantType: number }).assistantType === 4
+            ? [{ id: 0, name: "本机 Claude Code", code: "acp", llm_provider_id: 2 }]
+            : [{ id: 1, name: "OpenAI / GPT-4o", code: "gpt-4o", llm_provider_id: 1 }]);
         mockInvokeHandler("get_butler_feishu_status", () => null);
         mockInvokeHandler("get_butler_feishu_runtime_status", () => null);
         mockInvokeHandler("get_butler_chief_avatar", () => null);
@@ -181,5 +184,8 @@ describe("Decision model UI configuration (#340)", () => {
         expect(await screen.findByText("群聊路由决策模型")).toBeInTheDocument();
         expect(await screen.findByText("OpenAI / GPT-6 Luna [决策]")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "测试决策接口" })).not.toBeInTheDocument();
+        fireEvent.keyDown(screen.getByRole("combobox", { name: "总管家主模型" }), { key: "ArrowDown" });
+        expect(await screen.findByRole("option", { name: "本机 Claude Code" })).toBeInTheDocument();
+        expect(screen.getByRole("option", { name: "OpenAI / GPT-4o" })).toBeInTheDocument();
     });
 });

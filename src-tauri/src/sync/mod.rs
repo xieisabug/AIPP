@@ -747,6 +747,22 @@ pub async fn get_sync_status(app_handle: AppHandle) -> Result<SyncStatusDto, Str
     sync_status(&app_handle).await
 }
 
+/// Recheck the authoritative worker state after the UI finishes its installation probes.
+pub(crate) async fn onboarding_sync_keys_pending(app: &AppHandle) -> Result<bool, String> {
+    let status = sync_status(app).await?;
+    if status.mode == SyncMode::Local || status.syncing {
+        return Err("正在等待同步完成……".into());
+    }
+    if let Some(error) = status.last_error {
+        return Err(error);
+    }
+    if status.last_sync_at.is_none() {
+        return Err("正在等待同步完成……".into());
+    }
+    Ok(status.secret_pending_count > 0
+        || matches!(status.secret_sync_state.as_str(), "needs_passphrase" | "mismatch"))
+}
+
 #[tauri::command]
 pub async fn save_sync_settings(
     app_handle: AppHandle,
@@ -2472,12 +2488,20 @@ fn read_snapshot_rows(
         return Ok((Vec::new(), HashSet::new()));
     }
     let mut filters: Vec<String> = spec.where_clause.map(|filter| format!("({filter})")).into_iter().collect();
+    const LOCAL_ONLY_CONVERSATION_KINDS: &str = "'butler_proactive_run','butler_proactive_brief','onboarding_probe'";
     if spec.object_type=="conversation" && columns.iter().any(|c|c=="conversation_kind") {
-        filters.push("coalesce(conversation_kind,'normal') NOT IN ('butler_proactive_run','butler_proactive_brief')".into());
+        filters.push(format!("coalesce(conversation_kind,'normal') NOT IN ({LOCAL_ONLY_CONVERSATION_KINDS})"));
     }
     if spec.object_type=="conversation.message" && columns.iter().any(|c|c=="conversation_id")
         && !existing_columns(conn,"conversation",&["conversation_kind"])?.is_empty() {
-        filters.push("conversation_id NOT IN (SELECT id FROM conversation WHERE conversation_kind IN ('butler_proactive_run','butler_proactive_brief'))".into());
+        filters.push(format!("conversation_id NOT IN (SELECT id FROM conversation WHERE conversation_kind IN ({LOCAL_ONLY_CONVERSATION_KINDS}))"));
+    }
+    if spec.db_name == "llm.db" && !existing_columns(conn, "onboarding_draft_provider", &["provider_id"])?.is_empty() {
+        if spec.object_type == "llm.provider" {
+            filters.push("id NOT IN (SELECT provider_id FROM onboarding_draft_provider)".into());
+        } else if columns.iter().any(|c| c == "llm_provider_id") {
+            filters.push("llm_provider_id NOT IN (SELECT provider_id FROM onboarding_draft_provider)".into());
+        }
     }
     if let Some(ids) = ids {
         filters.push(format!("id IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")));

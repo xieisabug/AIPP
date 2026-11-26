@@ -254,6 +254,45 @@ pub(crate) fn open_default_home_window(app_handle: &AppHandle) {
     }
 }
 
+#[cfg(desktop)]
+pub(crate) fn create_onboarding_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("onboarding") {
+        window.unminimize().map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+        return window.set_focus().map_err(|e| e.to_string());
+    }
+    let (width, height) = app.primary_monitor().map_err(|e| e.to_string())?.map(|m| {
+        let work = m.work_area().size;
+        ((1024.0_f64).min(work.width as f64 / m.scale_factor()),
+         (740.0_f64).min(work.height as f64 / m.scale_factor() * 0.9))
+    }).unwrap_or((1024.0, 740.0));
+    let builder = WebviewWindowBuilder::new(app, "onboarding", WebviewUrl::App("index.html".into()))
+        .title("欢迎使用 AIPP").inner_size(width,height).resizable(false).maximizable(false).center();
+    #[cfg(target_os = "macos")]
+    let builder = with_macos_overlay_titlebar(builder);
+    #[cfg(target_os = "windows")]
+    let builder = with_windows_custom_titlebar(builder);
+    let window = builder.build().map_err(|e| format!("创建首次引导窗口失败：{e}"))?;
+    let handle = app.clone();
+    let to_hide = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            let should_destroy = SystemDatabase::new(&handle)
+                .map(|db| {
+                    let step = db.get_config("onboarding_step").unwrap_or_default();
+                    let state = db.get_config("onboarding_state").unwrap_or_default();
+                    step == "applied" || matches!(state.as_str(), "completed" | "skipped")
+                })
+                .unwrap_or(false);
+            if !should_destroy {
+                api.prevent_close();
+                let _ = to_hide.hide();
+            }
+        }
+    });
+    Ok(())
+}
+
 pub fn create_ask_window(app: &AppHandle) {
     create_ask_window_with_visibility(app, true);
 }
@@ -922,7 +961,11 @@ pub fn awaken_aipp(app_handle: &AppHandle) {
         }
     }
 
-    // 都不可见时，显示默认主页窗口
+    // 都不可见时，若仍需首次引导则优先唤起引导窗口，否则显示默认主页窗口
+    #[cfg(desktop)]
+    if crate::onboarding::intercept_home(app_handle) {
+        return;
+    }
     debug!(ts=%Local::now().to_string(), "No visible primary window, opening preferred home");
     open_default_home_window(app_handle);
 }

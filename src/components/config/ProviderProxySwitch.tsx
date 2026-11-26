@@ -1,3 +1,4 @@
+import { openSettings } from "@/lib/pendingSettingsRoute";
 import { emit } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
@@ -16,14 +17,16 @@ interface ProviderProxySwitchProps {
     checked: boolean;
     onCheckedChange: (checked: boolean) => void;
     busy?: boolean;
+    externalWindow?: boolean;
     onLeaveWizard?: () => void;
 }
 
 export function ProviderProxySwitch({
-    id, description, configured, checked, onCheckedChange, busy, onLeaveWizard,
+    id, description, configured, checked, onCheckedChange, busy, onLeaveWizard, externalWindow,
 }: ProviderProxySwitchProps) {
     async function openNetworkSettings() {
         try {
+            if (externalWindow) { await openSettings("network-config"); return; }
             await emit("config-navigate-to", { menu: "feature-assistant-config", subNav: "network_config" });
             onLeaveWizard?.();
         } catch (error) {

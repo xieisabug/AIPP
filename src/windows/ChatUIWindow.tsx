@@ -15,6 +15,7 @@ import {
     useWindowTitleBarLayout,
 } from "../components/window/WindowTitleBar";
 import ConversationSearchDialog from "../components/ConversationSearchDialog";
+import { OnboardingSetupChip } from "@/components/onboarding/OnboardingSetup";
 import ConversationUI, {
     ConversationUIRef,
     type InlineInteractionItem,
@@ -974,6 +975,7 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
                             )}
                         </div>
                         <div className="flex items-center self-stretch" {...drag}>
+                            {!isMobilePlatform && <OnboardingSetupChip />}
                             {mobileEnvironmentSwitch}
                             {selectedConversation ? (
                                 <Button
@@ -1069,7 +1071,8 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
                     />
                 </div>
 
-                <div className="flex-1 min-w-0 bg-background overflow-auto" data-aipp-slot="chat-main-content">
+                <div className="relative flex-1 min-w-0 bg-background overflow-auto" data-aipp-slot="chat-main-content">
+                    {!selectedConversation && <div className={`absolute top-2 z-10 ${platform === "windows" ? "right-36" : "right-4"}`}><OnboardingSetupChip /></div>}
                     <ConversationUI
                         ref={conversationUIRef}
                         pluginList={pluginList}
@@ -1078,6 +1081,7 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
                         onPreviewFileContextClick={handlePreviewFileContextSelection}
+                        headerExtraActions={selectedConversation ? <OnboardingSetupChip /> : undefined}
                         // Windows 窗口控制按钮由 ConversationUI 摆放：有标题栏时排进标题栏或展开的详情栏头部，
                         // 没有会话时浮在右上角（新会话发出首条消息后标题栏立即出现，按钮随之移入）
                         showWindowControls
