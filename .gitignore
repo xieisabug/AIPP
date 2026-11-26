@@ -19,6 +19,7 @@ dist-official-plugins
 package-lock.json
 
 target/*
+/AIPP-Release.wsb
 tmp/
 sync-server/tmp
 sync-server/data
