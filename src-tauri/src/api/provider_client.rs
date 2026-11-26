@@ -136,15 +136,19 @@ fn clean_error(mut error: genai::Error, redactor: &ProviderErrorRedactor) -> gen
             // Capture every source's diagnostics, then discard the original chain entirely.
             let mut detail = String::new();
             let mut current: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
-            let mut seen = Vec::new();
+            let mut seen: Vec<*const dyn std::error::Error> = Vec::new();
             while let Some(item) = current {
-                let address = item as *const dyn std::error::Error as *const ();
-                if seen.contains(&address) { break; }
-                seen.push(address);
+                // A wrapper and its first field share an address, so compare the whole trait
+                // object (address + type), and cap depth in case a cycle hides behind distinct vtables.
+                let pointer = item as *const dyn std::error::Error;
+                if seen.len() >= 32 || seen.iter().any(|known| std::ptr::eq(*known, pointer)) { break; }
+                seen.push(pointer);
                 if !detail.is_empty() { detail.push_str("\nCaused by: "); }
                 detail.push_str(&redactor.clean(&format!("{item}\nDetails: {item:?}")));
                 current = item.source();
             }
+            // genai renders WebStream as its `cause` only; keep the (already cleaned) diagnostics visible.
+            if !detail.is_empty() { cause.push_str(&format!("\nCaused by: {detail}")); }
             *source = Box::new(genai::Error::Internal(detail));
         }
         _ => {}

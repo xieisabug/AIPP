@@ -173,6 +173,18 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId, superse
         }
     };
 
+    const driver = /\bdriver_id=(claude_sdk|codex_app_server|pi|opencode|kiro|acp)(?:,|\])/.exec(content)?.[1];
+    const driverLoginInfo: Record<string, { name: string; command: string | null }> = {
+        claude_sdk: { name: "Claude Code", command: "claude" },
+        codex_app_server: { name: "Codex", command: "codex login" },
+        pi: { name: "Pi", command: "pi" },
+        opencode: { name: "OpenCode", command: "opencode auth login" },
+        kiro: { name: "Kiro", command: "kiro-cli login" },
+        acp: { name: "ACP 智能体", command: null },
+    };
+    const authError = Boolean(driver && /not logged in|not signed in|please (?:log|sign) in|please run \/login|authentication required|尚未登录|未登录/i.test(content));
+    const loginInfo = authError && driver ? driverLoginInfo[driver] : null;
+    const loginCopy = useCopyHandler(loginInfo?.command ?? "");
     const { summary, reason } = summarizeError(mainMessage, details, rootCause);
     const headline = superseded ? "此前请求失败" : `回复失败：${summary}${reason ? `（${reason}）` : ""}`;
     const action = isOpen ? "收起" : superseded ? "查看错误" : "查看详情";
@@ -201,6 +213,16 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId, superse
                 )}
                 <span className="shrink-0 text-muted-foreground">· {action}</span>
             </button>
+            {loginInfo && !superseded && <div className="flex flex-wrap items-center gap-2 text-sm">
+                {loginInfo.command ? (
+                    <>
+                        <span>{loginInfo.name} 还没登录。在终端运行 <code>{loginInfo.command}</code> 完成登录，再发一次消息。</span>
+                        <button type="button" className="underline" onClick={loginCopy.handleCopy}>{loginCopy.copyIconState === "ok" ? "已复制" : "复制命令"}</button>
+                    </>
+                ) : (
+                    <span>{loginInfo.name} 还没登录。请在终端完成对应 CLI 登录后，再发一次消息。</span>
+                )}
+            </div>}
             {isOpen && (
                 <div data-aipp-slot="error-details"
                     className={`${isMobilePlatform ? "w-full max-w-full" : "max-w-[min(65%,56rem)]"} ml-2 min-w-0 space-y-2 border-l border-border pb-1 pl-4 text-xs text-muted-foreground`}>
