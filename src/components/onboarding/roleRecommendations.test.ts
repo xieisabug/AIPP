@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { role, type Config } from "./onboardingService";
-import { checkSelected } from "./verifySources";
+import { deadline, role, type Config } from "./onboardingService";
+import { checkSelected, prepareSource } from "./verifySources";
+import packedPreset from "../../../src-tauri/src/onboarding/preset.json?raw";
+import packedCatalog from "../../../src-tauri/src/onboarding/recommendation-catalog.json?raw";
 import { firstVerified, rankedRoles, selectRecommendedRoles, type RoleCandidate } from "./roleRecommendations";
 import { invoke, clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 vi.mock("@tauri-apps/api/core", async () => import("@/__tests__/mocks/tauri"));
@@ -9,6 +11,19 @@ const makeCandidates = (codes: string[]) =>
 const ranked = makeCandidates(["a", "b", "c", "d", "e"]);
 const missing = { kind: "model_not_found", message: "404" };
 describe("onboarding role recommendation probes", () => {
+    it("uses the same published data for both onboarding paths on two Sol models", async () => {
+        const codes = ["gpt-5.6-sol","gpt-6.2-sol"];
+        const provider = {id:11,name:"OpenAI",api_type:"openai_api",endpoint:"https://api.openai.com/v1",is_enabled:true};
+        const preset = {...JSON.parse(packedPreset), recommendation_catalog: JSON.parse(packedCatalog)};
+        const models = codes.map((code,id) => ({id,code,name:code,llm_provider_id:11,request_mode:"responses",
+            description:"",is_selected:false,vision_support:false,audio_support:false,video_support:false}));
+        const expert = rankedRoles([provider], models, preset);
+        const source = await prepareSource(provider, preset, deadline(), () => {}, {models});
+        if (!("ranked" in source)) throw new Error("model-selection step missing");
+        expect(source.ranked).toEqual(expert);
+        for (const role of ["chat","light","review"] as const)
+            expect(expert[role].map(item => item.model.code).sort()).toEqual([...codes].sort());
+    });
     it("should compare offers across enabled sources even when no candidate has a benchmark", () => {
         const providers = ["first", "second"].map((name, index) => ({
             id: index + 1, name, api_type: "openai_api", is_enabled: true, endpoint: "https://"+name+".test",

@@ -96,12 +96,9 @@ export async function prepareSource(
     const candidates = (rows: Candidate[]) => rows.map(({code, reason}) => ({
         model: role(provider.id, code), reason,
     }));
-    const review = deepSeek && info.codes.includes("deepseek-flash")
-        ? [{ code: "deepseek-flash", reason: "自动选择" }, ...info.picks.review.filter(row => row.code !== "deepseek-flash")]
-        : info.picks.review;
     return {
         provider, agent, config, codes: info.codes,
-        ranked: { chat: candidates(info.picks.main), light: candidates(info.picks.light), review: candidates(review) },
+        ranked: { chat: candidates(info.picks.main), light: candidates(info.picks.light), review: candidates(info.picks.review) },
     };
 }
 export async function checkSelected(

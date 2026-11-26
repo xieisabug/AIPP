@@ -30,3 +30,15 @@ fn test_onboarding_old_helper_uses_current_packaged_policy() {
     legacy["recommended_provider"]["models"]["main"] = "deepseek-v4-pro".into();
     assert_eq!(official_preset(&legacy.to_string()).unwrap()["recommended_provider"]["models"]["main"], "deepseek-flash");
 }
+
+#[test]
+fn test_legacy_scores_upgrade_preserves_live_offers() {
+    let mut data: Value = serde_json::from_str(PACKAGED).unwrap();
+    data["revision"] = "test-live-offers".into();
+    let offers = serde_json::json!({"relay":{"endpoints":["https://example.test"],"models":{}}});
+    data["recommendation_catalog"] = serde_json::json!({"benchmarks":{}, "providers":offers});
+    let preset = official_preset(&data.to_string()).unwrap();
+    assert_eq!(preset["recommendation_catalog"]["providers"], offers);
+    assert_eq!(preset["recommendation_catalog"]["scoring_version"], 2);
+    assert!(preset["recommendation_catalog"]["independent_benchmarks"].is_object());
+}

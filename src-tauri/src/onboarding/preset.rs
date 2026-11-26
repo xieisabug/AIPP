@@ -52,8 +52,18 @@ fn validate(data: &str) -> Result<Value, String> {
 
 // The old public helper response predates Flash-first selection and model limits.
 fn official_preset(raw: &str) -> Result<Value, String> {
-    let preset = validate(raw)?;
-    if matches!(preset["revision"].as_str(), Some("2026-11-25.1" | "2026-11-26.1")) { validate(PACKAGED) } else { Ok(preset) }
+    let mut preset = validate(raw)?;
+    if matches!(preset["revision"].as_str(), Some("2026-11-25.1" | "2026-11-26.1")) {
+        return validate(PACKAGED);
+    }
+    if preset["recommendation_catalog"]["scoring_version"].as_u64() != Some(2) {
+        let mut bundled: Value = serde_json::from_str(include_str!("recommendation-catalog.json"))
+            .map_err(|e| format!("内置模型评分目录无效：{e}"))?;
+        // Keep the current endpoint-specific offers when an older helper lacks the new scores.
+        bundled["providers"] = preset["recommendation_catalog"]["providers"].take();
+        preset["recommendation_catalog"] = bundled;
+    }
+    Ok(preset)
 }
 
 pub(crate) struct ModelBudget {

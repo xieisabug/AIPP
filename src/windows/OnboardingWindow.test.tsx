@@ -35,8 +35,8 @@ const preset = {
     recommendation_catalog: {providers:{deepseek:{endpoints:["https://fixture.test"], models:{
         main:{model:"lab/main",input:2,output:2},small:{model:"lab/small",input:0.2,output:0.2},
     }}}, benchmarks:{
-        "lab/main":[{group:"reasoning",test:"reason",score:90}],
-        "lab/small":[{group:"reasoning",test:"reason",score:40}],
+        "lab/main":[{group:"reasoning",test:"reason",score:90},{group:"unsafeAllowance",test:"risk",score:30,lowerBetter:true}],
+        "lab/small":[{group:"reasoning",test:"reason",score:40},{group:"unsafeAllowance",test:"risk",score:3,lowerBetter:true}],
     }},
     model_ranking: { main: [], light: [] },
     strip_suffixes: [],
@@ -392,8 +392,8 @@ describe("first-run window", () => {
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
     });
-    it("躺平保留 DeepSeek 返回的所有型号，默认审核选用已验证的 Flash", async () => {
-        setup();
+    it("躺平保留全部型号，审核默认 Flash，点击帮我选后使用角色评分", async () => {
+        setup().allowAux();
         const codes = ["small", "deepseek-flash", "main", "embedding-test"];
         mockInvokeHandler("preview_model_list", () => ({
             available_models: codes.map(code => ({
@@ -404,13 +404,16 @@ describe("first-run window", () => {
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-        await selectRecommendedAndApply();
+        expect(await screen.findByLabelText("审核模型")).toHaveValue("deepseek-flash");
+        fireEvent.click(screen.getByRole("button", {name:"帮我选"}));
+        expect(screen.getByLabelText("审核模型")).toHaveValue("small");
+        fireEvent.click(screen.getByRole("button", {name:"应用"}));
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", { config: expect.objectContaining({
             models: [{ providerId: 44, codes }],
-            review: { providerId: 44, code: "deepseek-flash", verified: true },
+            review: { providerId: 44, code: "small", verified: true },
         }) });
-        expect(invoke).toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "deepseek-flash" });
+        expect(invoke).toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "small" });
         expect(invoke).not.toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "embedding-test" });
     });
     it("should complete a verified primary source while its shared auxiliary model fails and can retry independently", async () => {
