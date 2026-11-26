@@ -649,8 +649,6 @@ fn update_uv_impl(
             emit_log(&format!("使用代理: {}", proxy));
         }
 
-        cmd.env("UV_INSTALLER_GHE_BASE_URL", "https://ghfast.top/https://github.com");
-
         let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -813,12 +811,15 @@ async fn run_uv_installer(client: &reqwest::Client, proxy: Option<&str>, onboard
         cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
         cmd
     } else { background_command("sh") };
-    command.arg(path).env("UV_INSTALLER_GHE_BASE_URL", "https://ghfast.top/https://github.com");
+    command.arg(path);
     if onboarding { command.env("UV_NO_MODIFY_PATH", "1"); }
     if let Some(proxy) = proxy { command.envs(build_proxy_env_vars(proxy)); }
     let output = tokio::process::Command::from(command).output().await.map_err(|e| e.to_string())?;
     if output.status.success() { Ok(()) } else {
-        Err(format!("uv 安装器退出 {}：{}", output.status, String::from_utf8_lossy(&output.stderr).trim()))
+        // On Windows the official installer writes its caught exception to stdout.
+        let log = [output.stdout.as_slice(), output.stderr.as_slice()].map(String::from_utf8_lossy);
+        let message = log.iter().map(|part| part.trim()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n");
+        Err(format!("uv 安装器退出 {}：{}", output.status, if message.is_empty() { "安装器没有输出错误详情" } else { &message }))
     }
 }
 
