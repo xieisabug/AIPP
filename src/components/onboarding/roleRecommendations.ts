@@ -1,7 +1,7 @@
 import type { ModelForSelect } from "@/hooks/useFilteredModels";
 import { rankModels, type OnboardingPreset } from "@/utils/modelRecommend";
 import {
-    explain, local, role, selectAuxiliaryRole,
+    local, role, selectAuxiliaryRole,
     type Config, type Provider, type Role,
 } from "./onboardingService";
 
@@ -48,24 +48,14 @@ export function selectRecommended(config: Config, key: ModelRole, candidate: Rol
     return { ...next, notes: { ...next.notes, [key]: { reason: candidate.reason } } };
 }
 
-export async function verifyRecommendedRoles(
-    config: Config,
-    ranked: RankedRoles,
-    keys: readonly ModelRole[],
-    followLight: boolean,
-    probe: Probe
-) {
+export function selectRecommendedRoles(config: Config, ranked: RankedRoles, keys: ModelRole[], followLight = false) {
     let next = config;
-    const errors: string[] = [];
     for (const key of keys) {
         if (key === "review" && followLight && keys.includes("light")) continue;
-        try {
-            const selected = await firstVerified(ranked[key], probe);
-            next = selectRecommended(next, key, selected);
-            if (key === "light" && followLight) next = selectRecommended(next, "review", selected);
-        } catch (error) {
-            errors.push(explain(error));
-        }
+        const candidate = ranked[key][0];
+        if (!candidate) continue;
+        next = selectRecommended(next, key, candidate);
+        if (key === "light" && followLight) next = selectRecommended(next, "review", candidate);
     }
-    return { config: next, errors: [...new Set(errors)] };
+    return next;
 }

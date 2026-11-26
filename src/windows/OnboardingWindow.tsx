@@ -39,7 +39,7 @@ import { connectDeepSeekSearch, hideKey } from "@/components/config/deepseekSuit
 import { SourceForm } from "@/components/onboarding/SourceForm";
 import { HomeFields, ModelRoles } from "@/components/onboarding/ModelRoles";
 import {
-    modelRoles, rankedRoles, selectRecommended, verifyRecommendedRoles,
+    modelRoles, rankedRoles, selectRecommended, selectRecommendedRoles,
 } from "@/components/onboarding/roleRecommendations";
 import { SetupList, setupNames, useSetupItems, type SetupId } from "@/components/onboarding/OnboardingSetup";
 import { checkSelected, type Checked, type Notes } from "@/components/onboarding/verifySources";
@@ -739,20 +739,16 @@ export default function OnboardingWindow() {
                                     models={models}
                                     providers={providers}
                                     ask={ask}
-                                    onRecommend={(keys, followLight) => void run(async () => {
+                                    onRecommend={(keys, followLight) => {
                                         const ranked = rankedRoles(providers, models, preset);
                                         const available = keys.filter(key => ranked[key].length);
                                         if (!available.length) {
                                             setError("没有匹配的推荐模型，请手动选择。");
                                             return;
                                         }
-                                        const probe = probeSession(deadline(), setProgress);
-                                        const result = await verifyRecommendedRoles(
-                                            config, ranked, available, followLight, probe
-                                        );
-                                        setConfig(result.config);
-                                        setError(result.errors.join("；"));
-                                    })}
+                                        setError("");
+                                        setConfig(current => selectRecommendedRoles(current, ranked, available, followLight));
+                                    }}
                                 />
                             )}
                             {page === "home" && (

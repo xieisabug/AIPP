@@ -281,7 +281,9 @@ describe("first-run window", () => {
     async function selectRecommendedAndApply() {
         await screen.findByRole("heading", { name: "选择模型" });
         expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
+        const callsBeforePick = invoke.mock.calls.length;
         fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        expect(invoke.mock.calls).toHaveLength(callsBeforePick);
         const apply = screen.getByRole("button", { name: "应用" });
         await waitFor(() => expect(apply).toBeEnabled());
         expect(invoke.mock.calls.some(([cmd]) => cmd === "apply_onboarding_config")).toBe(false);
@@ -308,7 +310,7 @@ describe("first-run window", () => {
         fireEvent.click(screen.getByRole("button", { name: "上一步" }));
         await screen.findByText("已获取 13 个模型");
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-        fireEvent.change(await screen.findByLabelText("搜索模型"), { target: { value: "chat-13" } });
+        expect(await screen.findByRole("combobox", { name: "主力模型" })).toBeVisible();
         fireEvent.change(screen.getByLabelText("主力模型"), { target: { value: "chat-13" } });
         fireEvent.change(screen.getByLabelText("轻量模型"), { target: { value: "chat-7" } });
         fireEvent.change(screen.getByLabelText("审核模型"), { target: { value: "chat-7" } });
@@ -319,7 +321,7 @@ describe("first-run window", () => {
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model").map(([,args]) => args?.modelCode))
             .toEqual(["chat-13", "chat-7"]);
     });
-    it.each([false, true])("躺平添加提供商只获取列表，点击帮我选才试调用（首次列表失败：%s）", async (listFailsOnce) => {
+    it.each([false, true])("躺平添加提供商只获取列表，应用选定模型才试调用（首次列表失败：%s）", async (listFailsOnce) => {
         setup();
         if (listFailsOnce) {
             let first = true;
@@ -618,10 +620,11 @@ describe("first-run window", () => {
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /专家/ }));
         fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+        const callsBeforePick = invoke.mock.calls.length;
         fireEvent.click(await screen.findByRole("button", { name: "全部帮我选" }));
-        await waitFor(() => expect(screen.getByLabelText("新对话默认使用")).toHaveValue("main%%6"));
-        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model").map(([, args]) => args?.modelCode))
-            .toEqual(["retired", "main", "mini", "review"]);
+        expect(invoke.mock.calls).toHaveLength(callsBeforePick);
+        expect(screen.getByLabelText("新对话默认使用")).toHaveValue("retired%%6");
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(0);
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
         fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
         fireEvent.click(await screen.findByRole("button", { name: "完成" }));

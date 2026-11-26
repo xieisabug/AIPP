@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { deadline, probeSession, role, type Config } from "./onboardingService";
+import { role, type Config } from "./onboardingService";
 import { checkSelected } from "./verifySources";
-import { firstVerified, rankedRoles, verifyRecommendedRoles, type RoleCandidate } from "./roleRecommendations";
+import { firstVerified, rankedRoles, selectRecommendedRoles, type RoleCandidate } from "./roleRecommendations";
 import { invoke, clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 vi.mock("@tauri-apps/api/core", async () => import("@/__tests__/mocks/tauri"));
 const makeCandidates = (codes: string[]) =>
@@ -55,10 +55,14 @@ describe("onboarding role recommendation probes", () => {
             });
             const initial: Config = { chat: role(12, ""), home: "chat_ui", extras: [] };
             const picks = { chat: ranked, light: [ranked[2], ranked[3]], review: ranked.slice(2) };
-            const checked = await verifyRecommendedRoles(initial, picks, ["chat", "light", "review"], false, probeSession(deadline(), () => {}));
+            const selection = selectRecommendedRoles(initial, picks, ["chat", "light", "review"]);
+            expect(selection.chat.code).toBe("a");
+            expect(invoke).not.toHaveBeenCalled();
+            const providers = [{ id: 12, api_type: "ollama", name: "Ollama", is_enabled: true }];
+            const checked = await checkSelected(selection, providers, () => false, () => {}, undefined, picks);
             expect(checked.config.chat.code).toBe("b");
-            expect(checked.config.notes?.chat?.reason).toBe("推荐表第 2 名");
-            expect(checked.errors).toHaveLength(1);
+            expect(checked.notes.chat?.reason).toBe("推荐表第 2 名");
+            expect(checked.notes.review?.error).toBeTruthy();
             expect(invoke.mock.calls.map(([, args]) => args?.modelCode)).toEqual(["a", "b", "c"]);
         } finally {
             vi.useRealTimers();
