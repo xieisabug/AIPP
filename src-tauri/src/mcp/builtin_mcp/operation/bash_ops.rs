@@ -285,8 +285,8 @@ impl BashOperations {
             }
         }
 
-        // 尝试获取退出码
-        let exit_code = state.get_bash_exit_code(bash_id).await;
+        // 输出读完不代表进程已退出，短暂等待拿到真实退出码
+        let exit_code = state.wait_bash_exit_code(bash_id, std::time::Duration::from_secs(5)).await;
         info!(bash_id = %bash_id, exit_code = ?exit_code, command = %command, "Background process completed");
 
         // 标记进程已完成

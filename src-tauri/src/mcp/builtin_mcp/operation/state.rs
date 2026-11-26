@@ -283,6 +283,30 @@ impl OperationState {
     }
 
     /// 获取 Bash 进程退出码（尝试等待进程完成）
+    /// Output pipes can close before the process is reaped (common on Windows), so a single
+    /// `try_wait` right after EOF reports no exit code and a successful run looks failed.
+    /// Poll briefly, releasing the lock between attempts so kill/output calls are not blocked.
+    pub async fn wait_bash_exit_code(&self, bash_id: &str, limit: std::time::Duration) -> Option<i32> {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            if let Some(code) = self.get_bash_exit_code(bash_id).await {
+                return Some(code);
+            }
+            if tokio::time::Instant::now() >= deadline || !self.bash_child_running(bash_id).await {
+                return self.get_bash_exit_code(bash_id).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn bash_child_running(&self, bash_id: &str) -> bool {
+        let mut processes = self.bash_processes.lock().await;
+        processes
+            .get_mut(bash_id)
+            .and_then(|info| info.child.as_mut())
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+
     pub async fn get_bash_exit_code(&self, bash_id: &str) -> Option<i32> {
         let mut processes = self.bash_processes.lock().await;
         if let Some(info) = processes.get_mut(bash_id) {

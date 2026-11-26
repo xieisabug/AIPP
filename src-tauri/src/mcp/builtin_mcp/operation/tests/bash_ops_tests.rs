@@ -285,7 +285,8 @@ async fn test_execute_bash_background() {
     assert!(
         output_resp.status == BashProcessStatus::Completed
             || output_resp.status == BashProcessStatus::Running,
-        "Process should be completed or still running"
+        "Process should be completed or still running: {:?} exit={:?} output={:?}",
+        output_resp.status, output_resp.exit_code, output_resp.output
     );
 }
 
