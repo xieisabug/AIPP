@@ -281,7 +281,10 @@ fn test_assistant_prompt_operations() {
     let db = create_assistant_db();
 
     // 创建 Assistant
+    // 助手 1 是快速使用助手，其种子提示词会被替换为默认提示词；先占掉 1 号，测试普通助手的行为。
+    db.add_assistant("快速使用助手", "", None, false).unwrap();
     let assistant_id = db.add_assistant("Test", "Desc", None, false).unwrap();
+    assert_ne!(assistant_id, 1);
 
     // 添加 Prompt
     let prompt_id = db.add_assistant_prompt(assistant_id, "You are a helpful assistant.").unwrap();

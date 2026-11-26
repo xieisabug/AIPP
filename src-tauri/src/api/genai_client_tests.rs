@@ -192,13 +192,8 @@ async fn test_opencode_go_protocol_requests() {
         let endpoint = base.replace("https://opencode.ai", &format!("http://{}",listener.local_addr().unwrap()));
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut data = Vec::new();
-            let mut chunk = [0; 2048];
-            while !data.windows(4).any(|s| s == b"\r\n\r\n") {
-                let n = socket.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                data.extend_from_slice(&chunk[..n]);
-            }
+            let (head, body) = crate::utils::test_http::read_request(&mut socket).await;
+            let data = [head.as_bytes(), b"\r\n\r\n".as_slice(), &body].concat();
             socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
             String::from_utf8(data).unwrap().to_ascii_lowercase()
         });
@@ -238,13 +233,7 @@ async fn test_opencode_go_deepseek_stream_delivers_content() {
         "test-key".into(), Some(model.into()), Some(uuid::Uuid::new_v4()), genai::WebConfig::default(), HashMap::new()).unwrap();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut data = Vec::new();
-        let mut chunk = [0; 2048];
-        while !data.windows(4).any(|w| w == b"\r\n\r\n") {
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            data.extend_from_slice(&chunk[..n]);
-        }
+        let _request = crate::utils::test_http::read_request(&mut socket).await;
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Think\"}}]}\n\n",
@@ -306,13 +295,7 @@ async fn test_opencode_go_billing_survives_translated_streams() {
             "test-key".into(), Some("test".into()), Some(uuid::Uuid::new_v4()), genai::WebConfig::default(), HashMap::new()).unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut data = Vec::new();
-            let mut chunk = [0; 2048];
-            while !data.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = socket.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                data.extend_from_slice(&chunk[..n]);
-            }
+            let _request = crate::utils::test_http::read_request(&mut socket).await;
             socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
         });
         let req = ChatRequest::new(vec![ChatMessage::user("test")]);

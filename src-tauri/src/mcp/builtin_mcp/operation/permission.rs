@@ -896,9 +896,10 @@ mod tests {
     fn test_normalize_absolute_path_removes_dotdot() {
         #[cfg(windows)]
         {
-            let path = Path::new("C:\\Users\\admin\\projects\\..\\documents");
+            // Must not exist on the test machine: existing paths are canonicalized with their real casing.
+            let path = Path::new("C:\\aipp-nonexistent-normalize-test\\projects\\..\\documents");
             let normalized = PermissionManager::normalize_absolute_path(path).unwrap();
-            assert_eq!(normalized, PathBuf::from("C:\\Users\\admin\\documents"));
+            assert_eq!(normalized, PathBuf::from("C:\\aipp-nonexistent-normalize-test\\documents"));
         }
         #[cfg(not(windows))]
         {

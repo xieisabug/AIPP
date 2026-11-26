@@ -22,6 +22,8 @@ mod prompt_image_tests;
 #[cfg(test)]
 mod reply_quote_tests;
 #[cfg(test)]
+pub(crate) mod test_http;
+#[cfg(test)]
 mod turn_context_tests;
 #[cfg(test)]
 mod window_utils_tests;

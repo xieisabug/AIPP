@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 use super::*;
@@ -341,10 +341,8 @@ async fn spawn_mock_server(
     let body_str = response_body.to_string();
     let handle = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 16384];
-        let n = socket.read(&mut buf).await.unwrap();
-        let raw = String::from_utf8_lossy(&buf[..n]).to_string();
-        let (head, req_body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+        let (head, req_body) = crate::utils::test_http::read_request(&mut socket).await;
+        let req_body = String::from_utf8_lossy(&req_body).to_string();
         let reply = format!(
             "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_str}",
             body_str.len()

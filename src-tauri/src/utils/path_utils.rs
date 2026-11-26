@@ -76,17 +76,18 @@ mod tests {
 
     #[test]
     fn test_normalize_path_windows_drive() {
-        // 测试驱动器号规范化
-        let path = Path::new("C:\\Users\\test");
+        // 不存在的路径走词法规范化：驱动器号转大写、路径组件转小写。
+        // 必须是测试机上不存在的路径，存在的路径会按真实大小写 canonicalize。
+        let path = Path::new("c:\\AIPP-Nonexistent-Normalize\\Test");
         let normalized = normalize_path_for_comparison(path);
 
         #[cfg(windows)]
         {
-            // Windows 上应该规范化为小写路径组件
-            assert!(normalized.is_some());
-            let n = normalized.unwrap();
-            assert!(n.to_string_lossy().to_string().contains("c:"));
+            assert_eq!(normalized, Some(PathBuf::from("C:\\aipp-nonexistent-normalize\\test")));
+            assert!(is_path_under_trusted(Path::new("C:\\AIPP-NONEXISTENT-NORMALIZE\\TEST\\file.txt"), path));
         }
+        #[cfg(not(windows))]
+        let _ = normalized;
     }
 
     #[test]
