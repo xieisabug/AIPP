@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { emit } from "@tauri-apps/api/event";
 import { beforeEach, it, expect } from "vitest";
 import { mockInvokeHandler, clearAllMockHandlers } from "@/__tests__/mocks/tauri";
@@ -6,6 +6,34 @@ import { type SetupItem, OnboardingSetupChip, SetupList, useSetupItems } from ".
 
 function StatusList() { return <SetupList items={useSetupItems()}/>; }
 beforeEach(()=>clearAllMockHandlers());
+it("acknowledges failures only after all tasks finish and keeps the chip hidden on reopen", async () => {
+    let items: SetupItem[] = [
+        { id: "uv", state: "failed", message: "网络连接中断" },
+        { id: "bun", state: "running", message: "" },
+    ];
+    mockInvokeHandler("get_onboarding_setup_status", () => items);
+    mockInvokeHandler("acknowledge_onboarding_setup", async () => {
+        items = items.map(item => ({ ...item, acknowledged: item.state === "failed" }));
+        await emit("onboarding-setup-progress", items);
+    });
+    const { unmount } = render(<OnboardingSetupChip />);
+    fireEvent.click(await screen.findByRole("button", { name: "1 项未完成" }));
+    expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "我知道了" })).not.toBeInTheDocument();
+
+    items = [items[0], { id: "bun", state: "failed", message: "下载失败" }];
+    await act(() => emit("onboarding-setup-progress", items));
+    expect(await screen.findByText("2 项未完成")).toBeVisible();
+    fireEvent.click(await screen.findByRole("button", { name: "我知道了" }));
+    await waitFor(() => expect(screen.queryByText("2 项未完成")).not.toBeInTheDocument());
+    unmount();
+    render(<OnboardingSetupChip />);
+    await act(() => emit("onboarding-setup-progress", items));
+    expect(screen.queryByText("2 项未完成")).not.toBeInTheDocument();
+    items = items.map(item => ({ ...item, acknowledged: item.id === "uv" }));
+    await act(() => emit("onboarding-setup-progress", items));
+    expect(await screen.findByText("2 项未完成")).toBeVisible();
+});
 it("should retain Office progress received before the initial task status resolves", async () => {
     let resolveStatus!: (items: SetupItem[]) => void;
     mockInvokeHandler("get_onboarding_setup_status", () => new Promise<SetupItem[]>(resolve => {

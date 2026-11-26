@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn test_onboarding_setup_acknowledges_legacy_failures_after_work_finishes() {
+    let db = SystemDatabase { conn: rusqlite::Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    let prior = r#"[{"id":"uv","state":"failed","message":"下载失败"},{"id":"bun","state":"pending","message":""}]"#;
+    db.conn.execute("INSERT INTO system_config(key,value) VALUES(?1,?2)", [KEY, prior]).unwrap();
+    assert!(persist(&db, |items| acknowledge_finished(items)).is_err());
+    assert!(!read(&db.conn).unwrap()[0].acknowledged);
+    persist(&db, |items| {
+        items[1].state = State::Skipped;
+        acknowledge_finished(items)
+    }).unwrap();
+    let items = read(&db.conn).unwrap();
+    assert!(items[0].acknowledged && items[0].state == State::Failed);
+    assert_eq!(items[0].message, "下载失败");
+    assert!(!items[1].acknowledged);
+}
+
+#[test]
 fn test_onboarding_setup_preserves_failed_and_inflight_work_across_replay() {
     let db = SystemDatabase { conn: rusqlite::Connection::open_in_memory().unwrap() };
     db.create_tables().unwrap();

@@ -5,7 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { AlertCircle, CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { SettingsGroup } from "@/components/config/SettingsGroup";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { toast } from "sonner";
 
@@ -20,6 +19,7 @@ export type SetupItem = {
     id: SetupId;
     state: "pending" | "running" | "done" | "skipped" | "failed";
     message: string;
+    acknowledged?: boolean;
 };
 const states = { pending: "等待中", running: "正在准备", done: "已完成", skipped: "已就绪", failed: "未完成" };
 
@@ -64,21 +64,18 @@ export function useSetupItems() {
             : item
     );
 }
-function useOnboardingStatus(desktop: boolean) {
-    const [status, setStatus] = useState<{ canOpen: boolean; debug: boolean }>({ canOpen: false, debug: false });
+export function useOnboardingEntry(desktop: boolean) {
+    const [canOpen, setCanOpen] = useState(false);
     useDataRefresh({
         events: ["feature_config_changed", "onboarding-state-changed"],
         initial: true,
         paused: !desktop,
         refresh: async (current) => {
-            const result = await invoke<{ canOpen?: boolean; debug?: boolean }>("get_onboarding_state");
-            if (current()) setStatus({ canOpen: !!result?.canOpen, debug: Boolean(result?.debug) });
+            const result = await invoke<{ canOpen?: boolean }>("get_onboarding_state");
+            if (current()) setCanOpen(!!result?.canOpen);
         },
     });
-    return status;
-}
-export function useOnboardingEntry(desktop: boolean) {
-    return useOnboardingStatus(desktop).canOpen;
+    return canOpen;
 }
 export const openOnboarding = () => invoke("open_onboarding_window").catch((e) => toast.error(String(e)));
 function SetupStateIcon({ state }: { state: SetupItem["state"] }) {
@@ -157,12 +154,13 @@ export function OnboardingSetupChip() {
             return () => clearTimeout(timer);
         }
     }, [active, complete]);
-    if (!items.length || (!active && !failed && !showCompleted)) return null;
+    const hasUnseenFailure = items.some((item) => item.state === "failed" && !item.acknowledged);
+    if (!items.length || (!active && !hasUnseenFailure && !(complete && showCompleted))) return null;
     return (
         <Popover>
             <PopoverTrigger asChild>
                 <Button variant="outline" size="sm" className="h-7 text-xs">
-                    {failed
+                    {hasUnseenFailure
                         ? `${failed} 项未完成`
                         : complete
                           ? "准备好了"
@@ -171,36 +169,16 @@ export function OnboardingSetupChip() {
             </PopoverTrigger>
             <PopoverContent align="end" className="w-80">
                 <SetupList items={items} />
+                {!active && hasUnseenFailure && (
+                    <div className="mt-3 flex justify-end border-t pt-3">
+                        <Button size="sm" onClick={() =>
+                            void invoke("acknowledge_onboarding_setup").catch((e) => toast.error(String(e)))
+                        }>
+                            我知道了
+                        </Button>
+                    </div>
+                )}
             </PopoverContent>
         </Popover>
-    );
-}
-export function OnboardingSettings() {
-    const { canOpen, debug } = useOnboardingStatus(true);
-    const items = useSetupItems();
-    const canReset = debug || import.meta.env.DEV;
-    if (!canOpen && !items.length && !canReset) return null;
-    return (
-        <SettingsGroup id="onboarding" title="首次使用与后台准备">
-            {canOpen && (
-                <Button variant="outline" onClick={openOnboarding}>
-                    打开首次使用引导
-                </Button>
-            )}
-            {items.length > 0 && <SetupList items={items} />}
-            {canReset && (
-                <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                        void invoke("reset_onboarding_state")
-                            .then(() => toast.success("已重置引导状态"))
-                            .catch((e) => toast.error(String(e)))
-                    }
-                >
-                    重置首次引导状态
-                </Button>
-            )}
-        </SettingsGroup>
     );
 }

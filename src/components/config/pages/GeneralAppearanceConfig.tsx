@@ -26,7 +26,6 @@ import {
 } from "@/components/config/displayConfigFormValues";
 import { withCurrentCodeThemeOption } from "@/components/config/feature/forms/DisplayConfigForm";
 import { parseSubNav, useSettingsAnchorHighlight } from "@/lib/settingsNavigation";
-import { OnboardingSettings } from "@/components/onboarding/OnboardingSetup";
 import SettingsPageShell from "./SettingsPageShell";
 
 interface GeneralAppearanceConfigProps {
@@ -315,7 +314,6 @@ export const GeneralAppearanceConfig: React.FC<GeneralAppearanceConfigProps> = (
                 ) : null
             }
         >
-            {!isMobilePlatform && <OnboardingSettings />}
             {!isMobilePlatform ? (
                 <SettingsGroup id="startup" title="启动与窗口" description="控制应用启动方式与默认主界面。">
                     <div className={settingRowClassName}>

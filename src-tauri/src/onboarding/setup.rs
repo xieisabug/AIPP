@@ -16,6 +16,8 @@ pub struct SetupItem {
     id: String,
     state: State,
     message: String,
+    #[serde(default)]
+    acknowledged: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +69,7 @@ fn include_selected(items: &mut Vec<SetupItem>, selected: &[String]) -> Result<(
                     item.message.clear();
                 }
             } else {
-                items.push(SetupItem { id: id.into(), state: State::Pending, message: String::new() });
+                items.push(SetupItem { id: id.into(), state: State::Pending, message: String::new(), acknowledged: false });
             }
         }
     }
@@ -90,12 +92,31 @@ pub fn get_onboarding_setup_status(app: AppHandle) -> Result<Vec<SetupItem>, Str
     read(&SystemDatabase::new(&app).map_err(|e| e.to_string())?.conn)
 }
 
+fn acknowledge_finished(items: &mut [SetupItem]) -> Result<(), String> {
+    if items.iter().any(|item| matches!(item.state, State::Pending | State::Running)) {
+        return Err("仍有准备任务正在进行".into());
+    }
+    for item in items.iter_mut().filter(|item| item.state == State::Failed) {
+        item.acknowledged = true;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn acknowledge_onboarding_setup(app: AppHandle) -> Result<(), String> {
+    change(&app, |items| acknowledge_finished(items))
+}
+
 #[tauri::command]
 pub fn retry_onboarding_setup(app: AppHandle, id: String) -> Result<(), String> {
     if cfg!(mobile) { return Err("首次引导仅支持桌面端".into()); }
     change(&app, |items| {
         let item = items.iter_mut().find(|i| i.id == id).ok_or("准备任务不存在")?;
-        if item.state == State::Failed { item.state = State::Pending; item.message.clear(); }
+        if item.state == State::Failed {
+            item.state = State::Pending;
+            item.message.clear();
+            item.acknowledged = false;
+        }
         Ok(())
     })?;
     resume(&app);

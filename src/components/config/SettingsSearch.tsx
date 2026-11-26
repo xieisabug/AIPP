@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useOnboardingEntry } from "@/components/onboarding/OnboardingSetup";
 import { Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { usePinyinReady } from "@/utils/pinyinFilter";
@@ -26,10 +25,9 @@ export const SettingsSearch: React.FC<SettingsSearchProps> = ({
     const inputRef = useRef<HTMLInputElement>(null);
     const pinyinReady = usePinyinReady(query.trim().length > 0);
 
-    const canOpen = useOnboardingEntry(!isMobilePlatform);
     const results = useMemo(
-        () => searchSettings(query, { isMobilePlatform, availableMenus }).filter(item => item.id !== "first-run-onboarding" || canOpen),
-        [query, isMobilePlatform, availableMenus, pinyinReady, canOpen]
+        () => searchSettings(query, { isMobilePlatform, availableMenus }),
+        [query, isMobilePlatform, availableMenus, pinyinReady]
     );
 
     useEffect(() => {

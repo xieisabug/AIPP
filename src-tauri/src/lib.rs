@@ -1114,6 +1114,7 @@ pub fn run() {
             onboarding::preset::get_onboarding_preset,
             onboarding::preset::onboarding_provider_endpoints,
             onboarding::setup::get_onboarding_setup_status,
+            onboarding::setup::acknowledge_onboarding_setup,
             onboarding::setup::check_onboarding_skills_ready,
             onboarding::setup::retry_onboarding_setup,
             api::llm_api::probe_chat_model,
