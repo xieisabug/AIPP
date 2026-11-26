@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ModelTestField } from "./ModelTestField";
 import { Check, CheckCircle2, ChevronDown, ChevronRight, Sparkles, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,46 +35,48 @@ export function RoleSelect({
     keepExisting?: boolean;
 }) {
     return (
-        <label className="grid gap-1.5 text-sm font-medium">
-            <span className="text-[13px] text-foreground/85">{label}</span>
-            <div className="relative">
-                <select
-                    aria-label={label}
-                    className="h-9 w-full appearance-none rounded-xl border border-border/70 bg-background/90 pl-3.5 pr-8 text-sm font-normal text-foreground transition-colors hover:border-foreground/25 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
-                    value={!value && keepExisting ? "keep" : roleKey(value)}
-                    onChange={(e) => {
-                        const m = models.find((m) => roleKey(roleOf(m)) === e.target.value);
-                        onChange(m ? roleOf(m) : null);
-                    }}
-                >
-                    {!value && keepExisting && <option value="keep" disabled>沿用已有配置</option>}
-                    <option value="" disabled={!optional}>
-                        {optional ? "不配置" : "请选择"}
-                    </option>
-                    {[false, true].map((isAgent) => {
-                        const group = models.filter((m) =>
-                            providers.some((p) => p.id === m.llm_provider_id && local(p.api_type) === isAgent)
-                        );
-                        return (
-                            group.length > 0 && (
-                                <optgroup key={String(isAgent)} label={isAgent ? "本机智能体" : "API 聊天模型"}>
-                                    {group.map((m) => (
-                                        <option value={roleKey(roleOf(m))} key={roleKey(roleOf(m))}>
-                                            {providers.find((p) => p.id === m.llm_provider_id)?.name} /{" "}
-                                            {m.id === 0 ? "默认模型" : m.code}
-                                        </option>
-                                    ))}
-                                </optgroup>
-                            )
-                        );
-                    })}
-                </select>
-                <ChevronDown
-                    aria-hidden="true"
-                    className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-                />
-            </div>
-        </label>
+        <ModelTestField label={label} selected={value} provider={providers.find(p => p.id === value?.providerId)}>
+            <label className="grid gap-1.5 text-sm font-medium">
+                <span className="text-[13px] text-foreground/85">{label}</span>
+                <div className="relative">
+                    <select
+                        aria-label={label}
+                        className="h-9 w-full appearance-none rounded-xl border border-border/70 bg-background/90 pl-3.5 pr-8 text-sm font-normal text-foreground transition-colors hover:border-foreground/25 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
+                        value={!value && keepExisting ? "keep" : roleKey(value)}
+                        onChange={(e) => {
+                            const m = models.find((m) => roleKey(roleOf(m)) === e.target.value);
+                            onChange(m ? roleOf(m) : null);
+                        }}
+                    >
+                        {!value && keepExisting && <option value="keep" disabled>沿用已有配置</option>}
+                        <option value="" disabled={!optional}>
+                            {optional ? "不配置" : "请选择"}
+                        </option>
+                        {[false, true].map((isAgent) => {
+                            const group = models.filter((m) =>
+                                providers.some((p) => p.id === m.llm_provider_id && local(p.api_type) === isAgent)
+                            );
+                            return (
+                                group.length > 0 && (
+                                    <optgroup key={String(isAgent)} label={isAgent ? "本机智能体" : "API 聊天模型"}>
+                                        {group.map((m) => (
+                                            <option value={roleKey(roleOf(m))} key={roleKey(roleOf(m))}>
+                                                {providers.find((p) => p.id === m.llm_provider_id)?.name} /{" "}
+                                                {m.id === 0 ? "默认模型" : m.code}
+                                            </option>
+                                        ))}
+                                    </optgroup>
+                                )
+                            );
+                        })}
+                    </select>
+                    <ChevronDown
+                        aria-hidden="true"
+                        className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+                    />
+                </div>
+            </label>
+        </ModelTestField>
     );
 }
 export function ModelRoles({

@@ -107,6 +107,29 @@ export async function prepareSource(
         ranked: { chat: candidates(info.picks.main), light: candidates(info.picks.light), review: candidates(info.picks.review) },
     };
 }
+// The stored verified flag marks a role as eligible to apply. In lie-flat mode the
+// provider's model list supplies that evidence without generating any text.
+export function catalogRoleChecker(available: Role[]) {
+    const keys = new Set(available.map(roleKey));
+    return (selected: Role): Role => {
+        if (!keys.has(roleKey(selected))) throw new Error(`模型列表中没有 ${selected.code}，请重新选择模型`);
+        return { ...selected, verified: true };
+    };
+}
+
+export function lieFlatSelection(config: Config, check: (model: Role) => Role): Checked {
+    const chat = check(config.chat);
+    const result = { ...config, chat, butler: chat };
+    const notes: Notes = {};
+    for (const key of ["chat", "light", "review"] as const) {
+        const selected = config[key];
+        if (!selected) continue;
+        if (key !== "chat") result[key] = check(selected);
+        notes[key] = { reason: config.notes?.[key]?.reason ?? "手动选择" };
+    }
+    return { config: result, notes };
+}
+
 export async function checkSelected(
     config: Config,
     providers: Provider[],

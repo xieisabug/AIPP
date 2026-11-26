@@ -1223,6 +1223,7 @@ pub fn run() {
             get_assistants,
             get_assistant,
             onboarding::check_onboarding_agent,
+            onboarding::test_onboarding_agent_model,
             get_agent_model_options,
             api::ai::agent_driver::native_agents::auth::login_antigravity,
             api::ai::agent_driver::native_agents::auth::get_antigravity_login_status,

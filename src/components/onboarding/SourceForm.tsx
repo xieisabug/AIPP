@@ -265,7 +265,7 @@ export function SourceForm({
                 ? !!otherSource
                 : source === "agent" && !!agent;
     if (showingModels && modelSource) {
-        return <LieFlatModels source={modelSource} footer={footer} busy={busy} run={run} progress={progress} onChecked={onChecked} />;
+        return <LieFlatModels source={modelSource} footer={footer} busy={busy} run={run} onChecked={onChecked} />;
     }
     if (catalog)
         return (

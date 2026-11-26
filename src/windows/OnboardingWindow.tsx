@@ -42,7 +42,7 @@ import {
     modelRoles, rankedRoles, selectRecommended, selectRecommendedRoles,
 } from "@/components/onboarding/roleRecommendations";
 import { SetupList, setupNames, useSetupItems, type SetupId } from "@/components/onboarding/OnboardingSetup";
-import { checkSelected, type Checked, type Notes } from "@/components/onboarding/verifySources";
+import { catalogRoleChecker, checkSelected, lieFlatSelection, type Checked, type Notes } from "@/components/onboarding/verifySources";
 import {
     askModel,
     deadline,
@@ -526,6 +526,14 @@ export default function OnboardingWindow() {
         }
         setPage("roles");
     }
+    function checkRoleForPath() {
+        return path === "lie_flat" ? catalogRoleChecker(models.map(roleOf)) : probeSession(deadline(), setProgress, providers);
+    }
+    function checkEditedSelection(selection: Config) {
+        return path === "lie_flat"
+            ? lieFlatSelection(selection, catalogRoleChecker(models.map(roleOf)))
+            : checkSelected(selection, providers, setProgress, status?.draft.config);
+    }
     async function submitRoles() {
         if (editing || addingApi) {
             let c = config;
@@ -537,7 +545,7 @@ export default function OnboardingWindow() {
                 roleKey(c.butler) === roleKey(previous.butler)
             ) {
                 const changes: Partial<Pick<Config, "light" | "review" | "clearLight" | "clearReview" | "notes">> = {};
-                const probe = probeSession(deadline(), setProgress, providers);
+                const checkRole = checkRoleForPath();
                 const nextNotes = { ...notes };
                 const failed: Partial<Pick<Config, "light" | "review">> = {};
                 for (const key of ["light", "review"] as const) {
@@ -550,7 +558,7 @@ export default function OnboardingWindow() {
                     }
                     if (!chosen || roleKey(chosen) === roleKey(previous[key])) continue;
                     try {
-                        changes[key] = chosen.verified ? chosen : await probe(chosen);
+                        changes[key] = chosen.verified ? chosen : await checkRole(chosen);
                         nextNotes[key] = { reason: c.notes?.[key]?.reason ?? "手动选择" };
                         changes.notes = { ...changes.notes, [key]: nextNotes[key] };
                     } catch (e) {
@@ -576,7 +584,7 @@ export default function OnboardingWindow() {
                 setPage("done");
                 return;
             }
-            await accept(await checkSelected(c, providers, setProgress, previous));
+            await accept(await checkEditedSelection(c));
             return;
         }
         setConfig((c) => ({ ...c, butler: c.butler ?? c.chat }));
@@ -585,9 +593,9 @@ export default function OnboardingWindow() {
     async function retryRole(key: "light" | "review") {
         const value = config[key];
         if (!value) return;
-        const probe = probeSession(deadline(), setProgress, providers);
+        const checkRole = checkRoleForPath();
         try {
-            const verified = await probe(value);
+            const verified = await checkRole(value);
             const update: Partial<Config> = { [key]: verified };
             if (roleKey(config.light) === roleKey(config.review)) {
                 update.light = verified;
@@ -1098,12 +1106,7 @@ export default function OnboardingWindow() {
                                                 if (provider) {
                                                     await loginAgent(provider);
                                                     await accept(
-                                                        await checkSelected(
-                                                            config,
-                                                            providers,
-                                                            setProgress,
-                                                            status?.draft.config
-                                                        )
+                                                        await checkEditedSelection(config)
                                                     );
                                                 }
                                             })

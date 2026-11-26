@@ -50,6 +50,33 @@ pub async fn check_onboarding_agent(
     Ok(catalog.into_iter().map(|(code, _)| code).collect())
 }
 
+/// Only the manual test button runs a generation. Discovery never calls this command.
+#[tauri::command]
+pub async fn test_onboarding_agent_model(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    provider_id: i64,
+    model_code: String,
+) -> Result<(), String> {
+    require_window(&window)?;
+    let db = LLMDatabase::new(&app).map_err(err)?;
+    let provider = db.get_llm_provider(provider_id).map_err(err)?;
+    let model = match model_code.as_str() {
+        "acp" | "__agent_default__" => None,
+        code => {
+            db.get_llm_model_detail(&provider_id, code)
+                .map_err(|e| format!("无法读取 {} 的模型 {code}：{e}", provider.name))?;
+            Some(code)
+        }
+    };
+    let settings = db.get_llm_provider_config(provider_id).map_err(err)?;
+    let features = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
+    let channel = crate::api::ai::light_model::LocalChannel::new(&app, &provider, &settings, &features).map_err(err)?;
+    channel.text(model, "请仅回复 OK。").await
+        .map(|_| ())
+        .map_err(|e| format!("{}（{}）测试失败：{e}", provider.name, model.unwrap_or("通道默认模型")))
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Draft {

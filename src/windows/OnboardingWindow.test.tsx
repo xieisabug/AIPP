@@ -56,8 +56,7 @@ function setup() {
         draft: { providers: [] },
     };
     let provider: Provider | undefined;
-    let balance = 5,
-        aux = false;
+    let balance = 5;
     const cfg: Record<string, string> = {};
     const configure = (patch: Partial<OnboardingState>) => {
         state = { ...state, ...patch };
@@ -95,7 +94,7 @@ function setup() {
         available_models: ["main", "small"].map((code) => ({ code, request_mode: "chat_completions" })),
     }));
     mockInvokeHandler("probe_chat_model", (args) =>
-        args?.modelCode === "small" && !aux
+        args?.modelCode === "small"
             ? { ok: false, kind: "rate_limited", message: "429" }
             : { ok: true, kind: "ok", message: "" }
     );
@@ -123,9 +122,6 @@ function setup() {
         configure,
         balance: (value: number) => {
             balance = value;
-        },
-        allowAux: () => {
-            aux = true;
         },
     };
 }
@@ -290,7 +286,7 @@ describe("first-run window", () => {
         expect(invoke.mock.calls.some(([cmd]) => cmd === "apply_onboarding_config")).toBe(false);
         fireEvent.click(apply);
     }
-    it("来源页点下一步可浏览 13 个模型、返回并手动选择，应用时仅验证所选型号", async () => {
+    it("来源页点下一步可浏览 13 个模型、返回并手动选择，应用时直接保存所选型号", async () => {
         setup();
         const codes = Array.from({ length: 13 }, (_, index) => `chat-${index + 1}`);
         mockInvokeHandler("preview_model_list", () => ({
@@ -319,18 +315,61 @@ describe("first-run window", () => {
         fireEvent.click(screen.getByRole("button", { name: "应用" }));
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "preview_model_list")).toHaveLength(1);
-        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model").map(([,args]) => args?.modelCode))
-            .toEqual(["chat-13", "chat-7"]);
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(0);
+        expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", { config: expect.objectContaining({
+            chat: { providerId: 44, code: "chat-13", verified: true },
+            light: { providerId: 44, code: "chat-7", verified: true },
+            review: { providerId: 44, code: "chat-7", verified: true },
+        }) });
     });
-    it("网关返回含义不明的 404 时允许手动选协议，再点击应用才重试", async () => {
+    it("只在点击测试时请求当前角色，切换型号后忽略旧结果，测试失败仍能应用", async () => {
         setup();
-        let protocol: unknown;
+        let finishOld!: (value: { ok: boolean; message: string }) => void;
+        mockInvokeHandler("probe_chat_model", args => args?.modelCode === "main"
+            ? new Promise(resolve => { finishOld = resolve; })
+            : { ok: false, kind: "rate_limited", message: "429 额度限制" });
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        const select = await screen.findByLabelText("主力模型");
+        const test = () => screen.getByRole("button", { name: "测试主力模型" });
+        expect(test()).toBeDisabled();
+        fireEvent.change(select, { target: { value: "main" } });
+        fireEvent.click(test());
+        expect(test()).toBeDisabled();
+        fireEvent.change(select, { target: { value: "small" } });
+        fireEvent.click(test());
+        expect(await screen.findByRole("alert")).toHaveTextContent("429 额度限制");
+        await act(async () => finishOld({ ok: true, message: "" }));
+        expect(screen.queryByText("测试成功")).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model").map(([, args]) => args))
+            .toEqual([{ providerId: 44, modelCode: "main" }, { providerId: 44, modelCode: "small" }]);
+    });
+    it("点击本机轻量模型的测试按钮时，通过该实例的原生通道发送请求", async () => {
+        setup();
+        mockInvokeHandler("test_onboarding_agent_model", () => null);
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: "Codex · 已安装" }));
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        fireEvent.change(await screen.findByLabelText("轻量模型"), { target: { value: "agent-small%%44" } });
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "test_onboarding_agent_model")).toBe(false);
+        fireEvent.click(screen.getByRole("button", { name: "测试轻量模型" }));
+        expect(await screen.findByText("测试成功")).toBeVisible();
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "test_onboarding_agent_model").map(([, args]) => args))
+            .toEqual([{ providerId: 44, modelCode: "agent-small" }]);
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
+    });
+    it("躺平模式直接保存网关目录中的模型，不探测聊天协议", async () => {
+        setup();
         mockInvokeHandler("preview_model_list", () => ({
             available_models: [{ code: "gateway-model", request_mode: "chat_completions" }],
         }));
-        mockInvokeHandler("probe_chat_model", () => protocol === "chat_completions"
-            ? { ok: true } : { ok: false, kind: "choose_protocol", message: "gateway-model (responses): 404 Not Found" });
-        mockInvokeHandler("update_llm_model_request_mode", args => { protocol = args?.requestMode; });
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.click(await screen.findByRole("button", { name: /我用的是其他服务商/ }));
@@ -341,15 +380,10 @@ describe("first-run window", () => {
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
         fireEvent.change(await screen.findByLabelText("主力模型"), { target: { value: "gateway-model" } });
         fireEvent.click(screen.getByRole("button", { name: "应用" }));
-        expect(await screen.findByRole("alert")).toHaveTextContent("404 Not Found");
-        fireEvent.change(screen.getByLabelText("请求协议 · gateway-model"), { target: { value: "chat_completions" } });
-        await waitFor(() => expect(screen.getByRole("button", { name: "应用" })).toBeEnabled());
-        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(1);
-        fireEvent.click(screen.getByRole("button", { name: "应用" }));
         await screen.findByRole("heading", { name: "好了，可以开始了" });
-        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(2);
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model" || cmd === "update_llm_model_request_mode")).toBe(false);
     });
-    it.each([false, true])("躺平添加提供商只获取列表，应用选定模型才试调用（首次列表失败：%s）", async (listFailsOnce) => {
+    it.each([false, true])("躺平添加提供商只获取列表，应用选定模型不试调用（首次列表失败：%s）", async (listFailsOnce) => {
         setup();
         if (listFailsOnce) {
             let first = true;
@@ -375,9 +409,9 @@ describe("first-run window", () => {
         await screen.findByRole("heading", { name: "好了，可以开始了" });
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "preview_model_list")).toHaveLength(listFailsOnce ? 2 : 1);
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "add_llm_provider")).toHaveLength(1);
-        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
     });
-    it("躺平分享码在下一步导入，进入模型页后才可试调用", async () => {
+    it("躺平分享码在下一步导入，选模后直接保存", async () => {
         setup();
         mockInvokeHandler("import_llm_provider", () => ({ id: 17, api_type: "openai_api", name: "示例", is_enabled: false }));
         render(<OnboardingWindow />);
@@ -391,10 +425,10 @@ describe("first-run window", () => {
         fireEvent.click(select);
         await selectRecommendedAndApply();
         await screen.findByRole("heading", { name: "好了，可以开始了" });
-        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(false);
     });
     it("躺平保留全部型号，审核默认 Flash，点击帮我选后使用角色评分", async () => {
-        setup().allowAux();
+        setup();
         const codes = ["small", "deepseek-flash", "main", "embedding-test"];
         mockInvokeHandler("preview_model_list", () => ({
             available_models: codes.map(code => ({
@@ -414,36 +448,33 @@ describe("first-run window", () => {
             models: [{ providerId: 44, codes }],
             review: { providerId: 44, code: "small", verified: true },
         }) });
-        expect(invoke).toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "small" });
-        expect(invoke).not.toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "embedding-test" });
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(0);
     });
-    it("should complete a verified primary source while its shared auxiliary model fails and can retry independently", async () => {
-        const backend = setup();
+    it("躺平完成后更换主力或辅助模型均直接保存", async () => {
+        setup();
+        const provider = { id: 44, name: "DeepSeek", api_type: "deepseek", is_enabled: true };
+        mockInvokeHandler("get_llm_providers", () => [provider]);
+        mockInvokeHandler("get_filtered_models_for_select", args => args?.assistantType === 4 ? [] :
+            ["main", "small"].map((code, i) => ({ llm_provider_id: 44, id: i + 1, name: code, code })));
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
         await selectRecommendedAndApply();
-        expect(await screen.findByRole("heading", { name: "好了，可以开始了" })).toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "开始使用" })).toBeEnabled();
-        expect(invoke.mock.calls.filter(([c]) => c === "probe_chat_model")).toHaveLength(2);
-        expect(screen.getByText("需要审核的操作会请你确认。")).toBeInTheDocument();
-        backend.allowAux();
-        fireEvent.click(screen.getByRole("button", { name: "重试轻量与审核" }));
-        await waitFor(() =>
-            expect(invoke).toHaveBeenCalledWith(
-                "update_onboarding_roles",
-                expect.objectContaining({
-                    light: { providerId: 44, code: "small", verified: true },
-                    review: { providerId: 44, code: "small", verified: true },
-                })
-            )
-        );
-        await waitFor(() =>
-            expect(screen.queryByRole("button", { name: "重试轻量与审核" })).not.toBeInTheDocument()
-        );
-        fireEvent.click(screen.getByRole("button", { name: "开始使用" }));
-        await waitFor(() => expect(invoke).toHaveBeenCalledWith("finish_onboarding"));
+        fireEvent.click(await screen.findByRole("button", { name: "换一个" }));
+        fireEvent.change(await screen.findByLabelText("轻量模型"), { target: { value: "main%%44" } });
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("update_onboarding_roles", expect.objectContaining({
+            light: { providerId: 44, code: "main", verified: true },
+        })));
+        fireEvent.click(await screen.findByRole("button", { name: "换一个" }));
+        fireEvent.change(await screen.findByLabelText("新对话默认使用"), { target: { value: "small%%44" } });
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", { config: expect.objectContaining({
+            chat: { providerId: 44, code: "small", verified: true },
+            butler: { providerId: 44, code: "small", verified: true },
+        }) }));
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(0);
     });
     it("should resume the saved provider at its balance check without another key or provider", async () => {
         const backend = setup();
@@ -485,6 +516,7 @@ describe("first-run window", () => {
             }),
         });
         expect(invoke.mock.calls.some(([c]) => c === "probe_chat_model")).toBe(false);
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "check_onboarding_agent")).toHaveLength(1);
     });
     it("should recheck the same Cursor account after browser login and then apply its native role", async () => {
         setup();
