@@ -1517,9 +1517,6 @@ pub async fn ask_ai(
     );
     let mut runtime_user_prompt_prefix = runtime_user_prompt_prefix;
     let mut request = request;
-    // 管家工作记录会话：本轮附加上下文里需要带上当前工作记录（与历史里最近一次相同时不重复）。
-    let mut butler_goal_conversation = false;
-    // Claim intent before any asynchronous model/plugin preparation. Queued requests
     #[cfg(desktop)]
     let remote_chat = crate::host_bridge::chat::is_remote();
     #[cfg(not(desktop))]
@@ -1531,6 +1528,9 @@ pub async fn ask_ai(
         }
         crate::host_bridge::chat::begin_turn(id).await;
     }
+    // 管家工作记录会话：本轮附加上下文里需要带上当前工作记录（与历史里最近一次相同时不重复）。
+    let mut butler_goal_conversation = false;
+    // Claim intent before any asynchronous model/plugin preparation. Queued requests
     // carry their original version and cannot resurrect an obsolete requirement.
     if let Ok(id) = request.conversation_id.parse::<i64>() {
         let db = ConversationDatabase::new(&app_handle)?;
@@ -1827,13 +1827,13 @@ pub async fn ask_ai(
         Some(guard)
     } else { None };
     let mut user_metadata = work_context.metadata.clone();
-    if let Some(key) = processed_request.client_request_id {
-        user_metadata.get_or_insert_with(|| serde_json::json!({}))["client_request_id"] = serde_json::json!(key);
-    }
     #[cfg(desktop)]
     if remote_chat {
         crate::host_bridge::chat::check_before_execution(&app_handle,processed_request.assistant_id).await
             .map_err(|e| AppError::UnknownError(e.to_string()))?;
+    }
+    if let Some(key) = processed_request.client_request_id {
+        user_metadata.get_or_insert_with(|| serde_json::json!({}))["client_request_id"] = serde_json::json!(key);
     }
     let (
         conversation_id,
