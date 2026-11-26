@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import NewChatComponent from "./NewChatComponent";
@@ -114,7 +115,7 @@ describe("NewChatComponent setup guide (#155)", () => {
         layout.isMobilePlatform = true;
     });
 
-    const renderWith = (assistantModel: { provider_id: number; model_code: string } | null) => {
+    const renderWith = (assistantModel: { provider_id: number; model_code: string } | null, hasAssistant = true) => {
         invokeMock.mockImplementation((command: string) => {
             if (command === "get_llm_providers") return Promise.resolve([{ id: 1, is_enabled: true }]);
             if (command === "get_models_for_select") return Promise.resolve([{ code: "m1", llm_provider_id: 1 }]);
@@ -126,9 +127,9 @@ describe("NewChatComponent setup guide (#155)", () => {
         render(
             <NewChatComponent
                 selectedText=""
-                selectedAssistant={1}
+                selectedAssistant={hasAssistant ? 1 : -1}
                 setSelectedAssistant={vi.fn()}
-                assistants={[{ id: 1, name: "助手", assistant_type: 0 }]}
+                assistants={hasAssistant ? [{ id: 1, name: "助手", assistant_type: 0 }] : []}
                 selectedModel=""
                 selectedEffort=""
                 selectedApprovalPolicy=""
@@ -159,6 +160,19 @@ describe("NewChatComponent setup guide (#155)", () => {
         const unsubscribe = subscribeMobileConfigNavigation(receive);
         try {
             expect(receive).toHaveBeenCalledExactlyOnceWith({ menu: "assistant-config", subNav: undefined });
+        } finally {
+            unsubscribe();
+            navigateMobile("chat_ui");
+        }
+    });
+
+    it("should open the add action from the empty setup guide when mobile settings mounts", async () => {
+        renderWith(null, false);
+        fireEvent.click(await screen.findByRole("button", { name: "创建助手" }));
+        const receive = vi.fn();
+        const unsubscribe = subscribeMobileConfigNavigation(receive);
+        try {
+            expect(receive).toHaveBeenCalledExactlyOnceWith({ menu: "assistant-config", subNav: "create" });
         } finally {
             unsubscribe();
             navigateMobile("chat_ui");
@@ -215,6 +229,25 @@ describe("NewChatComponent setup guide placement on desktop", () => {
         renderDesktop([], { provider_id: 1, model_code: "m1" });
         expect(await screen.findByText(/还没有模型提供商/)).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "配置模型提供商" })).toBeInTheDocument();
-        expect(screen.queryByRole("button", { name: /助手/ })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "配置助手" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "创建助手" })).not.toBeInTheDocument();
+    });
+
+    it("should open settings once and keep the current assistant when creating from the menu", async () => {
+        const user = userEvent.setup();
+        renderDesktop([{ id: 1, is_enabled: true }], { provider_id: 1, model_code: "m1" });
+        const selector = screen.getByRole("button", { name: "快速使用助手" });
+        selector.focus();
+        await user.keyboard("{ArrowDown}");
+        expect(screen.getByRole("menuitemradio", { name: "快速使用助手" })).toBeChecked();
+        const create = screen.getByRole("menuitem", { name: "创建助手" });
+        await user.keyboard("{End}");
+        await waitFor(() => expect(create).toHaveFocus());
+        await user.keyboard("{Enter}");
+        expect(invokeMock.mock.calls.filter(([command]) => command === "open_config_window")).toEqual([
+            ["open_config_window", { navigation: { menu: "assistant-config", subNav: "create" } }],
+        ]);
+        expect(selector).toHaveTextContent("快速使用助手");
+        expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     });
 });

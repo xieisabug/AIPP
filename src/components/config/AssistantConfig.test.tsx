@@ -17,7 +17,14 @@ vi.mock("@/components/common", () => ({
     EmptyState: () => <div>empty</div>,
     ConfigPageLoading: () => <div>loading</div>,
 }));
-vi.mock("./AddAssistantDialog", () => ({ default: () => null }));
+vi.mock("./AddAssistantDialog", () => ({
+    default: ({ open, onOpenChange, onAssistantAdded }: {
+        open: boolean; onOpenChange: (open: boolean) => void; onAssistantAdded: (assistant: AssistantDetail) => void;
+    }) => open ? <div role="dialog" aria-label="新增助手">
+        <button onClick={() => onOpenChange(false)}>取消</button>
+        <button onClick={() => { onAssistantAdded(detail(7)); onOpenChange(false); }}>完成</button>
+    </div> : null,
+}));
 vi.mock("./assistant/AssistantDialogs", () => ({ AssistantDialogs: () => null }));
 vi.mock("@/hooks/assistant/useAssistantFormConfig", () => ({
     useAssistantFormConfig: ({ pluginAssistantConfigValues }: { pluginAssistantConfigValues: Record<string, unknown> }) => ({ formConfig: pluginAssistantConfigValues }),
@@ -73,6 +80,29 @@ function setup() {
 
 describe("AssistantConfig sync selection", () => {
     afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
+
+    it.each([{ ids: [] }, { ids: [1, 3] }])("should open add once and allow a later request with initial assistants $ids", async ({ ids }) => {
+        mockInvokeHandler("get_assistants", () => ids.map(id => detail(id).assistant));
+        mockInvokeHandler("get_assistant", args => detail(Number(args?.assistantId)));
+        mockInvokeHandler("get_plugin_assistant_configs", () => []);
+        function Harness() {
+            const [target, setTarget] = useState<string | undefined>("create");
+            return <>
+                <button onClick={() => setTarget("create")}>再次请求添加</button>
+                <AssistantConfig pluginList={plugins} navigateTo={() => undefined} subNav={target}
+                    onSubNavConsumed={() => setTarget(undefined)} />
+            </>;
+        }
+        render(<StrictMode><Harness /></StrictMode>);
+        expect(await screen.findByRole("dialog", { name: "新增助手" })).toBeVisible();
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        fireEvent.click(screen.getByRole("button", { name: "再次请求添加" }));
+        expect(await screen.findByRole("dialog", { name: "新增助手" })).toBeVisible();
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-7"));
+        expect(screen.getByTestId("selected")).toHaveTextContent("7");
+    });
 
     it("selects the assistant requested when settings open", async () => {
         mockInvokeHandler("get_assistants", () => [1, 2, 3].map((id) => detail(id).assistant));

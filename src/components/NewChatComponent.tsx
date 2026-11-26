@@ -1,15 +1,18 @@
 import { openOnboarding, useOnboardingEntry } from "./onboarding/OnboardingSetup";
 import AskWindowPrepare from "./AskWindowPrepare";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import {
+    DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup,
+    DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Button } from "./ui/button";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { navigateMobileConfig } from "@/mobile/navigation";
-import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck, CircleAlert } from "lucide-react";
+import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck, CircleAlert, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { getErrorMessage } from "@/utils/error";
@@ -238,20 +241,26 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
         },
     });
 
-    const openConfigMenu = async (menu: string) => {
+    const openConfigMenu = async (menu: string, subNav?: string) => {
         if (isMobilePlatform) {
-            navigateMobileConfig(menu);
+            navigateMobileConfig(menu, subNav);
             return;
         }
         try {
-            await invoke("open_config_window");
-            window.setTimeout(() => {
-                void emit("config-navigate-to", { menu });
-            }, 50);
+            await invoke("open_config_window", { navigation: { menu, subNav } });
         } catch (error) {
-            console.error("open config failed", error);
+            toast.error(`打开设置失败：${getErrorMessage(error)}`);
         }
     };
+    const createAssistant = () => { void openConfigMenu("assistant-config", "create"); };
+    const nameWithAvailability = (assistant: AssistantListItem) => (
+        <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate">{assistant.name}</span>
+            {isMobilePlatform && !isMobileExecutableAssistantType(assistant.assistant_type) && (
+                <span className="shrink-0 text-[10px] text-muted-foreground">此设备不可执行</span>
+            )}
+        </span>
+    );
 
     // 移动平台不需要拖动区域（桌面窄窗口仍保持可拖动）
     const dragProps = isMobilePlatform ? {} : { "data-tauri-drag-region": true };
@@ -273,35 +282,42 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                         : "请选择一个对话，或者选择一个助手开始新聊天"}
                 </p>
             </div>
-            <Select
-                value={selectedAssistant.toString()}
-                onValueChange={(value) => setSelectedAssistant(Number(value))}
-            >
-                <SelectTrigger className="mt-4 w-88 max-w-full" data-aipp-slot="chat-new-conversation-assistant-select">
-                    <SelectValue placeholder="选择一个助手" />
-                </SelectTrigger>
-                <SelectContent>
-                    {assistants.map((assistant) => {
-                        const executable = !isMobilePlatform || isMobileExecutableAssistantType(assistant.assistant_type);
-                        return (
-                            <SelectItem key={assistant.id} value={assistant.id.toString()}>
-                                <span className="flex items-center gap-2">
-                                    <span>{assistant.name}</span>
-                                    {!executable && (
-                                        <span className="text-[10px] text-muted-foreground">此设备不可执行</span>
-                                    )}
-                                </span>
-                            </SelectItem>
-                        );
-                    })}
-                </SelectContent>
-            </Select>
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className={`mt-4 w-88 max-w-full justify-between font-normal ${isMobilePlatform ? "min-h-11" : ""}`}
+                        data-aipp-slot="chat-new-conversation-assistant-select"
+                    >
+                        {selectedAssistantInfo ? nameWithAvailability(selectedAssistantInfo) : "选择一个助手"}
+                        <ChevronDown className="size-4 opacity-50" />
+                    </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="flex w-(--radix-dropdown-menu-trigger-width) flex-col overflow-hidden">
+                    {assistants.length > 0 && <>
+                        <DropdownMenuRadioGroup value={String(selectedAssistant)} onValueChange={(value) => setSelectedAssistant(Number(value))}
+                            className="min-h-0 overflow-y-auto">
+                            {assistants.map(assistant => (
+                                <DropdownMenuRadioItem key={assistant.id} value={String(assistant.id)} textValue={assistant.name}
+                                    className={isMobilePlatform ? "min-h-11" : undefined}>
+                                    {nameWithAvailability(assistant)}
+                                </DropdownMenuRadioItem>
+                            ))}
+                        </DropdownMenuRadioGroup>
+                        <DropdownMenuSeparator className="shrink-0" />
+                    </>}
+                    <DropdownMenuItem onSelect={createAssistant} className={isMobilePlatform ? "min-h-11 shrink-0" : "shrink-0"}>
+                        <Plus /> 创建助手
+                    </DropdownMenuItem>
+                </DropdownMenuContent>
+            </DropdownMenu>
             {setupGuide ? (
                 <SetupGuideNotice
                     guide={setupGuide}
                     touchFriendly={isMobilePlatform}
                     onConfigureProviders={() => { void openConfigMenu("llm-provider-config"); }}
-                    onConfigureAssistant={() => { void openConfigMenu("assistant-config"); }}
+                    onConfigureAssistant={setupGuide.kind === "no_assistant" ? createAssistant : () => { void openConfigMenu("assistant-config"); }}
                 />
             ) : null}
             {isMobilePlatform && isAgentAssistant ? (

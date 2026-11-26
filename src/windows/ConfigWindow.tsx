@@ -246,6 +246,32 @@ function ConfigWindow() {
         });
     }, [isMobilePlatform, navigateResolved]);
 
+    const navigateRef = useRef(navigateResolved);
+    navigateRef.current = navigateResolved;
+    useEffect(() => {
+        const configWindow = getCurrentWebviewWindow();
+        if (configWindow.label !== "config") return;
+        let active = true;
+        const readDestination = async () => {
+            if (!active) return;
+            try {
+                const target = await invoke<{ menu: string; subNav?: string } | null>("take_config_navigation");
+                if (active && target) navigateRef.current(target.menu, target.subNav);
+            } catch (error) {
+                if (active) toast.error(`读取设置导航失败：${error}`);
+            }
+        };
+        // 先订阅再读一次，覆盖窗口仍在启动和窗口已打开两种情况。
+        const subscription = configWindow.listen("config-navigation-pending", readDestination);
+        void subscription.then(readDestination).catch(error => {
+            if (active) toast.error(`订阅设置导航失败：${error}`);
+        });
+        return () => {
+            active = false;
+            void subscription.then(unlisten => unlisten(), () => {});
+        };
+    }, []);
+
     useEffect(() => {
         let active = true;
         const consume = (event?: SettingsRouteRequest) => {
@@ -444,7 +470,7 @@ function ConfigWindow() {
                             >
                                 {renderMenuItems((id, nextSubNav) => {
                                     requestConfigLeave(() => {
-                                        if (nextSubNav !== undefined) setSubNav(nextSubNav);
+                                        setSubNav(nextSubNav);
                                         goToSection(id);
                                         setSidebarOpen(false);
                                     });
@@ -518,7 +544,7 @@ function ConfigWindow() {
                     {macOverlayTitleBar && <WindowTitleBar className="-mx-3 mb-2" data-aipp-slot="config-titlebar" />}
                     {renderMenuItems((id, nextSubNav) => {
                         requestConfigLeave(() => {
-                            if (nextSubNav !== undefined) setSubNav(nextSubNav);
+                            setSubNav(nextSubNav);
                             goToSection(id);
                         });
                     })}

@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
-import { Bot, Settings, User, ClipboardPaste } from "lucide-react";
+import { Bot, Settings, User, ClipboardPaste, Plus } from "lucide-react";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
@@ -51,7 +51,7 @@ import type { AgentModelOption } from "@/utils/agentDefaults";
 interface AssistantConfigProps {
     pluginList: LoadedPlugin[];
     navigateTo: (menuKey: string, subNav?: string) => void;
-    /** 从其他窗口打开设置时要选中的助手 id。 */
+    /** 助手 id 或打开添加界面的 create。 */
     subNav?: string;
     onSubNavConsumed?: () => void;
 }
@@ -319,6 +319,20 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
     // 首次进入：列表与首个助手详情（含表单回填）都完成后才展示，避免先闪空状态/空表单
     const [initialLoaded, setInitialLoaded] = useState(false);
+    const [addOpen, setAddOpen] = useState(false);
+    const [mobileDetailRequest, setMobileDetailRequest] = useState(0);
+    const openAddAssistant = useCallback(() => {
+        if (isFormDirtyNow()) {
+            setLeavePrompt({ proceed: () => setAddOpen(true) });
+            return;
+        }
+        setAddOpen(true);
+    }, [isFormDirtyNow, setLeavePrompt]);
+    useEffect(() => {
+        if (!initialLoaded || subNav !== "create") return;
+        openAddAssistant();
+        onSubNavConsumed?.();
+    }, [initialLoaded, subNav, openAddAssistant, onSubNavConsumed]);
     // 打开设置时指定的助手。在渲染阶段写入，这样列表请求返回时一定读得到；
     // 不要在副作用里立刻清掉父组件传来的 subNav，否则开发模式重放副作用后第二次只会选中第一个助手。
     const requestedAssistantIdRef = useRef<number | null>(null);
@@ -649,6 +663,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             invalidateSelection();
             addAssistant(assistantDetail);
             void handleChooseAssistant(assistantDetail.assistant, true);
+            setMobileDetailRequest(value => value + 1);
         },
         [addAssistant, invalidateSelection, handleChooseAssistant]
     );
@@ -715,16 +730,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const addButton = useMemo(
         () => (
             <div className="flex gap-2">
-                <AddAssistantDialog
-                    assistantTypes={assistantTypes}
-                    onAssistantAdded={handleAssistantAdded}
-                    pluginList={pluginList}
-                    navigateTo={navigateTo}
-                    triggerButtonProps={{
-                        className:
-                            "gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all",
-                    }}
-                />
+                <Button iconLabel="添加助手" onClick={openAddAssistant}
+                    className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all">
+                    <Plus className="h-4 w-4" />
+                </Button>
                 <Tooltip delayDuration={500}>
                     <TooltipTrigger asChild>
                         <Button
@@ -740,7 +749,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 </Tooltip>
             </div>
         ),
-        [assistantTypes, handleAssistantAdded, openImportDialog, pluginList, navigateTo]
+        [openAddAssistant, openImportDialog]
     );
 
     // 按搜索词过滤助手（支持拼音）
@@ -838,6 +847,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         </AlertDialog></>
     );
 
+    const addDialog = (
+        <AddAssistantDialog open={addOpen} onOpenChange={setAddOpen} assistantTypes={assistantTypes}
+            onAssistantAdded={handleAssistantAdded} pluginList={pluginList} navigateTo={navigateTo} />
+    );
+
     const waitingForAssistant = parseAssistantSubNav(subNav);
     // 指定了助手时先不要画出上一个或列表里的第一个，窗口显示出来就是目标助手。
     if (!initialLoaded || (waitingForAssistant != null && (Number(currentAssistant?.assistant.id) !== waitingForAssistant || formAssistantId !== waitingForAssistant))) {
@@ -855,31 +869,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             icon={<Bot className="h-8 w-8 text-muted-foreground" />}
                             title="还没有配置助手"
                             description="创建你的第一个AI助手，开始享受个性化的智能对话体验"
-                            action={
-                                <div className="flex flex-col gap-3">
-                                    <div className="flex gap-2 justify-center">
-                                        <AddAssistantDialog
-                                            assistantTypes={assistantTypes}
-                                            onAssistantAdded={handleAssistantAdded}
-                                            pluginList={pluginList}
-                                            navigateTo={navigateTo}
-                                        />
-                                        <Tooltip delayDuration={500}>
-                                            <TooltipTrigger asChild>
-                                                <Button
-                                                    variant="outline"
-                                                    onClick={openImportDialog}
-                                                    iconLabel="导入助手"
-                                                    className="shadow-lg hover:shadow-xl transition-all"
-                                                >
-                                                    <ClipboardPaste className="h-4 w-4" />
-                                                </Button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>导入助手</TooltipContent>
-                                        </Tooltip>
-                                    </div>
-                                </div>
-                            }
+                            action={addButton}
                         />
                     }
                 />
@@ -898,6 +888,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     onCloseImport={closeImportDialog}
                 />
                 {leaveDialog}
+                {addDialog}
             </>
         );
     }
@@ -912,6 +903,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 onSelectOption={handleSelectFromDropdown}
                 selectPlaceholder="选择助手"
                 addButton={addButton}
+                mobileDetailRequest={mobileDetailRequest}
             />
 
             <AssistantDialogs
@@ -929,6 +921,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             />
 
             {leaveDialog}
+            {addDialog}
         </>
     );
 };

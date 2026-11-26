@@ -346,14 +346,18 @@ fn create_ask_window_with_visibility(app: &AppHandle, visible: bool) {
 }
 
 pub fn create_config_window(app: &AppHandle) {
-    create_config_window_with_visibility(app, true);
+    if let Err(error) = create_config_window_with_visibility(app, true) {
+        error!(%error, "Failed to build config window");
+    }
 }
 
 pub fn create_config_window_hidden(app: &AppHandle) {
-    create_config_window_with_visibility(app, false);
+    if let Err(error) = create_config_window_with_visibility(app, false) {
+        error!(%error, "Failed to build hidden config window");
+    }
 }
 
-fn create_config_window_with_visibility(app: &AppHandle, visible: bool) {
+fn create_config_window_with_visibility(app: &AppHandle, visible: bool) -> tauri::Result<()> {
     #[cfg(desktop)]
     {
         let (window_size, window_position) =
@@ -385,31 +389,26 @@ fn create_config_window_with_visibility(app: &AppHandle, visible: bool) {
         #[cfg(target_os = "windows")]
         let window_builder = with_windows_custom_titlebar(window_builder);
 
-        match window_builder.build() {
-            Ok(window) => {
-                info!(visible=%visible, "Config window built");
-                let window_clone = window.clone();
-                let app_handle = app.clone();
-                window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        window_clone.hide().unwrap();
-                        // 发送窗口隐藏事件，让前端重置状态
-                        let _ = app_handle.emit_to("config", "config-window-hidden", ());
-                    }
-                });
+        let window = window_builder.build()?;
+        info!(visible=%visible, "Config window built");
+        let window_clone = window.clone();
+        let app_handle = app.clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window_clone.hide().unwrap();
+                app_handle.state::<PendingConfigNavigation>().0.lock().unwrap().take();
+                let _ = app_handle.emit_to("config", "config-window-hidden", ());
             }
-            Err(e) => error!(error=%e, "Failed to build window"),
-        }
+        });
     }
     #[cfg(mobile)]
     {
         let window_builder =
             WebviewWindowBuilder::new(app, "config", WebviewUrl::App("index.html".into()));
-        if let Err(e) = window_builder.build() {
-            error!(error=%e, "Failed to build window");
-        }
+        window_builder.build()?;
     }
+    Ok(())
 }
 
 pub fn create_chat_ui_window(app: &AppHandle) {
@@ -755,10 +754,33 @@ pub async fn open_artifact_preview_window(
     Ok(())
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigNavigation {
+    menu: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub_nav: Option<String>,
+}
+
+#[derive(Default)]
+pub struct PendingConfigNavigation(std::sync::Mutex<Option<ConfigNavigation>>);
+
+#[tauri::command]
+pub fn take_config_navigation(
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, PendingConfigNavigation>,
+) -> Result<Option<ConfigNavigation>, String> {
+    if window.label() != "config" {
+        return Err("只有设置窗口可以读取待处理的设置导航".into());
+    }
+    Ok(pending.0.lock().unwrap().take())
+}
+
 #[tauri::command]
 pub async fn open_config_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
+    navigation: Option<ConfigNavigation>,
 ) -> Result<(), String> {
     if let Some(window) = app_handle.get_webview_window("config") {
         debug!("Showing config window");
@@ -766,15 +788,24 @@ pub async fn open_config_window(
         {
             reposition_to_source_monitor(&app_handle, &window, &source_window);
             if window.is_minimized().unwrap_or(false) {
-                window.unminimize().unwrap();
+                window.unminimize().map_err(|e| format!("还原设置窗口失败：{e}"))?;
             }
-            window.show().unwrap();
-            window.set_focus().unwrap();
+            window.show().map_err(|e| format!("显示设置窗口失败：{e}"))?;
+            window.set_focus().map_err(|e| format!("聚焦设置窗口失败：{e}"))?;
         }
     } else {
         // 窗口不存在时创建（正常情况下不应该发生，因为启动时已预创建）
         debug!("Creating config window (fallback)");
-        create_config_window(&app_handle);
+        create_config_window_with_visibility(&app_handle, true).map_err(|e| format!("创建设置窗口失败：{e}"))?;
+    }
+    if let Some(target) = navigation {
+        let pending = app_handle.state::<PendingConfigNavigation>();
+        let mut destination = pending.0.lock().unwrap();
+        *destination = Some(target);
+        if let Err(error) = app_handle.emit_to("config", "config-navigation-pending", ()) {
+            destination.take();
+            return Err(format!("通知设置窗口读取导航失败：{error}"));
+        }
     }
     Ok(())
 }

@@ -1073,6 +1073,7 @@ pub fn run() {
         .manage(CodexSessionState::new())
         .manage(ClaudeSessionState::new())
         .manage(MessageTokenManager::new())
+        .manage(crate::window::PendingConfigNavigation::default())
         .manage(ConversationActivityManager::new())
         .manage(crate::slash::SlashRegistryCacheState::default())
         .manage(OperationState::new())
@@ -1134,6 +1135,7 @@ pub fn run() {
             cancel_ai,
             get_selected,
             open_config_window,
+            crate::window::take_config_navigation,
             open_chat_ui_window,
             open_butler_experiment_window,
             open_plugin_window,

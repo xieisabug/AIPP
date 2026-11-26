@@ -77,16 +77,20 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
  * （MCP、Skills、工作区等按助手 id 读写，需要真实助手）。完成时保存第三步的改动；
  * 未完成就关闭（取消、Esc、离开页面）会删除这个助手。
  */
-const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({ triggerButtonProps, ...rest }) => {
-    const [open, setOpen] = useState(false);
+const AddAssistantDialog: React.FC<AddAssistantDialogProps & {
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
+}> = ({ triggerButtonProps, open, onOpenChange, ...rest }) => {
+    const [localOpen, setLocalOpen] = useState(false);
+    const setOpen = onOpenChange ?? setLocalOpen;
     const [busy, setBusy] = useState(false);
     return (
-        <Dialog open={open} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
-            <DialogTrigger asChild>
+        <Dialog open={open ?? localOpen} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
+            {open === undefined && <DialogTrigger asChild>
                 <Button iconLabel="添加助手" {...triggerButtonProps}>
                     <Plus className="h-4 w-4" />
                 </Button>
-            </DialogTrigger>
+            </DialogTrigger>}
             <DialogContent
                 showCloseButton={false}
                 // 向导有多步输入，点到外面不关闭；用关闭按钮或 Esc 退出
