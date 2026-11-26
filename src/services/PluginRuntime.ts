@@ -92,15 +92,6 @@ export interface PluginAssistantFormFieldContribution {
     options?: PluginSelectOption[];
 }
 
-export interface PluginMcpToolComponentContribution {
-    id: string;
-    title: string;
-    description?: string | null;
-    serverName?: string | null;
-    toolName?: string | null;
-    priority?: number | null;
-}
-
 export interface PluginContributions {
     hooks?: Array<{
         name: string;
@@ -114,7 +105,6 @@ export interface PluginContributions {
     actions?: PluginActionContribution[];
     slots?: PluginSlotContribution[];
     assistantFormFields?: PluginAssistantFormFieldContribution[];
-    mcpToolComponents?: PluginMcpToolComponentContribution[];
 }
 
 interface PluginDataItem {
@@ -1034,7 +1024,7 @@ class PluginRuntime {
         if (typeof handler !== "function") {
             throw new Error(`hook handler for '${normalizedHookName}' must be a function`);
         }
-        this.assertPluginPermission(plugin, `hook.${normalizedHookName}`);
+        this.assertHookPermission(plugin, normalizedHookName);
         this.hookHandlers.set(this.hookHandlerKey(plugin.code, normalizedHookName), handler);
     }
 
@@ -1123,6 +1113,23 @@ class PluginRuntime {
                 return;
             }
             console.warn("[PluginRuntime] Failed to submit JS hook result:", submitError);
+        }
+    }
+
+    /**
+     * Hooks can rewrite requests and replies, and the backend only dispatches to an exact
+     * `hook.<name>` grant. Wildcards (`*`, `hook.*`) must not make registration look successful
+     * while the hook silently never fires.
+     */
+    private assertHookPermission(plugin: BackendPluginItem, hookName: string): void {
+        const required = `hook.${hookName}`.toLowerCase();
+        const permissions = Array.isArray(plugin.permissions)
+            ? plugin.permissions.map((item) => String(item || "").trim().toLowerCase())
+            : [];
+        if (!permissions.includes(required)) {
+            throw new Error(
+                `plugin '${plugin.code}' must declare permission '${required}' to register hook '${hookName}' (wildcards do not grant hooks)`
+            );
         }
     }
 

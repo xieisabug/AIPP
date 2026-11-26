@@ -1267,6 +1267,18 @@ fn resolve_runtime_manifest(manifest: &PluginManifest) -> PluginRuntimeManifest 
     runtime
 }
 
+/// Hooks dispatch only on an exact `hook.<name>` grant (see `plugin/hook_bus.rs`); wildcard
+/// permissions never cover them. Returns the declared hooks lacking that grant.
+fn hooks_missing_exact_permission(hooks: &[PluginHookContribution], permissions: &[String]) -> Vec<String> {
+    hooks
+        .iter()
+        .map(|hook| hook.name.trim())
+        .filter(|name| !name.is_empty())
+        .filter(|name| !permissions.iter().any(|granted| granted.eq_ignore_ascii_case(&format!("hook.{name}"))))
+        .map(str::to_string)
+        .collect()
+}
+
 fn hook_contributions_to_registrations(
     hooks: &[PluginHookContribution],
 ) -> Vec<NewPluginHookRegistration> {
@@ -2087,6 +2099,9 @@ fn build_plan_plugin(
     }
     if !entry_path.is_file() {
         errors.push(format!("插件入口文件不存在：{}/{}", to, runtime.entry));
+    }
+    for hook in hooks_missing_exact_permission(&manifest.contributions.hooks, &permissions) {
+        errors.push(format!("声明了 hook {hook}，但 permissions 里缺少 hook.{hook}（通配符不授予 hook 权限）"));
     }
     if runtime.runtime_type != "js" && runtime.runtime_type != "declarative" {
         warnings.push(format!("当前插件商店第一版主要面向 JS runtime，检测到 {}", runtime.runtime_type));
@@ -3894,6 +3909,21 @@ pub async fn plugin_execute_image_task(app_handle: tauri::AppHandle, plugin_id: 
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn hook_contributions_require_exact_hook_permission() {
+        let hooks: Vec<PluginHookContribution> = serde_json::from_value(serde_json::json!([
+            {"name": "chat.beforeSend"}, {"name": "chat.afterResponseCompleted"}, {"name": " "}
+        ]))
+        .unwrap();
+        let granted = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            hooks_missing_exact_permission(&hooks, &granted(&["*", "hook.*", "hook.chat.beforesend"])),
+            vec!["chat.afterResponseCompleted"],
+            "wildcards never grant hooks; names compare case-insensitively"
+        );
+        assert!(hooks_missing_exact_permission(&hooks, &granted(&["hook.chat.beforeSend", "hook.chat.afterResponseCompleted"])).is_empty());
+    }
 
     fn official_entry(sha256: Option<&str>, dirs: Vec<PluginInstallRecipeDir>) -> OfficialPlugin {
         serde_json::from_value(serde_json::json!({

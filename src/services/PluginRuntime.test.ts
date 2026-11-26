@@ -38,6 +38,31 @@ describe("plugin script loading", () => {
         expect(result.loadError).toBeUndefined();
     });
 
+    it.each([
+        [["hook.*"], "wildcards do not grant hooks"],
+        [["*"], "wildcards do not grant hooks"],
+        [["hook.chat.beforesend"], undefined],
+    ])("should register hooks only with the exact hook permission (%j)", async (permissions, error) => {
+        mockInvokeHandler("get_enabled_plugins", () => [{
+            pluginId: 1, code: "fixture", version: "1", name: "Fixture",
+            isActive: true, permissions, pluginType: ["applicationType"],
+        }]);
+        mockInvokeHandler("verify_plugin_entry_checksum", () => undefined);
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(document.body, "appendChild").mockImplementation((node) => {
+            Reflect.set(window, "fixture", class {
+                onPluginLoad(api: { hooks: { register: (name: string, handler: () => void) => void } }) {
+                    api.hooks.register("chat.beforeSend", () => {});
+                }
+            });
+            node.dispatchEvent(new Event("load"));
+            return node;
+        });
+        const [result] = await pluginRuntime.reloadPlugins();
+        if (error) expect(result.loadError).toContain(error);
+        else expect(result.loadError).toBeUndefined();
+    });
+
     it("should report a file permission error before injecting an unreadable entry", async () => {
         mockInvokeHandler("verify_plugin_entry_checksum", () => Promise.reject("PLUGIN_FILE_PERMISSION_DENIED: dist/main.js: Permission denied"));
         const append = vi.spyOn(document.body, "appendChild");
