@@ -75,6 +75,17 @@ fn task_id(args: &Value) -> Result<i64, String> {
 }
 
 /// 给模型的任务摘要：人话时间、接下来几次、投递位置，便于它核对后原样告诉用户。
+/// Deleting a task shares `schedule.delete`'s user-approval boundary; this tool cannot show
+/// the approval card, so it points the model at the entry that can. `None` means allowed.
+pub(crate) fn delete_refusal(caller_kind: &str, task_id: i64) -> Option<String> {
+    crate::mcp::builtin_mcp::superadmin::action_approval_gate("schedule.delete", false)?;
+    Some(if is_butler_conversation_kind(caller_kind) {
+        format!("删除定时任务需要用户批准：请用 superadmin_execute 执行 schedule.delete（args: {{\"task_id\": {task_id}}}），会弹出批准卡，删除后可用 superadmin_undo 恢复。只想停下来可以用 pause。")
+    } else {
+        "删除定时任务需要用户本人确认：请用户在「定时任务」页面删除。只想停下来可以用 pause。".to_string()
+    })
+}
+
 pub(crate) fn task_card(view: &TaskView) -> Value {
     json!({
         "task_id": view.id,
@@ -229,6 +240,9 @@ async fn handle_inner(app: &tauri::AppHandle, conversation_id: Option<i64>, args
         }
         "delete" => {
             let id = task_id(args)?;
+            if let Some(reason) = delete_refusal(&caller.kind, id) {
+                return Err(reason);
+            }
             let view = service::get(app, id)?;
             service::delete(app, id)?;
             Ok(json!({ "deleted": true, "task_id": id, "name": view.name }))
@@ -257,6 +271,14 @@ mod tests {
 
     fn caller(kind: &str, conversation_id: Option<i64>, assistant_id: Option<i64>) -> Caller {
         Caller { conversation_id, kind: kind.to_string(), assistant_id }
+    }
+
+    #[test]
+    fn test_delete_shares_schedule_delete_approval_boundary() {
+        let butler = delete_refusal("butler_contact", 7).expect("delete must not bypass user approval");
+        assert!(butler.contains("schedule.delete") && butler.contains("\"task_id\": 7"), "{butler}");
+        let normal = delete_refusal("normal", 7).expect("normal chats cannot show the approval card");
+        assert!(normal.contains("定时任务") && !normal.contains("superadmin"), "{normal}");
     }
 
     #[test]

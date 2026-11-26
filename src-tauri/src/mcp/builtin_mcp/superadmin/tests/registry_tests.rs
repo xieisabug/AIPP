@@ -121,3 +121,40 @@ fn action_meta_completeness() {
         assert!(meta.risk_level.0 <= 3, "risk_level out of range for {}", meta.action_id);
     }
 }
+
+#[test]
+fn conversation_delete_is_explicit_and_needs_user_approval() {
+    let registry = build_registry();
+    assert!(registry.get("conversation.archive").is_none(), "the misleading archive name must not be offered");
+    let meta = registry.get_meta("conversation.delete").expect("conversation.delete registered");
+    assert!(meta.requires_approval);
+    assert_eq!(meta.approval_policy, ApprovalPolicy::UserApprovalRequired);
+    assert!(meta.rollback_hint.is_none(), "deletion is not undoable");
+    assert!(crate::mcp::builtin_mcp::superadmin::action_approval_gate("conversation.delete", false).is_some());
+    assert!(crate::mcp::builtin_mcp::superadmin::action_approval_gate("conversation.delete", true).is_none());
+}
+
+#[test]
+fn conversation_delete_refuses_kinds_with_their_own_lifecycle() {
+    use crate::mcp::builtin_mcp::superadmin::actions::conversation::deletion_refusal;
+    for kind in ["normal", "butler_task", "butler_contact_archive"] {
+        assert!(deletion_refusal(kind).is_none(), "{kind} should be deletable");
+    }
+    assert!(deletion_refusal("butler_contact").unwrap().contains("assistant.reset_conversation"));
+    for kind in ["butler_main", "butler_group", "butler_group_member", "scheduled_run", "butler_proactive_run", "onboarding_probe", ""] {
+        assert!(deletion_refusal(kind).is_some(), "{kind} must be refused");
+    }
+}
+
+#[test]
+fn catalog_only_lists_executable_actions_and_hints_name_real_ones() {
+    let registry = build_registry();
+    assert!(registry.get("task.spawn").is_none(), "non-executable actions must not be listed");
+    let action_ref = regex::Regex::new(r"\b([a-z]+\.[a-z_]+)\b").unwrap();
+    for meta in registry.all_metas() {
+        let Some(hint) = &meta.rollback_hint else { continue };
+        for name in action_ref.captures_iter(hint).map(|c| c[1].to_string()) {
+            assert!(registry.get(&name).is_some(), "{} rollback_hint names missing action {name}", meta.action_id);
+        }
+    }
+}

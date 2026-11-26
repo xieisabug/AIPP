@@ -20,8 +20,9 @@ pub trait ActionHandler: Send + Sync {
     ) -> Result<serde_json::Value, String>;
 
     /// High-risk handlers must atomically validate the approved resource before mutation.
+    /// `approved_in` is the conversation whose user granted the approval (the caller).
     async fn execute_approved(&self, _app_handle: &AppHandle, _args: serde_json::Value,
-        _snapshot: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        _snapshot: Option<&serde_json::Value>, _approved_in: i64) -> Result<serde_json::Value, String> {
         Err("该操作尚未实现原子批准校验，未执行".into())
     }
 
@@ -36,6 +37,7 @@ pub trait ActionHandler: Send + Sync {
     }
 
     /// Restore entity state from a before-snapshot (undo operation).
+    /// The snapshot also carries the original execution result under `undo::EXECUTION_RESULT_KEY`.
     /// Returns Ok with a description of what was restored, or Err if undo is not supported.
     async fn undo(
         &self,

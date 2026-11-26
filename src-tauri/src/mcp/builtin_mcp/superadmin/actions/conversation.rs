@@ -13,7 +13,7 @@ use crate::mcp::builtin_mcp::superadmin::types::*;
 struct ConversationListHandler;
 struct ConversationGetHandler;
 struct ConversationCreateHandler;
-struct ConversationArchiveHandler;
+struct ConversationDeleteHandler;
 struct ConversationInjectSystemMessageHandler;
 
 #[async_trait]
@@ -173,42 +173,91 @@ impl ActionHandler for ConversationCreateHandler {
     }
 }
 
+/// Kinds with their own lifecycle must not be deleted through SuperAdmin; returns the guidance.
+pub(crate) fn deletion_refusal(kind: &str) -> Option<&'static str> {
+    match kind {
+        "normal" | "butler_task" | "butler_contact_archive" => None,
+        "butler_main" | "butler_contact" => Some("这是总管家主会话或助手当前私聊，不能删除；需要换新上下文请用 assistant.reset_conversation"),
+        "butler_group" | "butler_group_member" => Some("群聊与成员执行会话随群维护，不能单独删除"),
+        "scheduled_run" => Some("定时任务的运行会话由系统保留和清理，删除定时任务时会一并删除"),
+        _ => Some("这类会话由系统维护，不能通过 SuperAdmin 删除"),
+    }
+}
+
+/// What the user approves: the conversation as it was, including how many messages it held.
+fn deletion_target(app_handle: &AppHandle, conversation_id: i64) -> Result<serde_json::Value, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conversation = db
+        .conversation_repo()
+        .map_err(|e| e.to_string())?
+        .read(conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let (message_count, last_message_id): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(id) FROM message WHERE conversation_id = ?1",
+            [conversation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "conversation_id": conversation.id,
+        "name": conversation.name,
+        "conversation_kind": conversation.conversation_kind,
+        "assistant_id": conversation.assistant_id,
+        "message_count": message_count,
+        "last_message_id": last_message_id,
+    }))
+}
+
+fn conversation_id_arg(args: &serde_json::Value) -> Result<i64, String> {
+    args.get("conversation_id").and_then(|v| v.as_i64()).ok_or_else(|| "Missing required parameter: conversation_id".to_string())
+}
+
+fn check_deletable(target: &serde_json::Value) -> Result<(), String> {
+    let kind = target["conversation_kind"].as_str().unwrap_or_default();
+    match deletion_refusal(kind) {
+        Some(reason) => Err(format!("不能删除会话 {}：{reason}", target["conversation_id"])),
+        None => Ok(()),
+    }
+}
+
 #[async_trait]
-impl ActionHandler for ConversationArchiveHandler {
+impl ActionHandler for ConversationDeleteHandler {
     async fn execute(
         &self,
         app_handle: &AppHandle,
         args: serde_json::Value,
         dry_run: bool,
     ) -> Result<serde_json::Value, String> {
-        let conversation_id = args
-            .get("conversation_id")
-            .and_then(|v| v.as_i64())
-            .ok_or("Missing required parameter: conversation_id")?;
-
-        let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let repo = db.conversation_repo().map_err(|e| e.to_string())?;
-
-        let conversation = repo
-            .read(conversation_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Conversation not found: {}", conversation_id))?;
-
-        if dry_run {
-            return Ok(json!({
-                "dry_run": true,
-                "conversation_id": conversation_id,
-                "current_name": conversation.name,
-                "would_delete": true,
-            }));
+        let target = deletion_target(app_handle, conversation_id_arg(&args)?)?;
+        check_deletable(&target)?;
+        if !dry_run {
+            return Err("conversation.delete 需要用户批准，请通过 superadmin_execute 发起".into());
         }
+        Ok(json!({ "dry_run": true, "would_delete": target, "reversible": false }))
+    }
 
-        repo.delete(conversation_id).map_err(|e| e.to_string())?;
-
-        Ok(json!({
-            "conversation_id": conversation_id,
-            "archived": true,
-        }))
+    async fn execute_approved(
+        &self,
+        app_handle: &AppHandle,
+        args: serde_json::Value,
+        snapshot: Option<&serde_json::Value>,
+        approved_in: i64,
+    ) -> Result<serde_json::Value, String> {
+        let conversation_id = conversation_id_arg(&args)?;
+        if conversation_id == approved_in {
+            return Err("不能删除正在执行本次操作的会话".into());
+        }
+        let expected = snapshot.and_then(|v| v.get("approved_resource")).ok_or("缺少批准对象快照")?;
+        let current = deletion_target(app_handle, conversation_id)?;
+        if &current != expected {
+            return Err("会话在批准后发生了变化（名称、类型或消息数），未删除，请重新确认".into());
+        }
+        check_deletable(&current)?;
+        crate::api::conversation_api::delete_conversation_with_cleanup(app_handle, conversation_id)?;
+        Ok(json!({ "conversation_id": conversation_id, "deleted": true }))
     }
 
     async fn snapshot_before(
@@ -216,110 +265,17 @@ impl ActionHandler for ConversationArchiveHandler {
         app_handle: &AppHandle,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        let conversation_id = args.get("conversation_id")?.as_i64()?;
-        let db = ConversationDatabase::new(app_handle).ok()?;
-        let repo = db.conversation_repo().ok()?;
-        let conv = repo.read(conversation_id).ok()??;
-
-        // Capture full conversation state before deletion
-        let mut snapshot = json!({
-            "_type": "conversation.archive",
-            "conversation_id": conv.id,
-            "name": conv.name,
-            "assistant_id": conv.assistant_id,
-            "conversation_kind": conv.conversation_kind,
-            "parent_butler_conversation_id": conv.parent_butler_conversation_id,
-            "source_task_title": conv.source_task_title,
-            "is_hidden_from_normal_chat_list": conv.is_hidden_from_normal_chat_list,
-            "channel_source": conv.channel_source,
-            "butler_task_status": conv.butler_task_status,
-            "butler_task_summary": conv.butler_task_summary,
-        });
-
-        // Also capture messages for full restore
-        if let Ok(msg_repo) = db.message_repo() {
-            if let Ok(messages) = msg_repo.list_by_conversation_id(conversation_id) {
-                let msg_data: Vec<serde_json::Value> = messages
-                    .iter()
-                    .take(200)
-                    .map(|(m, _)| {
-                        json!({
-                            "message_type": m.message_type,
-                            "content": crate::utils::turn_context::visible(&m.content),
-                            "llm_model_name": m.llm_model_name,
-                            "created_time": m.created_time.to_rfc3339(),
-                        })
-                    })
-                    .collect();
-                snapshot["messages"] = json!(msg_data);
-                snapshot["message_count"] = json!(messages.len());
-            }
-        }
-
-        Some(snapshot)
+        let target = deletion_target(app_handle, conversation_id_arg(args).ok()?).ok()?;
+        Some(json!({ "_type": "conversation.delete", "approved_resource": target }))
     }
 
     async fn undo(
         &self,
-        app_handle: &AppHandle,
-        snapshot: &serde_json::Value,
+        _app_handle: &AppHandle,
+        _snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        // Re-create the conversation from snapshot
-        let name = snapshot.get("name").and_then(|v| v.as_str()).unwrap_or("Restored Conversation");
-        let assistant_id = snapshot.get("assistant_id").and_then(|v| v.as_i64());
-
-        let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let repo = db.conversation_repo().map_err(|e| e.to_string())?;
-
-        use crate::db::conversation_db::Conversation;
-        use chrono::Utc;
-
-        let conv = Conversation {
-            id: 0,
-            name: name.to_string(),
-            assistant_id,
-            created_time: Utc::now(),
-            updated_time: Utc::now(),
-            conversation_kind: snapshot
-                .get("conversation_kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("normal")
-                .to_string(),
-            parent_butler_conversation_id: snapshot
-                .get("parent_butler_conversation_id")
-                .and_then(|v| v.as_i64()),
-            source_task_title: snapshot
-                .get("source_task_title")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            is_hidden_from_normal_chat_list: snapshot
-                .get("is_hidden_from_normal_chat_list")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            channel_source: snapshot
-                .get("channel_source")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            butler_task_status: snapshot
-                .get("butler_task_status")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            butler_task_summary: snapshot
-                .get("butler_task_summary")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            butler_task_finalized_at: None,
-        };
-
-        let created = repo.create(&conv).map_err(|e| e.to_string())?;
-
-        Ok(json!({
-            "undone": true,
-            "new_conversation_id": created.id,
-            "name": created.name,
-            "note": "Conversation re-created. Original messages are not restored (they were captured in snapshot for reference).",
-        }))
+        Err("会话删除不可撤销".into())
     }
 }
 
@@ -519,22 +475,22 @@ pub fn register(registry: &mut ActionRegistry) {
                 }
             }),
             supports_dry_run: true,
-            rollback_hint: Some("可通过 conversation.archive 删除创建的会话".into()),
+            rollback_hint: Some("如需删除创建的会话，可用 conversation.delete（需用户批准）".into()),
         },
         Box::new(ConversationCreateHandler),
     );
 
     registry.register(
         ActionMeta {
-            action_id: "conversation.archive".into(),
+            action_id: "conversation.delete".into(),
             domain: "conversation".into(),
-            summary: "归档（删除）会话".into(),
-            description: "删除指定会话及其所有消息。此操作不可逆。".into(),
-            risk_level: RiskLevel::MEDIUM,
-            requires_approval: false,
-            approval_policy: ApprovalPolicy::AllowInScope,
+            summary: "永久删除会话".into(),
+            description: "永久删除指定会话及其消息、附件和工具调用记录，开启同步时其他设备也会删除。不可撤销，每次都需用户批准。只能删除普通会话、管家任务会话和已归档的私聊；助手当前私聊请用 assistant.reset_conversation 重开。".into(),
+            risk_level: RiskLevel::HIGH,
+            requires_approval: true,
+            approval_policy: ApprovalPolicy::UserApprovalRequired,
             allowed_scopes: vec![ActionScope::Conversation],
-            tags: vec!["conversation".into(), "write".into(), "delete".into()],
+            tags: vec!["conversation".into(), "write".into(), "delete".into(), "destructive".into()],
             args_schema: json!({
                 "type": "object",
                 "properties": {
@@ -546,13 +502,13 @@ pub fn register(registry: &mut ActionRegistry) {
                 "type": "object",
                 "properties": {
                     "conversation_id": { "type": "integer" },
-                    "archived": { "type": "boolean" }
+                    "deleted": { "type": "boolean" }
                 }
             }),
             supports_dry_run: true,
             rollback_hint: None,
         },
-        Box::new(ConversationArchiveHandler),
+        Box::new(ConversationDeleteHandler),
     );
 
     registry.register(

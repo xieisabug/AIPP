@@ -102,6 +102,41 @@ impl ActionHandler for AssistantGetHandler {
     }
 }
 
+/// Undoing a create deletes the assistant only while nothing has used it yet.
+fn undo_unused_assistant(app: &AppHandle, assistant_id: i64) -> Result<serde_json::Value, String> {
+    use crate::db::conversation_db::ConversationDatabase;
+    let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let (used, empty): (i64, Vec<i64>) = {
+        let used = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message m JOIN conversation c ON c.id = m.conversation_id
+                 WHERE c.assistant_id = ?1 AND m.message_type <> 'system'",
+                [assistant_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM conversation WHERE assistant_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map([assistant_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<i64>, _>>()
+            .map_err(|e| e.to_string())?;
+        (used, ids)
+    };
+    if used > 0 {
+        return Err(format!("助手 #{assistant_id} 已经有对话记录，不能撤销创建；如需删除，请用户在设置中操作"));
+    }
+    // Conversations opened for it but never used (e.g. an empty private chat) go with it.
+    for conversation_id in &empty {
+        crate::api::conversation_api::delete_conversation_with_cleanup(app, *conversation_id)?;
+    }
+    crate::api::assistant_api::delete_assistant(app.clone(), assistant_id)?;
+    Ok(json!({ "undone": true, "deleted_assistant_id": assistant_id, "removed_empty_conversations": empty }))
+}
+
 #[async_trait]
 impl ActionHandler for AssistantCreateHandler {
     async fn execute(&self, app: &AppHandle, args: serde_json::Value, dry_run: bool) -> Result<serde_json::Value,String> {
@@ -119,15 +154,14 @@ impl ActionHandler for AssistantCreateHandler {
 
     async fn undo(
         &self,
-        _app_handle: &AppHandle,
-        _snapshot: &serde_json::Value,
+        app_handle: &AppHandle,
+        snapshot: &serde_json::Value,
         _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        // Undo create = delete the created assistant
-        // We need the result from the original execution to get the ID
-        // The original_args won't have the ID, but the result_json in audit has it.
-        // We'll handle this in the undo handler by passing result data.
-        Err("Undo for assistant.create requires the created assistant_id from the execution result. Use superadmin_execute with assistant.delete instead.".to_string())
+        let assistant_id = snapshot[crate::mcp::builtin_mcp::superadmin::undo::EXECUTION_RESULT_KEY]["assistant_id"]
+            .as_i64()
+            .ok_or("审计记录缺少新建助手的 ID，无法撤销")?;
+        undo_unused_assistant(app_handle, assistant_id)
     }
 }
 
@@ -544,7 +578,7 @@ pub fn register(registry: &mut ActionRegistry) {
                 }
             }),
             supports_dry_run: true,
-            rollback_hint: Some("可通过 assistant.delete 删除创建的助手".into()),
+            rollback_hint: Some("可通过 superadmin_undo 撤销（仅限助手还没有任何对话记录、定时任务或排队消息时）".into()),
         },
         Box::new(AssistantCreateHandler),
     );

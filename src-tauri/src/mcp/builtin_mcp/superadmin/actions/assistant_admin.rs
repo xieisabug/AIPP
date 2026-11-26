@@ -104,7 +104,7 @@ impl ActionHandler for Handler {
             Err(error) => json!({"error":error}),
         })
     }
-    async fn execute_approved(&self, app: &AppHandle, args: Value, snapshot: Option<&Value>) -> Result<Value,String> {
+    async fn execute_approved(&self, app: &AppHandle, args: Value, snapshot: Option<&Value>, _approved_in: i64) -> Result<Value,String> {
         if !matches!(self.0,"permission_patch"|"workspace_grant") {return Err("该动作不是权限授予入口".into());}
         let snapshot = snapshot.ok_or("权限批准缺少操作对象快照；未执行，请重新预览")?;
         if let Some(error)=snapshot["error"].as_str() {return Err(format!("权限预览失败：{error}；未执行"));}

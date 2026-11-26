@@ -588,19 +588,28 @@ pub fn delete_conversation(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
 ) -> Result<(), String> {
+    delete_conversation_with_cleanup(&app_handle, conversation_id)
+}
+
+/// 删除会话的唯一完整路径：界面与 SuperAdmin `conversation.delete` 共用，
+/// 保证运行实例、Office 副本、前端列表与同步都随之更新。
+pub(crate) fn delete_conversation_with_cleanup(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+) -> Result<(), String> {
     // Agent 对话：释放本地运行实例；ACP 尽力通知 agent 删除其侧 session；
     // Codex / Claude Code 只清理 AIPP 映射，不擅自归档或删除 CLI 侧历史。
     // 失败只记录日志，不影响本地删除。
-    crate::api::ai::acp::schedule_acp_session_delete(&app_handle, conversation_id);
+    crate::api::ai::acp::schedule_acp_session_delete(app_handle, conversation_id);
 
-    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     db.conversation_repo().map_err(|e| e.to_string())?
         .delete(conversation_id).map_err(|e| e.to_string())?;
-    crate::api::office_save::remove_conversation_outputs(&app_handle, conversation_id);
+    crate::api::office_save::remove_conversation_outputs(app_handle, conversation_id);
 
     // 发送删除事件通知前端更新列表
     let _ = app_handle.emit("conversation_deleted", conversation_id);
-    crate::sync::schedule_sync_after_local_change(&app_handle);
+    crate::sync::schedule_sync_after_local_change(app_handle);
 
     Ok(())
 }

@@ -863,7 +863,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "action": {
                             "type": "string",
                             "enum": ["create", "list", "get", "runs", "update", "pause", "resume", "run_now", "delete", "decide"],
-                            "description": "create: new task; list: tasks (scope mine/all); get: settings + recent runs; runs: run history; update: change fields (time changes recompute the next run); pause/resume: stop or restart (resume never replays missed runs); run_now: start one run now without changing the plan; delete: remove the task; decide: allow/deny an operation a scheduled run is waiting on."
+                            "description": "create: new task; list: tasks (scope mine/all); get: settings + recent runs; runs: run history; update: change fields (time changes recompute the next run); pause/resume: stop or restart (resume never replays missed runs); run_now: start one run now without changing the plan; delete: needs the user's approval — in Butler mode use superadmin_execute schedule.delete (shows an approval card, undoable), otherwise ask the user to delete it on the 定时任务 page; prefer pause when the user only wants it stopped; decide: allow/deny an operation a scheduled run is waiting on."
                         },
                         "task_id": { "type": "integer", "description": "Required for get/runs/update/pause/resume/run_now/delete." },
                         "name": { "type": "string", "description": "Short task name shown to the user. Required for create." },

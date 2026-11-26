@@ -81,8 +81,8 @@ pub async fn handle_execute(
     }
     // 4. Execute via handler
     let handler_result =
-        if approval_used {
-            registered.handler.execute_approved(app_handle, request.args.clone(), before_snapshot.as_ref()).await
+        if let Some(binding) = approved.as_ref() {
+            registered.handler.execute_approved(app_handle, request.args.clone(), before_snapshot.as_ref(), binding.conversation).await
         } else {
             registered.handler.execute(app_handle, request.args.clone(), request.dry_run).await
         };

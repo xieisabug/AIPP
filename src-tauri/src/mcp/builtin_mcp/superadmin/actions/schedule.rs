@@ -165,7 +165,7 @@ impl ActionHandler for ScheduleDeleteHandler {
         Ok(json!({ "task_id": id, "deleted": true }))
     }
 
-    async fn execute_approved(&self, app_handle: &AppHandle, args: serde_json::Value, snapshot: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+    async fn execute_approved(&self, app_handle: &AppHandle, args: serde_json::Value, snapshot: Option<&serde_json::Value>, _approved_in: i64) -> Result<serde_json::Value, String> {
         let id = task_id(&args)?;
         let expected = snapshot.and_then(|v| v.get("approved_resource")).ok_or("缺少批准对象快照")?;
         let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;

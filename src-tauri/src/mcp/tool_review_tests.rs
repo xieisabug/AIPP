@@ -543,6 +543,8 @@ fn test_review_exempt_suboperations_fail_closed() {
     assert!(admin("superadmin_execute", r#"{"action_id":"llm.get_model","args":{}}"#));
     assert!(!admin("superadmin_execute", r#"{"action_id":"llm.get_models","args":{}}"#));
     assert!(!admin("superadmin_execute", r#"{"action_id":"unknown","args":{},"dry_run":true}"#));
+    // 删除会话不可撤销：既不免审，也需要用户批准。
+    assert!(!admin("superadmin_execute", r#"{"action_id":"conversation.delete","args":{"conversation_id":1}}"#));
     assert!(admin("superadmin_batch", r#"{"actions":[{"action_id":"task.list","args":{}},{"action_id":"task.cancel","args":{}}]}"#));
     assert!(!admin("superadmin_batch", r#"{"actions":[{"action_id":"task.list","args":{}},{"action_id":"schedule.create","args":{}}]}"#));
     assert!(!admin("superadmin_batch", r#"{"actions":[]}"#));

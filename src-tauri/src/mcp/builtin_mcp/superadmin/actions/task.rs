@@ -12,7 +12,6 @@ use crate::mcp::builtin_mcp::superadmin::types::*;
 
 struct TaskListHandler;
 struct TaskGetHandler;
-struct TaskSpawnHandler;
 struct TaskCancelHandler;
 
 #[async_trait]
@@ -117,54 +116,6 @@ impl ActionHandler for TaskGetHandler {
         }
 
         Ok(result)
-    }
-}
-
-#[async_trait]
-impl ActionHandler for TaskSpawnHandler {
-    async fn execute(
-        &self,
-        _app_handle: &AppHandle,
-        args: serde_json::Value,
-        dry_run: bool,
-    ) -> Result<serde_json::Value, String> {
-        let butler_conversation_id = args
-            .get("butler_conversation_id")
-            .and_then(|v| v.as_i64())
-            .ok_or("Missing required parameter: butler_conversation_id")?;
-        let title = args
-            .get("title")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing required parameter: title")?;
-        let goal =
-            args.get("goal").and_then(|v| v.as_str()).ok_or("Missing required parameter: goal")?;
-        let executor_assistant_id = args.get("executor_assistant_id").and_then(|v| v.as_i64());
-        let executor_assistant_name =
-            args.get("executor_assistant_name").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-        if dry_run {
-            return Ok(json!({
-                "dry_run": true,
-                "would_spawn": {
-                    "butler_conversation_id": butler_conversation_id,
-                    "title": title,
-                    "goal_length": goal.len(),
-                    "executor_assistant_id": executor_assistant_id,
-                    "executor_assistant_name": executor_assistant_name,
-                }
-            }));
-        }
-
-        // NOTE: Actually spawning a butler task requires a Window handle and
-        // triggers async AI execution. The existing spawn_task_conversation
-        // agent tool in aipp:agent is the proper entry point.
-        // This action provides a structured wrapper that documents the intent,
-        // but for Phase 1 it delegates to the agent tool guidance.
-        Err("task.spawn is not directly executable in Phase 1. \
-             Use the existing aipp:agent spawn_task_conversation tool instead, \
-             which handles window context and AI execution. \
-             This action is registered for catalog/inspect discoverability."
-            .to_string())
     }
 }
 
@@ -324,41 +275,6 @@ pub fn register(registry: &mut ActionRegistry) {
             rollback_hint: None,
         },
         Box::new(TaskGetHandler),
-    );
-
-    registry.register(
-        ActionMeta {
-            action_id: "task.spawn".into(),
-            domain: "task".into(),
-            summary: "派发 Butler 子任务".into(),
-            description: "创建并启动一个新的 Butler 子任务。注意：Phase 1 中请使用 aipp:agent 的 spawn_task_conversation 工具，本 action 仅用于目录发现。".into(),
-            risk_level: RiskLevel::LOW,
-            requires_approval: false,
-            approval_policy: ApprovalPolicy::AutoAllow,
-            allowed_scopes: vec![ActionScope::App],
-            tags: vec!["task".into(), "butler".into(), "write".into(), "spawn".into()],
-            args_schema: json!({
-                "type": "object",
-                "properties": {
-                    "butler_conversation_id": { "type": "integer", "description": "Butler 主会话 ID" },
-                    "title": { "type": "string", "description": "任务标题" },
-                    "goal": { "type": "string", "description": "任务目标（作为提示词发送给执行助手）" },
-                    "executor_assistant_id": { "type": "integer", "description": "执行助手 ID（可选）" },
-                    "executor_assistant_name": { "type": "string", "description": "执行助手名称（可选，与 ID 二选一）" }
-                },
-                "required": ["butler_conversation_id", "title", "goal"]
-            }),
-            result_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_conversation_id": { "type": "integer" },
-                    "status": { "type": "string" }
-                }
-            }),
-            supports_dry_run: true,
-            rollback_hint: Some("可通过 task.cancel 取消任务".into()),
-        },
-        Box::new(TaskSpawnHandler),
     );
 
     registry.register(

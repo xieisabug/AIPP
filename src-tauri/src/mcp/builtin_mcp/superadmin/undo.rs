@@ -7,6 +7,9 @@ use super::registry::ActionRegistry;
 use super::types::RiskLevel;
 use crate::db::conversation_db::ConversationDatabase;
 
+/// Key under which `handle_undo` passes the original execution result to `ActionHandler::undo`.
+pub(crate) const EXECUTION_RESULT_KEY: &str = "_execution_result";
+
 /// Handle the `superadmin_undo` tool call.
 ///
 /// Flow:
@@ -79,12 +82,19 @@ pub async fn handle_undo(
     };
 
     // 4. Parse snapshot and original args
-    let snapshot: serde_json::Value = match serde_json::from_str(&snapshot_json) {
+    let mut snapshot: serde_json::Value = match serde_json::from_str(&snapshot_json) {
         Ok(v) => v,
         Err(e) => {
             return error_result(&format!("Failed to parse before_snapshot: {}", e));
         }
     };
+    // Create actions only learn the new entity's ID from their result; hand it to the handler.
+    if let (Some(object), Some(result)) = (
+        snapshot.as_object_mut(),
+        entry.result_json.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+    ) {
+        object.insert(EXECUTION_RESULT_KEY.into(), result);
+    }
     let original_args: serde_json::Value =
         entry.args_json.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(json!({}));
 
