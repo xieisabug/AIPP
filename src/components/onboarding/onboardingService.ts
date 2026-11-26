@@ -203,18 +203,22 @@ export async function loginAgent(provider: Provider) {
         action: "login",
     });
 }
-export async function preview(provider: Provider, preset: OnboardingPreset) {
+export async function fetchProviderModels(providerId: number) {
     const { available_models } = await invoke<ModelSelectionResponse>("preview_model_list", {
-        llmProviderId: provider.id,
+        llmProviderId: providerId,
     });
-    const codes = available_models
+    return available_models;
+}
+export async function preview(provider: Provider, preset: OnboardingPreset, fetched?: ModelSelectionResponse["available_models"]) {
+    const models = fetched ?? await fetchProviderModels(provider.id);
+    const codes = models
         .filter((model) => {
             const mode = model.request_mode;
             return mode !== "unsupported" && mode !== "provider_mode_mismatch" && !isDecisionRequestMode(mode);
         })
         .map((model) => model.code);
     const endpoint = provider.endpoint ?? (await invoke<Record<number, string>>("onboarding_provider_endpoints"))?.[provider.id];
-    return { codes, picks: recommendModels(codes, provider.api_type, preset, endpoint) };
+    return { codes, availableCodes: models.map(model => model.code), picks: recommendModels(codes, provider.api_type, preset, endpoint) };
 }
 export async function importProvider(code: string, password: string, draft: boolean, newName?: string) {
     const p = await invoke<Provider & { already_exists: boolean }>("import_llm_provider", {

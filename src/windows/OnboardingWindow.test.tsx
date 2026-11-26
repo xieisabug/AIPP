@@ -278,12 +278,74 @@ describe("first-run window", () => {
             }
         }
     );
+    it.each([false, true])("躺平添加提供商只获取列表，点击帮我选才试调用（首次列表失败：%s）", async (listFailsOnce) => {
+        setup();
+        if (listFailsOnce) {
+            let first = true;
+            mockInvokeHandler("preview_model_list", () => {
+                if (first) {
+                    first = false;
+                    throw { kind: "network", message: "连接中断" };
+                }
+                return { available_models: [{ code: "main", request_mode: "chat_completions" }] };
+            });
+        }
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /我用的是其他服务商/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /OpenAI API/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        if (listFailsOnce) await screen.findByText("连不上 OpenAI API，检查网络或代理设置");
+        else await screen.findByText("已获取 2 个模型");
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model" || cmd === "apply_onboarding_config")).toBe(false);
+        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "preview_model_list")).toHaveLength(listFailsOnce ? 2 : 1);
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "add_llm_provider")).toHaveLength(1);
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
+    });
+    it("躺平粘贴完整分享消息后等待点击帮我选", async () => {
+        setup();
+        mockInvokeHandler("import_llm_provider", () => ({ id: 17, api_type: "openai_api", name: "示例", is_enabled: false }));
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /有人发给我分享码/ }));
+        const code = btoa(JSON.stringify({ type: "provider", encrypted_data: "fixture", nonce: "test" }));
+        fireEvent.change(screen.getByLabelText("分享消息"), { target: { value: `分享码：${code}\n密码：example` } });
+        const select = screen.getByRole("button", { name: "帮我选" });
+        expect(select).toBeEnabled();
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "import_llm_provider" || cmd === "probe_chat_model")).toBe(false);
+        fireEvent.click(select);
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke.mock.calls.some(([cmd]) => cmd === "probe_chat_model")).toBe(true);
+    });
+    it("躺平保留 DeepSeek 返回的所有型号，默认审核选用已验证的 Flash", async () => {
+        setup();
+        const codes = ["small", "deepseek-flash", "main", "embedding-test"];
+        mockInvokeHandler("preview_model_list", () => ({
+            available_models: codes.map(code => ({
+                code, request_mode: code === "embedding-test" ? "unsupported" : "chat_completions",
+            })),
+        }));
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
+        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke).toHaveBeenCalledWith("apply_onboarding_config", { config: expect.objectContaining({
+            models: [{ providerId: 44, codes }],
+            review: { providerId: 44, code: "deepseek-flash", verified: true },
+        }) });
+        expect(invoke).toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "deepseek-flash" });
+        expect(invoke).not.toHaveBeenCalledWith("probe_chat_model", { providerId: 44, modelCode: "embedding-test" });
+    });
     it("should complete a verified primary source while its shared auxiliary model fails and can retry independently", async () => {
         const backend = setup();
         render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
-        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
         expect(await screen.findByRole("heading", { name: "好了，可以开始了" })).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "开始使用" })).toBeEnabled();
         expect(invoke.mock.calls.filter(([c]) => c === "probe_chat_model")).toHaveLength(2);
@@ -311,7 +373,7 @@ describe("first-run window", () => {
         const first = render(<OnboardingWindow />);
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
-        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        fireEvent.click(screen.getByRole("button", { name: "帮我选" }));
         fireEvent.click(await screen.findByRole("button", { name: "保存配置，稍后充值" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_onboarding_recharge", { providerId: 44 }));
         first.unmount();

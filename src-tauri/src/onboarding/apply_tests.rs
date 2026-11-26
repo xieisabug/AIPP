@@ -82,7 +82,7 @@ fn test_apply_unverified_auxiliary_roles_preserve_existing_values() {
         true,
     )
     .unwrap();
-    let changes = role_settings(Some(&ok), Some(&failed), false, false);
+    let changes = role_settings(Some(&ok), Some(&failed), false, false, false);
     crate::api::system_api::persist_feature_settings(
         &mut sys,
         "conversation_summary",
@@ -168,7 +168,7 @@ fn test_explicit_auxiliary_clear_updates_only_that_role_and_consumes_intent() {
     let mut config = config(30);
     let light = Role { provider_id: 30, code: "small".into(), verified: true };
     let review = Role { provider_id: 30, code: "audit".into(), verified: true };
-    let mut saved = role_settings(Some(&light), Some(&review), false, false);
+    let mut saved = role_settings(Some(&light), Some(&review), false, false, false);
     saved.insert("default_decision_model".into(), "decision%%31".into());
     saved.insert("title_prompt".into(), "custom".into());
     crate::api::system_api::persist_feature_settings(&mut sys, "conversation_summary", saved, true)
@@ -181,7 +181,7 @@ fn test_explicit_auxiliary_clear_updates_only_that_role_and_consumes_intent() {
     let checkpoint = serde_json::to_string(&config).unwrap();
     let mut recovered: Config = serde_json::from_str(&checkpoint).unwrap();
     assert!(recovered.clear_review);
-    let patch = role_settings(None, None, recovered.clear_light, recovered.clear_review);
+    let patch = role_settings(None, None, recovered.clear_light, recovered.clear_review, false);
     assert_eq!(patch.len(), 2);
     crate::api::system_api::persist_feature_settings(&mut sys, "conversation_summary", patch, true)
         .unwrap();
@@ -204,9 +204,9 @@ fn test_explicit_auxiliary_clear_updates_only_that_role_and_consumes_intent() {
 #[test]
 fn test_omitted_and_unverified_auxiliary_roles_do_not_clear_existing_settings() {
     let failed = Role { provider_id: 20, code: "unchecked".into(), verified: false };
-    assert!(role_settings(None, Some(&failed), false, false).is_empty());
+    assert!(role_settings(None, Some(&failed), false, false, false).is_empty());
     assert!(validate_clear(None, true, Some(&failed), false).is_ok());
-    let changes = role_settings(None, Some(&failed), true, false);
+    let changes = role_settings(None, Some(&failed), true, false, false);
     assert_eq!(changes, HashMap::from([("default_light_model".into(), String::new())]));
     assert!(validate_clear(None, false, Some(&failed), true).is_err());
 }
@@ -286,8 +286,51 @@ fn test_onboarding_quick_assistant_options_preserve_sampling_and_survive_replay(
         apply_chat_defaults(&db, 1, limit).unwrap();
         let values = crate::api::assistant_api::management::config_value;
         assert_eq!(values(&db,1,"max_tokens").unwrap(), Some(limit.to_string()));
-        for (key, value) in [("stream","true"),("mcp_loading_mode_explicit","true"),("dynamic_mcp_loading_enabled","true"),("temperature","0.75")] {
+        for (key, value) in [("stream","true"),("mcp_loading_mode_explicit","true"),("dynamic_mcp_loading_enabled","true"),("temperature","0.75"),("tool_review_mode","auto_model")] {
             assert_eq!(values(&db,1,key).unwrap().as_deref(), Some(value));
         }
     }
+}
+
+#[test]
+fn test_lie_flat_deepseek_saves_full_list_and_switches_only_in_this_mode() {
+    for lie_flat in [true, false] {
+        let (sys, llm) = super::super::state_tests::databases();
+        put(&sys.conn, "onboarding_path", if lie_flat { "lie_flat" } else { "expert" }).unwrap();
+        let mut c = config(30);
+        c.models[0].codes.extend((1..=16).map(|i| format!("model-{i}")));
+        let mut d = Draft::default();
+        for _ in 0..2 { prepare_providers(&sys, &llm, &mut d, &mut c, None).unwrap(); }
+        assert_eq!(llm.get_llm_models("30".into()).unwrap().len(), if lie_flat { 18 } else { 10 });
+        let configs = llm.get_llm_provider_config(30).unwrap();
+        for key in ["deepseek_web_enabled", "deepseek_show_balance_in_chat"] {
+            assert_eq!(configs.iter().any(|c| c.name == key && c.value == "true"), lie_flat);
+        }
+    }
+}
+
+#[test]
+fn test_lie_flat_review_is_the_inherited_decision_model() {
+    let review = Role { provider_id: 30, code: "deepseek-flash".into(), verified: true };
+    let settings = role_settings(None, Some(&review), false, false, true);
+    assert_eq!(settings["default_decision_model"], "deepseek-flash%%30");
+    assert_eq!(settings["auto_review_model"], "");
+    assert_eq!(settings["auto_review_provider_id"], "");
+    let cleared = role_settings(None, None, false, true, true);
+    assert_eq!(cleared["default_decision_model"], "");
+}
+
+#[test]
+fn test_lie_flat_quick_appearance_preserves_a_customized_assistant_on_replay() {
+    let (sys, _) = super::super::state_tests::databases();
+    let db = AssistantDatabase {conn: Connection::open_in_memory().unwrap(), mcp_conn: Connection::open_in_memory().unwrap()};
+    db.create_tables().unwrap();
+    let saved = || db.conn.query_row("SELECT value FROM assistant_appearance WHERE assistant_id=1", [], |r| r.get::<_, String>(0)).unwrap();
+    apply_quick_appearance(&sys, &db).unwrap();
+    let logo: serde_json::Value = serde_json::from_str(&saved()).unwrap();
+    assert_eq!(logo["shape"], "aipp");
+    assert_eq!(logo["accessories"], serde_json::json!({"eyes":null,"head":null}));
+    db.conn.execute("UPDATE assistant_appearance SET value='custom' WHERE assistant_id=1", []).unwrap();
+    apply_quick_appearance(&sys, &db).unwrap();
+    assert_eq!(saved(), "custom");
 }

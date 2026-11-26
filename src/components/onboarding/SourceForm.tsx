@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Textarea } from "@/components/ui/textarea";
 import NewProviderWizard from "@/components/config/NewProviderWizard";
+import type { ModelSelectionResponse } from "@/components/config/llmModelTypes";
 import { PROVIDER_API_TYPES, suggestProviderName } from "@/components/config/providerApiTypes";
 import type { useLocalAgentDetection } from "@/components/config/useLocalAgentDetection";
 import { parseProviderShareMessage } from "@/utils/providerShareMessage";
@@ -35,6 +36,7 @@ import {
     deadline,
     detail,
     explain,
+    fetchProviderModels,
     importProvider,
     local,
     loginAgent,
@@ -88,7 +90,7 @@ export function SourceForm({
     const recommended = preset.recommended_provider;
     const [source, setSource] = useState<Source>(recharge ? "existing" : "key");
     const [catalog, setCatalog] = useState(false);
-    const [otherProvider, setOtherProvider] = useState<Provider>();
+    const [otherSource, setOtherSource] = useState<{ provider: Provider; models?: ModelSelectionResponse["available_models"] }>();
     const [removeProvider, setRemoveProvider] = useState<Provider>();
     const [share, setShare] = useState("");
     const [password, setPassword] = useState("");
@@ -109,7 +111,6 @@ export function SourceForm({
     const cache = useRef(new Map<string, Provider>());
     const parsed = parseProviderShareMessage(share);
     const importedIds = useRef(new Set<number>());
-    const lastAuto = useRef("");
     const agentTypes = [...PROVIDER_API_TYPES.filter((t) => t.kind === "local")].sort((a, b) => {
         const order = (s: string) => (s === "claude_sdk" ? 0 : s === "codex_app_server" ? 1 : 2);
         return order(a.value) - order(b.value);
@@ -140,18 +141,18 @@ export function SourceForm({
         onControls(catalog);
         return () => onControls(false);
     }, [catalog, onControls]);
-    function handleError(e: unknown) {
+    function handleError(e: unknown, providerName = source === "other" ? otherSource?.provider.name ?? "服务商" : recommended.name) {
         setFailure({
             kind: e && typeof e === "object" && "kind" in e ? String(e.kind) : undefined,
-            message: explain(e, recommended.name),
+            message: explain(e, providerName),
             raw: detail(e),
         });
     }
-    async function submit(override?: Provider, skipOptional = false) {
+    async function submit() {
         setFailure(undefined);
         const within = deadline();
         try {
-            let p = override ?? (source === "other" ? otherProvider : undefined);
+            let p = source === "other" ? otherSource?.provider : undefined;
             let agentProvider: Provider | undefined;
             async function apiKeyProvider(value: string) {
                 const cached = cache.current.get("key:" + value);
@@ -224,7 +225,7 @@ export function SourceForm({
                 }
                 agentProvider = p;
                 setLogin(p);
-                if (!skipOptional && optional.trim()) p = await within(() => apiKeyProvider(optional.trim()));
+                if (optional.trim()) p = await within(() => apiKeyProvider(optional.trim()));
             }
             if (manual && source === "agent" && agent)
                 agentProvider = cache.current.get(agent.type + ":" + (agent.cli ?? ""));
@@ -246,6 +247,7 @@ export function SourceForm({
                 agent: agentProvider,
                 manual: manual ? { main, light } : undefined,
                 checkMainBalance: true,
+                models: source === "other" ? otherSource?.models : undefined,
             });
             if ("codes" in result) {
                 setManual(result);
@@ -267,14 +269,8 @@ export function SourceForm({
             : source === "existing"
               ? !!existing
               : source === "other"
-                ? !!otherProvider
+                ? !!otherSource
                 : source === "agent" && !!agent;
-    // 只有粘贴到了完整的分享消息才自动开始；同一条消息失败后由用户显式重试。
-    useEffect(() => {
-        if (expert || source !== "share" || !parsed?.password || busy || lastAuto.current === share) return;
-        lastAuto.current = share;
-        void run(() => submit());
-    }, [share, source, busy, expert]);
     if (catalog)
         return (
             <NewProviderWizard
@@ -290,10 +286,19 @@ export function SourceForm({
                         void refresh().catch(handleError);
                     } else
                         void run(async () => {
-                            const p = (await providerList()).find((i) => i.id === id);
-                            if (p) {
-                                setOtherProvider(p);
-                                await submit(p);
+                            setOtherSource(undefined);
+                            let providerName = "服务商";
+                            try {
+                                const within = deadline();
+                                const provider = (await within(providerList)).find((p) => p.id === id);
+                                if (!provider) throw new Error("找不到刚保存的提供商");
+                                providerName = provider.name;
+                                setOtherSource({ provider });
+                                progress("正在获取模型列表…");
+                                const models = await within(() => fetchProviderModels(id));
+                                setOtherSource({ provider, models });
+                            } catch (error) {
+                                handleError(error, providerName);
                             }
                         });
                 }}
@@ -380,7 +385,7 @@ export function SourceForm({
             className="space-y-3"
             onSubmit={(e) => {
                 e.preventDefault();
-                if (!busy && ready) void run(() => submit());
+                if (expert && !busy && ready) void run(() => submit());
             }}
         >
             <fieldset className="min-w-0 space-y-3" disabled={busy}>
@@ -710,7 +715,16 @@ export function SourceForm({
                                     subtitle: recharge ? "充值完成后点击下方重新检查" : "复用已填好 Key 的服务商配置",
                                 }
                             )}
-                        <button
+                        {otherSource ? selectSource("other", otherSource.provider.name, (
+                            <div className="flex items-center justify-between gap-3">
+                                {otherSource.models && (
+                                    <span className="text-xs text-muted-foreground">已获取 {otherSource.models.length} 个模型</span>
+                                )}
+                                <Button type="button" variant="outline" size="sm" onClick={() => setCatalog(true)}>
+                                    更换提供商
+                                </Button>
+                            </div>
+                        ), { icon: <Globe className="h-4 w-4" /> }) : <button
                             type="button"
                             className="group flex w-full items-center gap-3 rounded-2xl bg-muted/45 px-4 py-3 text-left text-sm transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-muted/25 dark:hover:bg-muted/45"
                             onClick={() => {
@@ -726,7 +740,7 @@ export function SourceForm({
                                 <span className="block text-xs text-muted-foreground">OpenAI、Anthropic、Gemini、Ollama 等</span>
                             </span>
                             <ArrowRight className="h-4 w-4 text-muted-foreground/70 transition-transform group-hover:translate-x-0.5" />
-                        </button>
+                        </button>}
                     </>
                 )}
                 {failure && (
@@ -834,9 +848,11 @@ export function SourceForm({
                     >
                         {failure?.kind === "insufficient_balance" || rechargeSaved
                             ? "我已充值，重新检查"
-                            : failure
+                            : failure && !(source === "other" && !otherSource?.models)
                               ? "重试"
-                              : "下一步"}
+                              : expert || (source === "agent" && !optional.trim())
+                                ? "下一步"
+                                : manual ? "验证所选模型" : "帮我选"}
                     </Button>,
                     footer
                 )}

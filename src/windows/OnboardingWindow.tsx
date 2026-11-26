@@ -616,7 +616,7 @@ export default function OnboardingWindow() {
                     e.nativeEvent.isComposing ||
                     e.defaultPrevented ||
                     target.closest("textarea,button,select,summary,[role=dialog],form") ||
-                    embedded
+                    embedded || (page === "sources" && path === "lie_flat" && !addingApi)
                 )
                     return;
                 const button = e.currentTarget.querySelector<HTMLButtonElement>("footer [data-primary]");

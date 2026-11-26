@@ -292,20 +292,30 @@ fn prepare_providers(
         let id = d.seed_targets.get(&r.provider_id).copied().unwrap_or(r.provider_id);
         selections.entry(id).or_default().insert(r.code.clone());
     }
-    for m in &c.models {
-        if retry_roles.is_none() {
-            if let Some(set) = selections.get_mut(&m.provider_id) {
-                for code in m.codes.iter().filter(|v| !v.trim().is_empty()) {
-                    if set.len() >= 10 {
-                        break;
+    let lie_flat = local(sys, "onboarding_path")?.as_deref() == Some("lie_flat");
+    for (id, mut codes) in selections {
+        let p = llm.get_llm_provider(id).map_err(err)?;
+        let deepseek_defaults = lie_flat && p.api_type == "deepseek";
+        let first_activation = retry_roles.is_none() || (deepseek_defaults && !p.is_enabled);
+        if first_activation {
+            for models in c.models.iter().filter(|m| m.provider_id == id) {
+                for code in models.codes.iter().filter(|value| !value.trim().is_empty()) {
+                    if !deepseek_defaults && codes.len() >= 10 { break; }
+                    codes.insert(code.clone());
+                }
+            }
+            if deepseek_defaults {
+                for key in ["deepseek_web_enabled", crate::api::deepseek_api::SHOW_BALANCE_IN_CHAT_CONFIG] {
+                    llm.update_llm_provider_config(id, key, "true").map_err(err)?;
+                    // The source survives until the next checkpoint. Keep it identical so merge_seed can replay.
+                    for (&source, &target) in &d.seed_targets {
+                        if target == id && is_owned(llm, source)? {
+                            llm.update_llm_provider_config(source, key, "true").map_err(err)?;
+                        }
                     }
-                    set.insert(code.clone());
                 }
             }
         }
-    }
-    for (id, codes) in selections {
-        let p = llm.get_llm_provider(id).map_err(err)?;
         if !is_local_agent_api_type(&p.api_type) {
             for code in codes {
                 llm.conn.execute("INSERT INTO llm_model(llm_provider_id,code,name,description) SELECT ?1,?2,?2,'' WHERE NOT EXISTS
@@ -383,16 +393,34 @@ fn apply_chat_defaults(db: &AssistantDatabase, assistant: i64, output: u64) -> R
         .ok_or("聊天助手缺少模型绑定")?;
     let tx = db.conn.unchecked_transaction().map_err(err)?;
     let output = output.to_string();
-    for (name, value, kind) in [
+    let mut options = vec![
         ("max_tokens", output.as_str(), "number"), ("stream", "true", "boolean"),
         ("mcp_loading_mode_explicit", "true", "boolean"), ("dynamic_mcp_loading_enabled", "true", "boolean"),
-    ] {
+    ];
+    if assistant == 1 {
+        options.push(("tool_review_mode", "auto_model", "string"));
+    }
+    for (name, value, kind) in options {
         tx.execute("INSERT INTO assistant_model_config(assistant_id,assistant_model_id,name,value,value_type)
             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(assistant_id,name) DO UPDATE SET
             assistant_model_id=excluded.assistant_model_id,value=excluded.value,value_type=excluded.value_type",
             params![assistant,model.id,name,value,kind]).map_err(err)?;
     }
     tx.commit().map_err(err)
+}
+
+fn apply_quick_appearance(sys: &SystemDatabase, db: &AssistantDatabase) -> Result<(), String> {
+    let key = "butler_appearance_1";
+    let legacy = sys.get_feature_config("butler_appearance", key).map_err(err)?
+        .is_some_and(|value| !value.value.trim().is_empty());
+    let appearance = serde_json::json!({
+        "version": 2, "shape": "aipp", "colors": {"primary": "#FFFFFF", "secondary": "#000000"},
+        "accessories": {"eyes": null, "head": null}, "motion": true
+    });
+    db.conn.execute("INSERT INTO assistant_appearance(assistant_id,value)
+        SELECT 1,?1 WHERE NOT ?2 OR EXISTS(SELECT 1 FROM assistant_appearance_foreign_legacy WHERE key=?3)
+        ON CONFLICT(assistant_id) DO NOTHING", params![appearance.to_string(), legacy, key]).map_err(err)?;
+    Ok(())
 }
 
 fn validate_clear(
@@ -412,19 +440,29 @@ fn role_settings(
     review: Option<&Role>,
     clear_light: bool,
     clear_review: bool,
+    lie_flat: bool,
 ) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if let Some(role) = light.filter(|r| r.verified) {
         map.insert("default_light_model".into(), role.selection());
     }
     if let Some(role) = review.filter(|r| r.verified) {
-        map.insert("auto_review_model".into(), role.code.clone());
-        map.insert("auto_review_provider_id".into(), role.provider_id.to_string());
+        if lie_flat {
+            map.insert("default_decision_model".into(), role.selection());
+            map.insert("auto_review_model".into(), String::new());
+            map.insert("auto_review_provider_id".into(), String::new());
+        } else {
+            map.insert("auto_review_model".into(), role.code.clone());
+            map.insert("auto_review_provider_id".into(), role.provider_id.to_string());
+        }
     }
     if clear_light {
         map.insert("default_light_model".into(), String::new());
     }
     if clear_review {
+        if lie_flat {
+            map.insert("default_decision_model".into(), String::new());
+        }
         map.insert("auto_review_model".into(), String::new());
         map.insert("auto_review_provider_id".into(), String::new());
     }
@@ -575,6 +613,9 @@ pub async fn apply_onboarding_config(
     prepare_providers(&sys, &llm, &mut d, &mut c, changed_roles.as_deref())?;
     let lie_flat = local(&sys, "onboarding_path")?.as_deref() == Some("lie_flat");
     let mut defaults = HashMap::new();
+    if lie_flat && previous.is_none() {
+        defaults.insert("conversation_summary_enabled".into(), "true".into());
+    }
     if lie_flat && changed_butler && c.home == "butler_experiment" {
         let chief = c.butler.as_ref().unwrap_or(&c.chat);
         let provider = llm.get_llm_provider(chief.provider_id).map_err(err)?;
@@ -588,6 +629,7 @@ pub async fn apply_onboarding_config(
             let budget = preset::selected_budget(&sys, &provider.api_type, &c.chat.code)?;
             let db = AssistantDatabase::new(&app).map_err(err)?;
             apply_chat_defaults(&db, assistant_id, budget.output)?;
+            apply_quick_appearance(&sys, &db)?;
             if assistant_id != 1 {
                 // Ask continues to use the quick assistant when the main chat uses a native agent.
                 let quick = db.get_assistant_model(1).map_err(err)?.into_iter().next().ok_or("快速使用助手缺少模型绑定")?;
@@ -618,7 +660,7 @@ pub async fn apply_onboarding_config(
     partial(
         &app,
         "conversation_summary",
-        role_settings(light, review, c.clear_light, c.clear_review),
+        role_settings(light, review, c.clear_light, c.clear_review, lie_flat),
     )
     .await?;
     let mut home = home_settings(&sys, &c, || default_workspace(&app))?;
@@ -777,6 +819,7 @@ fn prepare_role_update(
         change.review.then_some(c.review.as_ref()).flatten(),
         change.light && c.clear_light,
         change.review && c.clear_review,
+        local(sys, "onboarding_path")?.as_deref() == Some("lie_flat"),
     ))
 }
 

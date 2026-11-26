@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ModelSelectionResponse } from "@/components/config/llmModelTypes";
 import { type Candidate, type OnboardingPreset } from "@/utils/modelRecommend";
 import { firstVerified, type ModelRole, type RankedRoles } from "./roleRecommendations";
 import {
@@ -45,7 +46,12 @@ export async function autoCheck(
     preset: OnboardingPreset,
     within: Within,
     progress: Progress,
-    options: { agent?: Provider; manual?: { main: string; light: string }; checkMainBalance?: boolean } = {}
+    options: {
+        agent?: Provider;
+        manual?: { main: string; light: string };
+        checkMainBalance?: boolean;
+        models?: ModelSelectionResponse["available_models"];
+    } = {}
 ): Promise<Checked | ManualModels> {
     const agent = options.agent;
     const notes: Notes = {};
@@ -70,7 +76,7 @@ export async function autoCheck(
     let info: Awaited<ReturnType<typeof preview>>;
     try {
         progress("正在获取模型列表…");
-        info = await within(() => preview(provider, preset));
+        info = await within(() => preview(provider, preset, options.models));
         if (options.checkMainBalance && !agent) {
             progress("正在检查账户余额…");
             await checkBalance(provider, within);
@@ -84,6 +90,8 @@ export async function autoCheck(
         }
         return { config: { ...config, butler: config.chat }, notes };
     }
+    const deepSeek = provider.api_type === "deepseek";
+    if (deepSeek) config.models = [{ providerId: provider.id, codes: [...new Set(info.availableCodes)] }];
     const manual = options.manual;
     const manualLight = manual?.light ? [{ code: manual.light, reason: "手动选择" }] : [];
     const candidates = {
@@ -91,6 +99,12 @@ export async function autoCheck(
         light: manual ? manualLight : info.picks.light,
         review: manual ? manualLight : info.picks.review,
     };
+    if (deepSeek && info.codes.includes("deepseek-flash")) {
+        candidates.review = [
+            { code: "deepseek-flash", reason: "自动选择" },
+            ...candidates.review.filter(candidate => candidate.code !== "deepseek-flash"),
+        ];
+    }
     const fallback = { provider, codes: info.codes, light: info.picks.light[0]?.code ?? "" };
     if (!agent && !candidates.chat.length) return fallback;
     async function select(key: ModelRole, list: Candidate[]) {
