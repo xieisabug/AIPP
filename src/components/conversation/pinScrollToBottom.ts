@@ -351,6 +351,8 @@ const DEFAULT_RESUME_BOTTOM_THRESHOLD_PX = 240;
  * 若沿用 240px 宽阈值，用户上滑一点就会被「恢复跟滚」拽回底部。
  */
 const DEFAULT_SCROLL_RESUME_THRESHOLD_PX = 24;
+/** 高度刚变化后的一小段窗口内，浏览器/虚拟列表可能异步派发补偿 scroll，不能误判成用户拖滚动条上滑 */
+const HEIGHT_CHANGE_COMPENSATION_MS = 80;
 const USER_INTENT_EVENTS = ["wheel", "touchstart", "pointerdown", "mousedown", "keydown"] as const;
 
 /**
@@ -387,8 +389,15 @@ export function followScrollContainerBottom({
     let lastScrollHeight = container.scrollHeight;
     let lastScrollTop = container.scrollTop;
     let scrollTopAtPause = container.scrollTop;
+    let lastHeightChangeAt = -Infinity;
     /** wheel-up 后短暂禁止 scroll/poll 自动 resume，避免 Virtuoso 尚未离底时立刻解暂停 */
     let resumeLockedUntil = 0;
+
+    const noteHeightChange = (nextHeight: number) => {
+        if (Math.abs(nextHeight - lastScrollHeight) > 1) {
+            lastHeightChangeAt = performance.now();
+        }
+    };
 
     const getDistanceToBottom = () =>
         container.scrollHeight - container.scrollTop - container.clientHeight - bottomOffsetPx;
@@ -404,7 +413,10 @@ export function followScrollContainerBottom({
             return;
         }
         if (suspendWhile?.()) {
-            // 让出给动画；下一帧再看
+            // 让出给动画；同步当前位置，避免动画结束后的异步 scroll 拿旧基线误判上滑
+            noteHeightChange(container.scrollHeight);
+            lastScrollTop = container.scrollTop;
+            lastScrollHeight = container.scrollHeight;
             schedulePin();
             return;
         }
@@ -413,12 +425,16 @@ export function followScrollContainerBottom({
             0,
             container.scrollHeight - container.clientHeight - bottomOffsetPx,
         );
-        if (Math.abs(container.scrollTop - maxScrollTop) <= 1) {
+        // 已经在目标底线或更贴底（例如 smartScroll 把 scrollTop 滚到 0px 距底）时，
+        // 绝不能往回拉到 -bottomOffsetPx：回拉会触发其他跟滚器的 movedUp 误停，也会把 Virtuoso 翻成向上滚动。
+        if (container.scrollTop >= maxScrollTop - 1) {
+            noteHeightChange(container.scrollHeight);
             lastScrollTop = container.scrollTop;
             lastScrollHeight = container.scrollHeight;
             return;
         }
 
+        noteHeightChange(container.scrollHeight);
         isPinningScroll = true;
         container.scrollTop = maxScrollTop;
         isPinningScroll = false;
@@ -487,10 +503,22 @@ export function followScrollContainerBottom({
         if (stopped || isPinningScroll || isHiddenMobileConversation(container)) {
             return;
         }
+        if (suspendWhile?.()) {
+            noteHeightChange(container.scrollHeight);
+            lastScrollTop = container.scrollTop;
+            lastScrollHeight = container.scrollHeight;
+            return;
+        }
 
         const movedUp = container.scrollTop < lastScrollTop - 1;
         const movedDown = container.scrollTop > lastScrollTop + 1;
-        const heightUnchanged = Math.abs(container.scrollHeight - lastScrollHeight) <= 1;
+        const heightChangedNow = Math.abs(container.scrollHeight - lastScrollHeight) > 1;
+        if (heightChangedNow) {
+            lastHeightChangeAt = performance.now();
+            lastScrollHeight = container.scrollHeight;
+        }
+        const heightUnchanged = !heightChangedNow
+            && performance.now() - lastHeightChangeAt > HEIGHT_CHANGE_COMPENSATION_MS;
         lastScrollTop = container.scrollTop;
 
         // 触摸上拖：流式期间高度一直在变，heightUnchanged 判不出来，必须单独暂停
@@ -700,7 +728,9 @@ export function followScrollContainerBottom({
             // 保留 delta：不推进 lastScrollHeight，恢复后仍能看到增高
             return;
         }
-        lastScrollHeight = nextHeight;
+        // 不在此处抢先覆盖 lastScrollHeight：收缩引发的异步 scroll 晚到时若发现高度“没变”但
+        // scrollTop 变小，会误判成用户拖滚动条上滑；交由 pinToBottom / handleScroll 同步推进。
+        noteHeightChange(nextHeight);
         schedulePin();
     }, 100);
 

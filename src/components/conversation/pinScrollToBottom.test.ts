@@ -765,6 +765,172 @@ describe("followScrollContainerBottom", () => {
 
         expect(container.scrollTop).toBe(1100);
     });
+
+    it("should not falsely pause when heightPoll runs between a height shrink and its async scroll event", () => {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+        vi.useFakeTimers({
+            toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+        });
+        try {
+            const { container, setScrollHeight } = makeContainer(2000);
+            const onUserPause = vi.fn();
+            const stop = followScrollContainerBottom({
+                container,
+                shouldContinue: () => true,
+                onUserPause,
+            });
+            flushRaf();
+
+            // 高度收缩且浏览器夹紧 scrollTop，但异步 scroll 还没派发
+            setScrollHeight(1600);
+            container.scrollTop = 1200;
+            // 100ms heightPoll 抢先跑了一次
+            vi.advanceTimersByTime(100);
+            // 异步 scroll 随后到达
+            container.dispatchEvent(new Event("scroll"));
+            flushRaf();
+
+            expect(onUserPause).not.toHaveBeenCalled();
+
+            // 后续流式回复增高，必须继续贴底，不能停在旧位置
+            setScrollHeight(2400);
+            triggerResize();
+            flushRaf();
+            expect(container.scrollTop).toBe(2000);
+            stop();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("should recover from a delayed virtual-list upward scroll compensation right after a height shrink", () => {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+        vi.useFakeTimers({
+            toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+        });
+        try {
+            const { container, setScrollHeight } = makeContainer(3000);
+            const onUserPause = vi.fn();
+            const stop = followScrollContainerBottom({
+                container,
+                shouldContinue: () => true,
+                onUserPause,
+            });
+            flushRaf();
+
+            // Virtuoso 实测收缩并触发 ResizeObserver，pinToBottom 先同步了新高度
+            setScrollHeight(2600);
+            container.scrollTop = 2200;
+            triggerResize();
+            flushRaf();
+
+            // 16ms 后 Virtuoso 向上补偿逻辑把 scrollTop 往回拉了一段
+            vi.advanceTimersByTime(16);
+            container.scrollTop = 1900;
+            container.dispatchEvent(new Event("scroll"));
+            flushRaf();
+
+            expect(onUserPause).not.toHaveBeenCalled();
+            expect(container.scrollTop).toBe(2200);
+            stop();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("should not pull scrollTop backward when already past bottomOffsetPx and should not break concurrent followers", () => {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+        const { container, setScrollHeight } = makeContainer(1000);
+        container.scrollTop = 594;
+        const onSendPause = vi.fn();
+        const onStreamPause = vi.fn();
+
+        const stopSend = followScrollContainerBottom({
+            container,
+            bottomOffsetPx: 6,
+            shouldContinue: () => true,
+            onUserPause: onSendPause,
+        });
+        const stopStream = followScrollContainerBottom({
+            container,
+            bottomOffsetPx: 0,
+            shouldContinue: () => true,
+            onUserPause: onStreamPause,
+        });
+
+        // smartScroll / streamingFollow 滚到真底 600；sendFollow 不得把 scrollTop 往回拉到 594
+        flushRaf();
+        expect(container.scrollTop).toBe(600);
+        container.dispatchEvent(new Event("scroll"));
+        triggerResize();
+        flushRaf();
+
+        expect(container.scrollTop).toBe(600);
+        expect(onSendPause).not.toHaveBeenCalled();
+        expect(onStreamPause).not.toHaveBeenCalled();
+
+        setScrollHeight(1400);
+        triggerResize();
+        flushRaf();
+        expect(container.scrollTop).toBe(1000);
+        stopSend();
+        stopStream();
+    });
+
+    it("should ignore upward scroll events while suspendWhile is active and resume following afterward", () => {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+        const { container, setScrollHeight } = makeContainer(1000);
+        let animating = true;
+        const onUserPause = vi.fn();
+        const stop = followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+            suspendWhile: () => animating,
+            onUserPause,
+        });
+
+        // 发送动画期间出现程序回写 scrollTop（如 entry 归位或 rebase）
+        container.scrollTop = 520;
+        container.dispatchEvent(new Event("scroll"));
+        flushRaf();
+        expect(onUserPause).not.toHaveBeenCalled();
+
+        // 动画结束、内容继续长高时仍应正常跟滚到底部
+        animating = false;
+        setScrollHeight(1500);
+        triggerResize();
+        flushRaf();
+        expect(container.scrollTop).toBe(1100);
+        stop();
+    });
 });
 
 describe("pinScrollContainerToBottom", () => {

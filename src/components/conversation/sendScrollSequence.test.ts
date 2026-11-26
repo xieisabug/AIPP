@@ -138,3 +138,47 @@ it('should wait for the Butler shell and text before scrolling',()=>{
     vi.advanceTimersByTime(120); expect(container.scrollTop).toBeGreaterThan(0);
     vi.advanceTimersByTime(600); expect(container.scrollTop).toBe(592); expect(complete).toHaveBeenCalledOnce();
 });
+
+it('should not double-count viewport expansion height when rebasing mid-scroll', () => {
+    const container = document.createElement('div');
+    const content = document.createElement('div');
+    const child = document.createElement('div');
+    const row = document.createElement('div');
+    row.dataset.messageItem = ''; row.dataset.messageId = '3';
+    row.appendChild(document.createElement('div'));
+    child.appendChild(row); content.appendChild(child); container.appendChild(content);
+    document.body.appendChild(container);
+    const writtenHeights: string[] = [];
+    let currentHeight = '';
+    Object.defineProperty(content.style, 'height', {
+        get: () => currentHeight,
+        set: (value: string) => { currentHeight = value; if (value) writtenHeights.push(value); },
+    });
+    let rowTop = 608;
+    // Simulate viewport expanding by 100px after multiline input collapses: 100% - 400px = 100px
+    const evalHeight = () => {
+        const match = /calc\(([\d.]+)px \+ max\(0px, 100% - 400px\) \* ([\d.]+)\)/.exec(currentHeight);
+        return match ? Number(match[1]) + 100 * Number(match[2]) : 1200;
+    };
+    content.getBoundingClientRect = () => ({ height: evalHeight() } as DOMRect);
+    child.getBoundingClientRect = () => ({ height: 1200 } as DOMRect);
+    container.getBoundingClientRect = () => ({ top: 0 } as DOMRect);
+    row.getBoundingClientRect = () => ({ top: rowTop - container.scrollTop } as DOMRect);
+    Object.defineProperties(container, { scrollHeight: { get: evalHeight }, clientHeight: { value: 500 } });
+    container.scrollTop = 300;
+    const complete = vi.fn();
+    startSendScrollSequence({
+        container, content,
+        previousLayout: { height: 700, scrollHeight: 700, scrollTop: 300, viewportHeight: 400 },
+        messageId: 3, onComplete: complete, onUserRelease: vi.fn(),
+    });
+    vi.advanceTimersByTime(240);
+    const heightBeforeRebase = evalHeight();
+    rowTop = 660;
+    vi.advanceTimersByTime(16);
+    // Rebase must stay continuous instead of jumping up by another 100px
+    expect(evalHeight()).toBeCloseTo(heightBeforeRebase, 5);
+    vi.advanceTimersByTime(600);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(writtenHeights.every(h => !h.includes('NaN'))).toBe(true);
+});

@@ -426,6 +426,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         messageId: number | string;
         releasedByUser: boolean;
         pinning: boolean;
+        bottomOffsetPx: number;
         layout: SendLayout | null;
     } | null>(null);
     /** live-only 分支已把本会话贴底展示过；之后长出 history 属于「发送」，不是重新打开 */
@@ -865,6 +866,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             messageId: pinningMessageId,
             releasedByUser: false,
             pinning: true,
+            bottomOffsetPx: 0,
             layout,
         };
         sendScrollStateRef.current = sendState;
@@ -882,9 +884,14 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
             onComplete: () => {
                 finishPin();
+                const bottomOffsetPx = Math.min(
+                    8,
+                    Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop),
+                );
+                sendState.bottomOffsetPx = bottomOffsetPx;
                 sendFollowStopRef.current = followScrollContainerBottom({
                     container,
-                    bottomOffsetPx: Math.min(8, Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop)),
+                    bottomOffsetPx,
                     contentElements: [listWrapperRef.current],
                     shouldContinue: () => sendScrollStateRef.current === sendState,
                     onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
@@ -960,6 +967,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
         return followScrollContainerBottom({
             container,
+            bottomOffsetPx: sendScrollStateRef.current?.bottomOffsetPx ?? 0,
             contentElements: [listWrapperRef.current],
             onScrollStateChange,
             shouldContinue: () => streamingActiveRef.current,
@@ -1069,7 +1077,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         }
         // Rows change above the reader; keep what is on screen where it is.
         if (container && fromBottom !== null) {
-            container.scrollTop = container.scrollHeight - fromBottom;
+            const nextScrollTop = container.scrollHeight - fromBottom;
+            if (Math.abs(container.scrollTop - nextScrollTop) > 1) {
+                container.scrollTop = nextScrollTop;
+            }
         }
     }, [scrollContainerRef]);
     const retainedHasPending = retainedStart > 0

@@ -32,6 +32,8 @@ export function startSendScrollSequence({ container, content, previousLayout, me
     let finalHeight = content?.getBoundingClientRect().height ?? 0;
     const initialHeight = previousLayout ? Math.max(previousLayout.height, finalHeight - Math.max(0, container.scrollHeight - previousLayout.scrollHeight)) : finalHeight;
     let heightFrom = initialHeight;
+    let currentBaseHeight = initialHeight;
+    let viewportExpandProgress = 0;
     const animateHeight = !!content && !!previousLayout && !reduced;
     const heightStyle = (height: number, progress: number) => previousLayout
         ? `calc(${height}px + max(0px, 100% - ${previousLayout.viewportHeight}px) * ${1-progress})`
@@ -116,13 +118,13 @@ export function startSendScrollSequence({ container, content, previousLayout, me
         entryMutation.disconnect();
         entryResize?.disconnect();
         stopBubble();
-        restoreRows();
-        if (displayedOffset) container.scrollTop -= displayedOffset;
         if (animateHeight) {
             content!.style.height = savedHeight;
             content!.style.overflow = savedOverflow;
             content!.style.flexShrink = savedFlexShrink;
         }
+        restoreRows();
+        if (displayedOffset) container.scrollTop -= displayedOffset;
         container.style.scrollBehavior = previousBehavior;
         delete container.dataset.sendPhase;
         container.removeEventListener('wheel', release);
@@ -167,15 +169,20 @@ export function startSendScrollSequence({ container, content, previousLayout, me
             } else if (Math.abs(next - destination) > 1) {
                 // Rebase late virtual measurements from the currently displayed position.
                 from = container.scrollTop; destination = next; scrollStarted = now;
-                heightFrom = content?.getBoundingClientRect().height ?? initialHeight;
+                heightFrom = currentBaseHeight;
                 entryOffset = displayedOffset;
                 duration = Math.max(120, SEND_SCROLL_DURATION_MS - (now - started - entryDuration));
                 stableSince = null;
             }
             const progress = Math.min(1, (now - scrollStarted) / duration);
-            applyOffset(entryOffset * (1 - ease(progress)));
-            if (animateHeight) content!.style.height = heightStyle(heightFrom + (finalHeight - heightFrom) * ease(progress), ease(progress));
-            container.scrollTop = from + (destination - from) * ease(progress);
+            const eased = ease(progress);
+            applyOffset(entryOffset * (1 - eased));
+            if (animateHeight) {
+                currentBaseHeight = heightFrom + (finalHeight - heightFrom) * eased;
+                viewportExpandProgress = Math.max(viewportExpandProgress, eased);
+                content!.style.height = heightStyle(currentBaseHeight, viewportExpandProgress);
+            }
+            container.scrollTop = from + (destination - from) * eased;
             onScrollStateChange?.(container);
             if (progress === 1 && Math.abs(container.scrollTop - next) <= 1) {
                 stableSince ??= now;
