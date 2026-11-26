@@ -9,13 +9,13 @@ pub struct LoadSkillRequest {
     pub command: String,
     /// Source type of the skill (e.g., "aipp", "claude_code_agents", etc.)
     pub source_type: String,
-    /// Optional text file relative to the installed plugin skill directory.
+    /// Optional text file relative to the skill directory (folder-based skills only).
     #[serde(default)]
     pub file: Option<String>,
 }
 
 /// Response from loading a skill
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoadSkillResponse {
     /// The skill identifier
     pub identifier: String,
@@ -27,6 +27,12 @@ pub struct LoadSkillResponse {
     pub found: bool,
     /// Error message if not found
     pub error: Option<String>,
+    /// Absolute folder of a folder-based skill, so scripts can be run by absolute path
+    #[serde(default)]
+    pub skill_dir: Option<String>,
+    /// Supporting files in the skill folder, relative to `skill_dir` (only when loading SKILL.md)
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// Additional file content for a skill

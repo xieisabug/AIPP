@@ -302,9 +302,28 @@ pub fn migrate_skills_to_agents_dir(app_handle: &tauri::AppHandle) -> Result<(),
     Ok(())
 }
 
+/// Retire official skill folders renamed upstream and move assistant bindings to the new names.
+/// Best effort: a failure keeps the old folder and bindings working as before.
+fn migrate_renamed_official_skills(app_handle: &tauri::AppHandle) {
+    let Ok(skills_dir) = skills_directory(app_handle) else { return };
+    let removed = crate::skills::renamed::retire_replaced_folders(&skills_dir);
+    if !removed.is_empty() {
+        info!(?removed, "Removed official skill folders replaced by renamed versions");
+    }
+    match crate::db::skill_db::SkillDatabase::new(app_handle) {
+        Ok(db) => match crate::skills::renamed::rebind_assistant_skills(&db.conn, &skills_dir) {
+            Ok(0) => {}
+            Ok(changed) => info!(changed, "Moved assistant skill bindings to renamed official skills"),
+            Err(error) => warn!(%error, "Failed to move assistant skill bindings to renamed official skills"),
+        },
+        Err(error) => warn!(%error, "Failed to open assistant database for skill rename migration"),
+    }
+}
+
 /// Scan all skills from all configured sources
 #[tauri::command]
 pub async fn scan_skills(app_handle: tauri::AppHandle) -> Result<Vec<ScannedSkill>, String> {
+    migrate_renamed_official_skills(&app_handle);
     let scanner = create_scanner(&app_handle);
     let skills = scanner.scan_all();
     crate::slash::cache::index_scanned_skills(&app_handle, &scanner, &skills).map_err(|e| e.to_string())?;

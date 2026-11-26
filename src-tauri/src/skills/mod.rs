@@ -10,7 +10,9 @@
 pub mod installer;
 pub mod parser;
 pub mod prompt;
+pub(crate) mod renamed;
 pub mod scanner;
+pub mod support_files;
 pub mod types;
 
 // Re-exports for convenience

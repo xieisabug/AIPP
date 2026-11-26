@@ -582,11 +582,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "source_type": {
                             "type": "string",
-                            "description": "The source type of the skill. Available types: 'aipp' (AIPP Skills), 'agent_plugin' (installed GitHub plugins), 'claude_code_agents', 'claude_code_rules', 'codex', or custom source types."
+                            "description": "The source type shown in the skill's identifier (the part before ':'), e.g. 'agents' (~/.agents/skills, where AIPP installs skills), 'agent_plugin' (installed GitHub plugins), 'claude_code_skills', 'codex', 'copilot', or a custom source type."
                         },
                         "file": {
                             "type": "string",
-                            "description": "For agent_plugin skills, optionally read a supporting text file relative to that skill's directory, e.g. reference/template.md. Omit to load SKILL.md."
+                            "description": "Optionally read a supporting text file relative to the skill's directory, e.g. references/schema.md. Loading SKILL.md lists the available files. Omit to load SKILL.md."
                         }
                     },
                     "required": ["command", "source_type"]

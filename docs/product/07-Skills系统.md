@@ -22,7 +22,9 @@ Skills 系统用于给助手追加“可复用的任务说明书”。它不是�
 - 列表页只扫描元数据，减少加载开销
 - 打开某个 Skill 详情时，才会通过 `get_skill_content` 读取完整正文
 - `requires_files` 中声明的附加文件会一起读取并返回，便于 Skill 携带模板、示例或附属说明
-- 支持 YAML 多行说明和嵌套 `metadata.version/author`。GitHub 插件技能使用独立 `agent_plugin` 来源，安装时保留整个包；`load_skill` 的 `file` 参数可读取该技能的配套文本，路径相对于技能目录，并受包目录边界和大小限制。详见 [GitHub 插件包](./21-GitHub插件包.md)。
+- 支持 YAML 多行说明和嵌套 `metadata.version/author`。GitHub 插件技能使用独立 `agent_plugin` 来源，安装时保留整个包。详见 [GitHub 插件包](./21-GitHub插件包.md)。
+- 目录形式的 Skill（`<目录>/SKILL.md`，含 `agent_plugin`）用 `load_skill` 加载正文时，会在末尾附上技能目录绝对路径和配套文件清单（`references/`、`scripts/`、`assets/` 等，不含隐藏文件）；`file` 参数按相对技能目录的路径读取其中的 UTF-8 文本，不能越出目录，单个文件不超过 1 MiB（`skills/support_files.rs`）。单文件技能没有配套文件。这样普通模型也能按需读取参考文档、按绝对路径运行脚本，不必把它们都写进 `requires_files`。
+- 官方 AIPP Skills 在 2.0.0 改名（`aipp-artifact`→`building-aipp-artifacts`、`aipp-database`→`managing-aipp-data`、`aipp-plugin-dev`→`developing-aipp-plugins`）。`scan_skills` 在新目录装好后校验旧目录的 `SKILL.md`。若与历史官方版本的摘要一致，会删除整个旧目录，包括其中自行新增或修改的参考文档和脚本。新版目录提供随包发布的配套文件。若旧 `SKILL.md` 已修改，则保留旧目录及其绑定。旧目录不存在时，助手绑定迁移到新标识（`skills/renamed.rs`）。
 
 ---
 

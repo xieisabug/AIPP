@@ -92,6 +92,7 @@ mod tests {
             additional_files: vec![],
             found: true,
             error: None,
+            ..Default::default()
         };
 
         assert!(response.found);
@@ -107,6 +108,7 @@ mod tests {
             additional_files: vec![],
             found: false,
             error: Some("Skill not found".to_string()),
+            ..Default::default()
         };
 
         assert!(!response.found);
@@ -131,6 +133,7 @@ mod tests {
             ],
             found: true,
             error: None,
+            ..Default::default()
         };
 
         assert_eq!(response.additional_files.len(), 2);

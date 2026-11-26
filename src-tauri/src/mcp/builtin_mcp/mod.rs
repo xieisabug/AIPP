@@ -1760,13 +1760,30 @@ pub async fn execute_aipp_builtin_tool(
                                     }
                                 }
 
+                                if let Some(dir) = response.skill_dir.as_deref().filter(|_| !response.files.is_empty()) {
+                                    text.push_str(&format!(
+                                        "
+
+---
+技能目录：`{dir}`
+配套文件（用 load_skill 的 file 参数按相对路径读取；脚本按 技能目录/相对路径 的绝对路径运行）：
+"
+                                    ));
+                                    for file in &response.files {
+                                        text.push_str(&format!("- {file}
+"));
+                                    }
+                                }
+
                                 serde_json::json!({
                                     "content": [{"type": "text", "text": text}],
                                     "isError": false,
                                     "metadata": {
                                         "identifier": response.identifier,
                                         "found": true,
-                                        "additional_files_count": response.additional_files.len()
+                                        "additional_files_count": response.additional_files.len(),
+                                        "skill_dir": response.skill_dir,
+                                        "files": response.files
                                     }
                                 })
                             } else {

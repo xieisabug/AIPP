@@ -770,37 +770,24 @@ description: A skill with non-standard filename
         let plugins_dir = home_dir.path().join(".claude/plugins");
         fs::create_dir_all(&plugins_dir).unwrap();
 
+        // Serialize paths through serde_json: Windows paths contain backslashes that must be escaped.
+        let install_path = |name: &str| home_dir.path().join("plugins").join(name);
+        let entry = |name: &str| serde_json::json!([{
+            "scope": "user",
+            "installPath": install_path(name),
+            "version": "1.0.0",
+            "installedAt": "2026-01-09T00:00:00Z",
+            "lastUpdated": "2026-01-09T00:00:00Z"
+        }]);
         let json_file = plugins_dir.join("installed_plugins.json");
-        let mut f = fs::File::create(&json_file).unwrap();
-        writeln!(
-            f,
-            r#"{{
-  "version": 2,
-  "plugins": {{
-    "frontend-design@claude-plugins-official": [
-      {{
-        "scope": "user",
-        "installPath": "{}/plugins/frontend-design",
-        "version": "1.0.0",
-        "installedAt": "2026-01-09T00:00:00Z",
-        "lastUpdated": "2026-01-09T00:00:00Z"
-      }}
-    ],
-    "document-skills@anthropic-agent-skills": [
-      {{
-        "scope": "user",
-        "installPath": "{}/plugins/document-skills",
-        "version": "1.0.0",
-        "installedAt": "2026-01-09T00:00:00Z",
-        "lastUpdated": "2026-01-09T00:00:00Z"
-      }}
-    ]
-  }}
-}}"#,
-            home_dir.path().display(),
-            home_dir.path().display()
-        )
-        .unwrap();
+        let manifest = serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "frontend-design@claude-plugins-official": entry("frontend-design"),
+                "document-skills@anthropic-agent-skills": entry("document-skills")
+            }
+        });
+        fs::write(&json_file, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
 
         // Parse the JSON file
         let plugins = scanner.parse_installed_plugins(&json_file);
@@ -813,6 +800,7 @@ description: A skill with non-standard filename
         let plugin_names: Vec<_> = plugins.iter().map(|(name, _)| name.as_str()).collect();
         assert!(plugin_names.contains(&"frontend-design"));
         assert!(plugin_names.contains(&"document-skills"));
+        assert!(plugins.iter().any(|(name, path)| name == "frontend-design" && *path == install_path("frontend-design")));
     }
 
     #[test]
