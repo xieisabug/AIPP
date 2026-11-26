@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
+import { Eraser, Loader2, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 import IconButton from "@/components/IconButton";
 import InputArea from "@/components/conversation/InputArea";
@@ -57,13 +57,15 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const framelessTitleBar = useFramelessTitleBar();
     const drag = dragRegionProps(framelessTitleBar);
     const [inviteOpen, setInviteOpen] = useState(false);
-    const [confirmDelete, setConfirmDelete] = useState(false);
+    const [confirmation, setConfirmation] = useState<"clear" | "delete" | null>(null);
+    const [clearing, setClearing] = useState(false);
     const [nameDraft, setNameDraft] = useState("");
     const pendingPost = useRef<{ signature: string; key: string } | null>(null);
     const [localPost, setLocalPost] = useState<ButlerGroupMessage>();
     const historyLoaded = useRef(false);
     const loadedThrough = useRef(0);
     const revision = useRef(0);
+    const historyEpoch = useRef(0);
 
     const refresh = useCallback(async (replaceHistory = false) => {
         if (replaceHistory) historyLoaded.current = false;
@@ -84,7 +86,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             if (version !== revision.current) return;
             const incoming = pages.reverse().flat();
             historyLoaded.current = true;
-            loadedThrough.current = next.messages.at(-1)?.seq ?? loadedThrough.current;
+            loadedThrough.current = next.messages.at(-1)?.seq ?? 0;
             setDetail(previous => ({ ...next, messages: mergeMessages(loadFullHistory ? [] : previous?.messages ?? [], incoming) }));
             setLoadError("");
         } catch (error) {
@@ -92,12 +94,25 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         }
     }, [groupId]);
 
+    const resetHistory = useCallback(() => {
+        ++historyEpoch.current;
+        pendingPost.current = null;
+        setLocalPost(undefined);
+        setQuote(null);
+        setDetail(previous => previous && { ...previous, messages: [], turns: [], interaction_turns: [], routing: false });
+        return refresh(true);
+    }, [refresh]);
+
     useEffect(() => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         void refresh();
-        const subscription = groups.onButlerGroupChanged(changed => {
+        const subscription = groups.onButlerGroupChanged((changed, historyCleared) => {
             if (changed !== groupId) return;
             clearTimeout(timer);
+            if (historyCleared) {
+                void resetHistory();
+                return;
+            }
             timer = setTimeout(() => afterSendMotion(() => void refresh()), 80);
         });
         const sync = listen("conversation_data_changed", () => {
@@ -110,7 +125,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             ++revision.current;
             void subscription.then(stop => stop()).catch(() => {});
         };
-    }, [groupId, refresh]);
+    }, [groupId, refresh, resetHistory]);
 
     const messages = detail?.messages ?? [];
     const displayMessages = useMemo(() =>
@@ -150,7 +165,8 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     })), [members]);
 
     const send = async (body: string) => {
-        if (!body || sending) return;
+        if (!body || sending || clearing) return;
+        const epoch = historyEpoch.current;
         const replyTo = quote?.id ?? null;
         const signature = JSON.stringify([body, replyTo]);
         if (pendingPost.current?.signature !== signature) {
@@ -166,15 +182,18 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         setDraft("");
         try {
             const message = await groups.postButlerGroupMessage(groupId, requestKey, body, replyTo);
+            if (epoch !== historyEpoch.current) return;
             pendingPost.current = null;
             setQuote(current => current === quote ? null : current);
             // 用同一 request_key 将正式序号交给已经上屏的气泡；等发送动画结束再换，避免整表重渲染掉帧。
             afterSendMotion(() => {
+                if (epoch !== historyEpoch.current) return;
                 setLocalPost(current => current?.request_key === requestKey ? undefined : current);
                 setDetail(previous => previous ? { ...previous, routing: true, messages: mergeMessages(previous.messages, [message]) } : previous);
                 void refresh();
             });
         } catch (error) {
+            if (epoch !== historyEpoch.current) return;
             setLocalPost(current => current && { ...current, sendStatus: "failed", sendError: String(error) });
             setDraft(current => current || body);
             // 草稿保留，重试时沿用同一个 request key，后端不会重复入群
@@ -231,6 +250,20 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             onDeleted();
         } catch (error) {
             toast.error(String(error));
+        }
+    };
+
+    const clearHistory = async () => {
+        setClearing(true);
+        try {
+            await groups.clearButlerGroupHistory(groupId);
+            await resetHistory();
+            setPanelOpen(false);
+            toast.success("已清空群聊历史消息");
+        } catch (error) {
+            toast.error(String(error));
+        } finally {
+            setClearing(false);
         }
     };
 
@@ -335,7 +368,11 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                     </section>
                     <ButlerMemoryPanel conversationId={groupId} scope="group" />
                     <GroupRoutingModelCard />
-                    <Button variant="ghost" className="mt-auto justify-start gap-2 text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
+                    <Button variant="ghost" className="mt-auto justify-start gap-2" disabled={sending || clearing || !messages.length}
+                        onClick={() => setConfirmation("clear")}>
+                        <Eraser className="size-4" />清空历史消息
+                    </Button>
+                    <Button variant="ghost" className="justify-start gap-2 text-destructive hover:text-destructive" disabled={clearing} onClick={() => setConfirmation("delete")}>
                         <Trash2 className="size-4" />删除群聊
                     </Button>
                 </div>
@@ -349,19 +386,22 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                 await refresh();
             }} />
 
-        <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialog open={confirmation !== null} onOpenChange={open => { if (!open) setConfirmation(null); }}>
             <AlertDialogContent className="flex flex-col gap-0 overflow-hidden p-0 sm:max-w-md">
                 <AlertDialogHeader className="border-b border-border px-4 py-3 text-left sm:px-5">
-                    <AlertDialogTitle className="text-base font-semibold">删除群聊「{detail.name}」？</AlertDialogTitle>
+                    <AlertDialogTitle className="text-base font-semibold">{confirmation === "clear" ? `清空「${detail.name}」的历史消息？` : `删除群聊「${detail.name}」？`}</AlertDialogTitle>
                 </AlertDialogHeader>
                 <div className="px-4 py-4 sm:px-5">
                     <AlertDialogDescription className="text-sm leading-relaxed text-muted-foreground">
-                        群消息和成员在本群的执行记录都会删除，成员的私聊不受影响。正在进行的回复会先停止。
+                        {confirmation === "clear"
+                            ? "将停止当前回复，永久删除本群的消息和成员在本群的执行记录。群名、成员和群记忆会保留。"
+                            : "群消息和成员在本群的执行记录都会删除，成员的私聊不受影响。正在进行的回复会先停止。"}
                     </AlertDialogDescription>
                 </div>
                 <AlertDialogFooter className="flex-row items-center justify-end gap-2 border-t border-border bg-background px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] sm:px-5">
                     <AlertDialogCancel className="min-h-11 px-4 sm:min-h-9">取消</AlertDialogCancel>
-                    <AlertDialogAction className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9" onClick={() => void deleteGroup()}>删除</AlertDialogAction>
+                    <AlertDialogAction className="min-h-11 bg-destructive px-5 text-white hover:bg-destructive/90 sm:min-h-9"
+                        onClick={() => void (confirmation === "clear" ? clearHistory() : deleteGroup())}>{confirmation === "clear" ? "清空" : "删除"}</AlertDialogAction>
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog>

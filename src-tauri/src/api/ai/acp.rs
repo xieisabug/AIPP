@@ -5760,6 +5760,11 @@ async fn run_acp_connected_session(
 ///
 /// 任何一步失败只记录日志，不影响本地对话删除。
 pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_id: i64) {
+    tauri::async_runtime::spawn(prepare_session_cleanup(app_handle, conversation_id));
+}
+
+/// 删除事务前读取会话绑定，提交成功后再释放实例。
+pub(crate) fn prepare_session_cleanup(app_handle: &tauri::AppHandle, conversation_id: i64) -> impl std::future::Future<Output = ()> + Send + 'static {
     let stored_session_id = match ConversationDatabase::new(app_handle) {
         Ok(db) => match db.get_acp_session_id(conversation_id) {
             Ok(value) => value,
@@ -5796,7 +5801,7 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
     });
 
     let app_handle = app_handle.clone();
-    tauri::async_runtime::spawn(async move {
+    async move {
         {
             let session_state = app_handle.state::<crate::AcpSessionState>();
             let mut sessions = session_state.sessions.lock().await;
@@ -5866,7 +5871,7 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
                 );
             }
         }
-    });
+    }
 }
 
 fn prepare_acp_session_delete_config(

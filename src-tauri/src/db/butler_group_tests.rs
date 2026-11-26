@@ -79,6 +79,56 @@ fn test_group_rename_targets_id_and_preserves_members_history_context_and_memory
 }
 
 #[test]
+fn test_group_clear_history_resets_only_this_group_and_starts_fresh() {
+    let mut conn = setup();
+    let (group, roster) = group_with(&mut conn, &["甲", "乙", "丙"]);
+    let (other, other_roster) = group_with(&mut conn, &["甲"]);
+    let unaffected = reply(&conn, other_roster[0].conversation_id, "另一群的记录");
+    let q = post_user(&mut conn, group.id, "old", "@甲 旧问题", None).unwrap();
+    let old_turn = route(&mut conn, group.id, q.seq, &[roster[0].id], 1).unwrap()[0];
+    run(&mut conn, old_turn);
+    let old = member_conversations(&conn, group.id).unwrap();
+    assert!(clear_history(&conn, group.id, &old, q.seq).is_err());
+    stop(&mut conn, group.id).unwrap();
+    remove_member(&mut conn, group.id, roster[2].id, "移出了丙").unwrap();
+    reply(&conn, roster[2].conversation_id, "已退群成员的旧记录");
+    crate::db::butler_memory::schema(&conn).unwrap();
+    conn.execute("INSERT INTO butler_memory(content,scope_type,scope_id,created_at,updated_at) VALUES('群记忆','group',?1,1,1)", [group.id]).unwrap();
+    assert!(clear_history(&conn, group.id, &old, q.seq).is_err());
+    let through = get(&conn, group.id).unwrap().seq;
+    clear_history(&conn, group.id, &old, through).unwrap();
+    let current = members(&conn, group.id).unwrap();
+    assert_eq!(current.iter().map(|m| m.assistant_id).collect::<Vec<_>>(), vec![roster[0].assistant_id, roster[1].assistant_id]);
+    assert!(current.iter().all(|m| m.active && !old.contains(&m.conversation_id)));
+    assert_eq!(get(&conn, group.id).unwrap().name, group.name);
+    assert!(last_message(&conn, group.id).unwrap().is_none());
+    assert!(turn(&conn, old_turn).is_err());
+    assert_eq!(conn.query_row("SELECT count(*) FROM message WHERE id<>?1", [unaffected], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(conn.query_row("SELECT content FROM butler_memory WHERE scope_id=?1", [group.id], |r| r.get::<_, String>(0)).unwrap(), "群记忆");
+    assert!(last_message(&conn, other.id).unwrap().is_some());
+    let new = post_user(&mut conn, group.id, "new", "@甲 新问题", None).unwrap();
+    let new_turn = route(&mut conn, group.id, new.seq, &[current[0].id], 1).unwrap()[0];
+    assert!(new_turn > old_turn && new.seq > through);
+    let (_, _, input) = run(&mut conn, new_turn);
+    assert!(input.contains("新问题") && !input.contains("旧问题"));
+}
+
+#[test]
+fn test_group_clear_history_rolls_back_if_a_member_cannot_be_recreated() {
+    let mut conn = setup();
+    let (group, roster) = group_with(&mut conn, &["甲", "乙"]);
+    let old = member_conversations(&conn, group.id).unwrap();
+    let old_reply = reply(&conn, roster[0].conversation_id, "原始执行记录");
+    conn.execute_batch("CREATE TRIGGER fail_replacement BEFORE INSERT ON butler_chat_group_member
+        WHEN NEW.name='乙' BEGIN SELECT RAISE(ABORT, '模拟新会话写入失败'); END;").unwrap();
+    let error = clear_history(&conn, group.id, &old, group.seq).unwrap_err();
+    assert!(error.to_string().contains("模拟新会话写入失败"));
+    assert_eq!(member_conversations(&conn, group.id).unwrap(), old);
+    assert_eq!(last_message(&conn, group.id).unwrap().unwrap().seq, group.seq);
+    assert_eq!(conn.query_row("SELECT content FROM message WHERE id=?1", [old_reply], |r| r.get::<_, String>(0)).unwrap(), "原始执行记录");
+}
+
+#[test]
 fn test_group_post_user_is_idempotent_and_waits_for_routing() {
     let mut conn = setup();
     let (group, _) = group_with(&mut conn, &["张三", "李四"]);

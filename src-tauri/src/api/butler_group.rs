@@ -36,7 +36,11 @@ where
 
 /// 通知界面刷新，并唤醒调度。
 pub(super) fn changed(app: &AppHandle, group_id: i64) {
-    let _ = app.emit("butler_group_changed", serde_json::json!({ "group_id": group_id }));
+    notify_change(app, group_id, false);
+}
+
+fn notify_change(app: &AppHandle, group_id: i64, history_cleared: bool) {
+    let _ = app.emit("butler_group_changed", serde_json::json!({ "group_id": group_id, "history_cleared": history_cleared }));
     crate::sync::schedule_sync_after_local_change(app);
     super::butler_group_runtime::wake();
 }
@@ -403,6 +407,33 @@ pub(crate) async fn reset_butler_group_member_context(
         stopped_turns,
         stop_errors,
     })
+}
+
+#[tauri::command]
+pub async fn clear_butler_group_history(app_handle: AppHandle, group_id: i64) -> Result<(), String> {
+    desktop()?;
+    let (running, conversations, through) = database(&app_handle, "准备清空历史消息", move |conn| {
+        let running = group::stop(conn, group_id)?;
+        Ok((running, group::member_conversations(conn, group_id)?, group::get(conn, group_id)?.seq))
+    }).await?;
+    let errors = halt(&app_handle, running).await;
+    if !errors.is_empty() {
+        changed(&app_handle, group_id);
+        return Err(format!("无法清空群聊 #{group_id}：部分回复未能停止。\n{}", errors.join("\n")));
+    }
+    let app = app_handle.clone();
+    let cleanup = database(&app_handle, "清空历史消息", move |conn| {
+        let cleanup = conversations.iter().map(|&id| (id, super::ai::acp::prepare_session_cleanup(&app, id))).collect::<Vec<_>>();
+        group::clear_history(conn, group_id, &conversations, through)?;
+        Ok(cleanup)
+    }).await;
+    notify_change(&app_handle, group_id, cleanup.is_ok());
+    for (id, release) in cleanup? {
+        tauri::async_runtime::spawn(release);
+        super::office_save::remove_conversation_outputs(&app_handle, id);
+        let _ = app_handle.emit("conversation_deleted", id);
+    }
+    Ok(())
 }
 
 /// 删除群聊：先打断进行中的回复，再删除成员的群执行会话和群本身。成员的私聊不受影响。

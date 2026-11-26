@@ -26,7 +26,7 @@ class ResizeObserverMock {
 const api = vi.hoisted(() => ({
     markRepliesRead: vi.fn().mockResolvedValue(undefined), getButlerGroup: vi.fn(), listOlderButlerGroupMessages: vi.fn(), postButlerGroupMessage: vi.fn(),
     stopButlerGroupReplies: vi.fn(), addButlerGroupMembers: vi.fn(), removeButlerGroupMember: vi.fn(),
-    renameButlerGroup: vi.fn(), deleteButlerGroup: vi.fn(), onButlerGroupChanged: vi.fn(),
+    renameButlerGroup: vi.fn(), deleteButlerGroup: vi.fn(), clearButlerGroupHistory: vi.fn(), onButlerGroupChanged: vi.fn(),
 }));
 vi.mock("@/services/butlerGroupService", () => api);
 vi.mock("@/services/butlerMemoryService", () => ({
@@ -115,6 +115,24 @@ beforeEach(() => {
 });
 
 describe("ButlerGroupChat", () => {
+    it("should clear history only after confirmation and leave the group open", async () => {
+        api.clearButlerGroupHistory.mockImplementation(async () => {
+            api.getButlerGroup.mockResolvedValue(detail({ messages: [], interaction_turns: [] }));
+        });
+        renderChat();
+        expect(await screen.findByText("初稿如下")).toBeInTheDocument();
+        fireEvent.click(screen.getByTitle("群聊信息"));
+        fireEvent.click(screen.getByRole("button", { name: "清空历史消息" }));
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+        expect(api.clearButlerGroupHistory).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "清空历史消息" }));
+        fireEvent.click(screen.getByRole("button", { name: "清空" }));
+        await waitFor(() => expect(screen.queryByText("初稿如下")).toBeNull());
+        expect(api.clearButlerGroupHistory).toHaveBeenCalledWith(7);
+        expect(api.deleteButlerGroup).not.toHaveBeenCalled();
+        expect(screen.getByLabelText("群聊消息")).toBeInTheDocument();
+    });
+
     it("should show a plain chat stream without routing controls when opened", async () => {
         const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
         renderChat();

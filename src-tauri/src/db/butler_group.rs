@@ -91,6 +91,12 @@ CREATE INDEX IF NOT EXISTS idx_butler_chat_group_turn_state
     ON butler_chat_group_turn(state, member_id, id);
 CREATE INDEX IF NOT EXISTS idx_butler_chat_group_turn_reply
     ON butler_chat_group_turn(group_id, reply_seq) WHERE reply_seq IS NOT NULL;
+-- 旧版轮次表的主键允许复用。保留已删除的最大编号，避免迟到的执行回执命中新轮次。
+CREATE TABLE IF NOT EXISTS butler_group_deleted_turn (singleton INTEGER PRIMARY KEY CHECK(singleton=1), last_id INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS group_turn_deleted_id AFTER DELETE ON butler_chat_group_turn BEGIN
+    INSERT INTO butler_group_deleted_turn VALUES(1,OLD.id)
+        ON CONFLICT(singleton) DO UPDATE SET last_id=max(last_id,excluded.last_id);
+END;
 ";
 
 /// 第一版协作群的队列表（投递包、席位、依赖、原生插队等）。新实现不再使用，迁移公开消息后按子表到父表的顺序删除。
@@ -753,7 +759,9 @@ struct NewTurn {
 }
 
 fn insert_turn(tx: &Connection, turn: NewTurn) -> Result<i64> {
-    tx.execute("INSERT INTO butler_chat_group_turn(group_id,member_id,trigger_seq,origin_seq,depth,round,rounds) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+    tx.execute("INSERT INTO butler_chat_group_turn(id,group_id,member_id,trigger_seq,origin_seq,depth,round,rounds)
+        SELECT max(coalesce((SELECT max(id) FROM butler_chat_group_turn),0),
+                   coalesce((SELECT last_id FROM butler_group_deleted_turn WHERE singleton=1),0))+1,?1,?2,?3,?4,?5,?6,?7",
         params![turn.group, turn.member, turn.trigger, turn.origin, turn.depth, turn.round, turn.rounds])?;
     Ok(tx.last_insert_rowid())
 }
@@ -1189,6 +1197,28 @@ pub fn stop(conn: &mut Connection, group: i64) -> Result<Vec<Turn>> {
 
 pub fn member_conversations(conn: &Connection, group: i64) -> Result<Vec<i64>> {
     Ok(members(conn, group)?.into_iter().map(|m| m.conversation_id).collect())
+}
+
+/// 在同一事务中删除公开历史、清理历任成员的执行记录并为当前成员创建空白会话。
+pub fn clear_history(conn: &Connection, group: i64, expected_conversations: &[i64], through: i64) -> Result<()> {
+    let _journals = super::cascade_delete::prepare_transaction(conn, "conversation")?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let room = get(&tx, group)?;
+    let previous = members(&tx, group)?;
+    ensure!(room.seq == through && previous.iter().map(|m| m.conversation_id).eq(expected_conversations.iter().copied()),
+        "群聊 #{} 在清空前有新消息或成员变更，请重新确认", group);
+    ensure!(open_turns(&tx, group)?.is_empty() && !has_pending_route(&tx, group)?, "群聊 #{group} 仍有待处理的回复，请停止后重试");
+    tx.execute("DELETE FROM butler_chat_group_turn WHERE group_id=?1", [group])?;
+    tx.execute("DELETE FROM butler_chat_group_message WHERE group_id=?1", [group])?;
+    for member in &previous {
+        super::conversation_db::cascade_delete_conversation(&tx, member.conversation_id)
+            .with_context(|| format!("清理群成员会话 #{}", member.conversation_id))?;
+    }
+    for member in previous.iter().filter(|m| m.active) {
+        insert_member(&tx, &room, member.assistant_id, &member.name)?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// 应用重启后，上次未结束的回复已经失去执行者：有完整结果的照常公开，否则说明中断原因，不自动重做。

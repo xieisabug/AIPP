@@ -48,7 +48,8 @@ export const renameButlerGroup = (groupId: number, name: string) =>
     invoke<void>("rename_butler_group", { groupId, name });
 
 export const deleteButlerGroup = (groupId: number) => invoke<void>("delete_butler_group", { groupId });
+export const clearButlerGroupHistory = (groupId: number) => invoke<void>("clear_butler_group_history", { groupId });
 
 /** 任一群发生变化时回调；groupId 为变化的群。 */
-export const onButlerGroupChanged = (callback: (groupId: number) => void) =>
-    listen<{ group_id: number }>(BUTLER_GROUP_CHANGED_EVENT, ({ payload }) => callback(payload.group_id));
+export const onButlerGroupChanged = (callback: (groupId: number, historyCleared?: boolean) => void) =>
+    listen<{ group_id: number; history_cleared?: boolean }>(BUTLER_GROUP_CHANGED_EVENT, ({ payload }) => callback(payload.group_id, payload.history_cleared));
