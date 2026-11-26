@@ -161,8 +161,8 @@ pub fn is_review_exempt_tool(
 
 fn is_review_exempt_action(request: &serde_json::Value) -> bool {
     request["args"].is_object() && matches!(request["action_id"].as_str(), Some(
-        "assistant.list" | "assistant.get" | "assistant.create"
-        | "conversation.list" | "conversation.get" | "conversation.create"
+        "assistant.list" | "assistant.get" | "assistant.create" | "assistant.reset_conversation"
+        | "conversation.list" | "conversation.get" | "conversation.create" | "conversation.group_reset_member"
         | "task.list" | "task.get" | "task.cancel"
         | "schedule.list" | "schedule.get" | "mcp.list" | "mcp.get"
         | "llm.list_providers" | "llm.get_provider" | "llm.list_models" | "llm.get_model" | "llm.add_model"

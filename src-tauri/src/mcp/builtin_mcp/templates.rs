@@ -1383,17 +1383,17 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("superadmin") => vec![
             BuiltinToolInfo {
                 name: "superadmin_catalog".into(),
-                description: "查询 Super Admin 能力目录。支持按 domain、tag、risk_level 和关键词筛选，返回可执行 action 列表。".into(),
+                description: "查询 Super Admin 能力目录。支持按 domain、tag、risk_level 和关键词（支持空格分隔多词）筛选，返回可执行 action 列表。跨领域动作（例如重开助手私聊在 assistant 域、重开群成员上下文在 conversation 域）建议不限 domain 直接用 query 或 tag 搜索。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "关键词搜索（匹配 action_id、summary、description、tags）"
+                            "description": "关键词搜索（支持空格分隔多词，匹配 action_id、summary、description、tags）"
                         },
                         "domain": {
                             "type": "string",
-                            "enum": ["assistant", "conversation", "task", "schedule"],
+                            "enum": ["assistant", "conversation", "task", "schedule", "mcp", "llm"],
                             "description": "按 domain 筛选"
                         },
                         "tag": {
@@ -1518,7 +1518,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "domain": {
                             "type": "string",
-                            "enum": ["assistant", "conversation", "task", "schedule"],
+                            "enum": ["assistant", "conversation", "task", "schedule", "mcp", "llm"],
                             "description": "按 domain 筛选"
                         },
                         "success_only": {

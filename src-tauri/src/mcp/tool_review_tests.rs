@@ -543,8 +543,10 @@ fn test_review_exempt_suboperations_fail_closed() {
     assert!(admin("superadmin_execute", r#"{"action_id":"llm.get_model","args":{}}"#));
     assert!(!admin("superadmin_execute", r#"{"action_id":"llm.get_models","args":{}}"#));
     assert!(!admin("superadmin_execute", r#"{"action_id":"unknown","args":{},"dry_run":true}"#));
-    // 删除会话不可撤销：既不免审，也需要用户批准。
+    // 删除会话不可撤销：既不免审，也需要用户批准；重开上下文只归档不删数据，可免审放行。
     assert!(!admin("superadmin_execute", r#"{"action_id":"conversation.delete","args":{"conversation_id":1}}"#));
+    assert!(admin("superadmin_execute", r#"{"action_id":"assistant.reset_conversation","args":{"assistant_id":2}}"#));
+    assert!(admin("superadmin_execute", r#"{"action_id":"conversation.group_reset_member","args":{"group_id":3,"assistant_id":2}}"#));
     assert!(admin("superadmin_batch", r#"{"actions":[{"action_id":"task.list","args":{}},{"action_id":"task.cancel","args":{}}]}"#));
     assert!(!admin("superadmin_batch", r#"{"actions":[{"action_id":"task.list","args":{}},{"action_id":"schedule.create","args":{}}]}"#));
     assert!(!admin("superadmin_batch", r#"{"actions":[]}"#));

@@ -643,6 +643,46 @@ pub fn remove_member(conn: &mut Connection, group: i64, member_id: i64, reason: 
     Ok((result, running))
 }
 
+#[derive(Debug, Clone)]
+pub struct ResetMemberContext {
+    pub old_member: Member,
+    pub new_member: Member,
+    pub running_turns: Vec<Turn>,
+}
+
+/// 重开群内某位成员的执行上下文：停用旧成员执行会话并取消排队/进行中的回复，
+/// 为同一助手新建一条空白的群执行会话。群公开消息、历史回复与群记忆均保留；
+/// `joined_after` 沿用原入群位置（仍可用 `read_group_history` 查入群后发言），
+/// `delivered_through` 对齐当前群最新消息（后续新发言从新上下文开始）。
+pub fn reset_member_context(conn: &mut Connection, group: i64, assistant_id: i64) -> Result<ResetMemberContext> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let room = get(&tx, group)?;
+    let old = tx.query_row(
+        &format!("SELECT {MEMBER_COLUMNS} FROM butler_chat_group_member WHERE group_id=?1 AND assistant_id=?2 AND active=1"),
+        params![group, assistant_id],
+        member_row,
+    ).optional()?.with_context(|| format!("助手 #{assistant_id} 不是群聊 #{group} 的当前成员"))?;
+    tx.execute("UPDATE butler_chat_group_member SET active=0 WHERE id=?1", [old.id])?;
+    let running_turns = cancel_member_turns(&tx, old.id, "成员上下文已重开")?;
+    let stamp = Utc::now();
+    tx.execute(
+        "INSERT INTO conversation(name,assistant_id,created_time,updated_time,conversation_kind,parent_butler_conversation_id,is_hidden_from_normal_chat_list)
+         VALUES(?1,?2,?3,?3,?4,?5,1)",
+        params![format!("{} · {}", old.name, room.name), old.assistant_id, stamp, MEMBER_KIND, room.id],
+    )?;
+    let new_conversation_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO butler_chat_group_member(group_id,assistant_id,name,conversation_id,joined_after,delivered_through,active)
+         VALUES(?1,?2,?3,?4,?5,?6,1)",
+        params![room.id, old.assistant_id, old.name, new_conversation_id, old.joined_after, room.seq],
+    )?;
+    let new_member_id = tx.last_insert_rowid();
+    let old_member = member(&tx, old.id)?;
+    let new_member = member(&tx, new_member_id)?;
+    tx.commit()?;
+    Ok(ResetMemberContext { old_member, new_member, running_turns })
+}
+
 /// 成员显示名跟随助手改名；只更新以后的发言署名，已发出的消息保持原样。
 pub fn sync_member_names(conn: &Connection, group: i64, names: &std::collections::HashMap<i64, String>) -> Result<bool> {
     let mut changed = false;

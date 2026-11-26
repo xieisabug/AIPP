@@ -612,3 +612,55 @@ fn test_onboarding_aux_group_relay_confirmation_resumes_original_branch_once() {
     assert!(input.contains("开始"));
     assert_eq!((resumed.depth, resumed.origin_seq, member.id), (11, question.seq, members[0].id));
 }
+
+#[test]
+fn test_reset_member_context_opens_fresh_session_and_preserves_history() {
+    let mut conn = setup();
+    let (group, members) = group_with(&mut conn, &["张三", "李四"]);
+    let zhang = &members[0];
+    let first_msg = post_user(&mut conn, group.id, "m1", "第一句历史", None).unwrap();
+    let first_turn = route(&mut conn, group.id, first_msg.seq, &[zhang.id], 1).unwrap()[0];
+    let (active_first, _, _) = run(&mut conn, first_turn);
+    reply(&conn, zhang.conversation_id, "旧上下文里的回复");
+    let published = finish_turn(&mut conn, active_first.id, Outcome::Reply("旧上下文里的回复".into())).unwrap().unwrap().reply.unwrap();
+
+    // 开启一条正在进行的回复，验证重开时会取消并返回待打断的回复
+    let second_msg = post_user(&mut conn, group.id, "m2", "第二句正在处理", None).unwrap();
+    let running_turn = route(&mut conn, group.id, second_msg.seq, &[zhang.id], 1).unwrap()[0];
+    let (started_running, _, _) = run(&mut conn, running_turn);
+
+    let reset = reset_member_context(&mut conn, group.id, zhang.assistant_id).unwrap();
+    assert!(!reset.old_member.active);
+    assert!(reset.new_member.active);
+    assert_eq!(reset.old_member.id, zhang.id);
+    assert_ne!(reset.new_member.id, zhang.id);
+    assert_ne!(reset.new_member.conversation_id, zhang.conversation_id);
+    assert_eq!(reset.new_member.joined_after, zhang.joined_after);
+    assert_eq!(reset.new_member.delivered_through, get(&conn, group.id).unwrap().seq);
+    assert_eq!(reset.running_turns.len(), 1);
+    assert_eq!(reset.running_turns[0].id, started_running.id);
+    assert_eq!(turn(&conn, started_running.id).unwrap().state, "cancelled");
+
+    // 活跃成员列表只保留新席位，旧历史与成员会话列表（供删群清理）完整保留
+    let active = active_members(&conn, group.id).unwrap();
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().any(|m| m.id == reset.new_member.id && m.assistant_id == zhang.assistant_id));
+    assert_eq!(message(&conn, group.id, published.seq).unwrap().source_conversation_id, Some(zhang.conversation_id));
+    let all_convs = member_conversations(&conn, group.id).unwrap();
+    assert!(all_convs.contains(&zhang.conversation_id) && all_convs.contains(&reset.new_member.conversation_id));
+
+    // 新成员上下文仍可按原入群位置查群历史，但新发言只投递重开之后的增量
+    let history = read_history(&conn, reset.new_member.conversation_id, serde_json::from_value(serde_json::json!({"query":"第一句历史"})).unwrap()).unwrap();
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+
+    let after_msg = post_user(&mut conn, group.id, "m3", "重开后的新问题", None).unwrap();
+    let after_turn = route(&mut conn, group.id, after_msg.seq, &[reset.new_member.id], 1).unwrap()[0];
+    let (_, refreshed_member, input) = run(&mut conn, after_turn);
+    assert_eq!(refreshed_member.conversation_id, reset.new_member.conversation_id);
+    assert!(input.contains("重开后的新问题"));
+    assert!(!input.contains("第一句历史"));
+    assert!(!input.contains("第二句正在处理"));
+
+    // 非本群成员报错
+    assert!(reset_member_context(&mut conn, group.id, 99999).is_err());
+}

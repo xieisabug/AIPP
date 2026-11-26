@@ -84,7 +84,7 @@ pub async fn handle_execute(
         if let Some(binding) = approved.as_ref() {
             registered.handler.execute_approved(app_handle, request.args.clone(), before_snapshot.as_ref(), binding.conversation).await
         } else {
-            registered.handler.execute(app_handle, request.args.clone(), request.dry_run).await
+            registered.handler.execute_in_conversation(app_handle, request.args.clone(), request.dry_run, butler_conversation_id).await
         };
 
     match handler_result {

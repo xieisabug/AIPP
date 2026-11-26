@@ -84,6 +84,8 @@ fn reporting_member_prompts_share_core_and_keep_user_intervention_exception() {
     assert!(core.contains("配置修复由总管家或用户决定"), "成员不自行修复配置");
     assert!(core.contains("「交付与展示」"), "成员直接交付，也要遵守交付格式");
     assert!(core.contains("`preview_message`") && core.contains("不要转述"), "原样展示其他成员的答复");
+    assert!(core.contains("assistant.reset_conversation") && core.contains("conversation.group_reset_member"), "成员提示词说明可通过 SuperAdmin 重开助手或群成员上下文");
+    assert!(super::BUTLER_GROUP_MEMBER_PROMPT.contains("assistant.reset_conversation") && super::BUTLER_GROUP_MEMBER_PROMPT.contains("conversation.group_reset_member"), "群成员提示词说明可通过 SuperAdmin 重开上下文");
     assert!(super::BUTLER_MEMBER_TASK_PROMPT.contains("等待答复时最终回复只写"));
     assert!(super::BUTLER_MEMBER_TASK_PROMPT.contains("默认是内部协作"));
     for specific in [super::BUTLER_MEMBER_CONTACT_PROMPT, super::BUTLER_MEMBER_TASK_PROMPT] {

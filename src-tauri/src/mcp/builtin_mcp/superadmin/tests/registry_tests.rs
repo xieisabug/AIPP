@@ -30,12 +30,29 @@ fn get_existing_action() {
 #[test]
 fn test_assistant_reset_conversation_discoverable_by_purpose() {
     let registry = build_registry();
-    let results = registry.search(Some("重开"), Some("assistant"), None, None);
-    let reset = results.iter().find(|m| m.action_id == "assistant.reset_conversation").unwrap();
+    for query in ["重开", "重开上下文", "清空上下文", "重置会话", "reset context", "context"] {
+        let results = registry.search(Some(query), None, None, None);
+        assert!(
+            results.iter().any(|m| m.action_id == "assistant.reset_conversation"),
+            "assistant.reset_conversation should match query '{query}'"
+        );
+        assert!(
+            results.iter().any(|m| m.action_id == "conversation.group_reset_member"),
+            "conversation.group_reset_member should match query '{query}'"
+        );
+    }
+    let reset = registry.get_meta("assistant.reset_conversation").unwrap();
     assert_eq!(reset.args_schema["required"], serde_json::json!(["assistant_id"]));
     assert_eq!(reset.allowed_scopes.len(), 1);
     assert!(matches!(reset.allowed_scopes[0], ActionScope::Assistant));
     assert!(reset.supports_dry_run);
+    assert!(reset.tags.contains(&"conversation".to_string()));
+
+    let group_reset = registry.get_meta("conversation.group_reset_member").unwrap();
+    assert_eq!(group_reset.domain, "conversation");
+    assert_eq!(group_reset.args_schema["required"], serde_json::json!(["group_id", "assistant_id"]));
+    assert!(group_reset.supports_dry_run);
+    assert!(registry.search(None, Some("conversation"), None, None).iter().any(|m| m.action_id == "conversation.group_reset_member"));
 }
 
 #[test]

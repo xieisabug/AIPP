@@ -358,6 +358,53 @@ pub async fn rename_butler_group(app_handle: AppHandle, group_id: i64, name: Str
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupMemberResetResult {
+    pub group_id: i64,
+    pub assistant_id: i64,
+    pub name: String,
+    pub member_id: i64,
+    pub conversation_id: i64,
+    pub previous_member_id: i64,
+    pub previous_conversation_id: i64,
+    pub stopped_turns: usize,
+    pub stop_errors: Vec<String>,
+}
+
+/// 重开群聊中指定成员的执行上下文。禁止成员在自己的当前群回复回合里自重开（否则会丢弃本次回复）。
+pub(crate) async fn reset_butler_group_member_context(
+    app_handle: &AppHandle,
+    group_id: i64,
+    assistant_id: i64,
+    caller_conversation_id: Option<i64>,
+) -> Result<GroupMemberResetResult, String> {
+    enabled(app_handle).await?;
+    let reset = database(app_handle, "重开成员上下文", move |conn| {
+        let current = group::active_members(conn, group_id)?
+            .into_iter()
+            .find(|m| m.assistant_id == assistant_id)
+            .ok_or_else(|| anyhow::anyhow!("助手 #{assistant_id} 不是群聊 #{group_id} 的当前成员"))?;
+        if caller_conversation_id == Some(current.conversation_id) {
+            anyhow::bail!("不能在当前群回复回合中重开自己的群上下文，请由其他成员或在私聊中操作");
+        }
+        group::reset_member_context(conn, group_id, assistant_id)
+    }).await?;
+    let stopped_turns = reset.running_turns.len();
+    let stop_errors = halt(app_handle, reset.running_turns).await;
+    changed(app_handle, group_id);
+    Ok(GroupMemberResetResult {
+        group_id,
+        assistant_id: reset.new_member.assistant_id,
+        name: reset.new_member.name,
+        member_id: reset.new_member.id,
+        conversation_id: reset.new_member.conversation_id,
+        previous_member_id: reset.old_member.id,
+        previous_conversation_id: reset.old_member.conversation_id,
+        stopped_turns,
+        stop_errors,
+    })
+}
+
 /// 删除群聊：先打断进行中的回复，再删除成员的群执行会话和群本身。成员的私聊不受影响。
 #[tauri::command]
 pub async fn delete_butler_group(app_handle: AppHandle, group_id: i64) -> Result<(), String> {

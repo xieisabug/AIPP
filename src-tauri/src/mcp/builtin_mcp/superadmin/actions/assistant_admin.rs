@@ -14,12 +14,12 @@ pub(super) async fn profile_action(app: &AppHandle, op: &str, args: Value, dry_r
 
 struct Handler(&'static str);
 impl Handler {
-    async fn run(&self, app: &AppHandle, mut args: Value, dry_run: bool, approved: Option<&Value>) -> Result<Value,String> {
+    async fn run(&self, app: &AppHandle, mut args: Value, dry_run: bool, approved: Option<&Value>, caller_conversation_id: Option<i64>) -> Result<Value,String> {
         if matches!(self.0,"update"|"copy") { return profile_action(app,self.0,args,dry_run).await; }
-        if self.0.starts_with("group_") { return group_action(app,self.0,args,dry_run).await; }
+        if self.0.starts_with("group_") { return group_action(app,self.0,args,dry_run,caller_conversation_id).await; }
         let id = args["assistant_id"].as_i64().ok_or("需要 assistant_id")?;
         if self.0 == "reset_conversation" {
-            return reset_conversation(app, id, dry_run).await;
+            return reset_conversation(app, id, dry_run, caller_conversation_id).await;
         }
         let result = {
             let db = AssistantDatabase::new(app).map_err(|e|e.to_string())?;
@@ -67,7 +67,7 @@ impl Handler {
     }
 }
 
-async fn reset_conversation(app: &AppHandle, assistant_id: i64, dry_run: bool) -> Result<Value, String> {
+async fn reset_conversation(app: &AppHandle, assistant_id: i64, dry_run: bool, caller_conversation_id: Option<i64>) -> Result<Value, String> {
     use crate::api::butler_api;
     let assistant = AssistantDatabase::new(app).and_then(|db| db.get_assistant(assistant_id))
         .map_err(|e| format!("读取助手 {assistant_id} 失败：{e}"))?;
@@ -82,7 +82,7 @@ async fn reset_conversation(app: &AppHandle, assistant_id: i64, dry_run: bool) -
         Ok(json!({"assistant_id": assistant_id, "conversation_kind": kind,
             "conversation_id": conversation.id, "archived_conversation_ids": archived.as_slice()}))
     } else {
-        let result = butler_api::reset_butler_contact_conversation(app.clone(), assistant_id).await?;
+        let result = butler_api::reset_butler_contact_conversation_from(app.clone(), assistant_id, caller_conversation_id).await?;
         Ok(json!({"assistant_id": assistant_id, "conversation_kind": kind,
             "conversation_id": result.conversation_id, "archived_conversation_ids": result.archived_conversation_ids,
             "stop_notes": result.stop_notes}))
@@ -92,14 +92,17 @@ async fn reset_conversation(app: &AppHandle, assistant_id: i64, dry_run: bool) -
 #[async_trait]
 impl ActionHandler for Handler {
     async fn execute(&self, app: &AppHandle, args: Value, dry_run: bool) -> Result<Value,String> {
+        self.execute_in_conversation(app, args, dry_run, None).await
+    }
+    async fn execute_in_conversation(&self, app: &AppHandle, args: Value, dry_run: bool, caller_conversation_id: Option<i64>) -> Result<Value,String> {
         if !dry_run && matches!(self.0,"permission_patch"|"workspace_grant") {
             return Err("扩大权限的操作必须经 superadmin_execute 请求用户本次批准；未修改配置".into());
         }
-        self.run(app,args,dry_run,None).await
+        self.run(app,args,dry_run,None,caller_conversation_id).await
     }
     async fn snapshot_before(&self, app: &AppHandle, args: &Value) -> Option<Value> {
         if !matches!(self.0,"permission_patch"|"workspace_grant") {return None;}
-        Some(match self.run(app,args.clone(),true,None).await {
+        Some(match self.run(app,args.clone(),true,None,None).await {
             Ok(value) => value["permission_change"].clone(),
             Err(error) => json!({"error":error}),
         })
@@ -108,11 +111,11 @@ impl ActionHandler for Handler {
         if !matches!(self.0,"permission_patch"|"workspace_grant") {return Err("该动作不是权限授予入口".into());}
         let snapshot = snapshot.ok_or("权限批准缺少操作对象快照；未执行，请重新预览")?;
         if let Some(error)=snapshot["error"].as_str() {return Err(format!("权限预览失败：{error}；未执行"));}
-        self.run(app,args,false,Some(snapshot)).await
+        self.run(app,args,false,Some(snapshot),None).await
     }
 }
 
-async fn group_action(app: &AppHandle, op: &str, args: Value, dry_run: bool) -> Result<Value,String> {
+async fn group_action(app: &AppHandle, op: &str, args: Value, dry_run: bool, caller_conversation_id: Option<i64>) -> Result<Value,String> {
     use crate::api::butler_group as api;
     let result = match op {
         "group_list" => json!({"groups":api::list_butler_groups(app.clone()).await?.into_iter().map(|g|json!({"group_id":g.id,"name":g.name,"members":g.members})).collect::<Vec<_>>()}),
@@ -137,19 +140,48 @@ async fn group_action(app: &AppHandle, op: &str, args: Value, dry_run: bool) -> 
                 json!({"group_id":updated.id,"name":updated.name,"members":updated.members,"saved":true})
             } else { json!({"group_id":current.id,"name":current.name,"members":current.members}) }
         },
+        "group_reset_member" => {
+            let group_id = args["group_id"].as_i64().ok_or("需要 group_id")?;
+            let assistant_id = args["assistant_id"].as_i64().ok_or("需要 assistant_id")?;
+            let current = api::get_butler_group(app.clone(), group_id).await?;
+            let member = current.members.iter().find(|m| m.assistant_id == assistant_id)
+                .ok_or_else(|| format!("助手 #{assistant_id} 不是群聊 #{group_id} 的当前成员"))?;
+            if dry_run {
+                return Ok(json!({
+                    "dry_run": true,
+                    "group_id": group_id,
+                    "group_name": current.name,
+                    "assistant_id": assistant_id,
+                    "member_id": member.id,
+                    "name": member.name,
+                    "current_conversation_id": member.conversation_id,
+                }));
+            }
+            json!(api::reset_butler_group_member_context(app, group_id, assistant_id, caller_conversation_id).await?)
+        },
         _ => return Err(format!("未知群管理操作：{op}")),
     };
     Ok(result)
 }
 
 fn register_action(registry: &mut ActionRegistry, id: &str, op: &'static str, summary: &str, description: &str, schema: Value, write: bool, scope: ActionScope) {
+    register_action_with_tags(registry, id, op, summary, description, schema, write, scope, &["configuration"]);
+}
+
+fn register_action_with_tags(registry: &mut ActionRegistry, id: &str, op: &'static str, summary: &str, description: &str, schema: Value, write: bool, scope: ActionScope, extra_tags: &[&str]) {
     let domain = id.split('.').next().unwrap();
     let grant = matches!(op,"permission_patch"|"workspace_grant");
+    let mut tags = vec![domain.into(), if write {"write".into()} else {"read".into()}];
+    for tag in extra_tags {
+        if !tags.iter().any(|existing| existing == tag) {
+            tags.push((*tag).into());
+        }
+    }
     registry.register(ActionMeta {
         action_id:id.into(),domain:domain.into(),summary:summary.into(),description:description.into(),
         risk_level:if grant {RiskLevel::HIGH}else if write {RiskLevel::MEDIUM}else{RiskLevel::SAFE},requires_approval:grant,
         approval_policy:if grant {ApprovalPolicy::UserApprovalRequired}else if write {ApprovalPolicy::AllowInScope}else{ApprovalPolicy::AutoAllow},
-        allowed_scopes:vec![scope],tags:vec![domain.into(),if write {"write".into()}else{"read".into()},"configuration".into()],
+        allowed_scopes:vec![scope],tags,
         args_schema:schema,result_schema:json!({"type":"object"}),supports_dry_run:write && op!="group_create",rollback_hint:None,
     },Box::new(Handler(op)));
 }
@@ -163,10 +195,10 @@ pub fn register(registry: &mut ActionRegistry) {
     profile["properties"]["assistant_id"]["description"] = json!("来源助手 ID；复制全部配置，不复制聊天、记忆或工作状态");
     register_action(registry,"assistant.copy","copy","复制助手配置","保留来源模型参数、MCP、Skills、工作区及提示词参数，可覆盖基础资料；不应用新建默认值。",profile,true,ActionScope::Assistant);
     let assistant = json!({"type":"object","required":["assistant_id"],"properties":{"assistant_id":{"type":"integer"}}});
-    register_action(
-        registry, "assistant.reset_conversation", "reset_conversation", "为指定助手重开新会话",
-        "按 assistant_id 重开管家联系人私聊或总管家主会话，让后续消息从新上下文开始。旧会话归档可检索，长期记忆保留。重开联系人私聊会停止旧私聊进行中的工作并清除排队消息。",
-        assistant.clone(), true, ActionScope::Assistant,
+    register_action_with_tags(
+        registry, "assistant.reset_conversation", "reset_conversation", "为指定助手重开新会话（新上下文）",
+        "按 assistant_id 重开指定助手的管家联系人私聊或总管家主会话（重开上下文/重置会话/清空上下文重新开始）。旧会话归档可检索，长期记忆保留。重开联系人私聊会停止旧私聊进行中的工作并清除排队消息。如需重开群聊中某位成员的群内上下文，请用 conversation.group_reset_member。",
+        assistant.clone(), true, ActionScope::Assistant, &["conversation", "reset", "context", "session"],
     );
     register_action(registry,"assistant.get_channel_config","channel_get","查询通道配置与合法值","返回适用字段、合法值、助手覆盖、provider 默认、最终值与来源；不启动 Agent。",assistant.clone(),false,ActionScope::Assistant);
     register_action(registry,"assistant.patch_channel_config","channel_patch","修改或清除助手通道参数","先查询支持字段；普通修改与收紧可直接保存，扩大权限须使用 assistant.patch_agent_permissions 请求用户批准。remove 恢复继承也校验权限变化。",json!({"type":"object","required":["assistant_id","set","remove"],"properties":{"assistant_id":{"type":"integer"},"set":{"type":"object"},"remove":{"type":"array","items":{"type":"string"}}}}),true,ActionScope::Assistant);
@@ -181,4 +213,10 @@ pub fn register(registry: &mut ActionRegistry) {
     register_action(registry,"conversation.group_get","group_get","查询管家群详情","按 group_id 查询当前名称及成员。",json!({"type":"object","required":["group_id"],"properties":{"group_id":{"type":"integer"}}}),false,ActionScope::App);
     register_action(registry,"conversation.group_create","group_create","创建命名管家群","指定名称和成员，使用现有群聊服务；不支持 dry_run。",json!({"type":"object","required":["name","assistant_ids"],"properties":{"name":{"type":"string"},"assistant_ids":{"type":"array","items":{"type":"integer"}},"include_chief":{"type":"boolean"}}}),true,ActionScope::App);
     register_action(registry,"conversation.group_rename","group_rename","修改管家群名","仅按 group_id 定位；保留成员、历史、执行上下文和记忆。",json!({"type":"object","required":["group_id","name"],"properties":{"group_id":{"type":"integer"},"name":{"type":"string"}}}),true,ActionScope::App);
+    register_action_with_tags(
+        registry, "conversation.group_reset_member", "group_reset_member", "重开群聊成员的执行上下文",
+        "按 group_id 和 assistant_id 为群聊中的指定成员重开全新的群执行上下文（重开上下文/重置会话/清空上下文重新开始）。群公开聊天记录、该成员的历史回复和群记忆均保留；重开会停止该成员在群里进行中的回复，后续群发言从新上下文开始。",
+        json!({"type":"object","required":["group_id","assistant_id"],"properties":{"group_id":{"type":"integer","description":"群聊 ID"},"assistant_id":{"type":"integer","description":"要重开群内上下文的成员助手 ID"}}}),
+        true, ActionScope::Conversation, &["assistant", "group", "reset", "context", "session"],
+    );
 }

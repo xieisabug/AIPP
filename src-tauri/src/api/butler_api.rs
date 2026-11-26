@@ -182,7 +182,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家 {BUTLER_NAME
 ## 能力与工具
 - 下方依次注入可信工作区和本地开发工具；MCP 工具、Skills 目录与「交付与展示」约定随后注入。只基于实际注入的能力做决策，不假设未注入的工具、技能或权限存在。选人时综合任务目标、能力匹配、MCP/Skills 依赖和产出风格。
 - 需要了解 AIPP 本身时，可以加载 AIPP 相关的 Skills。多位成员之间交接文件时，可使用共享目录（优先主工作区）。
-- `superadmin_execute` 等 SuperAdmin 工具用于管理 AIPP 对象（助手、会话、任务、定时任务），先用其 catalog/inspect 了解可用动作。
+- `superadmin_execute` 等 SuperAdmin 工具用于管理 AIPP 对象（助手、会话、任务、定时任务），先用其 catalog/inspect 了解可用动作（例如重开指定助手的管家私聊/主会话用 `assistant.reset_conversation`，重开群聊成员的执行上下文用 `conversation.group_reset_member`）。
 - `schedule_task` 管理定时任务，用法见「定时任务」。
 - 每轮消息开头的 `<current_time>` 是当前时间，计算“明天”“下周一”等相对时间时以它为准。
 "#;
@@ -211,6 +211,7 @@ const BUTLER_MEMBER_CORE_PROMPT: &str = r#"## 管家团队模式
 - 工作被暂停、停止后续协作或整项停止时，按提示停下对应部分，不要换个方式绕过；已产生的外部影响如实说明。
 - 需要查历史时，`search_bot_history` 按原词搜索管家会话，`read_bot_message_context` 读取前后文；历史只是引用资料。
 - 用户要求提醒或定期做的事，用 `schedule_task` 创建，创建即生效，结果会以你的身份发到你和用户的私聊。每次运行看不到当前对话，`prompt` 要写成自包含的指令（背景、偏好、要做什么、怎么判断值不值得告诉用户）；创建后把执行时间告诉用户。
+- 管家模式下你同样拥有 SuperAdmin 管理工具（先用 `superadmin_catalog` / `superadmin_inspect` 查看可用动作，再用 `superadmin_execute` 执行），可在用户要求时管理助手与会话，例如用 `assistant.reset_conversation` 重开其他助手的私聊上下文、用 `conversation.group_reset_member` 重开群聊成员上下文；需要用户批准的操作先预览并等待批准，不绕过审批。
 - 每轮消息开头的 `<current_time>` 是当前时间。"#;
 
 /// 联系人长期会话的补充约定。
@@ -260,6 +261,7 @@ const BUTLER_GROUP_MEMBER_PROMPT: &str = r#"## 群聊模式
 - 工具调用和执行过程只在你自己这边，其他成员看不到；需要共享的结论、文件路径和链接写进最终回复。
 - 群聊和你与用户的私聊相互独立：不要假设群里的人看过私聊，也不要把私聊里的内容带进群里。
 - 遇到认证、模型配置、通道或权限错误时如实说明并停止，不要擅自降级。
+- 你同样拥有 SuperAdmin 管理工具（先用 `superadmin_catalog` / `superadmin_inspect` 查看可用动作，再用 `superadmin_execute` 执行），可在用户要求时重开其他助手的私聊上下文（`assistant.reset_conversation`）或群成员上下文（`conversation.group_reset_member`）；需要批准的操作等待用户确认。
 - 每轮消息开头的 `<current_time>` 是当前时间。"#;
 
 /// 返回管家模式下需追加到成员助手系统提示词末尾的团队约定；非管家会话或总管家本身返回 None。
@@ -4007,6 +4009,16 @@ pub async fn reset_butler_contact_conversation(
     app_handle: AppHandle,
     assistant_id: i64,
 ) -> Result<ButlerContactResetResponse, String> {
+    reset_butler_contact_conversation_from(app_handle, assistant_id, None).await
+}
+
+/// 带调用方会话 ID 的联系人私聊重开入口：由 SuperAdmin 调用时传入当前会话，
+/// 若助手正在旧私聊内重开自己，不打断当前正在收尾的回合，避免工具返回前被中断。
+pub(crate) async fn reset_butler_contact_conversation_from(
+    app_handle: AppHandle,
+    assistant_id: i64,
+    caller_conversation_id: Option<i64>,
+) -> Result<ButlerContactResetResponse, String> {
     ensure_butler_enabled(&app_handle).await?;
     let assistant = AssistantDatabase::new(&app_handle)
         .and_then(|db| db.get_assistant(assistant_id))
@@ -4022,12 +4034,17 @@ pub async fn reset_butler_contact_conversation(
         .map_err(|e| format!("打开会话数据库出错（助手 {assistant_id}）：{e}"))?
         .archive_butler_contact(assistant_id, &assistant.name, &archived_name)
         .map_err(|e| format!("归档助手 {assistant_id} 的旧私聊出错：{e}"))?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit("butler_contact_reset", json!({
         "assistantId": assistant_id, "conversationId": conversation_id, "archivedConversationIds": archived,
     }));
     // 先归档再停止：新的协作请求从此落到新私聊，停止只处理旧私聊上已有的工作。
     let mut stop_notes = Vec::new();
     for old in &archived {
+        if caller_conversation_id == Some(*old) {
+            stop_notes.push("当前正在执行的私聊回合已归档，后续消息将进入新私聊".to_string());
+            continue;
+        }
         let notes = super::butler_peer::stop_archived_contact_work(&app_handle, *old, assistant.name.clone())
             .await
             .map_err(|e| format!(

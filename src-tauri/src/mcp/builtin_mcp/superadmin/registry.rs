@@ -19,6 +19,18 @@ pub trait ActionHandler: Send + Sync {
         dry_run: bool,
     ) -> Result<serde_json::Value, String>;
 
+    /// Execute with the caller conversation ID when an action needs to distinguish
+    /// the active conversation (e.g. avoiding self-interruption on context reset).
+    async fn execute_in_conversation(
+        &self,
+        app_handle: &AppHandle,
+        args: serde_json::Value,
+        dry_run: bool,
+        _caller_conversation_id: Option<i64>,
+    ) -> Result<serde_json::Value, String> {
+        self.execute(app_handle, args, dry_run).await
+    }
+
     /// High-risk handlers must atomically validate the approved resource before mutation.
     /// `approved_in` is the conversation whose user granted the approval (the caller).
     async fn execute_approved(&self, _app_handle: &AppHandle, _args: serde_json::Value,
@@ -117,7 +129,15 @@ impl ActionRegistry {
         tag: Option<&str>,
         risk_level: Option<u8>,
     ) -> Vec<&ActionMeta> {
-        let query_lower = query.map(|q| q.to_lowercase());
+        let query_tokens: Vec<String> = query
+            .map(|q| {
+                q.to_lowercase()
+                    .split(|c: char| c.is_whitespace() || matches!(c, '/' | ',' | '，' | '、' | ';' | '；'))
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut results: Vec<&ActionMeta> = self
             .actions
@@ -142,12 +162,18 @@ impl ActionRegistry {
                         return false;
                     }
                 }
-                // Query filter (matches action_id, summary, description, tags)
-                if let Some(ref q) = query_lower {
-                    let matches = meta.action_id.to_lowercase().contains(q)
-                        || meta.summary.to_lowercase().contains(q)
-                        || meta.description.to_lowercase().contains(q)
-                        || meta.tags.iter().any(|t| t.to_lowercase().contains(q));
+                // Query filter (all tokens must match across action_id, summary, description, tags)
+                if !query_tokens.is_empty() {
+                    let action_id = meta.action_id.to_lowercase();
+                    let summary = meta.summary.to_lowercase();
+                    let description = meta.description.to_lowercase();
+                    let tags: Vec<String> = meta.tags.iter().map(|t| t.to_lowercase()).collect();
+                    let matches = query_tokens.iter().all(|token| {
+                        action_id.contains(token)
+                            || summary.contains(token)
+                            || description.contains(token)
+                            || tags.iter().any(|t| t.contains(token))
+                    });
                     if !matches {
                         return false;
                     }
