@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
     (AdapterKind::OpenAI, "https://api.openai.com/v1/"),
     (AdapterKind::OpenAIResp, "https://api.openai.com/v1/"),
-    (AdapterKind::Anthropic, "https://api.anthropic.com/"),
+    (AdapterKind::Anthropic, "https://api.anthropic.com/v1/"),
     (AdapterKind::Cohere, "https://api.cohere.ai/v1/"),
     (AdapterKind::Gemini, "https://generativelanguage.googleapis.com/v1beta/"),
     (AdapterKind::Groq, "https://api.groq.com/openai/v1/"),
@@ -30,15 +30,8 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
 pub fn supports_model_request_mode(api_type: &str) -> bool {
     matches!(
         api_type.to_lowercase().as_str(),
-        "openai" | "openai_api" | "gemini" | "typesafe_jev" | "github_copilot" | "opencode_go" | "magpie"
+        "openai" | "openai_api" | "anthropic" | "gemini" | "typesafe_jev" | "github_copilot" | "opencode_go" | "magpie"
     )
-}
-
-pub fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
-    match request_mode {
-        Some("responses") => "responses",
-        _ => "chat_completions",
-    }
 }
 
 /// 推断适配器类型
@@ -55,7 +48,7 @@ pub fn infer_adapter_kind(
         return magpie_provider::route(request_mode, "http://127.0.0.1")
             .map(|(kind, _)| kind).unwrap_or(AdapterKind::OpenAI);
     }
-    let request_mode = normalize_request_mode(request_mode);
+    let request_mode = crate::db::llm_db::resolve_request_mode_or_default(api_type, model_name, request_mode);
     debug!(
         model_name = %model_name,
         api_type = %api_type,
@@ -63,13 +56,11 @@ pub fn infer_adapter_kind(
         "infer_adapter_kind called"
     );
     match api_type.to_lowercase().as_str() {
-        "openai" | "openai_api" => {
-            if request_mode == "responses" {
-                AdapterKind::OpenAIResp
-            } else {
-                AdapterKind::OpenAI
-            }
-        }
+        "openai" | "openai_api" => match request_mode {
+            "responses" => AdapterKind::OpenAIResp,
+            "anthropic_messages" => AdapterKind::Anthropic,
+            _ => AdapterKind::OpenAI,
+        },
         "anthropic" => AdapterKind::Anthropic,
         "cohere" => AdapterKind::Cohere,
         "gemini" => AdapterKind::Gemini,
@@ -222,6 +213,8 @@ pub fn effective_endpoint_url(
 ) -> String {
     match resolution {
         ProviderEndpointResolution::Unset => get_default_endpoint(adapter_kind).to_string(),
+        ProviderEndpointResolution::Custom(ep) if adapter_kind == AdapterKind::Anthropic && ep == "https://api.anthropic.com/" =>
+            get_default_endpoint(adapter_kind).to_string(),
         ProviderEndpointResolution::Custom(ep) => ep.clone(),
     }
 }
@@ -265,6 +258,11 @@ fn create_raw_client_with_config(
     is_stream: bool,
     config_feature_map: &std::collections::HashMap<String, std::collections::HashMap<String, crate::db::system_db::FeatureConfig>>,
 ) -> Result<RawClient, AppError> {
+    if crate::db::llm_db::resolve_request_mode_or_default(api_type, model_name, request_mode)
+        == crate::db::llm_db::PROVIDER_MODE_MISMATCH
+    {
+        return Err(AppError::ProviderError(format!("提供商 {api_type} 与模型 {model_name} 的请求协议不匹配，请在提供商设置中重选协议")));
+    }
     if api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV)
         || request_mode.is_some_and(crate::decision::is_decision_mode)
     {
@@ -317,7 +315,9 @@ fn create_raw_client_with_config(
         magpie_gateway = Some(gateway);
         (ProviderEndpointResolution::Custom(base), None)
     } else { (resolved_endpoint, None) };
-    let final_endpoint_url = effective_endpoint_url(&resolved_endpoint, adapter_kind);
+    // Wire format can vary per model. The default destination belongs to the provider.
+    let endpoint_kind = if crate::db::llm_db::is_openai_http(api_type) { AdapterKind::OpenAI } else { adapter_kind };
+    let final_endpoint_url = effective_endpoint_url(&resolved_endpoint, endpoint_kind);
     // A vault-referenced key goes only to a site the user confirmed for it.
     crate::vault::config_ref::check_provider_destination(configs, &api_key, &final_endpoint_url)
         .map_err(AppError::ProviderError)?;

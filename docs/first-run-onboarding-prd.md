@@ -593,6 +593,7 @@ API 主模型须通过 10.4 的试调用；用户在 8.3 单独指定的管家 A
 
 - 用最小的请求：一条「hi」，`max_tokens=32`，超时 15 秒。
 - 返回 `{ ok, kind, message, latency_ms }`。
+- OpenAI 兼容提供商尚未保存模型协议时，先请求 Responses，仅在网关明确拒绝该接口时尝试 Chat Completions。两次请求共用 15 秒预算，使用同一模型与基址。成功后以提供商和模型保存协议。已保存协议、其他提供商的原生协议和目录推荐协议直接使用。
 - 只要接口成功返回就算通过，**不管结束原因是什么、内容是不是空的**。会思考的模型，在 token 很少时可能只返回一部分思考内容，或者什么都不返回；如果把 `max_tokens` 设成 1，这类模型会直接报错。
 
 `kind` 由新增的公共函数 `classify_provider_error` 根据状态码判断（使用 `genai::Error::status()`，现在这个值被丢掉了）：
@@ -601,7 +602,8 @@ API 主模型须通过 10.4 的试调用；用户在 8.3 单独指定的管家 A
 |---|---|
 | `auth` | 401、403 |
 | `insufficient_balance` | 402，或者响应文字里提到余额不足 |
-| `model_not_found` | 404 |
+| `model_not_found` | 上游明确指出模型不存在 |
+| `choose_protocol` | OpenAI 兼容网关返回原因不明的 404，或当前可试的协议均被拒绝，允许手动选择协议后重试 |
 | `rate_limited` | 429 |
 | `network` / `timeout` | 连接失败、超时 |
 | `other` | 其他情况 |

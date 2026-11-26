@@ -151,6 +151,7 @@ fn test_apply_auxiliary_retry_leaves_unrelated_disabled_provider_and_existing_en
 #[test]
 fn test_draft_notes_preserve_classification_without_raw_provider_diagnostic() {
     let mut note = RoleNote {
+        choose_protocol: false,
         reason: Some("推荐表第 2 名".into()),
         error: Some("upstream echoed the request credential".into()),
     };
@@ -177,7 +178,7 @@ fn test_explicit_auxiliary_clear_updates_only_that_role_and_consumes_intent() {
     config.chat.code = "another-chat".into();
     config.review = None;
     config.clear_review = true;
-    config.notes.insert("review".into(), RoleNote { reason: Some("手动选择".into()), error: None });
+    config.notes.insert("review".into(), RoleNote { reason: Some("手动选择".into()), error: None, choose_protocol: false });
     let checkpoint = serde_json::to_string(&config).unwrap();
     let mut recovered: Config = serde_json::from_str(&checkpoint).unwrap();
     assert!(recovered.clear_review);

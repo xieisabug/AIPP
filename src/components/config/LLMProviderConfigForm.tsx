@@ -339,6 +339,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 await invoke("update_selected_models", {
                     llmProviderId: parseInt(id),
                     selectedModels,
+                    selectionOnly: true,
                 });
 
                 // 更新本地标签显示

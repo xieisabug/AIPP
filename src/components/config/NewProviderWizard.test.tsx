@@ -281,7 +281,7 @@ describe("NewProviderWizard", () => {
         fireEvent.click(await screen.findByRole("button", { name: /Anthropic API/ }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_llm_provider", { llmProviderId: DRAFT_ID }));
         expect(await screen.findByLabelText("提供商名称")).toHaveValue("Anthropic API");
-        expect(screen.getByLabelText("接口地址")).toHaveValue("https://api.anthropic.com/");
+        expect(screen.getByLabelText("接口地址")).toHaveValue("https://api.anthropic.com/v1/");
     });
 
     it("should delete the unfinished draft when the wizard is closed", async () => {

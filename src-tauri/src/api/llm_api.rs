@@ -1,6 +1,6 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
-use crate::db::llm_db::{http_provider_modes, resolve_request_mode_or_default, LLMDatabase};
+use crate::db::llm_db::{http_provider_modes, is_openai_http, resolve_request_mode_or_default, LLMDatabase};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
 use crate::FeatureConfigState;
 use genai::Modality;
@@ -470,7 +470,7 @@ pub async fn add_llm_model(
     let tx = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
     db.add_llm_model(&code_str, llm_provider_id, &code_str, &code_str, false, false, false)
         .map_err(|e| e.to_string())?;
-    if available_modes.is_some() && request_mode != "unsupported" {
+    if !is_openai_http(&llm_provider.api_type) && available_modes.is_some() && request_mode != "unsupported" {
         db.upsert_model_request_mode(llm_provider_id, &code, &request_mode).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -556,7 +556,18 @@ fn classify_provider_error(status: Option<u16>, message: String) -> ProviderChec
             || lower.contains("credit balance is too low")
             || lower.contains("余额不足") => "insufficient_balance",
         Some(401 | 403) => "auth",
-        Some(404) => "model_not_found",
+        Some(400 | 404 | 422) if ["model_not_found", "model not found", "unknown model", "no such model",
+            "model does not exist", "模型不存在"].iter().any(|hint| lower.contains(hint))
+            || (lower.contains("model `") && lower.contains("does not exist")) => "model_not_found",
+        Some(405) => "unsupported_endpoint",
+        Some(400 | 404 | 422 | 501) if ["unsupported_endpoint", "endpoint_not_supported", "unsupported endpoint",
+            "unknown endpoint", "unrecognized request url", "cannot post ", "route not found", "endpoint not found",
+            "does not support the responses api", "responses api is not supported", "use /v1/chat/completions",
+            "use the chat completions", "不支持 responses 接口"].iter().any(|hint| lower.contains(hint))
+            || (lower.contains("responses endpoint") || lower.contains("responses api"))
+                && ["not supported on", "not supported in", "does not support this", "is not supported by"]
+                    .iter().any(|hint| lower.contains(hint)) => "unsupported_endpoint",
+        Some(404) => "ambiguous_not_found",
         Some(429) => "rate_limited",
         Some(408 | 504) => "timeout",
         _ if lower.contains("timed out") || lower.contains("timeout") || lower.contains("超时") => "timeout",
@@ -567,7 +578,20 @@ fn classify_provider_error(status: Option<u16>, message: String) -> ProviderChec
 }
 
 fn classify_genai_error(error: genai::Error) -> ProviderCheckError {
-    classify_provider_error(error.status().map(|s| s.as_u16()), error.to_string())
+    let message = error.to_string();
+    // The diagnostic also contains the requested model ID, which is not evidence of a missing route.
+    let upstream = match &error {
+        genai::Error::HttpError { body, .. } => body.as_str(),
+        genai::Error::WebModelCall { webc_error, .. } | genai::Error::WebAdapterCall { webc_error, .. } => {
+            match webc_error {
+                genai::webc::Error::ResponseFailedStatus { body, .. } => body.as_str(),
+                _ => &message,
+            }
+        }
+        _ => &message,
+    };
+    let kind = classify_provider_error(error.status().map(|s| s.as_u16()), upstream.to_owned()).kind;
+    ProviderCheckError { kind, message }
 }
 
 /// OpenCode Go binds each request to a persistent conversation identity. Use one
@@ -586,6 +610,53 @@ async fn probe_request(client: &genai_client::Client, code: &str) -> Result<(), 
     client.exec_chat(code, request, Some(&options)).await.map(|_| ()).map_err(classify_genai_error)
 }
 
+/// Only onboarding probes negotiate. Conversation requests always use the saved wire format.
+async fn probe_model_protocol(
+    db: &mut LLMDatabase, provider_id: i64, api_type: &str, code: &str,
+    mut client_for: impl FnMut(&str) -> Result<genai_client::Client, String>,
+) -> Result<bool, ProviderCheckError> {
+    let saved = db.get_model_request_mode(provider_id, code).map_err(|e| e.to_string())?;
+    let detect = is_openai_http(api_type) && saved.is_none();
+    let mut mode = if detect { "responses".into() } else {
+        db.effective_model_mode(api_type, provider_id, code).map_err(|e| e.to_string())?
+    };
+    let mut first_failure = None;
+    loop {
+        let client = client_for(&mode)?;
+        match probe_request(&client, code).await {
+            Ok(()) => break,
+            Err(mut error) => {
+                error.message = format!("{code} ({mode}): {}", error.message);
+                if detect && mode == "responses" && error.kind == "unsupported_endpoint" {
+                    first_failure = Some(error.message);
+                    mode = "chat_completions".into();
+                    continue;
+                }
+                if let Some(previous) = first_failure {
+                    error.message = format!("{previous}\n{}", error.message);
+                }
+                if is_openai_http(api_type) && matches!(error.kind, "unsupported_endpoint" | "ambiguous_not_found") {
+                    error.kind = "choose_protocol";
+                }
+                return Err(error);
+            }
+        }
+    }
+    if !detect { return Ok(false); }
+
+    // A manual selection saved while the HTTP request was in flight takes precedence.
+    let inserted = db.conn.execute(
+        "INSERT INTO llm_model_request_mode_preference (llm_provider_id, model_code, request_mode)
+         SELECT id, ?2, ?3 FROM llm_provider WHERE id=?1
+         ON CONFLICT(llm_provider_id,model_code) DO NOTHING",
+        rusqlite::params![provider_id, code, mode],
+    ).map_err(|e| e.to_string())?;
+    if inserted == 0 && db.get_model_request_mode(provider_id, code).map_err(|e| e.to_string())? != Some(mode) {
+        return Err(format!("模型 {code} 的提供商或协议已变更，请重新验证").into());
+    }
+    Ok(inserted > 0)
+}
+
 #[derive(Serialize)]
 pub struct ProbeResult {
     ok: bool,
@@ -598,14 +669,12 @@ pub struct ProbeResult {
 pub async fn probe_chat_model(app: tauri::AppHandle, provider_id: i64, model_code: String) -> ProbeResult {
     let started = std::time::Instant::now();
     let probe = async {
-        let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
+        let mut db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
         let provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
         if crate::db::llm_db::is_local_agent_api_type(&provider.api_type) {
             return Err(ProviderCheckError::from("本机智能体需通过对应通道检查".to_owned()));
         }
         let configs = db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
-        let saved = db.get_model_request_mode(provider_id, &model_code).map_err(|e| e.to_string())?;
-        let (_, mode) = protocol_choice(&db, &provider.api_type, provider_id, &model_code, saved.as_ref())?;
         let features = app.state::<FeatureConfigState>().config_feature_map.lock().await.clone();
         let use_proxy = provider_setting(&configs, "proxy_enabled") == Some("true");
         let proxy = get_network_proxy_from_config(&features).filter(|_| use_proxy);
@@ -616,9 +685,12 @@ pub async fn probe_chat_model(app: tauri::AppHandle, provider_id: i64, model_cod
             let connection = db.get_connection().map_err(|e| e.to_string())?;
             Some((&app, onboarding_probe_conversation(&connection).map_err(|e| e.to_string())?))
         } else { None };
-        let client = genai_client::create_client_with_config(session, &prepared, &model_code, &provider.api_type,
-            Some(&mode), proxy.as_deref(), use_proxy, Some(15), false, &features).map_err(|e| e.to_string())?;
-        probe_request(&client, &model_code).await
+        let changed = probe_model_protocol(&mut db, provider_id, &provider.api_type, &model_code, |mode| {
+            genai_client::create_client_with_config(session, &prepared, &model_code, &provider.api_type,
+                Some(mode), proxy.as_deref(), use_proxy, Some(15), false, &features).map_err(|e| e.to_string())
+        }).await?;
+        if changed { crate::sync::schedule_sync_after_local_change(&app); }
+        Ok(())
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(15), probe).await
         .unwrap_or_else(|_| Err(ProviderCheckError { kind: "timeout", message: "模型试调用超过 15 秒".into() }));
@@ -852,6 +924,7 @@ pub async fn update_selected_models(
     app_handle: tauri::AppHandle,
     llm_provider_id: i64,
     selected_models: Vec<ModelForSelection>,
+    selection_only: Option<bool>,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
@@ -870,7 +943,9 @@ pub async fn update_selected_models(
         video_support: model.video_support,
         request_mode: model.request_mode.clone(),
     }).collect::<Vec<_>>();
-    db.replace_llm_models(llm_provider_id, &models, supports_request_mode).map_err(|e| e.to_string())?;
+    // The picker only edits membership. Its displayed default is not a user protocol preference.
+    let save_modes = supports_request_mode && !(is_openai_http(&llm_provider.api_type) && selection_only == Some(true));
+    db.replace_llm_models(llm_provider_id, &models, save_modes).map_err(|e| e.to_string())?;
 
     crate::sync::schedule_sync_after_local_change(&app_handle);
     emit_llm_provider_changed(&app_handle);

@@ -17,11 +17,16 @@ pub fn is_local_agent_api_type(api_type: &str) -> bool {
 pub fn http_provider_modes(api_type: &str) -> Option<&'static [&'static str]> {
     use crate::decision::{MODE_GEMINI_DECISIONS, MODE_JEV_SYSTEMONE, MODE_OPENAI_DECISIONS};
     match api_type.to_ascii_lowercase().as_str() {
-        "openai" | "openai_api" => Some(&["chat_completions", "responses", MODE_OPENAI_DECISIONS]),
+        "openai" | "openai_api" => Some(&["chat_completions", "responses", "anthropic_messages", MODE_OPENAI_DECISIONS]),
+        "anthropic" => Some(&["anthropic_messages"]),
         "gemini" => Some(&["google_gemini", MODE_GEMINI_DECISIONS]),
         "typesafe_jev" => Some(&[MODE_JEV_SYSTEMONE]),
         _ => None,
     }
+}
+
+pub fn is_openai_http(api_type: &str) -> bool {
+    api_type.eq_ignore_ascii_case("openai") || api_type.eq_ignore_ascii_case("openai_api")
 }
 
 fn copilot_prefers_responses_by_default(model_code: &str) -> bool {
@@ -37,6 +42,7 @@ pub fn default_request_mode_for_model(api_type: &str, model_code: &str) -> &'sta
     if let Some(decision_mode) = crate::decision::default_decision_mode_for_model(api_type, model_code) {
         return decision_mode;
     }
+    if api_type.eq_ignore_ascii_case("anthropic") { return "anthropic_messages"; }
     if api_type.eq_ignore_ascii_case("gemini") {
         return "google_gemini";
     }
@@ -62,6 +68,10 @@ pub fn resolve_request_mode_or_default(
     }
     if api_type.eq_ignore_ascii_case(crate::decision::PROVIDER_TYPESAFE_JEV) {
         return crate::decision::MODE_JEV_SYSTEMONE;
+    }
+    // Earlier versions labelled native Anthropic models as Chat Completions.
+    if api_type.eq_ignore_ascii_case("anthropic") && request_mode == Some("chat_completions") {
+        return "anthropic_messages";
     }
     if let Some(mode) = request_mode.filter(|mode| !mode.is_empty()) {
         if let Some(modes) = http_provider_modes(api_type) {

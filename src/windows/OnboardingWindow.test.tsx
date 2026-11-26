@@ -321,6 +321,33 @@ describe("first-run window", () => {
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model").map(([,args]) => args?.modelCode))
             .toEqual(["chat-13", "chat-7"]);
     });
+    it("网关返回含义不明的 404 时允许手动选协议，再点击应用才重试", async () => {
+        setup();
+        let protocol: unknown;
+        mockInvokeHandler("preview_model_list", () => ({
+            available_models: [{ code: "gateway-model", request_mode: "chat_completions" }],
+        }));
+        mockInvokeHandler("probe_chat_model", () => protocol === "chat_completions"
+            ? { ok: true } : { ok: false, kind: "choose_protocol", message: "gateway-model (responses): 404 Not Found" });
+        mockInvokeHandler("update_llm_model_request_mode", args => { protocol = args?.requestMode; });
+        render(<OnboardingWindow />);
+        fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /我用的是其他服务商/ }));
+        fireEvent.click(await screen.findByRole("button", { name: /OpenAI API/ }));
+        fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
+        fireEvent.click(screen.getByRole("button", { name: "完成" }));
+        await screen.findByText("已获取 1 个模型");
+        fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+        fireEvent.change(await screen.findByLabelText("主力模型"), { target: { value: "gateway-model" } });
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent("404 Not Found");
+        fireEvent.change(screen.getByLabelText("请求协议 · gateway-model"), { target: { value: "chat_completions" } });
+        await waitFor(() => expect(screen.getByRole("button", { name: "应用" })).toBeEnabled());
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(1);
+        fireEvent.click(screen.getByRole("button", { name: "应用" }));
+        await screen.findByRole("heading", { name: "好了，可以开始了" });
+        expect(invoke.mock.calls.filter(([cmd]) => cmd === "probe_chat_model")).toHaveLength(2);
+    });
     it.each([false, true])("躺平添加提供商只获取列表，应用选定模型才试调用（首次列表失败：%s）", async (listFailsOnce) => {
         setup();
         if (listFailsOnce) {

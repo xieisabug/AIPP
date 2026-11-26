@@ -346,7 +346,7 @@ const WizardContent: React.FC<Omit<NewProviderWizardProps, "open">> = ({ onClose
             // 服务商已启用（能力接入失败后重试）时只重试能力
             if (!finishedRef.current) {
                 if (models.some((model) => model.is_selected)) {
-                    await invoke("update_selected_models", { llmProviderId: draft.id, selectedModels: models });
+                    await invoke("update_selected_models", { llmProviderId: draft.id, selectedModels: models, selectionOnly: true });
                 }
                 for (const code of customCodes) {
                     if (addedCustomRef.current.has(code)) continue;

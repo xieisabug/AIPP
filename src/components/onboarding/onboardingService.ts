@@ -92,6 +92,9 @@ export function detail(error: unknown) {
     if (error && typeof error === "object" && "message" in error) return String(error.message);
     return String(error);
 }
+export class ProtocolChoiceError extends Error {
+    constructor(message: string, readonly model: Role) { super(message); }
+}
 export function explain(error: unknown, name = "服务商") {
     const kind = error && typeof error === "object" && "kind" in error ? String(error.kind) : "";
     const text: Record<string, string> = {
@@ -102,6 +105,8 @@ export function explain(error: unknown, name = "服务商") {
         network: `连不上 ${name}，检查网络或代理设置`,
         timeout: `连不上 ${name}，检查网络或代理设置`,
     };
+    if (text[kind] && error && typeof error === "object" && "probe" in error && detail(error))
+        return text[kind] + " · " + detail(error);
     return text[kind] ?? (/decrypt|解密/i.test(detail(error)) ? "密码不对" : detail(error));
 }
 export function deadline() {
@@ -253,7 +258,10 @@ export function probeSession(within: Within, progress: (text: string) => void) {
             );
         }
         const result = await checked.get(key)!;
-        if (!result.ok) throw result;
+        if (!result.ok) {
+            if (result.kind === "choose_protocol") throw new ProtocolChoiceError(result.message, r);
+            throw { ...result, probe: true };
+        }
         return { ...r, verified: true };
     };
 }

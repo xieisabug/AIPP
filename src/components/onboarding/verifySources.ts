@@ -11,6 +11,7 @@ import {
     local,
     preview,
     probeSession,
+    ProtocolChoiceError,
     role,
     type Config,
     type Provider,
@@ -21,6 +22,7 @@ import {
 export interface RoleNote {
     reason?: string;
     error?: string;
+    chooseProtocol?: boolean;
 }
 export type Notes = Partial<Record<"chat" | "light" | "review", RoleNote>>;
 export interface Checked {
@@ -165,8 +167,9 @@ export async function checkSelected(
         try {
             result[key] = await checkRole(key, selected);
         } catch (e) {
-            notes[key] = { reason: config.notes?.[key]?.reason ?? "手动选择", error: explain(e) || detail(e) };
-            result[key] = { ...selected, verified: false };
+            notes[key] = { reason: config.notes?.[key]?.reason ?? "手动选择", error: explain(e) || detail(e),
+                chooseProtocol: e instanceof ProtocolChoiceError || undefined };
+            result[key] = { ...(e instanceof ProtocolChoiceError ? e.model : selected), verified: false };
         }
     }
     return { config: result, notes };

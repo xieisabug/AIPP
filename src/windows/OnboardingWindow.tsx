@@ -51,6 +51,8 @@ import {
     local,
     openSettings,
     probeSession,
+    ProtocolChoiceError,
+    type Role,
     loginAgent,
     providerList,
     providerSettings,
@@ -147,6 +149,7 @@ export default function OnboardingWindow() {
     const lock = useRef(false);
     const [progress, setProgress] = useState("");
     const [error, setError] = useState("");
+    const [protocolModel, setProtocolModel] = useState<Role>();
     const [loginId, setLoginId] = useState<number | null>(null);
     const [waiting, setWaiting] = useState(false);
     const [syncMessage, setSyncMessage] = useState("");
@@ -168,6 +171,7 @@ export default function OnboardingWindow() {
         if (lock.current) return;
         lock.current = true;
         setLoginId(null);
+        setProtocolModel(undefined);
         setBusy(true);
         setError("");
         setProgress("");
@@ -176,6 +180,7 @@ export default function OnboardingWindow() {
         } catch (e) {
             if (e && typeof e === "object" && "kind" in e && e.kind === "login" && "providerId" in e)
                 setLoginId(Number(e.providerId));
+            if (e instanceof ProtocolChoiceError) setProtocolModel(e.model);
             setError(explain(e));
         } finally {
             lock.current = false;
@@ -183,6 +188,22 @@ export default function OnboardingWindow() {
             setProgress("");
         }
     }, []);
+    function protocolPicker(model?: Role | null) {
+        if (!model) return null;
+        return <select aria-label={`请求协议 · ${model.code}`} defaultValue="" disabled={busy}
+            className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+            onChange={event => {
+                const requestMode = event.target.value;
+                void run(() => invoke("update_llm_model_request_mode", {
+                    llmProviderId: model.providerId, modelCode: model.code, requestMode,
+                }));
+            }}>
+            <option value="" disabled>选择请求协议</option>
+            <option value="responses">Responses</option>
+            <option value="chat_completions">Chat Completions</option>
+            <option value="anthropic_messages">Anthropic Messages</option>
+        </select>;
+    }
     const refresh = useCallback(async () => {
         const rev = ++sourceGeneration.current;
         const [list, api, agents, currentAsk] = await Promise.all([
@@ -266,7 +287,10 @@ export default function OnboardingWindow() {
         }
         const actual = applied.draft.config ?? checked.config;
         setStatus(applied);
-        const appliedNotes = actual.notes ?? checked.notes;
+        const appliedNotes = { ...actual.notes };
+        for (const key of modelRoles) {
+            if (checked.notes[key]) appliedNotes[key] = checked.notes[key];
+        }
         setConfig({ ...actual, notes: appliedNotes });
         setNotes(appliedNotes);
         setEditing(false);
@@ -530,7 +554,8 @@ export default function OnboardingWindow() {
                         nextNotes[key] = { reason: c.notes?.[key]?.reason ?? "手动选择" };
                         changes.notes = { ...changes.notes, [key]: nextNotes[key] };
                     } catch (e) {
-                        nextNotes[key] = { reason: c.notes?.[key]?.reason ?? "手动选择", error: explain(e) };
+                        nextNotes[key] = { reason: c.notes?.[key]?.reason ?? "手动选择", error: explain(e),
+                            chooseProtocol: e instanceof ProtocolChoiceError || undefined };
                         failed[key] = { ...chosen, verified: false };
                     }
                 }
@@ -584,7 +609,8 @@ export default function OnboardingWindow() {
             });
             await refresh();
         } catch (e) {
-            setNotes((prev) => ({ ...prev, [key]: { error: explain(e) } }));
+            setNotes((prev) => ({ ...prev, [key]: { error: explain(e),
+                chooseProtocol: e instanceof ProtocolChoiceError || undefined } }));
         }
     }
     const stageTitle =
@@ -944,6 +970,7 @@ export default function OnboardingWindow() {
                                                         <p className="text-muted-foreground">
                                                             当前生效 · 轻量：{label(status.activeLight)} / 审核：{label(status.activeReview)}
                                                         </p>
+                                                        {(notes.light?.chooseProtocol || notes.review?.chooseProtocol) && protocolPicker(config.light)}
                                                         {!status.activeLight && <p className="text-muted-foreground">对话总结暂停，群聊可用 @ 指定成员。</p>}
                                                         {!status.activeReview && <p className="text-muted-foreground">需要审核的操作会请你确认。</p>}
                                                     </div>
@@ -971,6 +998,7 @@ export default function OnboardingWindow() {
                                                         <p className="text-sm font-medium text-foreground">
                                                             {name}验证未通过 · {notes[key]?.error || "未完成试调用"}
                                                         </p>
+                                                        {notes[key]?.chooseProtocol && protocolPicker(config[key])}
                                                         <p className="text-muted-foreground">
                                                             候选模型 · {label(roleKey(config[key]))} · 当前生效 · {label(active)}
                                                         </p>
@@ -1058,6 +1086,7 @@ export default function OnboardingWindow() {
                                 <span>{error}</span>
                             </div>
                             <div className="flex shrink-0 items-center gap-1.5">
+                                {protocolPicker(protocolModel)}
                                 {loginId && (
                                     <Button
                                         variant="ghost"

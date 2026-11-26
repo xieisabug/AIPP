@@ -26,6 +26,8 @@ pub struct ProviderModels {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoleNote {
+    #[serde(default, rename = "chooseProtocol", skip_serializing_if = "std::ops::Not::not")]
+    choose_protocol: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -763,7 +765,7 @@ pub async fn update_onboarding_roles(
                         Some("手动选择".into())
                     }
                 });
-            let mut note = RoleNote { reason, error: None };
+            let mut note = RoleNote { reason, error: None, choose_protocol: false };
             note.sanitize();
             c.notes.insert(key.into(), note);
             *slot = Some(chosen.clone());
