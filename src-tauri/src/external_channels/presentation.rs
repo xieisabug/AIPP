@@ -1948,6 +1948,13 @@ impl ToolPresenter for OperationToolPresenter {
     }
 }
 
+/// `show_artifact` 的展示名：优先标题，其次 `artifact_key`。
+fn artifact_label(params: &Value) -> Option<&str> {
+    value_string(params, "title")
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| value_string(params, "artifact_key"))
+}
+
 impl ToolPresenter for ArtifactToolPresenter {
     fn matches(&self, server_name: &str, _tool_name: &str) -> bool {
         canonical_server_name(server_name) == "artifact"
@@ -1957,10 +1964,8 @@ impl ToolPresenter for ArtifactToolPresenter {
         match tool_call.tool_name.as_str() {
             "get_artifact_workspace" => Some("📦 读取 Artifact 工作区".to_string()),
             "show_artifact" => {
-                let artifact_id = value_string(&tool_call.parameters, "artifactId")
-                    .or_else(|| value_string(&tool_call.parameters, "artifact_id"))
-                    .unwrap_or("未知 Artifact");
-                Some(format!("🎨 展示 Artifact：{}", artifact_id))
+                let label = artifact_label(&tool_call.parameters).unwrap_or("未知 Artifact");
+                Some(format!("🎨 展示 Artifact：{}", label))
             }
             "capture_artifact_screenshot" => Some("📸 截取 Artifact 预览".to_string()),
             _ => None,
@@ -1971,13 +1976,8 @@ impl ToolPresenter for ArtifactToolPresenter {
         match tool_result.tool_name.as_deref() {
             Some("show_artifact") if tool_result.success => {
                 let params = tool_result_parameters(tool_result);
-                let artifact_id = params
-                    .as_ref()
-                    .and_then(|p| {
-                        value_string(p, "artifactId").or_else(|| value_string(p, "artifact_id"))
-                    })
-                    .unwrap_or("Artifact");
-                Some(format!("🎨 Artifact 已展示：{}", artifact_id))
+                let label = params.as_ref().and_then(artifact_label).unwrap_or("Artifact");
+                Some(format!("🎨 Artifact 已展示：{}", label))
             }
             Some("show_artifact") => Some("❌ Artifact 展示失败".to_string()),
             Some("get_artifact_workspace") if tool_result.success => {
@@ -2597,6 +2597,31 @@ mod tests {
 
         assert!(rendered.contains("📸 Artifact 截图已生成：src/App.tsx（800x600）"));
         assert!(!rendered.contains("iVBORw0KGgoAAAANSUhEUgAA"));
+    }
+
+    #[test]
+    fn show_artifact_result_names_artifact_by_title_then_key() {
+        let titled = build_tool_result_message(
+            "show_artifact",
+            "Artifact 工具",
+            json!({"artifact_key": "demo/card", "entry_file": "index.html", "title": "价格卡片"}),
+            json!({"content": [{"type": "text", "text": "ok"}]}),
+        );
+        let rendered =
+            render_joined(&titled, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+        assert!(rendered.contains("🎨 Artifact 已展示：价格卡片"), "{rendered}");
+
+        let untitled = build_tool_result_message(
+            "show_artifact",
+            "Artifact 工具",
+            json!({"artifact_key": "demo/card", "entry_file": "index.html"}),
+            json!({"content": [{"type": "text", "text": "ok"}]}),
+        );
+        let rendered =
+            render_joined(&untitled, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+        assert!(rendered.contains("🎨 Artifact 已展示：demo/card"), "{rendered}");
     }
 
     #[test]

@@ -114,9 +114,12 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
 
     // 处理 Bridge 消息
     const handleMessage = useCallback(async (event: MessageEvent) => {
-        // 验证来源
+        // 只处理绑定 iframe 发来的桥接请求；同窗口里其他 iframe（Draw.io、诊断脚本等）的消息一律忽略
+        const iframeWindow = iframeRef.current?.contentWindow;
+        if (!iframeWindow || event.source !== iframeWindow) {
+            return;
+        }
         if (!isValidOrigin(event.origin)) {
-            console.warn('[ArtifactBridge] Invalid origin:', event.origin);
             return;
         }
 
@@ -124,8 +127,6 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
         if (!message || !message.id || !message.type) {
             return;
         }
-
-        console.log('[ArtifactBridge] Received message:', message.type);
 
         let response: BridgeResponse;
 

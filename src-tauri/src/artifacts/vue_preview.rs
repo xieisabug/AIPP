@@ -82,9 +82,9 @@ impl VuePreviewManager {
         target_window: Option<String>,
         request_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let preview_id = "vue".to_string();
-        println!("🚀 [Vue Preview] 开始创建预览, ID: {}", preview_id);
         let target_window_name = target_window.unwrap_or_else(|| "artifact_preview".to_string());
+        let preview_id = crate::artifacts::shared_components::preview_instance_id("vue", &target_window_name);
+        println!("🚀 [Vue Preview] 开始创建预览, ID: {}", preview_id);
         if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
             let _ = window.emit(
                 "artifact-preview-log",
@@ -333,6 +333,7 @@ impl VuePreviewManager {
         println!("🛠️ [VueSetup] 写入组件文件到: {:?}", component_file);
 
         fs::write(&component_file, component_code)?;
+        crate::artifacts::shared_components::write_console_script(&preview_dir)?;
         println!("🛠️ [VueSetup] 组件文件写入完成");
 
         // 返回预览目录和是否需要安装依赖的标志
@@ -354,13 +355,21 @@ impl VuePreviewManager {
         )
     }
 
+    /// 启动截图用的开发服务器并登记到服务器表，`close_preview(preview_id)` 才能找到并结束它。
     pub fn start_capture_dev_server(
         &self,
+        preview_id: &str,
         project_path: &PathBuf,
         port: u16,
         force_install: bool,
     ) -> Result<u32, Box<dyn std::error::Error>> {
-        self.start_dev_server(project_path, port, force_install)
+        let _ = self.close_preview(preview_id);
+        let pid = self.start_dev_server(project_path, port, force_install)?;
+        GLOBAL_VUE_SERVERS
+            .lock()
+            .unwrap()
+            .insert(preview_id.to_string(), VuePreviewServer { port, process: Some(pid) });
+        Ok(pid)
     }
 
     fn start_dev_server(

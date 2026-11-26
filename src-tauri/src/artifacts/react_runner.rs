@@ -214,6 +214,7 @@ impl ReactArtifactRunner {
         println!("🛠️ [ReactRunner] 写入组件文件到: {:?}", component_file);
 
         fs::write(&component_file, component_code)?;
+        crate::artifacts::shared_components::write_console_script(&artifact_dir)?;
         println!("🛠️ [ReactRunner] 组件文件写入完成");
 
         Ok((artifact_dir, need_install_deps))

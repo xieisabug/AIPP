@@ -75,6 +75,64 @@ pub struct ShowArtifactResponse {
     pub updated_at: String,
     pub db_id: Option<String>,
     pub assistant_id: Option<i64>,
+    /// 发布后的运行检查结果；调用方关闭检查时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<ArtifactDiagnostics>,
+}
+
+/// 发布后在后台加载一次预览收集到的问题，交给模型自查。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ArtifactDiagnostics {
+    /// `ok`：运行无报错；`errors`：有报错；`skipped`：未运行检查，原因见 `note`。
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+const MAX_DIAGNOSTIC_ITEMS: usize = 20;
+
+#[derive(Debug, Deserialize)]
+struct RuntimeConsoleEntry {
+    level: String,
+    message: String,
+}
+
+impl ArtifactDiagnostics {
+    fn skipped(note: impl Into<String>) -> Self {
+        Self { status: "skipped".to_string(), note: Some(note.into()), ..Default::default() }
+    }
+
+    fn from_entries(entries: Vec<RuntimeConsoleEntry>) -> Self {
+        let mut errors: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        for entry in entries {
+            let bucket = match entry.level.as_str() {
+                "error" => &mut errors,
+                "warn" => &mut warnings,
+                _ => continue,
+            };
+            // React 等会把同一个异常既 console.error 又抛到 window，去掉完全相同的重复。
+            if bucket.len() < MAX_DIAGNOSTIC_ITEMS && !bucket.contains(&entry.message) {
+                bucket.push(entry.message);
+            }
+        }
+        if errors.is_empty() {
+            Self { status: "ok".to_string(), warnings, ..Default::default() }
+        } else {
+            Self {
+                status: "errors".to_string(),
+                note: Some(
+                    "预览运行时出现错误。修复后再次调用 show_artifact 会重新检查。".to_string(),
+                ),
+                errors,
+                warnings,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +385,7 @@ pub fn show_artifact(
         updated_at: entry_to_persist.updated_at,
         db_id: entry_to_persist.db_id,
         assistant_id: entry_to_persist.assistant_id,
+        diagnostics: None,
     })
 }
 
@@ -456,6 +515,166 @@ pub async fn capture_artifact_screenshot(
     Err("capture_artifact_screenshot is only supported on desktop".to_string())
 }
 
+/// 在后台加载一次已发布 Artifact 的预览，收集运行时错误（console.error、未捕获异常、
+/// 资源加载失败、Vite 编译错误）。无法运行时返回 `skipped`，不影响发布结果。
+#[cfg(desktop)]
+pub async fn check_artifact_runtime(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    artifact_key: &str,
+    entry_file: &str,
+    language: Option<String>,
+    preview_type: Option<String>,
+) -> ArtifactDiagnostics {
+    let request = CaptureArtifactScreenshotRequest {
+        conversation_id,
+        artifact_key: artifact_key.to_string(),
+        entry_file: entry_file.to_string(),
+        language,
+        preview_type,
+        output_mode: None,
+        selector: None,
+        width: None,
+        height: None,
+        delay_ms: None,
+    };
+    let prepared = match prepare_artifact_capture(app_handle, &request) {
+        Ok(prepared) => prepared,
+        Err(e) => return ArtifactDiagnostics::skipped(format!("无法读取入口文件：{}", e)),
+    };
+
+    let entries = match prepared.preview_type.as_str() {
+        "html" | "svg" | "xml" => {
+            if prepared.code.starts_with("AIPP_CHOICE_PREVIEW_V1\n") {
+                return ArtifactDiagnostics::skipped("比选候选预览不做运行检查");
+            }
+            let html = crate::artifacts::shared_components::inject_console_script(
+                &build_html_like_capture_document(&prepared.code),
+            );
+            run_html_runtime_check(app_handle, &html).await
+        }
+        "react" | "jsx" | "vue" | "tsx" | "ts" | "js" => {
+            run_component_runtime_check(app_handle, &prepared).await
+        }
+        "markdown" | "md" => {
+            return ArtifactDiagnostics::skipped("Markdown 为静态内容，未运行检查");
+        }
+        other => return ArtifactDiagnostics::skipped(format!("{} 暂不支持运行检查", other)),
+    };
+
+    match entries {
+        Ok(entries) => ArtifactDiagnostics::from_entries(entries),
+        Err(e) => ArtifactDiagnostics::skipped(e),
+    }
+}
+
+#[cfg(not(desktop))]
+pub async fn check_artifact_runtime(
+    _app_handle: &AppHandle,
+    _conversation_id: i64,
+    _artifact_key: &str,
+    _entry_file: &str,
+    _language: Option<String>,
+    _preview_type: Option<String>,
+) -> ArtifactDiagnostics {
+    ArtifactDiagnostics::skipped("运行检查仅在桌面端可用")
+}
+
+#[cfg(desktop)]
+const RUNTIME_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 打开无头浏览器，`load` 载入页面后收集诊断脚本记下的条目。
+#[cfg(desktop)]
+async fn collect_runtime_entries_in_browser(
+    app_handle: &AppHandle,
+    load: impl FnOnce(chromiumoxide::Page) -> futures::future::BoxFuture<'static, Result<chromiumoxide::Page, String>>,
+    settle_ms: u64,
+) -> Result<Vec<RuntimeConsoleEntry>, String> {
+    let check = async {
+        let mut browser = launch_capture_browser(app_handle)
+            .await
+            .map_err(|e| format!("未找到可用的 Chromium 浏览器，未运行检查（{}）", e))?;
+        let result = async {
+            let page = browser
+                .new_page("about:blank")
+                .await
+                .map_err(|e| format!("无法创建检查页面：{}", e))?;
+            let page = load(page).await?;
+            let entries = collect_runtime_entries(&page, settle_ms).await;
+            let _ = page.close().await;
+            entries
+        }
+        .await;
+        let _ = browser.close().await;
+        let _ = browser.wait().await;
+        result
+    };
+    tokio::time::timeout(RUNTIME_CHECK_TIMEOUT, check)
+        .await
+        .map_err(|_| "运行检查超时，未得到结果".to_string())?
+}
+
+#[cfg(desktop)]
+async fn run_html_runtime_check(
+    app_handle: &AppHandle,
+    html: &str,
+) -> Result<Vec<RuntimeConsoleEntry>, String> {
+    let html = html.to_string();
+    collect_runtime_entries_in_browser(
+        app_handle,
+        move |page| {
+            Box::pin(async move {
+                page.set_content(html).await.map_err(|e| format!("无法加载预览内容：{}", e))?;
+                Ok(page)
+            })
+        },
+        500,
+    )
+    .await
+}
+
+#[cfg(desktop)]
+async fn run_component_runtime_check(
+    app_handle: &AppHandle,
+    prepared: &PreparedArtifactCapture,
+) -> Result<Vec<RuntimeConsoleEntry>, String> {
+    let _guard = CAPTURE_LOCK.lock().await;
+    remove_legacy_capture_dirs(app_handle);
+    let session = launch_component_preview(app_handle, prepared)
+        .await
+        .map_err(|e| format!("预览服务未能启动，未运行检查（{}）", e))?;
+    let url = session.url.clone();
+    // 多留时间给 Vite 编译和错误浮层出现
+    let result = collect_runtime_entries_in_browser(
+        app_handle,
+        move |page| {
+            Box::pin(async move {
+                page.goto(url.as_str()).await.map_err(|e| format!("无法打开预览地址：{}", e))?;
+                Ok(page)
+            })
+        },
+        1500,
+    )
+    .await;
+    session.cleanup(app_handle);
+    result
+}
+
+#[cfg(desktop)]
+async fn collect_runtime_entries(
+    page: &chromiumoxide::Page,
+    settle_ms: u64,
+) -> Result<Vec<RuntimeConsoleEntry>, String> {
+    wait_for_render_stability(page, settle_ms).await?;
+    let raw: String = page
+        .evaluate("JSON.stringify(window.__aippDiag || [])")
+        .await
+        .map_err(|e| format!("无法读取运行记录：{}", e))?
+        .into_value()
+        .map_err(|e| format!("无法读取运行记录：{}", e))?;
+    serde_json::from_str(&raw).map_err(|e| format!("运行记录格式无效：{}", e))
+}
+
 pub fn list_published_artifacts(
     app_handle: &AppHandle,
     conversation_id: i64,
@@ -465,19 +684,14 @@ pub fn list_published_artifacts(
     let mut items = Vec::new();
 
     for artifact in manifest.artifacts.iter().filter(|artifact| artifact.status == "published") {
-        let entry_path =
-            context.workspace_path.join(&artifact.artifact_dir).join(&artifact.entry_file);
-        if !entry_path.exists() {
-            return Err(format!(
-                "Published artifact entry file not found: {}",
-                entry_path.display()
-            ));
-        }
-        ensure_within_workspace(&context.workspace_path, &entry_path)?;
-        ensure_preview_size(&entry_path)?;
-        let code = fs::read_to_string(&entry_path).map_err(|e| {
-            format!("Failed to read artifact entry file '{}': {}", entry_path.display(), e)
-        })?;
+        // 单个 Artifact 的入口丢失/越界/过大/不可读时只跳过它，不让整张列表失败。
+        let code = match read_published_entry(&context, artifact) {
+            Ok(code) => code,
+            Err(e) => {
+                tracing::warn!(conversation_id, artifact_key = %artifact.artifact_key, error = %e, "Skip unreadable published artifact");
+                continue;
+            }
+        };
         items.push(ConversationArtifactItem {
             artifact_key: artifact.artifact_key.clone(),
             title: artifact.title.clone(),
@@ -553,6 +767,9 @@ async fn capture_component_preview_screenshot(
     height: u32,
     delay_ms: u64,
 ) -> Result<Vec<u8>, String> {
+    // 截图复用固定的模板目录（依赖只装一次），因此同一时间只跑一个截图预览。
+    let _guard = CAPTURE_LOCK.lock().await;
+    remove_legacy_capture_dirs(app_handle);
     let session = launch_component_preview(app_handle, prepared).await?;
     let capture_result =
         capture_url_screenshot(app_handle, &session.url, selector, width, height, delay_ms).await;
@@ -560,50 +777,93 @@ async fn capture_component_preview_screenshot(
     capture_result
 }
 
+/// 截图专用的预览实例 ID：React/Vue 各自的模板目录与服务器表互不相同，可共用同一个 ID。
+#[cfg(desktop)]
+const CAPTURE_PREVIEW_ID: &str = "artifact-capture";
+#[cfg(desktop)]
+static CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 旧版本每次截图都新建 `artifact-capture-<时间戳>` 目录且从不删除，这里顺手清掉。
+#[cfg(desktop)]
+fn remove_legacy_capture_dirs(app_handle: &AppHandle) {
+    let Ok(app_data_dir) = app_handle.path().app_data_dir() else {
+        return;
+    };
+    for kind in ["react", "vue"] {
+        let root = app_data_dir.join("preview").join("templates").join(kind);
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("artifact-capture-") && entry.path().is_dir() {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
 #[cfg(desktop)]
 async fn launch_component_preview(
     app_handle: &AppHandle,
     prepared: &PreparedArtifactCapture,
 ) -> Result<ComponentPreviewSession, String> {
-    let preview_id =
-        format!("artifact-capture-{}", Utc::now().timestamp_nanos_opt().unwrap_or_default());
+    let kind = detect_component_preview_kind(prepared)?;
     let shared_utils = SharedPreviewUtils::new(app_handle.clone());
     let port = shared_utils
         .find_available_port(42000, 52000)
         .map_err(|e| format!("Failed to find available preview port: {}", e))?;
 
-    match detect_component_preview_kind(prepared)? {
-        ComponentPreviewKind::React { component_name } => {
-            let manager = ReactPreviewManager::new(app_handle.clone());
-            let (template_path, need_install_deps) = manager
-                .setup_capture_preview_project(&preview_id, &prepared.code, &component_name)
-                .map_err(|e| e.to_string())?;
-            manager
-                .start_capture_dev_server(&template_path, port, need_install_deps)
-                .map_err(|e| e.to_string())?;
-            wait_for_local_url_ready(port, Duration::from_secs(20)).await?;
-            return Ok(ComponentPreviewSession {
-                url: format!("http://127.0.0.1:{port}"),
-                preview_id,
-                kind: ComponentPreviewRuntime::React,
-            });
+    // 复制模板、安装依赖、启动进程都是阻塞操作，放到阻塞线程，避免卡住异步运行时。
+    let app = app_handle.clone();
+    let code = prepared.code.clone();
+    let runtime = tokio::task::spawn_blocking(move || -> Result<ComponentPreviewRuntime, String> {
+        match kind {
+            ComponentPreviewKind::React { component_name } => {
+                let manager = ReactPreviewManager::new(app);
+                let (template_path, need_install_deps) = manager
+                    .setup_capture_preview_project(CAPTURE_PREVIEW_ID, &code, &component_name)
+                    .map_err(|e| e.to_string())?;
+                manager
+                    .start_capture_dev_server(
+                        CAPTURE_PREVIEW_ID,
+                        &template_path,
+                        port,
+                        need_install_deps,
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(ComponentPreviewRuntime::React)
+            }
+            ComponentPreviewKind::Vue { component_name } => {
+                let manager = VuePreviewManager::new(app);
+                let (template_path, need_install_deps) = manager
+                    .setup_capture_preview_project(CAPTURE_PREVIEW_ID, &code, &component_name)
+                    .map_err(|e| e.to_string())?;
+                manager
+                    .start_capture_dev_server(
+                        CAPTURE_PREVIEW_ID,
+                        &template_path,
+                        port,
+                        need_install_deps,
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(ComponentPreviewRuntime::Vue)
+            }
         }
-        ComponentPreviewKind::Vue { component_name } => {
-            let manager = VuePreviewManager::new(app_handle.clone());
-            let (template_path, need_install_deps) = manager
-                .setup_capture_preview_project(&preview_id, &prepared.code, &component_name)
-                .map_err(|e| e.to_string())?;
-            manager
-                .start_capture_dev_server(&template_path, port, need_install_deps)
-                .map_err(|e| e.to_string())?;
-            wait_for_local_url_ready(port, Duration::from_secs(20)).await?;
-            return Ok(ComponentPreviewSession {
-                url: format!("http://127.0.0.1:{port}"),
-                preview_id,
-                kind: ComponentPreviewRuntime::Vue,
-            });
-        }
+    })
+    .await
+    .map_err(|e| format!("Preview server task failed: {}", e))??;
+
+    let session = ComponentPreviewSession {
+        url: format!("http://127.0.0.1:{port}"),
+        preview_id: CAPTURE_PREVIEW_ID.to_string(),
+        kind: runtime,
+    };
+    if let Err(e) = wait_for_local_url_ready(port, Duration::from_secs(20)).await {
+        session.cleanup(app_handle);
+        return Err(e);
     }
+    Ok(session)
 }
 
 #[cfg(desktop)]
@@ -974,6 +1234,20 @@ fn screenshot_filename_slug(value: &str) -> String {
     }
 }
 
+/// 删除会话时一并删除它的 Artifact 工作区；失败只记日志，不影响会话删除。
+pub fn remove_conversation_workspace(app_handle: &AppHandle, conversation_id: i64) {
+    let Ok(app_data_dir) = app_handle.path().app_data_dir() else {
+        return;
+    };
+    let dir =
+        app_data_dir.join("artifact_workspaces").join(format!("conversation_{}", conversation_id));
+    if dir.is_dir() {
+        if let Err(e) = fs::remove_dir_all(&dir) {
+            tracing::warn!(conversation_id, error = %e, "Failed to remove artifact workspace of deleted conversation");
+        }
+    }
+}
+
 fn ensure_workspace_context(
     app_handle: &AppHandle,
     conversation_id: i64,
@@ -1188,6 +1462,21 @@ fn is_supported_language(language: &str) -> bool {
     )
 }
 
+fn read_published_entry(
+    context: &WorkspaceContext,
+    artifact: &ArtifactManifestEntry,
+) -> Result<String, String> {
+    let entry_path = context.workspace_path.join(&artifact.artifact_dir).join(&artifact.entry_file);
+    if !entry_path.exists() {
+        return Err(format!("Published artifact entry file not found: {}", entry_path.display()));
+    }
+    ensure_within_workspace(&context.workspace_path, &entry_path)?;
+    ensure_preview_size(&entry_path)?;
+    fs::read_to_string(&entry_path).map_err(|e| {
+        format!("Failed to read artifact entry file '{}': {}", entry_path.display(), e)
+    })
+}
+
 fn ensure_preview_size(path: &Path) -> Result<(), String> {
     let metadata = fs::metadata(path)
         .map_err(|e| format!("Failed to read file metadata '{}': {}", path.display(), e))?;
@@ -1225,6 +1514,48 @@ fn normalize_path_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(level: &str, message: &str) -> RuntimeConsoleEntry {
+        RuntimeConsoleEntry { level: level.to_string(), message: message.to_string() }
+    }
+
+    #[test]
+    fn diagnostics_keep_errors_and_warnings_and_drop_duplicates() {
+        let diagnostics = ArtifactDiagnostics::from_entries(vec![
+            entry("log", "hello"),
+            entry("error", "TypeError: x is undefined"),
+            entry("error", "TypeError: x is undefined"),
+            entry("warn", "deprecated prop"),
+            entry("info", "ignored"),
+        ]);
+        assert_eq!(diagnostics.status, "errors");
+        assert_eq!(diagnostics.errors, vec!["TypeError: x is undefined".to_string()]);
+        assert_eq!(diagnostics.warnings, vec!["deprecated prop".to_string()]);
+        assert!(diagnostics.note.is_some());
+    }
+
+    #[test]
+    fn diagnostics_without_errors_are_ok_and_cap_items() {
+        let warnings: Vec<RuntimeConsoleEntry> =
+            (0..50).map(|i| entry("warn", &format!("w{i}"))).collect();
+        let diagnostics = ArtifactDiagnostics::from_entries(warnings);
+        assert_eq!(diagnostics.status, "ok");
+        assert_eq!(diagnostics.warnings.len(), MAX_DIAGNOSTIC_ITEMS);
+        assert!(diagnostics.errors.is_empty());
+    }
+
+    #[test]
+    fn inject_console_script_goes_first_in_head() {
+        use crate::artifacts::shared_components::inject_console_script;
+        let html = inject_console_script("<html><header>x</header><head><script>app()</script></head></html>");
+        let script_at = html.find("__aippConsoleInstalled").unwrap();
+        assert!(script_at < html.find("app()").unwrap());
+        assert!(html.find("<head>").unwrap() < script_at);
+
+        let fragment = inject_console_script("<div>hi</div>");
+        assert!(fragment.starts_with("<script>"));
+        assert!(fragment.ends_with("<div>hi</div>"));
+    }
     #[cfg(desktop)]
     use chromiumoxide::browser::BrowserConfig;
     #[cfg(desktop)]
@@ -1300,6 +1631,52 @@ mod tests {
             click_selector_if_requested(&page, Some("#toggle"), 50).await.expect("click selector");
             let bytes = take_png_screenshot(&page).await.expect("take screenshot");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+
+            let _ = page.close().await;
+            let _ = browser.close().await;
+            let _ = browser.wait().await;
+        });
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn runtime_check_collects_console_errors_and_exceptions() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            let browser_path = BrowserManager::new(None)
+                .get_browser_path()
+                .expect("chromium browser should be available for runtime check");
+            let temp_dir = TempDir::new().expect("temp dir");
+            let config = BrowserConfig::builder()
+                .no_sandbox()
+                .chrome_executable(&browser_path)
+                .user_data_dir(temp_dir.path())
+                .build()
+                .expect("browser config");
+            let (mut browser, mut handler) =
+                Browser::launch(config).await.expect("launch headless chromium");
+            tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+            let page = browser.new_page("about:blank").await.expect("new page");
+            let html = crate::artifacts::shared_components::inject_console_script(
+                &build_html_like_capture_document(
+                    "<script>console.log('boot'); console.warn('careful'); console.error('bad state');</script>\
+                     <script>missingFunction();</script>\
+                     <script>Promise.reject(new Error('async boom'));</script>",
+                ),
+            );
+            page.set_content(html).await.expect("set content");
+            let entries = collect_runtime_entries(&page, 200).await.expect("collect entries");
+            let diagnostics = ArtifactDiagnostics::from_entries(entries);
+
+            assert_eq!(diagnostics.status, "errors");
+            assert!(diagnostics.errors.iter().any(|e| e.contains("bad state")), "{diagnostics:?}");
+            assert!(
+                diagnostics.errors.iter().any(|e| e.contains("missingFunction")),
+                "{diagnostics:?}"
+            );
+            assert!(diagnostics.errors.iter().any(|e| e.contains("async boom")), "{diagnostics:?}");
+            assert_eq!(diagnostics.warnings, vec!["careful".to_string()]);
 
             let _ = page.close().await;
             let _ = browser.close().await;

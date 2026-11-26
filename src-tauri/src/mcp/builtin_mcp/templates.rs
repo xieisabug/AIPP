@@ -1288,7 +1288,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "show_artifact".into(),
-                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。入口文件必须位于 `<workspace_path>/artifacts/<artifact_key>/<entry_file>`。预览只加载入口文件本身，不会加载同目录的其他文件，所以入口要写成自包含的单个文件（HTML 把样式和脚本内联；React/Vue 写成单个组件文件）。".into(),
+                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。入口文件必须位于 `<workspace_path>/artifacts/<artifact_key>/<entry_file>`。预览只加载入口文件本身，不会加载同目录的其他文件，所以入口要写成自包含的单个文件（HTML 把样式和脚本内联；React/Vue 写成单个组件文件）。发布后默认在后台加载一次预览，结果的 `diagnostics` 给出运行检查：`status` 为 `errors` 时 `errors` 列出运行时错误、编译错误或资源加载失败，应修复后再次调用 show_artifact；`skipped` 表示未能检查（见 `note`）。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1323,6 +1323,10 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         "assistant_id": {
                             "type": "number",
                             "description": "可选。绑定一个助手 ID，Artifact 可通过 AIPP SDK 调用该助手"
+                        },
+                        "check": {
+                            "type": "boolean",
+                            "description": "可选，默认 true。发布后在后台加载一次预览并返回运行检查结果；传 false 跳过（更快，但看不到运行时错误）"
                         }
                     },
                     "required": ["artifact_key", "entry_file"]

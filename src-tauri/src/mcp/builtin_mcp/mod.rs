@@ -1503,11 +1503,27 @@ pub async fn execute_aipp_builtin_tool(
                         db_id: args.get("db_id").and_then(|v| v.as_str()).map(|v| v.to_string()),
                         assistant_id: argument_i64(&args, "assistant_id"),
                     };
+                    let run_check = args.get("check").and_then(|v| v.as_bool()).unwrap_or(true);
                     match show_artifact(&app_handle, request) {
-                        Ok(response) => serde_json::json!({
-                            "content": [{"type": "json", "json": response}],
-                            "isError": false
-                        }),
+                        Ok(mut response) => {
+                            if run_check {
+                                response.diagnostics = Some(
+                                    crate::artifacts::workspace::check_artifact_runtime(
+                                        &app_handle,
+                                        resolved_conversation_id,
+                                        &response.artifact_key,
+                                        &response.entry_file,
+                                        Some(response.language.clone()),
+                                        Some(response.preview_type.clone()),
+                                    )
+                                    .await,
+                                );
+                            }
+                            serde_json::json!({
+                                "content": [{"type": "json", "json": response}],
+                                "isError": false
+                            })
+                        }
                         Err(e) => {
                             error!(error = %e, "show_artifact tool execution failed");
                             serde_json::json!({

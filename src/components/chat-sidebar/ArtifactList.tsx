@@ -22,37 +22,9 @@ const getLanguageIcon = (language: string) => {
         return <FileText className="h-4 w-4 flex-shrink-0" />;
     }
     if (['js', 'javascript', 'ts', 'typescript', 'jsx', 'tsx'].includes(lang)) {
-        return <FileCode className="h-4 w-4 text-yellow-500 flex-shrink-0" />;
+        return <FileCode className="h-4 w-4 flex-shrink-0" />;
     }
     return <Code className="h-4 w-4 flex-shrink-0" />;
-};
-
-const getLanguageColor = (language: string): string => {
-    const lang = language.toLowerCase();
-    const colors: Record<string, string> = {
-        javascript: 'text-yellow-500',
-        js: 'text-yellow-500',
-        typescript: 'text-blue-500',
-        ts: 'text-blue-500',
-        tsx: 'text-blue-500',
-        jsx: 'text-yellow-500',
-        python: 'text-green-500',
-        py: 'text-green-500',
-        rust: 'text-orange-500',
-        rs: 'text-orange-500',
-        go: 'text-cyan-500',
-        java: 'text-red-500',
-        cpp: 'text-purple-500',
-        c: 'text-purple-500',
-        html: 'text-orange-400',
-        css: 'text-blue-400',
-        json: 'text-gray-500',
-        sql: 'text-pink-500',
-        bash: 'text-green-400',
-        shell: 'text-green-400',
-        sh: 'text-green-400',
-    };
-    return colors[lang] || 'text-muted-foreground';
 };
 
 const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobile = false, onArtifactClick }) => {
@@ -69,7 +41,7 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobil
     if (artifacts.length === 0) {
         return (
             <div className={cn("p-3 text-sm text-muted-foreground text-center", className)}>
-                暂无代码块
+                暂无 Artifact
             </div>
         );
     }
@@ -86,7 +58,7 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobil
                     )}
                     onClick={() => onArtifactClick?.(artifact)}
                 >
-                    <div className={cn("flex-shrink-0", getLanguageColor(artifact.language))}>
+                    <div className="flex-shrink-0 text-muted-foreground">
                         {getLanguageIcon(artifact.language)}
                     </div>
                     <div className="flex-1 min-w-0">

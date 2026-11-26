@@ -217,132 +217,95 @@ pub async fn open_artifact_window(
     // This replaces the old hardcoded 1000ms sleep with a proper event-based wait
     let _ = crate::artifacts::preview_router::wait_for_artifact_ready(&app_handle).await;
 
+    let Some(window) = app_handle.get_webview_window("artifact") else {
+        return Ok(());
+    };
+    let payload = |preview_type: &str, code: &str| {
+        serde_json::json!({
+            "id": artifact.id,
+            "name": artifact.name,
+            "icon": artifact.icon,
+            "description": artifact.description,
+            "type": preview_type,
+            "original_code": code,
+            "tags": artifact.tags,
+            "created_time": artifact.created_time,
+            "last_used_time": artifact.last_used_time,
+            "use_count": artifact.use_count,
+            "db_id": artifact.db_id,
+            "assistant_id": artifact.assistant_id,
+        })
+    };
+
     match artifact.artifact_type.as_str() {
         "react" | "jsx" => {
-            if is_react_component(artifact.code.as_str()) {
-                let component_name = extract_component_name(artifact.code.as_str())
-                    .unwrap_or_else(|| "UserComponent".to_string());
-                if let Some(window) = app_handle.get_webview_window("artifact") {
-                    let _ = window.emit(
-                        "artifact-data",
-                        serde_json::json!({
-                            "id": artifact.id,
-                            "name": artifact.name,
-                            "icon": artifact.icon,
-                            "description": artifact.description,
-                            "type": "react",
-                            "original_code": artifact.code.as_str(),
-                            "tags": artifact.tags,
-                            "created_time": artifact.created_time,
-                            "last_used_time": artifact.last_used_time,
-                            "use_count": artifact.use_count,
-                        }),
-                    );
-                }
-                let _url = run_react_artifact(
-                    app_handle.clone(),
-                    artifact_id,
-                    artifact.code.as_str().to_string(),
-                    component_name,
-                )
-                .await
-                .map_err(|e| {
-                    let error_msg = format!("React 组件运行失败: {}", e);
-                    if let Some(window) = app_handle.get_webview_window("artifact") {
-                        let _ = window.emit("artifact-error", &error_msg);
-                    }
-                    error_msg
-                })?;
-            } else if let Some(window) = app_handle.get_webview_window("artifact") {
+            if !is_react_component(artifact.code.as_str()) {
                 let _ = window.emit(
                     "artifact-error",
                     "React 代码片段预览暂不支持，请提供完整的 React 组件代码。",
                 );
+                return Ok(());
             }
+            let component_name = extract_component_name(artifact.code.as_str())
+                .unwrap_or_else(|| "UserComponent".to_string());
+            let _ = window.emit("artifact-data", payload("react", &artifact.code));
+            run_react_artifact(app_handle.clone(), artifact_id, artifact.code.clone(), component_name)
+                .await
+                .map_err(|e| {
+                    let error_msg = format!("React 组件运行失败: {}", e);
+                    let _ = window.emit("artifact-error", &error_msg);
+                    error_msg
+                })?;
         }
         "vue" => {
             let bun_version = BunUtils::get_bun_version(&app_handle);
             if bun_version.is_err()
                 || bun_version.as_ref().unwrap_or(&String::new()).contains("Not Installed")
             {
-                if let Some(window) = app_handle.get_webview_window("artifact") {
-                    let _ = window.emit("environment-check", serde_json::json!({
-                        "tool": "bun",
-                        "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
-                        "lang": "vue",
-                        "input_str": artifact.code.as_str()
-                    }));
-                }
+                let _ = window.emit("environment-check", serde_json::json!({
+                    "tool": "bun",
+                    "message": "Vue 预览需要 bun 环境，但系统中未安装 bun。是否要自动安装？",
+                    "lang": "vue",
+                    "input_str": artifact.code.as_str()
+                }));
                 return Ok(());
             }
-            if is_vue_component(artifact.code.as_str()) {
-                let component_name = extract_vue_component_name(artifact.code.as_str())
-                    .unwrap_or_else(|| "UserComponent".to_string());
-                if let Some(window) = app_handle.get_webview_window("artifact") {
-                    let _ = window.emit(
-                        "artifact-data",
-                        serde_json::json!({
-                            "id": artifact.id,
-                            "name": artifact.name,
-                            "icon": artifact.icon,
-                            "description": artifact.description,
-                            "type": "vue",
-                            "original_code": artifact.code.as_str(),
-                            "tags": artifact.tags,
-                            "created_time": artifact.created_time,
-                            "last_used_time": artifact.last_used_time,
-                            "use_count": artifact.use_count,
-                        }),
-                    );
-                }
-                let _url = run_vue_artifact(
-                    app_handle.clone(),
-                    artifact_id,
-                    artifact.code.as_str().to_string(),
-                    component_name,
-                )
-                .await
-                .map_err(|e| {
-                    let error_msg = format!("Vue 组件运行失败: {}", e);
-                    if let Some(window) = app_handle.get_webview_window("artifact") {
-                        let _ = window.emit("artifact-error", &error_msg);
-                    }
-                    error_msg
-                })?;
-            } else if let Some(window) = app_handle.get_webview_window("artifact") {
+            if !is_vue_component(artifact.code.as_str()) {
                 let _ = window.emit(
                     "artifact-error",
                     "Vue 代码片段预览暂不支持，请提供完整的 Vue 组件代码。",
                 );
+                return Ok(());
             }
+            let component_name = extract_vue_component_name(artifact.code.as_str())
+                .unwrap_or_else(|| "UserComponent".to_string());
+            let _ = window.emit("artifact-data", payload("vue", &artifact.code));
+            run_vue_artifact(app_handle.clone(), artifact_id, artifact.code.clone(), component_name)
+                .await
+                .map_err(|e| {
+                    let error_msg = format!("Vue 组件运行失败: {}", e);
+                    let _ = window.emit("artifact-error", &error_msg);
+                    error_msg
+                })?;
         }
+        // 静态内容由窗口直接渲染，不需要预览服务器。
         "html" => {
-            let is_snapshot = artifact.code.starts_with(archive::PREFIX);
-            if let Some(window) = app_handle.get_webview_window("artifact") {
-                let _ = window.emit("artifact-log", format!("准备预览 {} 内容...", "html"));
-                let _ = window.emit(
-                    "artifact-data",
-                    serde_json::json!({
-                        "id": artifact.id,
-                        "name": artifact.name,
-                        "icon": artifact.icon,
-                        "description": artifact.description,
-                        "type": "html",
-                        "original_code": if is_snapshot { archive::PREFIX } else { artifact.code.as_str() },
-                        "tags": artifact.tags,
-                        "created_time": artifact.created_time,
-                        "last_used_time": artifact.last_used_time,
-                        "use_count": artifact.use_count,
-                    }),
-                );
-
-                if !is_snapshot {
-                    let _ = window.emit("artifact-log", format!("html content: {}", artifact.code));
-                }
-                let _ = window.emit("artifact-success", format!("{} 预览已准备完成", "HTML"));
-            }
+            // 比选快照只把前缀交给前端，前端按收藏 ID 读取完整工程。
+            let code = if artifact.code.starts_with(archive::PREFIX) {
+                archive::PREFIX
+            } else {
+                artifact.code.as_str()
+            };
+            let _ = window.emit("artifact-data", payload("html", code));
+            let _ = window.emit("artifact-success", "HTML 预览已准备完成");
         }
-        _ => {}
+        other @ ("svg" | "xml" | "markdown" | "md" | "mermaid") => {
+            let _ = window.emit("artifact-data", payload(other, &artifact.code));
+            let _ = window.emit("artifact-success", "预览已准备完成");
+        }
+        other => {
+            let _ = window.emit("artifact-error", format!("暂不支持预览该类型：{}", other));
+        }
     }
     Ok(())
 }

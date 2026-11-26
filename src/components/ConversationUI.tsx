@@ -37,6 +37,8 @@ import {
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { useArtifactFixRequests } from "@/utils/artifactFixRequest";
 import FileDropArea from "./FileDropArea";
 import useFileDropHandler from "../hooks/useFileDropHandler";
 import { describeAskAiError } from "@/lib/askAiError";
@@ -549,6 +551,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             () => setDraftReadyKey(conversationId),
             notifyMissingDraftAttachments,
         );
+
+        // 预览窗口「让 AI 修复」：报错填进本会话输入框（接在已有草稿后），由用户补充后发送
+        useArtifactFixRequests(conversationId ? Number(conversationId) : null, (text) => {
+            setInputText((prev) => (prev.trim() ? `${prev}\n\n${text}` : text));
+            const currentWindow = getCurrentWebviewWindow();
+            void currentWindow.unminimize().catch(() => {});
+            void currentWindow.show().catch(() => {});
+            void currentWindow.setFocus().catch(() => {});
+        });
 
         // 文件拖拽
         const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleDropFiles, addLocalPaths);

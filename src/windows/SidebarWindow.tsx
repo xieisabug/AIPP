@@ -580,7 +580,12 @@ function SidebarWindow() {
 
         if (previewMode === 'artifact') {
             // Use embedded artifact preview component
-            return <EmbeddedArtifactPreview className="flex-1" previewOnly />;
+            return (
+                <EmbeddedArtifactPreview
+                    className="flex-1"
+                    onOpenInWindow={canOpenInPreviewWindow ? handleOpenInPreviewWindow : undefined}
+                />
+            );
         }
 
         if (previewMode === 'context' && contextPreview) {
@@ -634,18 +639,6 @@ function SidebarWindow() {
             {/* Left side - Preview area */}
             <div className="relative flex-1 flex flex-col border-r border-border min-w-0" data-aipp-slot="sidebar-preview-pane">
                 {renderPreview()}
-                {canOpenInPreviewWindow && (
-                    <Button
-                        variant="secondary"
-                        size="sm"
-                        className="absolute top-3 right-3 z-20 h-8 px-3 shadow-md bg-background/90 backdrop-blur-sm"
-                        onClick={handleOpenInPreviewWindow}
-                        title="在预览窗口打开"
-                    >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        在预览窗口打开
-                    </Button>
-                )}
             </div>
 
             {/* Right side - Sidebar content with resize handle */}

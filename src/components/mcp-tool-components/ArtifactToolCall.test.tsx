@@ -54,6 +54,36 @@ describe("ArtifactToolCall", () => {
         expect(screen.getByText(/记账本/)).toBeInTheDocument();
     });
 
+    it("should flag runtime errors found by the publish check", () => {
+        const withErrors = JSON.stringify([
+            {
+                type: "json",
+                json: {
+                    artifact_key: "tools/ledger",
+                    title: "记账本",
+                    preview_type: "react",
+                    diagnostics: { status: "errors", errors: ["TypeError: a", "ReferenceError: b"] },
+                },
+            },
+        ]);
+        render(
+            <ArtifactToolCall
+                toolName="show_artifact"
+                status="success"
+                conversationId={9}
+                currentToolCall={call("success", { result: withErrors })}
+            />,
+        );
+        expect(screen.getByText(/运行检查发现 2 个错误/)).toBeInTheDocument();
+    });
+
+    it("should not mention the check when it passed", () => {
+        render(
+            <ArtifactToolCall toolName="show_artifact" status="success" conversationId={9} currentToolCall={call("success", { result: RESULT })} />,
+        );
+        expect(screen.queryByText(/运行检查/)).toBeNull();
+    });
+
     it("should explain why publishing failed", () => {
         render(
             <ArtifactToolCall

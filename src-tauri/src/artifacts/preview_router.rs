@@ -783,6 +783,25 @@ pub async fn retry_preview_after_install(
     db_id: Option<String>,
     assistant_id: Option<i64>,
 ) -> Result<String, String> {
+    // 安装前那次预览已写入缓存；同一份内容时沿用它的会话、绑定与 Artifact 定位，
+    // 否则重试会丢掉 artifact_key/entry_file 与 db/助手绑定。
+    let cached = {
+        let cache = LAST_ARTIFACT_CACHE.lock().await;
+        cache
+            .get(preview_cache_key(source_window.as_deref()))
+            .filter(|c| c.lang == lang && c.input_str == input_str)
+            .cloned()
+    };
+    let (conversation_id, db_id, assistant_id, artifact_key, entry_file) = match cached {
+        Some(c) => (
+            conversation_id.or(c.conversation_id),
+            db_id.or(c.db_id),
+            assistant_id.or(c.assistant_id),
+            c.artifact_key,
+            c.entry_file,
+        ),
+        None => (conversation_id, db_id, assistant_id, None, None),
+    };
     match run_artifacts(
         app_handle.clone(),
         &lang,
@@ -791,8 +810,8 @@ pub async fn retry_preview_after_install(
         conversation_id,
         db_id,
         assistant_id,
-        None,
-        None,
+        artifact_key,
+        entry_file,
     )
     .await
     {

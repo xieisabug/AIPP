@@ -1204,6 +1204,7 @@ pub async fn open_artifact_window(
         debug!(label=%window_label, "Showing artifact window");
         #[cfg(desktop)]
         {
+            let _ = window.set_title(&artifact.name);
             if window.is_minimized().unwrap_or(false) {
                 window.unminimize().unwrap();
             }

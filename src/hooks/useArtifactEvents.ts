@@ -169,7 +169,6 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
         if (readyIntervalRef.current) {
             clearInterval(readyIntervalRef.current);
             readyIntervalRef.current = null;
-            console.log(`🔧 [${windowType}] 停止发送 ready 信号`);
         }
     }, [windowType]);
 
@@ -177,7 +176,6 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
     const sendDataReceivedConfirmation = useCallback(() => {
         const confirmEvent = `${eventPrefix}-data-received`;
         emit(confirmEvent, { timestamp: Date.now(), windowType });
-        console.log(`🔧 [${windowType}] 发送数据接收确认: ${confirmEvent}`);
     }, [eventPrefix, windowType]);
 
     useEffect(() => {
@@ -186,22 +184,18 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
         const registerListeners = async () => {
             // 防止重复注册
             if (isRegisteredRef.current || isCancelled) {
-                console.log(`🔧 [${windowType}] 监听器已注册或已取消，跳过`);
                 return;
             }
             isRegisteredRef.current = true;
 
-            console.log(`🔧 [${windowType}] 开始注册事件监听器...`);
 
             // 创建日志处理函数
             const createLogHandler = (type: LogLine['type']) => (event: { payload: any }) => {
                 const { message, requestId } = parseMessagePayload(event.payload);
                 if (shouldIgnoreEvent(requestId)) {
-                    console.log(`🔧 [${windowType}] 忽略过期日志: ${requestId ?? 'no-request'}`);
                     return;
                 }
                 ensureRequestId(requestId);
-                console.log(`🔧 [${windowType}] 收到日志[${type}]: ${message}`);
                 setLogs(prev => [...prev, { type, message }]);
             };
 
@@ -214,12 +208,10 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                 }
                 const requestId = getRequestId(payload);
                 if (shouldIgnoreEvent(requestId)) {
-                    console.log(`🔧 [${windowType}] 忽略过期 artifact 数据: ${requestId ?? 'no-request'}`);
                     return;
                 }
                 ensureRequestId(requestId);
                 const data = payload as ArtifactData;
-                console.log(`🔧 [${windowType}] 收到 artifact 数据:`, data);
 
                 // 标记已接收数据
                 setHasReceivedData(true);
@@ -247,12 +239,10 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                 }
 
                 if (shouldIgnoreEvent(requestId)) {
-                    console.log(`🔧 [${windowType}] 忽略过期重定向: ${requestId ?? 'no-request'}`);
                     return;
                 }
                 ensureRequestId(requestId);
 
-                console.log(`🔧 [${windowType}] 收到重定向: ${url}`);
 
                 // 标记已接收数据
                 setHasReceivedData(true);
@@ -271,33 +261,28 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
             const handleEnvironmentCheck = (event: { payload: any }) => {
                 const requestId = getRequestId(event.payload);
                 if (shouldIgnoreEvent(requestId)) {
-                    console.log(`🔧 [${windowType}] 忽略过期环境检查: ${requestId ?? 'no-request'}`);
                     return;
                 }
                 ensureRequestId(requestId);
                 const data = event.payload as EnvironmentCheckData;
-                console.log(`🔧 [${windowType}] 收到环境检查:`, data);
                 onEnvironmentCheck?.(data);
             };
 
             // 处理环境安装开始
             const handleEnvironmentInstallStarted = (event: { payload: any }) => {
                 const data = event.payload;
-                console.log(`🔧 [${windowType}] 环境安装开始:`, data);
                 onEnvironmentInstallStarted?.(data);
             };
 
             // 处理 Bun 安装完成
             const handleBunInstallFinished = (event: { payload: any }) => {
                 const success = event.payload as boolean;
-                console.log(`🔧 [${windowType}] Bun 安装完成:`, success);
                 onBunInstallFinished?.(success);
             };
 
             // 处理 uv 安装完成
             const handleUvInstallFinished = (event: { payload: any }) => {
                 const success = event.payload as boolean;
-                console.log(`🔧 [${windowType}] uv 安装完成:`, success);
                 onUvInstallFinished?.(success);
             };
 
@@ -307,13 +292,11 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                     ? event.payload.request_id
                     : null;
                 currentRequestIdRef.current = nextRequestId;
-                console.log(`🔧 [${windowType}] 收到 reset 事件，重置状态`);
                 reset();  // 清除内部状态
                 onReset?.();  // 调用外部回调
 
                 // Reset 后需要重新发送 ready 信号，因为后端在等待
                 // 立即发送一次，然后重新启动 interval
-                console.log(`🔧 [${windowType}] reset 后重新发送 ready 信号`);
                 emit(readyEvent, {
                     windowType,
                     timestamp: Date.now(),
@@ -329,7 +312,6 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                                 timestamp: Date.now(),
                                 listenersRegistered: true
                             });
-                            console.log(`🔧 [${windowType}] 发送 ready 信号: ${readyEvent}`);
                         } else {
                             stopReadySignal();
                         }
@@ -352,11 +334,9 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                     listen('artifact-preview-reset', handleReset),
                 ]);
 
-                console.log(`🔧 [${windowType}] 所有监听器注册成功`);
 
                 // 检查是否已被取消
                 if (isCancelled) {
-                    console.log(`🔧 [${windowType}] 初始化已取消，清理监听器`);
                     unlisteners.forEach(fn => fn());
                     return;
                 }
@@ -376,7 +356,6 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                         timestamp: Date.now(),
                         listenersRegistered: true 
                     });
-                    console.log(`🔧 [${windowType}] 发送 ready 信号: ${readyEvent}`);
                 };
 
                 // 立即发送第一次 ready 信号
@@ -388,7 +367,6 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
                 // 设置最大发送时间 30 秒，避免无限发送
                 setTimeout(() => {
                     if (readyIntervalRef.current && !hasReceivedDataRef.current) {
-                        console.log(`🔧 [${windowType}] ready 信号发送超时 (30s)，停止发送`);
                         stopReadySignal();
                     }
                 }, 30000);

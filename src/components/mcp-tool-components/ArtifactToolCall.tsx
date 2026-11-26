@@ -12,6 +12,10 @@ export interface ShowArtifactResult {
     language?: string;
     preview_type?: string;
     entry_file?: string;
+    /** 发布后的运行检查（show_artifact 默认执行）。 */
+    diagnostics?: { status: "ok" | "errors" | "skipped"; errors?: string[] };
+    /** 调用参数里的 check=false 表示跳过运行检查。 */
+    check?: boolean;
 }
 
 const parseJson = (text: string | undefined): unknown => {
@@ -103,12 +107,13 @@ export default function ArtifactToolCall(props: McpToolComponentProps) {
         return (
             <div className="my-1 flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground" data-testid="artifact-card" data-state="running">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                正在发布 Artifact{params.title ? `「${params.title}」` : ""}…
+                {params.check === false ? "正在发布" : "正在发布并检查"} Artifact{params.title ? `「${params.title}」` : ""}…
             </div>
         );
     }
 
     const title = result.title || result.artifact_key;
+    const runtimeErrors = result.diagnostics?.status === "errors" ? result.diagnostics.errors?.length ?? 0 : 0;
     const open = async () => {
         if (conversationId == null) return;
         setOpening(true);
@@ -142,6 +147,11 @@ export default function ArtifactToolCall(props: McpToolComponentProps) {
                 <div className="truncate font-medium text-foreground">{title}</div>
                 <div className="truncate text-xs text-muted-foreground">
                     {artifactKindLabel(result.preview_type || result.language)}
+                    {runtimeErrors > 0 && (
+                        <span className="text-destructive" title={result.diagnostics?.errors?.join("\n\n")}>
+                            {` · 运行检查发现 ${runtimeErrors} 个错误`}
+                        </span>
+                    )}
                 </div>
             </div>
             <Button

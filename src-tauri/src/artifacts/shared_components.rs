@@ -495,6 +495,64 @@ impl SharedPreviewUtils {
 // 进程管理函数
 
 /// 终止进程 (跨平台)
+/// 每个预览窗口各用一个 React/Vue 预览实例，互不关闭对方的服务器。
+/// 主预览窗口沿用旧 ID（`react`/`vue`），以复用已安装依赖的模板目录。
+/// 前端 `previewInstanceId`（src/components/artifact/artifactRuntime.ts）须与此一致。
+pub fn preview_instance_id(kind: &str, target_window: &str) -> String {
+    if target_window == "artifact_preview" {
+        kind.to_string()
+    } else {
+        format!("{}-{}", kind, target_window)
+    }
+}
+
+/// 预览运行时诊断脚本（console/异常/资源失败/Vite 编译错误），与前端 HTML 预览注入的是同一份。
+pub const ARTIFACT_CONSOLE_SCRIPT: &str = include_str!("../../artifacts/runtime/aipp-console.js");
+
+/// 写入 React/Vue 预览工程的 `public/aipp-console.js`，模板 index.html 在最前面加载它。
+pub fn write_console_script(project_dir: &std::path::Path) -> std::io::Result<()> {
+    let public_dir = project_dir.join("public");
+    fs::create_dir_all(&public_dir)?;
+    fs::write(public_dir.join("aipp-console.js"), ARTIFACT_CONSOLE_SCRIPT)
+}
+
+/// 去掉整行注释并压成一行，注入后页面报错的行号与原文一致（前端 `compactScript` 同规则）。
+pub fn inline_console_script(source: &str) -> String {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 把诊断脚本内联到 HTML 文档最前面（`<head>` 之后，否则 `<html>` 之后，否则文首），
+/// 让它先于页面自身脚本运行。
+pub fn inject_console_script(html: &str) -> String {
+    static INLINE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| inline_console_script(ARTIFACT_CONSOLE_SCRIPT));
+    let tag = format!("<script>{}</script>", INLINE.as_str());
+    let lower = html.to_ascii_lowercase();
+    let insert_after = |needle: &str| -> Option<usize> {
+        let mut from = 0;
+        while let Some(found) = lower[from..].find(needle) {
+            let start = from + found;
+            let rest = &lower[start..];
+            // 跳过 `<header>` 这类同前缀标签
+            let next = rest.as_bytes().get(needle.len()).copied();
+            if matches!(next, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r')) {
+                return rest.find('>').map(|end| start + end + 1);
+            }
+            from = start + needle.len();
+        }
+        None
+    };
+    match insert_after("<head").or_else(|| insert_after("<html")) {
+        Some(index) => format!("{}{}{}", &html[..index], tag, &html[index..]),
+        None => format!("{}{}", tag, html),
+    }
+}
+
 pub fn kill_process_by_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔧 [SharedProcess] 执行 kill_process PID: {}", pid);
 
