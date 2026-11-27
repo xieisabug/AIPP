@@ -19,7 +19,7 @@ export interface ChatQuotaProvider {
 }
 
 export type ChatQuotaState =
-    | { status: "idle" | "loading" }
+    | { status: "idle" | "loading" | "unqueried" }
     | { status: "done"; reading: QuotaReading; error?: string }
     | { status: "error"; message: string };
 
@@ -68,21 +68,23 @@ export function useChatProviderQuota({
     const resolveSeqRef = useRef(0);
     const fetchSeqRef = useRef(0);
 
-    const fetchQuota = useCallback(async (targetProviderId: number, force: boolean, keepPrevious: boolean) => {
+    const fetchQuota = useCallback(async (targetProviderId: number, trigger: "load" | "refresh" | "manual", keepPrevious: boolean) => {
         const seq = ++fetchSeqRef.current;
         setRefreshing(true);
         if (!keepPrevious && !quotaCache.has(targetProviderId)) {
             setState({ status: "loading" });
         }
         try {
-            const reading = await invoke<QuotaReading>("get_provider_quota", {
-                providerId: targetProviderId,
-                force,
-            });
+            const reading = await invoke<QuotaReading | null>("get_provider_quota", trigger === "manual"
+                ? { providerId: targetProviderId, manual: true }
+                : { providerId: targetProviderId, force: trigger === "refresh" });
             if (seq !== fetchSeqRef.current || providerIdRef.current !== targetProviderId) return;
             if (reading && Array.isArray(reading.windows)) {
                 quotaCache.set(targetProviderId, { reading, updatedAt: Date.now() });
                 setState({ status: "done", reading });
+            } else if (reading === null) {
+                quotaCache.delete(targetProviderId);
+                setState({ status: "unqueried" });
             } else {
                 const cached = quotaCache.get(targetProviderId);
                 setState(
@@ -132,7 +134,7 @@ export function useChatProviderQuota({
                 providerIdRef.current = resolved?.providerId ?? null;
                 setProvider(resolved);
                 if (resolved && refreshSameProvider && previousId === resolved.providerId) {
-                    void fetchQuota(resolved.providerId, false, true);
+                    void fetchQuota(resolved.providerId, "load", true);
                 }
             } catch {
                 if (disposed || seq !== resolveSeqRef.current) return;
@@ -170,26 +172,27 @@ export function useChatProviderQuota({
         const cached = quotaCache.get(providerId);
         if (cached) {
             setState({ status: "done", reading: cached.reading });
-            if (Date.now() - cached.updatedAt > QUOTA_MEMORY_CACHE_TTL_MS) {
-                void fetchQuota(providerId, false, true);
+            if (provider?.apiType === "antigravity" || Date.now() - cached.updatedAt > QUOTA_MEMORY_CACHE_TTL_MS) {
+                void fetchQuota(providerId, "load", true);
             }
         } else {
-            void fetchQuota(providerId, false, false);
+            void fetchQuota(providerId, "load", false);
         }
 
+        if (provider?.apiType !== "cursor") return;
         const unlistenCursor = listen(`cursor-account-changed-${providerId}`, () => {
             quotaCache.delete(providerId);
-            void fetchQuota(providerId, true, false);
+            void fetchQuota(providerId, "refresh", false);
         });
         return () => {
             void unlistenCursor.then((stop) => stop()).catch(() => {});
         };
-    }, [provider?.providerId, fetchQuota]);
+    }, [provider?.providerId, provider?.apiType, fetchQuota]);
 
     // 监听当前会话运行态：在一轮对话完全结束（is_running: true -> false 且稳定空闲）后强制刷新额度
     useEffect(() => {
         const providerId = provider?.providerId ?? null;
-        if (providerId === null || normalizedConvId === null) return;
+        if (providerId === null || normalizedConvId === null || provider?.apiType === "antigravity") return;
 
         let disposed = false;
         let wasRunning = false;
@@ -215,7 +218,7 @@ export function useChatProviderQuota({
                 settleTimer = setTimeout(() => {
                     settleTimer = null;
                     if (!disposed) {
-                        void fetchQuota(providerId, true, true);
+                        void fetchQuota(providerId, "refresh", true);
                     }
                 }, settleDelayMs);
             }
@@ -247,12 +250,12 @@ export function useChatProviderQuota({
             clearSettleTimer();
             void unlistenPromise.then((stop) => stop()).catch(() => {});
         };
-    }, [provider?.providerId, normalizedConvId, settleDelayMs, fetchQuota]);
+    }, [provider?.providerId, provider?.apiType, normalizedConvId, settleDelayMs, fetchQuota]);
 
     const reload = useCallback(() => {
         const providerId = provider?.providerId ?? null;
         if (providerId === null) return Promise.resolve();
-        return fetchQuota(providerId, true, true);
+        return fetchQuota(providerId, "manual", true);
     }, [provider?.providerId, fetchQuota]);
 
     return { provider, state, refreshing, reload };
@@ -361,7 +364,7 @@ const ProviderQuotaBadge: React.FC<ProviderQuotaBadgeProps> = React.memo(({
                     ) : (
                         <>
                             <RefreshCw className="h-3.5 w-3.5 shrink-0" />
-                            <span className="whitespace-nowrap">额度异常</span>
+                            <span className="whitespace-nowrap">{state.status === "unqueried" ? "查询额度" : "额度异常"}</span>
                         </>
                     )}
                 </button>
@@ -409,7 +412,7 @@ const ProviderQuotaBadge: React.FC<ProviderQuotaBadgeProps> = React.memo(({
                     ) : null}
 
                     <p className="border-t border-border/60 pt-2 text-[11px] text-muted-foreground">
-                        点击图标刷新 · 会话结束后自动更新
+                        {provider.apiType === "antigravity" ? "点击图标刷新额度" : "点击图标刷新 · 会话结束后自动更新"}
                     </p>
                 </div>
             </HoverCardContent>

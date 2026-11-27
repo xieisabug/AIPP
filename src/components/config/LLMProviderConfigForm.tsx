@@ -1075,6 +1075,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         key={`${id}-${quotaRevision}`}
                         providerId={Number(id)}
                         label={quotaLabel}
+                        manualOnly={apiType === "antigravity"}
                         showInChat={showQuotaInChat}
                         onShowInChatChange={(enabled) => {
                             form.setValue("show_quota_in_chat", String(enabled));

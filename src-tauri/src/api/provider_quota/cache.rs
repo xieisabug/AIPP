@@ -31,6 +31,22 @@ pub(super) struct QuotaCache {
 }
 
 impl QuotaCache {
+    fn identity(provider_type: &str, account: &str) -> String {
+        hex::encode(Sha256::new().chain_update(provider_type).chain_update([0]).chain_update(account).finalize())
+    }
+
+    pub(super) fn latest(&self, provider_type: &str, account: &str) -> Result<Option<QuotaReading>, String> {
+        let row = self.conn.query_row(
+            "SELECT checked_at, windows FROM provider_quota_cache WHERE owner=?1 AND identity=?2",
+            params![self.owner, Self::identity(provider_type, account)],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(|e| format!("读取额度缓存失败：{e}"))?;
+        Ok(row.and_then(|(checked_at, json)| {
+            let windows = serde_json::from_str::<Vec<QuotaWindow>>(&json).ok()?;
+            (!windows.is_empty()).then(|| QuotaReading::new(checked_at, windows))
+        }))
+    }
+
     pub async fn read(&mut self, provider_type: &str, account: &str, query: impl Future<Output = Result<Vec<QuotaWindow>, String>>) -> Result<QuotaReading, String> {
         let gate = {
             let mut gates = GATES.lock().await;
@@ -45,18 +61,10 @@ impl QuotaCache {
             }
         };
         let _guard = gate.lock().await;
-        let identity = hex::encode(Sha256::new().chain_update(provider_type).chain_update([0]).chain_update(account).finalize());
         if !self.force {
             let now = Utc::now().timestamp_millis();
-            let row = self.conn.query_row(
-                "SELECT checked_at, windows FROM provider_quota_cache WHERE owner=?1 AND identity=?2 AND checked_at>?3 AND checked_at<=?4",
-                params![self.owner, identity, now - TTL_MS, now],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            ).optional().map_err(|e| format!("读取额度缓存失败：{e}"))?;
-            if let Some((checked_at, json)) = row {
-                if let Ok(windows) = serde_json::from_str::<Vec<QuotaWindow>>(&json) {
-                    if !windows.is_empty() { return Ok(QuotaReading::new(checked_at, windows)); }
-                }
+            if let Some(reading) = self.latest(provider_type, account)? {
+                if reading.checked_at <= now && now < reading.expires_at { return Ok(reading); }
             }
         }
         let windows = query.await?;
@@ -66,7 +74,7 @@ impl QuotaCache {
         self.conn.execute(
             "INSERT INTO provider_quota_cache(owner, identity, checked_at, windows) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(owner) DO UPDATE SET identity=excluded.identity, checked_at=excluded.checked_at, windows=excluded.windows",
-            params![self.owner, identity, checked_at, json],
+            params![self.owner, Self::identity(provider_type, account), checked_at, json],
         ).map_err(|e| format!("保存额度缓存失败：{e}"))?;
         Ok(QuotaReading::new(checked_at, windows))
     }

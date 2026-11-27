@@ -134,7 +134,7 @@ describe("ProviderQuotaBadge", () => {
         percent = 70;
         fireEvent.click(badge);
         await waitFor(() =>
-            expect(invoke).toHaveBeenCalledWith("get_provider_quota", { providerId: 44, force: true }),
+            expect(invoke).toHaveBeenCalledWith("get_provider_quota", { providerId: 44, manual: true }),
         );
         await waitFor(() =>
             expect(screen.getAllByTestId("quota-ring")[0]).toHaveAttribute("data-ring-percent", "70"),
@@ -156,6 +156,28 @@ describe("ProviderQuotaBadge", () => {
             expect(screen.getAllByTestId("quota-ring")[0]).toHaveAttribute("data-ring-percent", "60"),
         );
         expect(invoke.mock.calls.filter(([cmd]) => cmd === "get_provider_quota")).toHaveLength(3);
+    });
+
+    it("should query Antigravity only on click across completed chat turns", async () => {
+        mockInvokeHandler("get_chat_quota_provider", () => ({
+            providerId: 46, providerName: "Antigravity", apiType: "antigravity", label: "本机 Antigravity CLI 额度",
+        }));
+        const lookup = vi.fn((args) => args?.manual
+            ? makeReading([{ label: "每周", remainingPercent: 35, resetsAt: null }])
+            : null);
+        mockInvokeHandler("get_provider_quota", lookup);
+        render(<ProviderQuotaBadge conversationId={16} assistantId={5} settleDelayMs={0} />);
+        const button = await screen.findByRole("button", { name: /本机 Antigravity CLI 额度/ });
+        await waitFor(() => expect(button).toHaveTextContent("查询额度"));
+        expect(lookup).toHaveBeenCalledWith({ providerId: 46, force: false });
+
+        fireEvent.click(button);
+        await waitFor(() => expect(screen.getByTestId("quota-ring")).toHaveAttribute("data-ring-percent", "35"));
+        await emitRuntime(16, true);
+        await emitRuntime(16, false);
+        await act(() => new Promise<void>(resolve => setTimeout(resolve, 10)));
+        expect(lookup).toHaveBeenCalledTimes(2);
+        expect(lookup).toHaveBeenLastCalledWith({ providerId: 46, manual: true });
     });
 
     it("hides immediately when the setting toggle is turned off", async () => {

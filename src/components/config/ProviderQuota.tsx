@@ -15,6 +15,7 @@ import {
 export interface ProviderQuotaProps {
     providerId: number;
     label?: string;
+    manualOnly?: boolean;
     showInChat?: boolean;
     onShowInChatChange?: (enabled: boolean) => void;
 }
@@ -22,6 +23,7 @@ export interface ProviderQuotaProps {
 export function ProviderQuota({
     providerId,
     label = "订阅额度",
+    manualOnly = false,
     showInChat,
     onShowInChatChange,
 }: ProviderQuotaProps) {
@@ -31,7 +33,7 @@ export function ProviderQuota({
     const intent = useRef<"manual" | "expiry" | null>(null);
     const refresh = useDataRefresh({
         identity: providerId,
-        events: [`cursor-account-changed-${providerId}`],
+        events: manualOnly ? [] : [`cursor-account-changed-${providerId}`],
         onInvalidate: (fromEvent) => {
             if (fromEvent || !intent.current) setReading(null);
             setLoading(true);
@@ -42,9 +44,11 @@ export function ProviderQuota({
             setError(String(cause));
         },
         refresh: async (isCurrent) => {
-            const force = intent.current === "manual";
+            const manual = intent.current === "manual";
             intent.current = null;
-            const result = await invoke<QuotaReading>("get_provider_quota", { providerId, force });
+            const result = await invoke<QuotaReading | null>("get_provider_quota", manual
+                ? { providerId, manual: true }
+                : { providerId, force: false });
             if (isCurrent()) {
                 setReading(result);
                 setLoading(false);
@@ -59,14 +63,14 @@ export function ProviderQuota({
     }, [refresh, providerId]);
 
     useEffect(() => {
-        if (loading || (!reading && !error)) return;
+        if (manualOnly || loading || (!reading && !error)) return;
         const delay = error ? 15 * 60_000 : Math.max(0, reading!.expiresAt - Date.now());
         const timer = setTimeout(() => {
             intent.current = "expiry";
             refresh();
         }, delay);
         return () => clearTimeout(timer);
-    }, [refresh, reading, loading, error]);
+    }, [manualOnly, refresh, reading, loading, error]);
 
     const display = useMemo(
         () => (reading ? classifyQuotaDisplay(reading.windows) : null),
@@ -103,8 +107,8 @@ export function ProviderQuota({
                         {reading
                             ? `更新于 ${new Date(reading.checkedAt).toLocaleTimeString()}`
                             : loading
-                                ? "正在查询额度…"
-                                : "额度查询失败"}
+                                ? "正在读取额度…"
+                                : error ? "额度查询失败" : "点击刷新查询额度"}
                     </span>
                 </div>
                 <div className="flex shrink-0 items-center gap-2.5">

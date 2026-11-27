@@ -21,7 +21,7 @@ it("should show the selected provider's windows and report a failed refresh", as
     mockInvokeHandler("get_provider_quota", () => { throw new Error("HTTP 403"); });
     fireEvent.click(screen.getByRole("button", { name: "刷新订阅额度" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("HTTP 403");
-    expect(invoke).toHaveBeenCalledWith("get_provider_quota", { providerId: 42, force: true });
+    expect(invoke).toHaveBeenCalledWith("get_provider_quota", { providerId: 42, manual: true });
     expect(screen.getByText("剩余 0%")).toBeVisible();
 });
 
@@ -31,7 +31,7 @@ it("should show each local CLI model group's windows under its own heading", asy
         { group: "Gemini Models", label: "5 小时", remainingPercent: 0, resetsAt: null },
         { group: "Claude and GPT models", label: "每周", remainingPercent: null, remainingAmount: 12, resetsAt: null },
     ]));
-    render(<ProviderQuota providerId={42} label="本机 Antigravity CLI 额度" />);
+    render(<ProviderQuota providerId={42} label="本机 Antigravity CLI 额度" manualOnly />);
     const gemini = await screen.findByRole("region", { name: "Gemini Models" }, { timeout: 3000 });
     expect(within(gemini).getByText("每周")).toBeVisible();
     expect(within(gemini).getByText("剩余 37.5%")).toBeVisible();
@@ -42,6 +42,37 @@ it("should show each local CLI model group's windows under its own heading", asy
     expect(other.getByText("每周")).toBeVisible();
     expect(other.getByText("剩余 12")).toBeVisible();
     expect(screen.getByRole("button", { name: "刷新本机 Antigravity CLI 额度" })).toBeEnabled();
+});
+
+it("should wait for a click and skip expiry and failure retries for Antigravity", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn(() => null);
+    mockInvokeHandler("get_provider_quota", read);
+    const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    const view = render(<ProviderQuota providerId={42} manualOnly />);
+    try {
+        await advance(1000);
+        expect(screen.getByRole("status")).toHaveTextContent("点击刷新查询额度");
+        expect(read).toHaveBeenCalledTimes(1);
+        expect(invoke).toHaveBeenLastCalledWith("get_provider_quota", { providerId: 42, force: false });
+
+        const live = vi.fn(() => reading([{ label: "每周", remainingPercent: 60, resetsAt: null }]));
+        mockInvokeHandler("get_provider_quota", live);
+        const button = screen.getByRole("button", { name: "刷新订阅额度" });
+        fireEvent.click(button);
+        await advance(101);
+        expect(invoke).toHaveBeenLastCalledWith("get_provider_quota", { providerId: 42, manual: true });
+        await advance(20 * 60_000);
+        expect(live).toHaveBeenCalledTimes(1);
+
+        const failure = vi.fn(() => { throw new Error("offline"); });
+        mockInvokeHandler("get_provider_quota", failure);
+        fireEvent.click(button);
+        await advance(20 * 60_000);
+        expect(failure).toHaveBeenCalledTimes(1);
+        expect(screen.getByRole("alert")).toHaveTextContent("offline");
+        expect(screen.getByText("剩余 60%")).toBeVisible();
+    } finally { view.unmount(); vi.useRealTimers(); }
 });
 
 it("should render the show-in-chat toggle and ring preview when enabled", async () => {

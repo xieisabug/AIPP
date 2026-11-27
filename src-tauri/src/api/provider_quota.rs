@@ -218,12 +218,17 @@ pub(crate) async fn get_chat_quota_provider(
 }
 
 #[tauri::command]
-pub(crate) async fn get_provider_quota(app: tauri::AppHandle, provider_id: i64, force: Option<bool>) -> Result<QuotaReading, String> {
+pub(crate) async fn get_provider_quota(app: tauri::AppHandle, provider_id: i64, force: Option<bool>, manual: Option<bool>) -> Result<Option<QuotaReading>, String> {
     let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
     let provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
     let configs = db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
     let kind = provider.api_type.as_str();
-    let mut cache = QuotaCache { conn: db.conn, owner: if kind == "antigravity" { 0 } else { provider_id }, force: force.unwrap_or(false) };
+    let manual = manual.unwrap_or(false);
+    let mut cache = QuotaCache { conn: db.conn, owner: if kind == "antigravity" { 0 } else { provider_id }, force: manual || force.unwrap_or(false) };
+    // A background refresh may force other providers, but only a click may launch agy.
+    if kind == "antigravity" && !manual {
+        return cache.latest(kind, "");
+    }
     let state = app.state::<crate::FeatureConfigState>();
     let proxy = agent_network_proxy(&configs, &*state.config_feature_map.lock().await);
     match kind {
@@ -261,7 +266,7 @@ pub(crate) async fn get_provider_quota(app: tauri::AppHandle, provider_id: i64, 
             }).await
         }
         _ => Err("该提供商未接入订阅额度查询".into()),
-    }
+    }.map(Some)
 }
 
 #[cfg(test)]

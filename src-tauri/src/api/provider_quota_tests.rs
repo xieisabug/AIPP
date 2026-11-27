@@ -27,6 +27,20 @@ async fn test_quota_cache_ttl_manual_refresh_failure_and_account_scope() {
     assert!(cache.read("cursor", "account-b", async { Err("no cache for this provider".into()) }).await.is_err());
 }
 
+#[tokio::test]
+async fn test_antigravity_latest_snapshot_survives_expiry() {
+    let db = LLMDatabase { conn: rusqlite::Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    let mut cache = QuotaCache { conn: db.conn, owner: 0, force: true };
+    assert!(cache.latest("antigravity", "").unwrap().is_none());
+    cache.read("antigravity", "", async { Ok(vec![QuotaWindow::new("每周", 20.0, None)]) }).await.unwrap();
+    let yesterday = Utc::now().timestamp_millis() - 86_400_000;
+    cache.conn.execute("UPDATE provider_quota_cache SET checked_at=?1", [yesterday]).unwrap();
+    let snapshot = cache.latest("antigravity", "").unwrap().unwrap();
+    assert_eq!(snapshot.checked_at, yesterday);
+    assert_eq!(snapshot.windows[0].remaining_percent, Some(80.0));
+}
+
 #[test]
 fn test_codex_windows_preserve_buckets_and_skip_missing_secondary() {
     let bucket = json!({"primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1700000000}});
