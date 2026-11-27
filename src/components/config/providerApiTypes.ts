@@ -5,10 +5,10 @@
  * - `copilot`：GitHub 账号授权，创建后在详情页完成授权。
  * - `local`：本机 CLI / SDK 智能体，创建后在详情页检测运行环境；移动端不可新建。
  */
-import localAgentApiTypes from "./localAgentApiTypes.json";
+import catalog from "./providerApiTypeCatalog.json";
 
 export function isLocalAgentApiType(value: string): boolean {
-    return localAgentApiTypes.includes(value);
+    return findProviderApiType(value)?.kind === "local";
 }
 
 export type ProviderApiTypeKind = "http" | "copilot" | "local";
@@ -24,26 +24,7 @@ export interface ProviderApiTypeOption {
     noEndpoint?: boolean;
 }
 
-export const PROVIDER_API_TYPES: readonly ProviderApiTypeOption[] = [
-    { value: "openai_api", label: "OpenAI API", description: "OpenAI、New API 等兼容接口（支持对话与 Decisions）", kind: "http", defaultEndpoint: "https://api.openai.com/v1/" },
-    { value: "anthropic", label: "Anthropic API", description: "Claude 系列模型接口", kind: "http", defaultEndpoint: "https://api.anthropic.com/v1/" },
-    { value: "gemini", label: "Google Gemini", description: "Gemini 对话与 Decisions 决策模型", kind: "http", defaultEndpoint: "https://generativelanguage.googleapis.com/v1beta/" },
-    { value: "typesafe_jev", label: "TypeSafe Jev", description: "System One 决策模型（/v1/systemone）", kind: "http", defaultEndpoint: "https://api.typesafe.ai/v1/" },
-    { value: "deepseek", label: "DeepSeek API", description: "DeepSeek 官方接口", kind: "http", defaultEndpoint: "https://api.deepseek.com/" },
-    { value: "ollama", label: "Ollama API", description: "本机或局域网 Ollama", kind: "http", defaultEndpoint: "http://localhost:11434/v1/" },
-    { value: "cohere", label: "Cohere API", description: "Cohere 模型接口", kind: "http", defaultEndpoint: "https://api.cohere.ai/v1/" },
-    { value: "opencode_go", label: "OpenCode Go", description: "OpenCode 订阅模型", kind: "http", noEndpoint: true },
-    { value: "magpie", label: "Magpie", description: "本机模型网关", kind: "http" },
-    { value: "github_copilot", label: "GitHub Copilot", description: "使用 GitHub 账号授权", kind: "copilot" },
-    { value: "acp", label: "ACP (Agent Client Protocol)", description: "Gemini、Kimi 等 ACP CLI", kind: "local" },
-    { value: "codex_app_server", label: "Codex", description: "本机 Codex CLI", kind: "local" },
-    { value: "claude_sdk", label: "Claude Code", description: "本机 Claude Code", kind: "local" },
-    { value: "pi", label: "Pi", description: "本机 Pi 智能体", kind: "local" },
-    { value: "cursor", label: "Cursor", description: "Cursor 智能体 SDK", kind: "local" },
-    { value: "opencode", label: "OpenCode", description: "本机 OpenCode 智能体", kind: "local" },
-    { value: "kiro", label: "Kiro", description: "本机 Kiro CLI", kind: "local" },
-    { value: "antigravity", label: "Antigravity", description: "本机 Antigravity 智能体", kind: "local" },
-];
+export const PROVIDER_API_TYPES: readonly ProviderApiTypeOption[] = catalog as ProviderApiTypeOption[];
 
 export function findProviderApiType(value: string): ProviderApiTypeOption | undefined {
     return PROVIDER_API_TYPES.find((type) => type.value === value);

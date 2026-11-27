@@ -6,12 +6,38 @@ use super::get_db_path;
 pub const DEFAULT_MODEL_REQUEST_MODE: &str = "chat_completions";
 pub const PROVIDER_MODE_MISMATCH: &str = "provider_mode_mismatch";
 
-const LOCAL_AGENT_TYPES: &str = include_str!("../../../src/components/config/localAgentApiTypes.json");
+#[derive(serde::Deserialize)]
+struct ProviderApiType {
+    value: &'static str,
+    kind: &'static str,
+}
+
+static PROVIDER_TYPES: std::sync::LazyLock<Vec<ProviderApiType>> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../src/components/config/providerApiTypeCatalog.json"))
+        .expect("bundled provider API type catalog")
+});
+
+// Shared parameter for the SQLite json_each filters used by model and provider pickers.
+static LOCAL_AGENT_TYPES: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let types: Vec<_> = PROVIDER_TYPES.iter().filter(|entry| entry.kind == "local").map(|entry| entry.value).collect();
+    serde_json::to_string(&types).expect("serializable local agent API types")
+});
 
 pub fn is_local_agent_api_type(api_type: &str) -> bool {
-    static TYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(||
-        serde_json::from_str(LOCAL_AGENT_TYPES).expect("bundled local agent API types"));
-    TYPES.iter().any(|kind| kind == api_type)
+    PROVIDER_TYPES.iter().any(|entry| entry.value == api_type && entry.kind == "local")
+}
+
+pub(crate) fn creatable_provider_types() -> impl Iterator<Item = &'static str> {
+    PROVIDER_TYPES.iter()
+        .filter(|entry| !cfg!(mobile) || entry.kind != "local")
+        .map(|entry| entry.value)
+}
+
+pub(crate) fn validate_new_provider_type(api_type: &str) -> Result<(), String> {
+    if creatable_provider_types().any(|value| value == api_type) {
+        return Ok(());
+    }
+    Err(format!("不支持创建提供商类型 {api_type}。可选类型：{}", creatable_provider_types().collect::<Vec<_>>().join("、")))
 }
 
 pub fn http_provider_modes(api_type: &str) -> Option<&'static [&'static str]> {
@@ -325,7 +351,7 @@ impl LLMDatabase {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let llm_providers = stmt.query_map([LOCAL_AGENT_TYPES], |row| {
+        let llm_providers = stmt.query_map([LOCAL_AGENT_TYPES.as_str()], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
         })?;
 
@@ -845,7 +871,7 @@ impl LLMDatabase {
                 .map_err(|e| e.to_string())?;
 
             let models = stmt
-                .query_map([LOCAL_AGENT_TYPES], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+                .query_map([LOCAL_AGENT_TYPES.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
                 .map_err(|e| e.to_string())?;
 
             let mut result = Vec::new();
@@ -883,7 +909,7 @@ impl LLMDatabase {
             Err(e) => return Err(e.to_string()),
         };
 
-        let models = match stmt.query_map([LOCAL_AGENT_TYPES], |row| {
+        let models = match stmt.query_map([LOCAL_AGENT_TYPES.as_str()], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,

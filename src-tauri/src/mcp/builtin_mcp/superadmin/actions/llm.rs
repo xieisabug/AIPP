@@ -6,7 +6,7 @@ use tauri::AppHandle;
 
 use crate::api::llm_api::{fetch_model_list, preview_model_list};
 use crate::db::llm_db::{
-    resolve_request_mode_or_default, LLMDatabase, LLMProvider, ModelDetail,
+    creatable_provider_types, resolve_request_mode_or_default, validate_new_provider_type, LLMDatabase, LLMProvider, ModelDetail,
     DEFAULT_MODEL_REQUEST_MODE,
 };
 use crate::mcp::builtin_mcp::superadmin::registry::{ActionHandler, ActionRegistry};
@@ -210,6 +210,7 @@ impl ActionHandler for LlmAddProviderHandler {
     ) -> Result<Value, String> {
         let name = required_string_arg(&args, "name")?;
         let api_type = required_string_arg(&args, "api_type")?;
+        validate_new_provider_type(&api_type)?;
         let description = optional_string_arg(&args, "description")?.unwrap_or_default();
         let is_official = optional_bool_arg(&args, "is_official")?.unwrap_or(false);
         let is_enabled = optional_bool_arg(&args, "is_enabled")?.unwrap_or(false);
@@ -318,6 +319,9 @@ impl ActionHandler for LlmUpdateProviderHandler {
 
         let mut api_type = provider.api_type.clone();
         if let Some(next_api_type) = optional_string_arg(&args, "api_type")? {
+            if next_api_type != api_type {
+                validate_new_provider_type(&next_api_type)?;
+            }
             api_type = next_api_type;
             updated_fields.push("api_type");
         }
@@ -859,7 +863,7 @@ pub fn register(registry: &mut ActionRegistry) {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "提供商名称" },
-                    "api_type": { "type": "string", "description": "API 类型，如 openai" },
+                    "api_type": { "type": "string", "enum": creatable_provider_types().collect::<Vec<_>>(), "description": "设置页支持的提供商类型，OpenAI 兼容接口使用 openai_api" },
                     "description": { "type": "string", "description": "描述（可选）" },
                     "is_official": { "type": "boolean", "description": "是否官方提供商（可选）" },
                     "is_enabled": { "type": "boolean", "description": "是否启用（可选）" }
@@ -895,7 +899,7 @@ pub fn register(registry: &mut ActionRegistry) {
                 "properties": {
                     "provider_id": { "type": "integer", "description": "提供商 ID" },
                     "name": { "type": "string", "description": "新名称（可选）" },
-                    "api_type": { "type": "string", "description": "新 API 类型（可选）" },
+                    "api_type": { "type": "string", "enum": creatable_provider_types().collect::<Vec<_>>(), "description": "新 API 类型（可选）" },
                     "description": { "type": "string", "description": "新描述（可选）" },
                     "is_enabled": { "type": "boolean", "description": "是否启用（可选）" }
                 },

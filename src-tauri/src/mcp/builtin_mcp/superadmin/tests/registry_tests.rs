@@ -2,6 +2,22 @@ use crate::mcp::builtin_mcp::superadmin::registry::build_registry;
 use crate::mcp::builtin_mcp::superadmin::types::*;
 
 #[test]
+fn test_provider_type_catalog_limits_add_and_update() {
+    use crate::db::llm_db::{creatable_provider_types, validate_new_provider_type};
+    let types = creatable_provider_types().collect::<Vec<_>>();
+    let registry = build_registry();
+    for action in ["llm.add_provider", "llm.update_provider"] {
+        let meta = registry.get_meta(action).unwrap();
+        assert_eq!(meta.args_schema["properties"]["api_type"]["enum"], serde_json::json!(types));
+    }
+    assert!(validate_new_provider_type("openai_api").is_ok());
+    assert_eq!(validate_new_provider_type("codex_app_server").is_ok(), !cfg!(mobile));
+    for unsupported in ["openai", "unknown_api", ""] {
+        assert!(validate_new_provider_type(unsupported).unwrap_err().contains("openai_api"));
+    }
+}
+
+#[test]
 fn registry_builds_without_panic() {
     let registry = build_registry();
     assert!(registry.action_count() > 0, "Registry should have at least one action");

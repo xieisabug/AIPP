@@ -169,6 +169,7 @@ pub async fn add_llm_provider(
     api_type: String,
     onboarding_draft: Option<bool>,
 ) -> Result<i64, String> {
+    crate::db::llm_db::validate_new_provider_type(&api_type)?;
     let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
     // 新建向导在创建后立即写入连接信息并获取模型列表，因此返回新 ID；完成向导时再启用。
     let tx = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -195,6 +196,10 @@ pub async fn update_llm_provider(
     is_enabled: bool,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let current = db.get_llm_provider(id).map_err(|e| e.to_string())?;
+    if current.api_type != api_type {
+        crate::db::llm_db::validate_new_provider_type(&api_type)?;
+    }
     db.update_llm_provider(id, &*name, &*api_type, &*description, is_enabled)
         .map_err(|e| e.to_string())?;
     confirm_vault_key(&app_handle, id);
