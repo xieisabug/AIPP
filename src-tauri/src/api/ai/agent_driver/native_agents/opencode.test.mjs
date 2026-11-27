@@ -289,3 +289,47 @@ test('should resume only the owned OpenCode session on a new busy interval', asy
     assert.equal(events.length, 4);
   } finally { await runtime.close(); }
 });
+
+test('should bind concurrent OpenCode permissions to each running assistant call and preserve normal review', async () => {
+  const mcp = { command: 'aipp-bridge', args: ['stdio'], env: { SCOPE: 'fixture' } };
+  const tool = 'aipp_aipp_t61_schedule_task';
+  const source = { type: 'local', command: [mcp.command, ...mcp.args], environment: mcp.env };
+  let servers = { aipp: { status: 'connected' } };
+  let plugins = [];
+  let release;
+  const paused = new Promise(resolve => { release = resolve; });
+  const f = openCodeFixture({ respond: async path => {
+    if (path === '/config') return Response.json({ mcp: { aipp: source }, plugin: plugins });
+    if (path === '/mcp') return Response.json(servers);
+    if (!path.startsWith('/session/s1/message/')) return;
+    const id = path.split('/').at(-1);
+    if (id === 'late') await paused;
+    const part = { sessionID: 's1', messageID: id, type: 'tool', tool, callID: 'same',
+      state: { status: 'running', input: { action: id === 'one' ? 'list' : 'delete' } } };
+    return Response.json({ info: { sessionID: 's1', id, role: 'assistant' }, parts: [part] });
+  } });
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1', mcp }, event => f.events.push(event), f);
+  const ask = (id, messageID, callID = 'same') => {
+    f.event('message.updated', { info: { sessionID: 's1', id: messageID, role: 'assistant' } });
+    f.event('permission.asked', { sessionID: 's1', id, permission: tool, tool: { messageID, callID } });
+  };
+  const permission = id => f.events.find(e => e.type === 'permission' && e.id === id);
+  try {
+    await runtime.prompt('task', 'turn');
+    ask('1', 'one'); ask('2', 'two');
+    await tick();
+    assert.deepEqual(permission('1').input, { action: 'list' });
+    assert.deepEqual(permission('2').input, { action: 'delete' });
+    assert.deepEqual(permission('1').toolMeta.mcp, { serverName: 'aipp', toolName: 'aipp_t61_schedule_task' });
+    servers.aipp_aipp = { status: 'connected' };
+    ask('3', 'one'); await tick();
+    assert.equal(permission('3').toolMeta, undefined);
+    delete servers.aipp_aipp;
+    plugins = ['changes-tool-arguments'];
+    ask('4', 'one'); await tick();
+    assert.equal(permission('4').toolMeta, undefined);
+    plugins = [];
+    ask('5', 'late'); await tick(); await runtime.cancel(); release(); await tick();
+    assert.equal(permission('5'), undefined);
+  } finally { release(); await runtime.close(); }
+});

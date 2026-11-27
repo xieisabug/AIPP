@@ -1107,7 +1107,7 @@ async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity,
     let (sender, receiver) = oneshot::channel();
     app.state::<AcpPermissionState>().store_request_guarded(event.clone(), sender, scope.clone(), guard.clone()).await?;
     let call = match identity.driver_id.as_str() {
-        "kiro" | "antigravity" => frame["toolMeta"].as_object().zip(frame.get("input"))
+        "kiro" | "antigravity" | "opencode" => frame["toolMeta"].as_object().zip(frame.get("input"))
             .and_then(|(meta, input)| crate::acp_mcp_bridge::permission::acp_call(meta, input, "aipp")),
         _ => None,
     };

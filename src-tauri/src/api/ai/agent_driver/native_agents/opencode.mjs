@@ -1,6 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import { basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import { RequestRejected, deadline, launch, permissionOption, splitModel, stopChild } from './common.mjs';
 
 export async function openOpenCode(config, emit, dependencies = {}) {
@@ -42,9 +44,9 @@ export async function openOpenCode(config, emit, dependencies = {}) {
     }), 'OpenCode server startup');
     const headers = { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`,
       'Content-Type': 'application/json', 'x-opencode-directory': encodeURIComponent(config.cwd) };
-    const api = async (path, method = 'GET', body) => {
+    const api = async (path, method = 'GET', body, timeout = 30000) => {
       const response = await fetch(`${base}${path}`, { method, headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30000) });
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeout) });
       const text = await response.text();
       if (!response.ok) throw new Error(`OpenCode ${method} ${path} HTTP ${response.status}: ${text}`);
       return text ? JSON.parse(text) : null;
@@ -77,6 +79,48 @@ export async function openOpenCode(config, emit, dependencies = {}) {
     const waitingParts = new Map();
     let waitingBytes = 0, pendingIdle = false;
     let previousTurn, wakes = 0;
+    const emitPermission = async p => {
+      const requestedTurn = turn;
+      const current = () => turn === requestedTurn && !cancelling && !closing && pendingPermissions.has(p.id);
+      let input = p, toolMeta;
+      const { messageID, callID } = p.tool || {};
+      if (config.mcp && typeof p.permission === 'string' && /^aipp_aipp_t\d+_[\w-]+$/.test(p.permission)
+        && typeof messageID === 'string' && typeof callID === 'string') {
+        try {
+          const read = path => api(path, 'GET', undefined, 1000);
+          const [settings, servers] = await Promise.all([read('/config'), read('/mcp')]);
+          const source = settings.mcp?.aipp;
+          // OpenCode flattens server and tool names. Another configured server may have the same prefix.
+          const owners = Object.keys(servers).filter(key => p.permission.startsWith(key.replace(/[^a-zA-Z0-9_-]/g, '_') + '_'));
+          if (owners.length === 1 && owners[0] === 'aipp' && servers.aipp.status === 'connected'
+            && source?.type === 'local' && isDeepStrictEqual(source.command, nativeConfig.mcp.aipp.command)
+            && isDeepStrictEqual(source.environment ?? {}, config.mcp.env ?? {})
+            && !settings.plugin?.length) {
+            // A before-tool plugin may rewrite the model's arguments. Only use an unmodified running call.
+            for (const wait of [0, 75, 250]) {
+              if (wait) await delay(wait);
+              if (!current()) return;
+              const msg = await read(`/session/${encodeURIComponent(session)}/message/${encodeURIComponent(messageID)}`);
+              if (msg.info?.id !== messageID || msg.info.sessionID !== session || msg.info.role !== 'assistant') break;
+              const calls = msg.parts.filter(part => part.type === 'tool' && part.callID === callID);
+              if (calls.length > 1) break;
+              const part = calls[0];
+              if (!part || part.state.status === 'pending' || !roles.has(messageID)) continue;
+              if (part.sessionID === session && part.messageID === messageID && roles.get(messageID) === 'assistant'
+                && part.tool === p.permission && part.state.status === 'running'
+                && part.state.input && typeof part.state.input === 'object' && !Array.isArray(part.state.input)) {
+                input = part.state.input;
+                toolMeta = { mcp: { serverName: 'aipp', toolName: part.tool.slice('aipp_'.length) } };
+              }
+              break;
+            }
+          }
+        } catch { /* Missing or unsupported evidence keeps the normal permission flow. */ }
+      }
+      if (current()) emit({ type: 'permission', turn, id: p.id, title: p.permission, input, toolMeta,
+        options: [{ id: 'once', name: '本次允许', kind: 'allow_once' },
+          { id: 'always', name: '会话内允许', kind: 'allow_always' }, { id: 'reject', name: '拒绝', kind: 'reject_once' }] });
+    };
     const startTurn = id => {
       turn = id; cancelling = false; errorMessage = undefined; sawActivity = false; pendingIdle = false;
       parts.clear(); partTypes.clear(); partOwners.clear(); roles.clear(); waitingParts.clear(); waitingBytes = 0;
@@ -141,10 +185,11 @@ export async function openOpenCode(config, emit, dependencies = {}) {
           emit({ type: 'activity', turn, id: p.partID, kind: 'reasoning', status: 'running', output: p.delta, append: true });
         } else if (partTypes.get(p.partID) === 'text') emit({ type: 'text', turn, text: p.delta });
       } else if (event.type === 'permission.asked') {
+        if (pendingPermissions.has(p.id)) return;
         pendingPermissions.add(p.id);
-        emit({ type: 'permission', turn, id: p.id, title: p.permission, input: p,
-          options: [{ id: 'once', name: '本次允许', kind: 'allow_once' },
-            { id: 'always', name: '会话内允许', kind: 'allow_always' }, { id: 'reject', name: '拒绝', kind: 'reject_once' }] });
+        void emitPermission(p);
+      } else if (event.type === 'permission.replied') {
+        pendingPermissions.delete(p.requestID);
       } else if (event.type === 'question.asked') {
         if (new Set(p.questions.map(question => question.question)).size !== p.questions.length) {
           throw new Error('OpenCode question contains duplicate question text that AIPP cannot address independently');
