@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ArrowUpFromLine, Download, Globe } from "lucide-react";
 import type { AppUpdateStatus } from "@/data/Update";
-import { checkAppUpdate, installAppUpdate, useAppUpdater } from "@/hooks/useAppUpdater";
+import { checkAppUpdate, installAppUpdate, restartAfterAppUpdate, useAppUpdater } from "@/hooks/useAppUpdater";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -23,7 +23,11 @@ function byteSize(bytes: number) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-export function AppUpdateDetails({ status }: { status: AppUpdateStatus }) {
+function RestartUpdateButton() {
+    return <Button type="button" size="sm" onClick={restartAfterAppUpdate}>重启 AIPP</Button>;
+}
+
+export function AppUpdateDetails({ status, canRestart }: { status: AppUpdateStatus; canRestart: boolean }) {
     const { phase, version, body, downloaded, total, error } = status;
     const busy = ["checking", "downloading", "installing", "installed"].includes(phase);
     const ready = phase === "ready" && !!version;
@@ -42,6 +46,7 @@ export function AppUpdateDetails({ status }: { status: AppUpdateStatus }) {
         </div>}
         {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
         {body && <div className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-sm">{body}</div>}
+        {canRestart && <RestartUpdateButton />}
         {!busy && <div className="flex gap-2">
             <Button type="button" variant={ready ? "default" : "outline"}
                 onClick={() => ready ? installAppUpdate(version) : checkAppUpdate()}>
@@ -54,25 +59,25 @@ export function AppUpdateDetails({ status }: { status: AppUpdateStatus }) {
 }
 
 export function AppUpdateNotice({ rounded = false }: { rounded?: boolean }) {
-    const { available, status } = useAppUpdater();
+    const { available, status, canRestart } = useAppUpdater();
     const [open, setOpen] = useState(false);
     if (!available || !status?.version) return null;
     const version = status.version;
     const ready = status.phase === "ready";
     const title = `v${version} · ${ready ? "点击安装更新" : phaseLabel[status.phase]}`;
     return <>
-        <Button type="button" size="icon" variant={rounded ? "outline" : "ghost"}
+        {canRestart ? <RestartUpdateButton /> : <Button type="button" size="icon" variant={rounded ? "outline" : "ghost"}
             className={`relative size-8 text-primary ${rounded ? "rounded-full" : ""}`}
             title={title} aria-label={title}
             onClick={() => ready ? installAppUpdate(version) : setOpen(true)}>
             {ready ? <ArrowUpFromLine /> : <Download />}
             <span aria-hidden className="absolute right-1 top-1 size-1.5 rounded-full bg-primary" />
-        </Button>
+        </Button>}
         <Dialog open={open} onOpenChange={setOpen}>
             <CompactDialogContent className="sm:max-w-md" aria-describedby={undefined}>
                 <CompactDialogHeader title="应用更新" subtitle={version ? `v${version}` : undefined} />
                 <CompactDialogBody>
-                    <AppUpdateDetails status={status} />
+                    <AppUpdateDetails status={status} canRestart={canRestart} />
                 </CompactDialogBody>
             </CompactDialogContent>
         </Dialog>

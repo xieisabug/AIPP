@@ -4,9 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import type { AppUpdateStatus } from "@/data/Update";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
+import { usePlatform } from "@/hooks/use-platform";
 
 export function useAppUpdater() {
     const available = useFeatureAvailableOnPlatform("app_updater");
+    const platform = usePlatform();
     const [status, setStatus] = useState<AppUpdateStatus | null>(null);
     const [readError, setReadError] = useState("");
 
@@ -40,7 +42,8 @@ export function useAppUpdater() {
         };
     }, [available]);
 
-    return { available, status, readError };
+    const canRestart = platform === "macos" && status?.phase === "installed";
+    return { available, status, readError, canRestart };
 }
 
 export function checkAppUpdate(useProxy = false) {
@@ -49,4 +52,8 @@ export function checkAppUpdate(useProxy = false) {
 
 export function installAppUpdate(version: string) {
     return invoke("install_app_update", { version }).catch(error => toast.error(String(error)));
+}
+
+export function restartAfterAppUpdate() {
+    return invoke("restart_after_app_update").catch(error => toast.error(String(error)));
 }

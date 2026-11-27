@@ -6,7 +6,7 @@ import { AppUpdateDetails } from "@/components/AppUpdateNotice";
 import { useAppUpdater } from "@/hooks/useAppUpdater";
 
 export function AboutConfigForm(_props: { form: UseFormReturn<any> }) {
-    const { available, status, readError } = useAppUpdater();
+    const { available, status, readError, canRestart } = useAppUpdater();
     const [version, setVersion] = useState("加载中…");
     useEffect(() => {
         void invoke<string>("get_app_version").then(setVersion).catch(error => setVersion(`读取版本失败：${error}`));
@@ -23,7 +23,7 @@ export function AboutConfigForm(_props: { form: UseFormReturn<any> }) {
                 <div className="text-2xl font-bold">{version}</div>
             </div>
             {available && readError && <p role="alert" className="text-sm text-destructive">{readError}</p>}
-            {available && status && <AppUpdateDetails status={status} />}
+            {available && status && <AppUpdateDetails status={status} canRestart={canRestart} />}
         </CardContent>
     </Card>;
 }

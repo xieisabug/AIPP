@@ -147,6 +147,8 @@ use crate::api::token_statistics_api::{
 use crate::api::updater_api::get_app_version;
 #[cfg(desktop)]
 use crate::api::updater_api::desktop::{check_app_update, get_app_update_status, install_app_update};
+#[cfg(target_os = "macos")]
+use crate::api::updater_api::desktop::restart_after_app_update;
 use crate::artifacts::artifact_bridge_api::{
     artifact_ai_ask, artifact_db_batch_execute, artifact_db_delete, artifact_db_execute,
     artifact_db_exists, artifact_db_get_columns, artifact_db_get_tables, artifact_db_list,
@@ -568,14 +570,14 @@ fn spawn_chat_scroll_perf_autorun_if_requested(app_handle: &AppHandle) {
 
         write_chat_scroll_perf_output(&config.result_path, &output);
         if !parse_bool_env("AIPP_CHAT_SCROLL_PERF_KEEP_OPEN", false) {
-            request_app_exit(&app_handle);
+            request_app_exit(&app_handle, EXIT_STATE_REQUESTED);
         }
     });
 }
 
-fn request_app_exit(app_handle: &tauri::AppHandle) {
+fn request_app_exit(app_handle: &tauri::AppHandle, requested_state: u8) {
     if EXIT_STATE
-        .compare_exchange(EXIT_STATE_IDLE, EXIT_STATE_REQUESTED, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(EXIT_STATE_IDLE, requested_state, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
         app_handle.exit(0);
@@ -857,7 +859,7 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        request_app_exit(app);
+                        request_app_exit(app, EXIT_STATE_REQUESTED);
                     }
                     _ => {}
                 });
@@ -1604,6 +1606,8 @@ pub fn run() {
             check_app_update,
             #[cfg(desktop)]
             install_app_update,
+            #[cfg(target_os = "macos")]
+            restart_after_app_update,
             get_app_version,
             list_scheduled_tasks,
             get_scheduled_task,
@@ -1696,11 +1700,11 @@ pub fn run() {
                 EXIT_STATE_IDLE => {
                     api.prevent_exit();
                 }
-                EXIT_STATE_REQUESTED => {
+                requested @ (EXIT_STATE_REQUESTED | EXIT_STATE_RESTART_REQUESTED) => {
                     api.prevent_exit();
                     if EXIT_STATE
                         .compare_exchange(
-                            EXIT_STATE_REQUESTED,
+                            requested,
                             EXIT_STATE_CLEANING,
                             Ordering::SeqCst,
                             Ordering::SeqCst,
@@ -1716,7 +1720,11 @@ pub fn run() {
                             let sync_flush = crate::sync::flush_before_exit(&app_handle);
                             let _ = tokio::time::timeout(Duration::from_secs(8), sync_flush).await;
                             EXIT_STATE.store(EXIT_STATE_READY, Ordering::SeqCst);
-                            app_handle.exit(0);
+                            if requested == EXIT_STATE_RESTART_REQUESTED {
+                                app_handle.request_restart();
+                            } else {
+                                app_handle.exit(0);
+                            }
                         });
                     }
                 }
@@ -2065,6 +2073,7 @@ const EXIT_STATE_IDLE: u8 = 0;
 const EXIT_STATE_REQUESTED: u8 = 1;
 const EXIT_STATE_CLEANING: u8 = 2;
 const EXIT_STATE_READY: u8 = 3;
+const EXIT_STATE_RESTART_REQUESTED: u8 = 4;
 static EXIT_STATE: AtomicU8 = AtomicU8::new(EXIT_STATE_IDLE);
 static RUSTLS_CRYPTO_PROVIDER_READY: OnceLock<()> = OnceLock::new();
 

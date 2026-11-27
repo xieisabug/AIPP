@@ -214,6 +214,16 @@ pub mod desktop {
         result
     }
 
+    #[cfg(target_os = "macos")]
+    #[tauri::command]
+    pub fn restart_after_app_update(app: AppHandle, state: State<'_, AppUpdater>) -> Result<(), String> {
+        if state.download.lock().unwrap().status.phase != Phase::Installed {
+            return Err("更新尚未安装完成".into());
+        }
+        crate::request_app_exit(&app, crate::EXIT_STATE_RESTART_REQUESTED);
+        Ok(())
+    }
+
     pub fn start(app: &AppHandle) {
         app.manage(AppUpdater::default());
         let app = app.clone();
