@@ -2,6 +2,7 @@
 // persistence remain separate from the user-configured generic ACP provider.
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
+import { isDeepStrictEqual } from 'node:util';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -65,6 +66,18 @@ export async function antigravityLaunch(config, environment = process.env, fs = 
 }
 
 const choices = option => (option?.options ?? []).flatMap(entry => 'value' in entry ? [entry] : entry.options ?? []);
+
+function permissionToolMeta(driver, mcp, toolCall) {
+  const meta = toolCall?._meta;
+  if (driver !== 'antigravity' || !mcp || meta?.mcp !== undefined || meta?.claudeCode !== undefined) return meta;
+  // agy ACP supplies the dispatch name and arguments on toolCall itself.
+  // The Rust bridge checks the extracted registration against the active prompt's catalog.
+  const prefix = 'mcp_aipp_';
+  if (toolCall?.kind !== 'other' || typeof toolCall.name !== 'string' || !toolCall.name.startsWith(prefix)
+    || !toolCall.args || typeof toolCall.args !== 'object' || Array.isArray(toolCall.args)
+    || !isDeepStrictEqual(toolCall.args, toolCall.rawInput)) return meta;
+  return { ...meta, mcp: { serverName: 'aipp', toolName: toolCall.name.slice(prefix.length) } };
+}
 
 // Antigravity permission modes the assistant may choose, with the native IDs each may be advertised as.
 export const ANTIGRAVITY_MODES = {
@@ -256,7 +269,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
         }
         approvals.set(id, { id: frame.id, options: offered });
         emit({ type: 'permission', turn, id, title: frame.params.toolCall?.title, input: frame.params.toolCall?.rawInput,
-          toolMeta: frame.params.toolCall?._meta,
+          toolMeta: permissionToolMeta(driver, config.mcp, frame.params.toolCall),
           options: [...offered.map(option => ({ id: option.optionId,
             name: `${option.name || option.optionId}${option.kind === 'allow_always' ? '（会保存到智能体权限规则）' : ''}${option._meta?.['agy.security.warning']?.message ? `：${String(option._meta['agy.security.warning'].message).slice(0, 512)}` : ''}`,
             kind: option.kind })),

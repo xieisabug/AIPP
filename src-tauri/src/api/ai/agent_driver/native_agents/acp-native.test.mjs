@@ -142,6 +142,34 @@ test('should wait for Kiro prompt activity before sending an early cancel', asyn
   } finally { await runtime.close(); }
 });
 
+test('should identify the Antigravity message permission from the native dispatch fields', async () => {
+  const f = fixture();
+  const runtime = await f.open('antigravity', { mcp: { command: 'fixture', args: [] } });
+  try {
+    const prompt = runtime.prompt('send an internal message', 'turn');
+    const args = { message: 'ACK', toolSummary: 'Local diagnostic echo call' };
+    const name = 'mcp_aipp_aipp_t61_message_bot';
+    const call = { sessionUpdate: 'tool_call', toolCallId: 'call_123', kind: 'other',
+      name, args, rawInput: args, title: `Run ${name}` };
+    let id = 80;
+    const request = fields => {
+      f.permission(++id, { ...call, ...fields }, [{ optionId: 'once', name: 'Allow', kind: 'allow_once' }]);
+      return f.events.at(-1);
+    };
+    const permission = request({});
+    assert.equal(permission.type, 'permission');
+    assert.deepEqual(permission.toolMeta, { mcp: { serverName: 'aipp', toolName: 'aipp_t61_message_bot' } });
+    assert.deepEqual(permission.input, args);
+    assert.equal(request({ name: undefined }).toolMeta, undefined);
+    assert.equal(request({ name: 'mcp_external_aipp_t61_message_bot' }).toolMeta, undefined);
+    assert.equal(request({ name: 'run_command', rawInput: { name, ...args } }).toolMeta, undefined);
+    assert.equal(request({ args: { message: 'different' } }).toolMeta, undefined);
+    const external = { mcp: { serverName: 'external', toolName: 'aipp_t61_message_bot' } };
+    assert.deepEqual(request({ _meta: external }).toolMeta, external);
+    f.finish(); await prompt;
+  } finally { await runtime.close(); }
+});
+
 test('should never offer persistent Kiro approval when an allow_once option exists', async () => {
   const f = fixture(); const runtime = await f.open('kiro');
   try {
