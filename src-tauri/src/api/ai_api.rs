@@ -2120,15 +2120,9 @@ pub async fn ask_ai(
             && !mcp_info.enabled_servers.is_empty()
             && !force_non_native_for_invalid_tool_args;
 
-        // 某些 OpenAI 兼容通道在使用 Gemini 模型时不会返回 usage（或返回 null），
-        // 而 genai 的 OpenAI 适配器会尝试严格反序列化 usage，从而在日志中出现错误。
-        // 为避免该无害错误噪音，这里对「provider_api_type=openai 且 model_code 含 gemini」的组合禁用 usage 捕获。
         let provider_api_type_lc = provider_api_type.to_lowercase();
-        let model_code_lc = model_code.to_lowercase();
         let is_openai_like =
             provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
-        let is_gemini = model_code_lc.contains("gemini");
-        let capture_usage = !(is_openai_like && is_gemini);
         let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
 
         let capture_reasoning_content = stream
@@ -2143,7 +2137,6 @@ pub async fn ask_ai(
                 .with_normalize_reasoning_content(true)
                 .with_capture_content(capture_content)
                 .with_capture_reasoning_content(capture_reasoning_content)
-                .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
         };
@@ -2154,10 +2147,8 @@ pub async fn ask_ai(
             has_tools = has_available_tools,
             provider_api_type = %provider_api_type,
             capture_content = capture_content,
-            capture_usage = capture_usage,
             capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
-            is_gemini = is_gemini,
             force_non_native_for_invalid_tool_args,
             "chat configuration established"
         );
@@ -2688,12 +2679,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         && !force_non_native_for_gemini_toolresult
         && !force_non_native_for_invalid_tool_args;
 
-    // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
     let provider_api_type_lc = provider_api_type.to_lowercase();
-    let model_code_lc = model_code.to_lowercase();
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
-    let is_gemini = model_code_lc.contains("gemini");
-    let capture_usage = !(is_openai_like && is_gemini);
     let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
 
     let capture_reasoning_content = stream
@@ -2708,7 +2695,6 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             .with_normalize_reasoning_content(true)
             .with_capture_content(capture_content)
             .with_capture_reasoning_content(capture_reasoning_content)
-            .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools), // 动态设置
         client,
     };
@@ -2719,10 +2705,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         has_tools = has_available_tools,
         provider_api_type = %provider_api_type,
         capture_content = capture_content,
-        capture_usage = capture_usage,
         capture_reasoning_content = capture_reasoning_content,
         is_openai_like = is_openai_like,
-        is_gemini = is_gemini,
         force_non_native_for_gemini_toolresult,
         force_non_native_for_invalid_tool_args,
         "chat configuration (tool_result_continue)"
@@ -3102,10 +3086,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         && !force_non_native_for_invalid_tool_args;
 
     let provider_api_type_lc = provider_api_type.to_lowercase();
-    let model_code_lc = model_code.to_lowercase();
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
-    let is_gemini = model_code_lc.contains("gemini");
-    let capture_usage = !(is_openai_like && is_gemini);
     let capture_content = stream && model_request_mode.eq_ignore_ascii_case("responses");
 
     let capture_reasoning_content = stream
@@ -3120,7 +3101,6 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             .with_normalize_reasoning_content(true)
             .with_capture_content(capture_content)
             .with_capture_reasoning_content(capture_reasoning_content)
-            .with_capture_usage(capture_usage)
             .with_capture_tool_calls(has_available_tools),
         client,
     };
@@ -3690,13 +3670,9 @@ pub async fn regenerate_ai(
             && !mcp_info.enabled_servers.is_empty()
             && !force_non_native_for_invalid_tool_args;
 
-        // 同 ask_ai：避免 OpenAI 兼容通道 + Gemini 模型导致的 usage 反序列化报错日志
         let provider_api_type_lc = regenerate_provider_api_type.to_lowercase();
-        let model_code_lc = regenerate_model_code.to_lowercase();
         let is_openai_like =
             provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
-        let is_gemini = model_code_lc.contains("gemini");
-        let capture_usage = !(is_openai_like && is_gemini);
         let capture_content =
             stream && regenerate_model_request_mode.eq_ignore_ascii_case("responses");
 
@@ -3712,7 +3688,6 @@ pub async fn regenerate_ai(
                 .with_normalize_reasoning_content(true)
                 .with_capture_content(capture_content)
                 .with_capture_reasoning_content(capture_reasoning_content)
-                .with_capture_usage(capture_usage)
                 .with_capture_tool_calls(has_available_tools), // 动态设置
             client,
         };
@@ -3723,10 +3698,8 @@ pub async fn regenerate_ai(
             has_tools = has_available_tools,
             provider_api_type = %regenerate_provider_api_type,
             capture_content = capture_content,
-            capture_usage = capture_usage,
             capture_reasoning_content = capture_reasoning_content,
             is_openai_like = is_openai_like,
-            is_gemini = is_gemini,
             force_non_native_for_invalid_tool_args,
             "chat configuration (regenerate)"
         );

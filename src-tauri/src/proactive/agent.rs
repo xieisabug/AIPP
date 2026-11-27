@@ -203,16 +203,12 @@ async fn execute_llm_loop(
         .collect();
     let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_detail.model.code.clone());
     let provider_api_type_lc = model_detail.provider.api_type.to_lowercase();
-    let model_code_lc = model_detail.model.code.to_lowercase();
     let is_openai_like = provider_api_type_lc == "openai" || provider_api_type_lc == "openai_api";
-    let is_gemini = model_code_lc.contains("gemini");
-    let capture_usage = !(is_openai_like && is_gemini);
     let has_tools = mcp_info.use_native_toolcall && !mcp_info.enabled_servers.is_empty();
     let capture_reasoning = is_openai_like && has_tools && config_map.contains_key("reasoning_effort");
     let chat_options = ConfigBuilder::build_chat_options(&config_map, None, None)
         .with_normalize_reasoning_content(true)
         .with_capture_reasoning_content(capture_reasoning)
-        .with_capture_usage(capture_usage)
         .with_capture_tool_calls(has_tools);
     let tool_call_strategy = if has_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
     let tool_config = build_tool_config_for_mcp(&mcp_info, has_tools);

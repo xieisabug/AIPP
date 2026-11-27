@@ -70,7 +70,8 @@ impl ConfigBuilder {
         feature_config_map: Option<&HashMap<String, HashMap<String, FeatureConfig>>>,
         openai_cache_context: Option<&OpenAiCacheContext>,
     ) -> ChatOptions {
-        let mut chat_options = ChatOptions::default();
+        // OpenAI-compatible gateways may report usage only in the final stream frame.
+        let mut chat_options = ChatOptions::default().with_capture_usage(true);
         if let Some(temp_str) = config_map.get("temperature") {
             if let Ok(temp) = temp_str.parse::<f64>() {
                 chat_options = chat_options.with_temperature(temp);

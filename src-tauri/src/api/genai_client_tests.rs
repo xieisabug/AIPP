@@ -15,6 +15,50 @@ fn endpoint_config(endpoint: &str) -> Vec<LLMProviderConfig> {
     }]
 }
 
+#[tokio::test]
+async fn test_gemini_openai_stream_keeps_cache_for_conversation_stats() {
+    use crate::api::ai::{chat::merge_chat_response_metadata, config::ConfigBuilder};
+    use crate::db::conversation_db::parse_persisted_usage_metadata;
+    use futures::StreamExt;
+    use genai::chat::{ChatMessage, ChatRequest, ChatStreamEvent};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (_, body) = crate::utils::test_http::read_request(&mut socket).await;
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":4,\"total_tokens\":124,\"prompt_tokens_details\":{\"cached_tokens\":96}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}", events.len()).as_bytes()).await.unwrap();
+        request
+    });
+    let model = "gemini-4-carbon";
+    let mut configs = endpoint_config(&endpoint);
+    configs.push(LLMProviderConfig { name: "api_key".into(), value: "test-key".into(), ..configs[0].clone() });
+    let client = create_client_with_config(None, &configs, model, "openai_api", Some("chat_completions"),
+        None, false, None, true, &HashMap::new()).unwrap();
+    let options = ConfigBuilder::build_chat_options(&HashMap::new(), None, None);
+    let request = ChatRequest::new(vec![ChatMessage::user("test")]);
+    let mut stream = client.exec_chat_stream(model, request, Some(&options)).await.unwrap().stream;
+    let mut usage = None;
+    while let Some(event) = stream.next().await {
+        if let ChatStreamEvent::End(end) = event.unwrap() {
+            usage = end.captured_usage;
+        }
+    }
+    assert_eq!(server.await.unwrap()["stream_options"]["include_usage"], true);
+    let usage = usage.expect("final stream frame should contain usage");
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens), (Some(120), Some(4), Some(124)));
+    let stored = merge_chat_response_metadata(None, Some(&usage), None, None);
+    let stats = parse_persisted_usage_metadata(stored.as_deref());
+    assert_eq!(stats.cached_input_tokens, 96);
+    assert_eq!(stats.usage_source.as_deref(), Some("reported"));
+}
+
 /// AIPP supplies its identity and selected protocol to the independent provider.
 #[tokio::test]
 async fn test_magpie_client_uses_library_transport_with_aipp_identity() {

@@ -281,12 +281,12 @@ pub(crate) fn merge_chat_response_metadata(
         .filter(|value| *value >= 0);
     let cached_write_tokens = cache_creation_tokens_from_usage(usage);
 
-    if thought_tokens.is_none() && cached_input_tokens.is_none() && cached_write_tokens.is_none() {
-        return serde_json::to_string(&serde_json::Value::Object(map)).ok();
-    }
-
     if usage.total_tokens.is_some() || usage.prompt_tokens.is_some() || usage.completion_tokens.is_some() {
         map.insert("usage_source".into(), serde_json::json!("reported"));
+    }
+
+    if thought_tokens.is_none() && cached_input_tokens.is_none() && cached_write_tokens.is_none() {
+        return serde_json::to_string(&serde_json::Value::Object(map)).ok();
     }
 
     if let Some(value) = thought_tokens {
@@ -1244,6 +1244,15 @@ mod tests {
         assert_eq!(parsed["cached_read_tokens"], 30);
         assert_eq!(parsed["cache_creation_tokens"], 5);
         assert_eq!(parsed["cached_write_tokens"], 5);
+    }
+
+    #[test]
+    fn test_merge_chat_usage_metadata_marks_totals_without_cache_detail_as_reported() {
+        let usage = Usage { prompt_tokens: Some(120), completion_tokens: Some(4), ..Default::default() };
+        let merged = merge_chat_response_metadata(None, Some(&usage), None, None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(parsed["usage_source"], "reported");
+        assert!(parsed.get("cached_input_tokens").is_none());
     }
 
     #[test]
