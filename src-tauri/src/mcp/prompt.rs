@@ -1,5 +1,5 @@
 use crate::api::assistant_api::{
-    get_assistant_field_value, get_assistant_mcp_servers_with_tools, MCPServerWithTools,
+    get_assistant_mcp_servers_with_tools, MCPServerWithTools,
     MCPToolInfo,
 };
 use crate::db::mcp_db::MCPDatabase;
@@ -43,20 +43,32 @@ pub async fn is_dynamic_mcp_loading_enabled_for_assistant(
         } else {
             false
         };
-    let assistant_db = crate::db::assistant_db::AssistantDatabase::new(app_handle);
-    let explicit = assistant_db.as_ref().ok().and_then(|db|
-        crate::api::assistant_api::management::config_value(db,assistant_id,"mcp_loading_mode_explicit").ok().flatten())
-        .as_deref() == Some("true");
-    // New assistants and explicit mode changes own their mode. Legacy assistants
-    // retain the existing global experiment gate until explicitly reconfigured.
-    if !global_enabled && !explicit {
-        return false;
+    let result = crate::db::assistant_db::AssistantDatabase::new(app_handle)
+        .map_err(|error| error.to_string())
+        .and_then(|db| assistant_dynamic_mcp_enabled(&db, assistant_id, global_enabled));
+    match result {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            warn!(assistant_id, %error, "Failed to read assistant MCP loading mode");
+            false
+        }
     }
-    match get_assistant_field_value(app_handle.clone(), assistant_id, "dynamic_mcp_loading_enabled")
+}
+
+pub(crate) fn assistant_dynamic_mcp_enabled(
+    db: &crate::db::assistant_db::AssistantDatabase,
+    assistant_id: i64,
+    global_experiment: bool,
+) -> Result<bool, String> {
+    use crate::api::assistant_api::management::config_value;
+    let assistant = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if assistant.assistant_type != Some(4) && !global_experiment
+        && config_value(db, assistant_id, "mcp_loading_mode_explicit")?.as_deref() != Some("true")
     {
-        Ok(v) => parse_bool(&v, true),
-        Err(_) => true,
+        return Ok(false);
     }
+    let saved = config_value(db, assistant_id, "dynamic_mcp_loading_enabled")?;
+    Ok(saved.as_deref().is_none_or(|value| parse_bool(value, true)))
 }
 
 pub(crate) fn collect_all_enabled_servers_for_dynamic_mode(

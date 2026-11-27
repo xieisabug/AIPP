@@ -137,6 +137,30 @@ describe("assistant configuration save button", () => {
         await waitFor(() => expect(button).toBeDisabled());
     });
 
+    it("should persist a legacy agent's first opt-out from dynamic MCP loading", async () => {
+        const agent = assistant(1);
+        agent.assistant.assistant_type = 4;
+        const save = vi.fn(async (_detail: AssistantDetail) => {});
+        mockInvokeHandler("get_assistants", () => [agent.assistant]);
+        mockInvokeHandler("get_assistant", () => agent);
+        mockInvokeHandler("get_agent_runtime_info", () => ({ agent_kind: "antigravity" }));
+        mockInvokeHandler("get_filtered_providers", () => [{ id: 3, name: "Antigravity", api_type: "antigravity" }]);
+        mockInvokeHandler("get_agent_model_options", () => []);
+        mockInvokeHandler("get_llm_provider_config", () => []);
+        mockInvokeHandler("save_assistant", args => save(args?.assistantDetail as AssistantDetail));
+        const user = userEvent.setup();
+        render(<AssistantConfig pluginList={[]} navigateTo={() => undefined} />);
+        const button = await screen.findByRole("button", { name: "保存配置" });
+        await user.click(screen.getByRole("tab", { name: "能力与工具" }));
+        const panel = screen.getByRole("tabpanel", { name: "能力与工具" });
+        await user.click(within(panel).getByRole("switch", { checked: true }));
+        await user.click(button);
+        await waitFor(() => expect(save).toHaveBeenCalledOnce());
+        expect(save.mock.calls[0][0].model_configs).toContainEqual(expect.objectContaining({
+            name: "dynamic_mcp_loading_enabled", value_type: "boolean", value: "false",
+        }));
+    });
+
     it("should restore both tool switches to their displayed defaults when edits are discarded", async () => {
         const first = assistant(1);
         first.model_configs.push({

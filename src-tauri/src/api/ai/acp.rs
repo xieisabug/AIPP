@@ -229,8 +229,7 @@ pub fn build_selected_mcp_tools_with_catalog(
 ) -> Result<(String, Vec<(String, String)>), String> {
     use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
     let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let dynamic = crate::api::assistant_api::management::config_value(&db,assistant_id,"mcp_loading_mode_explicit")?.as_deref()==Some("true")
-        && crate::api::assistant_api::management::config_value(&db,assistant_id,"dynamic_mcp_loading_enabled")?.as_deref()==Some("true");
+    let dynamic = crate::mcp::prompt::assistant_dynamic_mcp_enabled(&db, assistant_id, false)?;
     let mut servers: Vec<MCPServerWithTools> = db.get_assistant_mcp_servers_with_tools(assistant_id)
         .map_err(|e| e.to_string())?.into_iter()
         .filter(|(_,name,command,enabled,_)| *enabled && name != "MCP 动态加载工具" && command.as_deref() != Some("aipp:dynamic_mcp"))
@@ -252,7 +251,10 @@ pub fn build_selected_mcp_tools_with_catalog(
     }
     if dynamic {
         servers = crate::mcp::prompt::collect_all_enabled_servers_for_dynamic_mode(app_handle).map_err(|e|e.to_string())?;
-        let access = crate::mcp::assistant_access::Restrictions::conversation(app_handle,conversation_id)?;
+        let access = match conversation_id {
+            Some(id) => crate::mcp::assistant_access::Restrictions::conversation(app_handle, Some(id))?,
+            None => crate::mcp::assistant_access::Restrictions::load(&db, assistant_id)?,
+        };
         servers.retain(|s|access.server(s.id));
         for server in &mut servers { server.tools.retain(|t|access.tool(server.id,t.id)); }
         dynamic_catalog = collect_native_dynamic_mcp_catalog(&servers);

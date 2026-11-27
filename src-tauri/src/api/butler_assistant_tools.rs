@@ -145,11 +145,9 @@ pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> an
             },
             "tools"=> {
                 let mut info=crate::mcp::collect_mcp_info_for_assistant(app,id,None,None).await?;
-                // Native-agent bridges expose explicitly selected MCP tools, not the dynamic catalog.
-                if assistant.assistant_type == Some(4) {
+                if assistant.assistant_type == Some(4) && !info.dynamic_loading_enabled {
                     info.enabled_servers=super::assistant_api::get_assistant_mcp_servers_with_tools(app.clone(),id).await
                         .map_err(anyhow::Error::msg)?.into_iter().filter(|s|s.is_enabled).collect();
-                    info.dynamic_loading_enabled=false;
                 }
                 crate::mcp::butler_tools::inject(app,&mut info.enabled_servers,"butler_contact")?;
                 let contact_id=contact(&ConversationDatabase::new(app)?.get_connection()?,id)?;

@@ -203,19 +203,17 @@ export const useAssistantFormConfig = ({
     const formConfig: AssistantFormConfig[] = useMemo(() => {
         if (!currentAssistant) return [];
 
-        const globalDynamicMcpEnabled =
+        const dynamicMcpAvailable =
+            currentAssistant.assistant.assistant_type === 4 ||
             getConfigValue("experimental", "dynamic_mcp_loading_enabled") === "true" ||
             currentAssistant.model_configs.some(config => config.name === "mcp_loading_mode_explicit" && config.value === "true");
         const assistantDynamicEnabled =
-            globalDynamicMcpEnabled &&
+            dynamicMcpAvailable &&
             (() => {
                 const assistantDynamicRaw = currentAssistant.model_configs.find(
                     (config) => config.name === "dynamic_mcp_loading_enabled"
                 )?.value;
-                return (
-                    assistantDynamicRaw == null ||
-                    (assistantDynamicRaw !== "false" && assistantDynamicRaw !== "0")
-                );
+                return !["false", "0", "off"].includes(assistantDynamicRaw?.trim().toLowerCase() ?? "");
             })();
 
         // 智能体助手类型 (assistant_type === 4) 的专用配置
@@ -450,17 +448,17 @@ export const useAssistantFormConfig = ({
                       ]
                     : []),
                 ...nativeAgentApprovalFields,
-                ...(currentAssistant.model_configs.some(config => config.name === "mcp_loading_mode_explicit" && config.value === "true") ? [{
+                {
                     key: "dynamic_mcp_loading_enabled",
                     config: {
                         type: "switch" as const,
-                        label: "MCP 动态加载（实验）",
+                        label: "MCP 动态加载",
                         value: assistantDynamicEnabled,
                         tooltip: "开启后按需加载工具；关闭后使用手动选择的 MCP 工具",
                         onChange: (value: string | boolean) => handleConfigChange("dynamic_mcp_loading_enabled", value, "boolean"),
                     },
-                }] : []),
-                ...(!currentAssistant.model_configs.some(config => config.name === "mcp_loading_mode_explicit" && config.value === "true") || !assistantDynamicEnabled ? [{
+                },
+                ...(!assistantDynamicEnabled ? [{
                     key: "mcp_config",
                     config: {
                         type: "custom" as const,
@@ -588,7 +586,7 @@ export const useAssistantFormConfig = ({
             });
         }
 
-        if (globalDynamicMcpEnabled && !assistantTypeHideField.includes("dynamic_mcp_loading_enabled")) {
+        if (dynamicMcpAvailable && !assistantTypeHideField.includes("dynamic_mcp_loading_enabled")) {
             baseConfigs.push({
                 key: "dynamic_mcp_loading_enabled",
                 config: {

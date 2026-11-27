@@ -178,7 +178,10 @@ describe("useAssistantFormConfig ACP MCP option", () => {
         mockInvokeHandler("get_all_feature_config", () => []);
     });
 
-    it("shows manual MCP selector for ACP assistants", async () => {
+    it.each([
+        [undefined, true],
+        ["false", false],
+    ] as const)("uses the agent MCP default unless a mode is saved (%s)", async (saved, dynamic) => {
         const onConfigChange = vi.fn();
         const acpAssistant: AssistantDetail = {
             ...baseAssistantDetail,
@@ -186,7 +189,10 @@ describe("useAssistantFormConfig ACP MCP option", () => {
                 ...baseAssistantDetail.assistant,
                 assistant_type: 4,
             },
-            model_configs: [],
+            model_configs: saved === undefined ? [] : [{
+                id: 1, assistant_id: 1, assistant_model_id: 1,
+                name: "dynamic_mcp_loading_enabled", value: saved, value_type: "boolean",
+            }],
         };
 
         const { result } = renderHook(() =>
@@ -219,13 +225,13 @@ describe("useAssistantFormConfig ACP MCP option", () => {
         const workingDirectoryField = result.current.formConfig.find(
             (item) => item.key === "acp_working_directory"
         );
-        expect(mcpField?.config.label).toBe("MCP工具");
-        expect(mcpField?.config.type).toBe("custom");
+        expect(Boolean(mcpField)).toBe(!dynamic);
         expect(workingDirectoryField?.config.type).toBe("folder-picker");
         expect(workingDirectoryField?.config.placeholder).toBe("选择工作目录");
-        expect(
-            result.current.formConfig.some((item) => item.key === "dynamic_mcp_loading_enabled")
-        ).toBe(false);
+        const mode = result.current.formConfig.find((item) => item.key === "dynamic_mcp_loading_enabled");
+        expect(mode?.config.value).toBe(dynamic);
+        mode?.config.onChange?.(!dynamic);
+        expect(onConfigChange).toHaveBeenCalledWith("dynamic_mcp_loading_enabled", !dynamic, "boolean");
     });
 });
 

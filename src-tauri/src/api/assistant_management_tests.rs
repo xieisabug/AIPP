@@ -416,6 +416,22 @@ fn test_assistant_management_provider_priority_does_not_replace_missing_modern_b
 }
 
 #[test]
+fn test_agent_dynamic_mcp_default_and_saved_mode() {
+    use crate::mcp::prompt::assistant_dynamic_mcp_enabled;
+    let (db, _, _, _) = fixture();
+    let agent = db.add_assistant("Agent", "", Some(4), true).unwrap();
+    let chat = db.add_assistant("Chat", "", Some(0), true).unwrap();
+    assert!(assistant_dynamic_mcp_enabled(&db, agent, false).unwrap());
+    assert!(!assistant_dynamic_mcp_enabled(&db, chat, false).unwrap());
+    assert!(assistant_dynamic_mcp_enabled(&db, chat, true).unwrap());
+    let model = db.add_assistant_model(agent, 0, "", "").unwrap();
+    db.add_assistant_model_config(agent, model, "dynamic_mcp_loading_enabled", "false", "boolean").unwrap();
+    for global in [false, true] {
+        assert!(!assistant_dynamic_mcp_enabled(&db, agent, global).unwrap());
+    }
+}
+
+#[test]
 fn test_assistant_management_mcp_mode_uses_legacy_config_target_in_preview_and_save() {
     for has_model in [true,false] {
         let (db,llm,_,codex) = fixture();

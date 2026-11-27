@@ -1119,13 +1119,12 @@ pub fn is_agent_load_skill_ready(
     let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let assistant_mcp_configs =
         assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
-    let explicit_dynamic = crate::api::assistant_api::management::config_value(&assistant_db,assistant_id,"mcp_loading_mode_explicit")?.as_deref()==Some("true")
-        && crate::api::assistant_api::management::config_value(&assistant_db,assistant_id,"dynamic_mcp_loading_enabled")?.as_deref()==Some("true");
+    let dynamic = super::prompt::assistant_dynamic_mcp_enabled(&assistant_db, assistant_id, false)?;
     let assistant_enabled = assistant_mcp_configs
         .iter()
         .find(|c| c.mcp_server_id == agent_server.id)
         .map(|c| c.is_enabled)
-        .unwrap_or(explicit_dynamic);
+        .unwrap_or(dynamic);
     if !assistant_enabled {
         return Ok(false);
     }
@@ -1136,7 +1135,7 @@ pub fn is_agent_load_skill_ready(
         .iter()
         .find(|c| c.mcp_tool_id == load_skill.id)
         .map(|c| c.is_enabled)
-        .unwrap_or(explicit_dynamic);
+        .unwrap_or(dynamic);
 
     Ok(load_skill_assistant_enabled)
 }
@@ -1208,13 +1207,14 @@ pub async fn check_operation_mcp_for_skills(
         agent_load_skill_enabled,
         agent_load_skill_assistant_enabled,
     ) = if let Some(agent) = &agent_server {
+        let dynamic = super::prompt::assistant_dynamic_mcp_enabled(&assistant_db, assistant_id, false)?;
         let assistant_mcp_configs =
             assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
         let assistant_enabled_flag = assistant_mcp_configs
             .iter()
             .find(|c| c.mcp_server_id == agent.id)
             .map(|c| c.is_enabled)
-            .unwrap_or(false);
+            .unwrap_or(dynamic);
 
         let tools = db.get_mcp_server_tools(agent.id).map_err(|e| e.to_string())?;
         let load_skill = tools.iter().find(|t| t.tool_name == AGENT_LOAD_SKILL_TOOL_NAME);
@@ -1223,9 +1223,8 @@ pub async fn check_operation_mcp_for_skills(
         let assistant_tool_configs =
             assistant_db.get_assistant_mcp_tool_configs(assistant_id).map_err(|e| e.to_string())?;
         let load_skill_assistant_enabled = load_skill
-            .and_then(|tool| assistant_tool_configs.iter().find(|c| c.mcp_tool_id == tool.id))
-            .map(|c| c.is_enabled)
-            .unwrap_or(false);
+            .is_some_and(|tool| assistant_tool_configs.iter().find(|c| c.mcp_tool_id == tool.id)
+                .map_or(dynamic, |config| config.is_enabled));
 
         (
             Some(agent.id),
