@@ -332,7 +332,7 @@ describe("ButlerGroupChat", () => {
             { member_id: 2, state: "running", round: 1, rounds: 1 },
         ] }));
         mockInvokeHandler("get_butler_progress_summary", args => args?.conversationId === 102
-            ? { conversation_id: 102, epoch: 1, reports: ["我先整理本周的交付。"], helper: { text: "正在核对交付记录", steps: [] } }
+            ? { conversation_id: 102, epoch: 1, reports: [{ text: "我先整理本周的交付。", anchor: 12, request_id: "report-1" }], helper: { text: "正在核对交付记录", steps: [] } }
             : { conversation_id: 101, epoch: 1, reports: [], helper: { text: "正在查看任务安排", steps: [] } });
         renderChat();
         const writer = await screen.findByRole("status", { name: "写作助手 正在输入" });

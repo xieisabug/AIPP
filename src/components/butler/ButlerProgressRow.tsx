@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
+import type { ButlerReport, PublishedButlerReport } from "@/data/Conversation";
 import { useButlerProgress, type ButlerProgressSummary } from "./butlerProgress";
 import { useButlerLiveStatus } from "./useButlerLiveStatus";
 
@@ -20,18 +21,21 @@ export function ReportBubble({ text }: { text: string }) {
 }
 
 /** 已经进入时间线的每次成功上报，只抵消实时快照中的一次。 */
-export function LiveReportBubbles({ reports = [], published = [] }: { reports?: string[]; published?: string[] }) {
-    const savedCounts = new Map<string, number>();
-    for (const text of published) savedCounts.set(text, (savedCounts.get(text) ?? 0) + 1);
-    return reports.map((text, index) => {
-        const saved = savedCounts.get(text) ?? 0;
-        if (!saved) return <ReportBubble key={index} text={text} />;
-        savedCounts.set(text, saved - 1);
+export function LiveReportBubbles({ reports = [], published = [] }: { reports?: ButlerReport[]; published?: PublishedButlerReport[] }) {
+    const savedIds = new Set(published.map(report => report.request_id));
+    // 原生工具活动和 MCP 回执可能比交互记录先到，此时按所属消息和原文逐次匹配。
+    const provisional = published.filter(report => !report.request_id);
+    return reports.map((report, index) => {
+        if (report.request_id && savedIds.has(report.request_id)) return null;
+        const match = provisional.findIndex(row => row.text === report.text
+            && (report.anchor == null ? row.currentTurn : row.anchor === report.anchor));
+        if (match < 0) return <ReportBubble key={report.request_id ?? index} text={report.text} />;
+        provisional.splice(match, 1);
         return null;
     });
 }
 
-export default function ButlerProgressRow({ conversationId, publishedReports }: { conversationId: number; publishedReports?: string[] }) {
+export default function ButlerProgressRow({ conversationId, publishedReports }: { conversationId: number; publishedReports?: PublishedButlerReport[] }) {
     const progress = useButlerProgress(conversationId);
     const live = useButlerLiveStatus(conversationId);
     return <>

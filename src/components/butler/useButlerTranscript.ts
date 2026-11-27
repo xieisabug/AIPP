@@ -51,9 +51,12 @@ export function useButlerTranscript({ conversationId, compact, running, messages
         }
         const reports = reportedProgressByMessage(conversationId, activities.values(), calls.values(), interactions);
         const visible = withPeerTimeline(messages, unpublished, posts ?? [], conversationId, interactions, liveItems, calls, reports);
-        // 审核期间正文可能已经发布，恢复执行时仍需抵消本轮已经显示的进度。
-        const publishedReports = visible.filter(row => row.message_type === "butler_report" && turnIds.has(row.parent_id!));
+        // 插话会新增用户消息，运行中的工具仍属于原回复。
+        const publishedReports = visible.filter(row => row.message_type === "butler_report").map(row => ({
+            text: row.content, anchor: row.parent_id ?? null, request_id: row.butler_report_request_id,
+            currentTurn: turnIds.has(row.parent_id!),
+        }));
         return withButlerProcessing(visible, conversationId, running || (held && !hasPublishedReply(visible)),
-            publishedReports.map(row => row.content));
+            publishedReports);
     }, [compact, running, held, conversationId, messages, turnIds, posts, interactions, liveItems, calls, activities]);
 }

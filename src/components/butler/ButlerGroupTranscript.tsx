@@ -5,7 +5,7 @@ import type { InlineInteractionItem } from "@/components/ConversationUI";
 import ConversationTurnRail, { makeTurnPreview, type TurnRailItem } from "@/components/conversation/ConversationTurnRail";
 import VirtuosoMessageList from "@/components/conversation/VirtuosoMessageList";
 import type { MessageScrollAlign } from "@/components/conversation/scrollHighlight";
-import type { Message, StreamEvent } from "@/data/Conversation";
+import type { Message, PublishedButlerReport, StreamEvent } from "@/data/Conversation";
 import type { ButlerGroupInteractionTurn, ButlerGroupMember, ButlerGroupMessage } from "@/data/ButlerGroup";
 import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { useAskUserQuestion } from "@/hooks/useInlineInteraction";
@@ -37,7 +37,7 @@ function toTranscriptMessage(groupId: number, message: ButlerGroupMessage, quote
     return message.kind === "message" ? chat : { ...chat, message_type: `butler_group_${message.kind}` };
 }
 
-function TypingRow({ member, shown }: { member: ButlerGroupMember; shown?: string[] }) {
+function TypingRow({ member, shown }: { member: ButlerGroupMember; shown?: PublishedButlerReport[] }) {
     const progress = useButlerProgress(member.conversation_id);
     return <div role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
         <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name}>

@@ -7,7 +7,8 @@ import ButlerProgressRow, { LiveReportBubbles } from "./ButlerProgressRow";
 import { BUTLER_PROGRESS_EVENT } from "./butlerProgress";
 
 const snapshot = (latest: { source: string; conversation_id: number; epoch: number; text: string; steps: unknown[] }, reports: string[] = []) => ({
-    ...latest, reports: latest.source === "report_progress" ? [...reports, latest.text] : reports,
+    ...latest, reports: (latest.source === "report_progress" ? [...reports, latest.text] : reports)
+        .map((text, i) => ({ text, request_id: String(i), anchor: 2 })),
     helper: latest.source === "helper_summary" ? latest : null,
 });
 
@@ -129,8 +130,15 @@ describe("ButlerProgressRow", () => {
     });
 
     it("should keep a repeated live report when only its first occurrence is already on the timeline", () => {
-        render(<LiveReportBubbles reports={["核对中", "核对中", "即将完成"]} published={["核对中"]} />);
+        const reports = ["核对中", "核对中", "即将完成"].map((text, i) => ({ text, request_id: String(i), anchor: 2 }));
+        render(<LiveReportBubbles reports={reports} published={[{ ...reports[0], currentTurn: true }]} />);
         expect(screen.getAllByText("核对中")).toHaveLength(1);
         expect(screen.getByText("即将完成")).toBeInTheDocument();
+    });
+
+    it("should show a new report when another saved report has the same owner and text", () => {
+        const report = { text: "核对中", anchor: 2, request_id: "new" };
+        render(<LiveReportBubbles reports={[report]} published={[{ ...report, request_id: "earlier", currentTurn: true }]} />);
+        expect(screen.getByText(report.text)).toBeInTheDocument();
     });
 });

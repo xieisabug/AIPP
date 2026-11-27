@@ -2,7 +2,7 @@ import type { AgentActivityEvent, MCPToolCallUpdateEvent } from "@/data/Conversa
 import { parseDatabaseTime } from "@/utils/messageOrdering";
 import type { InteractionRow } from "./butlerInteractions";
 
-export interface ProgressReport { text: string; time?: number; order: number }
+export interface ProgressReport { text: string; time?: number; order: number; request_id?: string }
 
 export function reportedProgressByMessage(conversation: number, activities: Iterable<AgentActivityEvent>,
     calls: Iterable<MCPToolCallUpdateEvent>, saved: readonly InteractionRow[] = []): Map<number, ProgressReport[]> {
@@ -51,7 +51,7 @@ export function reportedProgressByMessage(conversation: number, activities: Iter
         const index = legacy?.findIndex(report => report.text === text) ?? -1;
         if (legacy && index >= 0) legacy.splice(index, 1);
         const list = recorded.get(row.anchor) ?? [];
-        list.push({ text, time:row.occurred_ms, order:row.request.call_id ?? row.id });
+        list.push({ text, time: row.occurred_ms, order: row.request.call_id ?? row.id, request_id: row.request_id });
         recorded.set(row.anchor, list);
     }
     for (const [owner, list] of recorded) result.set(owner, [...(result.get(owner) ?? []), ...list]);

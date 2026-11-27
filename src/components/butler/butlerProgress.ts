@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ButlerReport } from "@/data/Conversation";
 
 // Kept in sync with src-tauri/src/api/butler_progress.rs.
 export const BUTLER_PROGRESS_EVENT = "butler_progress_summary";
 export interface ButlerProgressStep { label: string; status: string }
 export interface ButlerProgressSummary { source: "report_progress" | "helper_summary"; conversation_id: number; epoch: number; text: string; steps: ButlerProgressStep[] }
 
-export interface ProgressSnapshot extends ButlerProgressSummary { reports: string[]; helper: ButlerProgressSummary | null }
+export interface ProgressSnapshot extends ButlerProgressSummary { reports: ButlerReport[]; helper: ButlerProgressSummary | null }
 
 /** 当前会话这一轮的进度摘要；只接受不早于已知轮次的结果，避免上一轮遗留的摘要回写。 */
 export function useButlerProgress(conversationId: number): ProgressSnapshot | undefined {

@@ -96,15 +96,17 @@ fn test_progress_snapshot_keeps_reports_and_helper_for_current_epoch() {
     let entry = |source, epoch, text: &str| ButlerProgressSummary {
         source, conversation_id: 42, epoch, text: text.into(), steps: Vec::new(),
     };
-    let first = ProgressSnapshot::update(None, entry(ProgressSource::ReportProgress, 1, "开工"));
+    let report = |id: &str| ProgressSource::ReportProgress { request_id: id.into(), anchor: Some(17) };
+    let first = ProgressSnapshot::update(None, entry(report("first"), 1, "开工"));
     let summary = ProgressSnapshot::update(Some(&first), entry(ProgressSource::HelperSummary, 1, "核对中"));
-    let next = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 1, "继续检查"));
-    assert_eq!(summary.reports, ["开工"]);
-    let repeated = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 1, "开工"));
-    assert_eq!(repeated.reports, ["开工", "开工"]);
-    assert_eq!(next.reports, ["开工", "继续检查"]);
+    let next = ProgressSnapshot::update(Some(&summary), entry(report("next"), 1, "继续检查"));
+    let saved = |id: &str, text: &str| LiveReport { request_id: id.into(), anchor: Some(17), text: text.into() };
+    assert_eq!(summary.reports, [saved("first", "开工")]);
+    let repeated = ProgressSnapshot::update(Some(&summary), entry(report("second"), 1, "开工"));
+    assert_eq!(repeated.reports, [saved("first", "开工"), saved("second", "开工")]);
+    assert_eq!(next.reports, [saved("first", "开工"), saved("next", "继续检查")]);
     assert_eq!(next.helper.unwrap().text, "核对中");
-    let fresh = ProgressSnapshot::update(Some(&summary), entry(ProgressSource::ReportProgress, 2, "新任务"));
-    assert_eq!(fresh.reports, ["新任务"]);
+    let fresh = ProgressSnapshot::update(Some(&summary), entry(report("fresh"), 2, "新任务"));
+    assert_eq!(fresh.reports, [saved("fresh", "新任务")]);
     assert!(fresh.helper.is_none());
 }

@@ -133,7 +133,7 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
 
 
 // Presentation-only row. Never inserted into messages or sent to the backend.
-export function withButlerProcessing(messages: Message[], conversationId: number, running: boolean, publishedReports?: string[]): Message[] {
+export function withButlerProcessing(messages: Message[], conversationId: number, running: boolean, publishedReports?: Message["butler_published_reports"]): Message[] {
     if (!running) return messages;
     return [...messages, {
         id: Number.MIN_SAFE_INTEGER, conversation_id: conversationId,

@@ -21,6 +21,16 @@ export interface ConversationWithMessages {
     messages: Array<Message>;
 }
 
+export interface ButlerReport {
+    text: string;
+    anchor: number | null;
+    request_id?: string;
+}
+
+export interface PublishedButlerReport extends ButlerReport {
+    currentTurn: boolean;
+}
+
 export interface Message {
     clientRequestId?: string;
     sendStatus?: "sending" | "failed";
@@ -29,7 +39,8 @@ export interface Message {
     butler_interaction?: import("react").ReactNode;
     butler_event_order?: number;
     butler_live_item_key?: string;
-    butler_published_reports?: string[];
+    butler_report_request_id?: string;
+    butler_published_reports?: PublishedButlerReport[];
     butler_posts?: import("../components/butler/butlerTimeline").PeerPost[];
     /** Native agents can store commentary and the final answer in the same response. */
     butler_final_text?: string | null;

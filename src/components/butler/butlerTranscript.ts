@@ -64,7 +64,8 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
         for (const [index, report] of (reports?.get(message.id) ?? []).entries()) {
             result.push({ ...message, id: -5_000_000_000_000 - message.id * 65536 - index, parent_id: message.id,
                 created_time: Number.isFinite(report.time) ? new Date(report.time!) : message.created_time,
-                message_type: "butler_report", content: report.text, butler_event_order: report.order });
+                message_type: "butler_report", content: report.text, butler_event_order: report.order,
+                butler_report_request_id: report.request_id });
         }
         // 失败和 ChatUI 一样显示成可展开的一行；之后已有回复的旧错误属于重试过程，简洁聊天不再显示。
         if (message.message_type === "error") {

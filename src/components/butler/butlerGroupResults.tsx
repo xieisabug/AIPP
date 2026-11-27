@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { MCPToolCall } from "@/data/MCPToolCall";
+import type { ButlerReport, PublishedButlerReport } from "@/data/Conversation";
 import { parseGroupTime, type ButlerGroupInteractionTurn, type ButlerGroupMessage } from "@/data/ButlerGroup";
 import { parsePreviewFileRequestId } from "@/hooks/useInlineInteraction";
 import { interactionContent, type InteractionRow } from "./butlerInteractions";
@@ -16,7 +17,7 @@ interface GroupResult {
     owner: number;
     time: number;
     content: ReactNode;
-    report?: string;
+    report?: ButlerReport;
     questionCall?: number;
     liveQuestion?: boolean;
 }
@@ -49,8 +50,8 @@ function groupResults(conversation: number, calls: MCPToolCall[], rows: Interact
     const represented = new Set<number>();
     for (const row of rows) {
         if (row.anchor == null || row.kind === "task") continue;
-        const report = row.kind === "report" ? row.request.text : undefined;
-        const content = report ? <ReportBubble text={report} /> : interactionContent(row, undefined, conversation);
+        const report = row.kind === "report" ? { text: row.request.text, anchor: row.anchor, request_id: row.request_id } : undefined;
+        const content = report ? <ReportBubble text={report.text} /> : interactionContent(row, undefined, conversation);
         if (!content && row.kind !== "question") continue;
         requests.add(row.request_id);
         if ((row.kind === "question" || row.kind === "report") && row.request.call_id) represented.add(row.request.call_id);
@@ -69,7 +70,8 @@ function groupResults(conversation: number, calls: MCPToolCall[], rows: Interact
         } else if (!isButlerInteractionTool(call.tool_name) && !isGroupResultCard(call.tool_name)) continue;
         if (call.tool_name === "preview_file" && requests.has(parsePreviewFileRequestId(call.result) ?? "")) continue;
         const stamp = call.started_time || call.created_time;
-        events.push({ key: `call-${call.id}`, conversation, owner, time: stamp ? parseGroupTime(stamp).getTime() : NaN, report,
+        events.push({ key: `call-${call.id}`, conversation, owner, time: stamp ? parseGroupTime(stamp).getTime() : NaN,
+            report: report ? { text: report, anchor: owner } : undefined,
             questionCall: call.tool_name === "ask_user_question" ? call.id : undefined,
             content: pendingQuestion ? null : report ? <ReportBubble text={report} /> : resultCard(conversation, owner, call) });
     }
@@ -118,7 +120,7 @@ export function positionGroupResults(events: ReadonlyMap<number, GroupResult[]>,
     messages: ButlerGroupMessage[], questions: ReadonlyMap<number, GroupQuestion>) {
     const before = new Map<number, GroupResult[]>();
     const tail: GroupResult[] = [];
-    const currentReports = new Map<number, string[]>();
+    const currentReports = new Map<number, PublishedButlerReport[]>();
     const bySeq = new Map(messages.map(message => [message.seq, message]));
     const ordered = [...events.values()].flat();
     for (const [conversation, question] of questions) {
@@ -145,7 +147,7 @@ export function positionGroupResults(events: ReadonlyMap<number, GroupResult[]>,
         if (!reply && turn.ended_at && (event.liveQuestion || !Number.isFinite(event.time) || event.time > parseGroupTime(turn.ended_at).getTime())) continue;
         if (!reply && !turn.ended_at && event.report) {
             const reports = currentReports.get(event.conversation) ?? [];
-            reports.push(event.report);
+            reports.push({ ...event.report, currentTurn: true });
             currentReports.set(event.conversation, reports);
         }
         const next = messages.find(message => message.seq > turn.trigger_seq &&
