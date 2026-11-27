@@ -241,6 +241,53 @@ describe("InputArea slash completion", () => {
     });
 });
 
+describe("InputArea artifact references", () => {
+    const tool = { id: 4, name: "番茄钟", icon: "⏱", description: "", artifact_type: "html", tags: null, created_time: "", use_count: 2 };
+
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_bang_list", () => []);
+        mockInvokeHandler("get_assistants", () => []);
+        mockInvokeHandler("get_skills_for_slash_completion", () => []);
+        mockInvokeHandler("get_artifacts_for_completion", () => [tool]);
+    });
+
+    it("should insert a #name reference on Enter instead of opening the tool", async () => {
+        const opened = vi.fn();
+        mockInvokeHandler("open_artifact_window", opened);
+        const user = userEvent.setup();
+        render(<InputAreaHarness />);
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+        await user.type(textarea, "改一下 #番");
+        expect(screen.getByText(/Enter 引用/)).toBeInTheDocument();
+        await user.keyboard("{Enter}");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(textarea.value).toBe("改一下 #番茄钟 ");
+        expect(opened).not.toHaveBeenCalled();
+    });
+
+    it("should open the tool with Ctrl+Enter and remove the typed #query", async () => {
+        const opened = vi.fn();
+        mockInvokeHandler("open_artifact_window", opened);
+        const user = userEvent.setup();
+        render(<InputAreaHarness />);
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+        await user.type(textarea, "#番");
+        await user.keyboard("{Control>}{Enter}{/Control}");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(textarea.value).toBe("");
+        expect(opened).toHaveBeenCalledWith({ artifactId: 4 });
+    });
+});
+
 describe("InputArea Plan mode", () => {
     beforeEach(() => {
         clearAllMockHandlers();

@@ -110,7 +110,7 @@
     var parts = [];
     while (el && el.nodeType === 1 && el !== document.documentElement && el !== document.body && parts.length < 6) {
       var part = el.tagName.toLowerCase();
-      if (el.id) {
+      if (el.id && /^[A-Za-z][\w-]*$/.test(el.id)) {
         parts.unshift(part + "#" + el.id);
         break;
       }

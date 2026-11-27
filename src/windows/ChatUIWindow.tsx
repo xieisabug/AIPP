@@ -48,6 +48,10 @@ import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { formatShortcutDisplay, useAppShortcuts } from "../hooks/useAppShortcuts";
 import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "../data/Shortcuts";
 import useConversationManager from "../hooks/useConversationManager";
+import { ConversationDraftContext, createConversationDraftStore } from "../hooks/useConversationDraft";
+import { START_CONVERSATION_WITH_DRAFT_EVENT } from "../utils/openConversationInChat";
+import ChatArtifactPane from "../components/artifact/ChatArtifactPane";
+import { enableArtifactPane, useArtifactPaneOpen } from "../components/artifact/artifactPane";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
@@ -239,6 +243,14 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
     const [selectedConversation, setSelectedConversation] = useState<string>(() =>
         mobileEnvironmentSwitch ? sessionStorage.getItem("aipp.mobile.localConversation") ?? "" : "");
     const conversationUIRef = useRef<ConversationUIRef>(null);
+    // 窗口级草稿：其他窗口可以把一段话放进新会话的输入框（如合集「在新会话里修改」）
+    const [conversationDrafts] = useState(createConversationDraftStore);
+    // 桌面聊天窗口的 Artifact 分栏：预览显示在右侧面板，不另开预览窗口
+    const artifactPaneOpen = useArtifactPaneOpen();
+    useEffect(() => {
+        enableArtifactPane(!isMobile);
+        return () => enableArtifactPane(false);
+    }, [isMobile]);
     const selectedConversationRef = useRef(selectedConversation);
     const lastChatPerfResultRef = useRef<ChatScrollPerfTestOutcome | null>(null);
     const virtualRowHeightDriftRef = useRef(
@@ -725,6 +737,13 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
                 setSelectedConversation(convId as string);
             }
         });
+        // 切到新会话，并把一段话放进输入框（不自动发送）
+        const unlistenDraft = getCurrentWebviewWindow().listen<{ text?: string }>(START_CONVERSATION_WITH_DRAFT_EVENT, (event) => {
+            const text = event.payload?.text ?? "";
+            conversationDrafts.set("", text);
+            setSelectedConversation("");
+            requestAnimationFrame(() => conversationUIRef.current?.focus());
+        });
 
         // 监听窗口焦点变化
         const windowFocusUnlisten = getCurrentWebviewWindow().onFocusChanged(({ payload: focused }) => {
@@ -749,6 +768,7 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
             unlisten.then((unlisten) => unlisten());
             windowFocusUnlisten.then((unlistenFn) => unlistenFn());
             unlistenHidden.then((unlistenFn) => unlistenFn());
+            unlistenDraft.then((unlistenFn) => unlistenFn());
         };
     }, []);
 
@@ -1053,6 +1073,7 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
         />
     );
     return (
+        <ConversationDraftContext.Provider value={conversationDrafts}>
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div className="flex h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                 {/* 与总管家窗口统一：侧栏与主区平铺、纯色背景，以分隔线区分，右侧头部与详情栏从窗口顶部占满 */}
@@ -1071,21 +1092,26 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
                     />
                 </div>
 
-                <div className="relative flex-1 min-w-0 bg-background overflow-auto" data-aipp-slot="chat-main-content">
-                    {!selectedConversation && <div className={`absolute top-2 z-10 ${platform === "windows" ? "right-36" : "right-4"}`}><OnboardingSetupChip /></div>}
-                    <ConversationUI
-                        ref={conversationUIRef}
-                        pluginList={pluginList}
-                        conversationId={selectedConversation}
-                        onChangeConversationId={setSelectedConversation}
-                        inlineInteractionItems={inlineInteractionItems}
-                        inlineInteractionVisible={hasInlineInteraction}
-                        onPreviewFileContextClick={handlePreviewFileContextSelection}
-                        headerExtraActions={selectedConversation ? <OnboardingSetupChip /> : undefined}
-                        // Windows 窗口控制按钮由 ConversationUI 摆放：有标题栏时排进标题栏或展开的详情栏头部，
-                        // 没有会话时浮在右上角（新会话发出首条消息后标题栏立即出现，按钮随之移入）
-                        showWindowControls
-                    />
+                <div className="relative flex flex-1 min-w-0 bg-background" data-aipp-slot="chat-main-content">
+                    {/* 会话始终在这一层，开关分栏不会重建会话界面 */}
+                    <div className="relative flex-1 min-w-0 overflow-auto" data-aipp-slot="chat-main-conversation">
+                        {!selectedConversation && !artifactPaneOpen && <div className={`absolute top-2 z-10 ${platform === "windows" ? "right-36" : "right-4"}`}><OnboardingSetupChip /></div>}
+                        <ConversationUI
+                            ref={conversationUIRef}
+                            pluginList={pluginList}
+                            conversationId={selectedConversation}
+                            onChangeConversationId={setSelectedConversation}
+                            inlineInteractionItems={inlineInteractionItems}
+                            inlineInteractionVisible={hasInlineInteraction}
+                            onPreviewFileContextClick={handlePreviewFileContextSelection}
+                            headerExtraActions={selectedConversation ? <OnboardingSetupChip /> : undefined}
+                            // Windows 窗口控制按钮由 ConversationUI 摆放：有标题栏时排进标题栏或展开的详情栏头部，
+                            // 没有会话时浮在右上角（新会话发出首条消息后标题栏立即出现，按钮随之移入）；
+                            // 打开 Artifact 分栏时按钮移到分栏工具栏末尾
+                            showWindowControls={!artifactPaneOpen}
+                        />
+                    </div>
+                    {artifactPaneOpen && <ChatArtifactPane />}
                 </div>
 
                 <ConversationSearchDialog
@@ -1111,6 +1137,7 @@ function ChatUIWindow({ mobileEnvironmentSwitch }: { mobileEnvironmentSwitch?: R
                 />
             </div>
         </AntiLeakageProvider>
+        </ConversationDraftContext.Provider>
     );
 }
 

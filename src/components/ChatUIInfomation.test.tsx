@@ -27,7 +27,7 @@ describe("ChatUIInfomation platform gating", () => {
 
     it("desktop: shows artifacts/schedule and opens a separate config window", async () => {
         render(<ChatUIInfomation />);
-        for (const label of ["打开设置", "打开制品合集", "打开定时任务"]) {
+        for (const label of ["打开设置", "打开 Artifact 合集", "打开定时任务"]) {
             expect(screen.getByRole("button", { name: label })).toHaveAttribute("title", label);
         }
         await act(async () => {

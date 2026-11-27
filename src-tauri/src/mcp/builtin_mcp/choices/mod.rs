@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod artifact_build;
 pub mod build;
 pub mod document;
 pub(crate) mod snapshot;

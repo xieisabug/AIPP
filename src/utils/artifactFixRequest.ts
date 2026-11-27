@@ -14,10 +14,12 @@ interface FixRequestPayload {
     request_id: string;
     conversation_id: number;
     text: string;
+    /** 一并加进输入框的本机文件（如选中元素的截图）。 */
+    attachments?: string[];
 }
 
 /** 发送修复请求；有聊天界面接收返回 true。 */
-export async function requestArtifactFix(conversationId: number, text: string): Promise<boolean> {
+export async function requestArtifactFix(conversationId: number, text: string, attachments?: string[]): Promise<boolean> {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let resolveAck: (handled: boolean) => void = () => {};
     const acknowledged = new Promise<boolean>((resolve) => {
@@ -28,7 +30,12 @@ export async function requestArtifactFix(conversationId: number, text: string): 
     });
     const timer = setTimeout(() => resolveAck(false), ACK_TIMEOUT_MS);
     try {
-        await emit(REQUEST_EVENT, { request_id: requestId, conversation_id: conversationId, text } satisfies FixRequestPayload);
+        await emit(REQUEST_EVENT, {
+            request_id: requestId,
+            conversation_id: conversationId,
+            text,
+            attachments: attachments?.length ? attachments : undefined,
+        } satisfies FixRequestPayload);
         return await acknowledged;
     } finally {
         clearTimeout(timer);
@@ -43,6 +50,7 @@ export async function requestArtifactFix(conversationId: number, text: string): 
 export async function requestArtifactFixOpening(
     conversationId: number,
     text: string,
+    attachments?: string[],
     deps: {
         request?: typeof requestArtifactFix;
         open?: (conversationId: number) => Promise<void>;
@@ -52,17 +60,20 @@ export async function requestArtifactFixOpening(
     const request = deps.request ?? requestArtifactFix;
     const open = deps.open ?? openConversationInChat;
     const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    if (await request(conversationId, text)) return true;
+    if (await request(conversationId, text, attachments)) return true;
     await open(conversationId);
     for (let attempt = 0; attempt < 4; attempt += 1) {
         await wait(500);
-        if (await request(conversationId, text)) return true;
+        if (await request(conversationId, text, attachments)) return true;
     }
     return false;
 }
 
 /** 聊天界面接收发给当前会话的修复请求。 */
-export function useArtifactFixRequests(conversationId: number | null, onRequest: (text: string) => void) {
+export function useArtifactFixRequests(
+    conversationId: number | null,
+    onRequest: (text: string, attachments: string[]) => void,
+) {
     const onRequestRef = useRef(onRequest);
     onRequestRef.current = onRequest;
 
@@ -70,7 +81,7 @@ export function useArtifactFixRequests(conversationId: number | null, onRequest:
         if (conversationId === null) return;
         const subscription = listen<FixRequestPayload>(REQUEST_EVENT, ({ payload }) => {
             if (payload.conversation_id !== conversationId) return;
-            onRequestRef.current(payload.text);
+            onRequestRef.current(payload.text, payload.attachments ?? []);
             void emit(ACK_EVENT, { request_id: payload.request_id });
         });
         return () => {

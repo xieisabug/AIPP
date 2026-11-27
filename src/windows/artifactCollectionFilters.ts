@@ -1,4 +1,4 @@
-/** 小工具库（Artifacts 合集）的筛选与排序。 */
+/** 小工具库（Artifact 合集）的筛选与排序。 */
 
 export type CollectionSort = "frequent" | "recent" | "newest";
 

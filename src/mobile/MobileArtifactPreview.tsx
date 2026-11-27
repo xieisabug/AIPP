@@ -47,7 +47,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
             else if (["text", "txt", "xml"].includes(language)) markup = renderToStaticMarkup(<pre style={{ whiteSpace: "pre-wrap" }}>{preview.code}</pre>);
             else if (language === "image") {
                 if (!/^data:image\/(png|jpeg|gif|webp);base64,/.test(preview.code)) throw new Error("图片预览仅支持已导入的 PNG/JPEG/GIF/WebP 数据；远端地址不可直接加载");
-                markup = renderToStaticMarkup(<img src={preview.code} alt="制品图片" style={{ maxWidth: "100%" }} />);
+                markup = renderToStaticMarkup(<img src={preview.code} alt="Artifact 图片" style={{ maxWidth: "100%" }} />);
             } else if (language === "mermaid") {
                 const { default: mermaid } = await import("mermaid");
                 mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
@@ -56,7 +56,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
             else throw new Error(`移动预览不支持 ${language} 格式`);
             if (active) setDocument(staticPreviewDocument(markup));
         };
-        void build().catch(e => { if (active) setError(`制品渲染失败（${preview.language}）：${String(e)}`); });
+        void build().catch(e => { if (active) setError(`Artifact 渲染失败（${preview.language}）：${String(e)}`); });
         return () => { active = false; };
     }, [preview.language, preview.code, preview.title, isChoice]);
     const fromCollection = preview.collectionId != null;
@@ -66,7 +66,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
                 <ChevronLeft className="h-5 w-5" />
                 返回
             </Button>
-            <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{preview.title || "制品预览"}</h1>
+            <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{preview.title || "Artifact 预览"}</h1>
             {fromCollection
                 ? <span className="px-2 text-sm text-muted-foreground">已收藏</span>
                 : !isChoice && <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>}
@@ -80,16 +80,16 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
             {reference && (reference.conversationId === preview.conversationId
                 ? <div style={{ zoom }}><SavedChoicePreview reference={reference} /></div>
                 : <p role="alert">此工程快照属于其他会话。</p>)}
-            {!isChoice && document && <iframe key={JSON.stringify([preview.language, preview.code, preview.title])} ref={frame} title="隔离制品预览" sandbox={component ? "allow-scripts" : ""} referrerPolicy="no-referrer" srcDoc={document}
+            {!isChoice && document && <iframe key={JSON.stringify([preview.language, preview.code, preview.title])} ref={frame} title="隔离 Artifact 预览" sandbox={component ? "allow-scripts" : ""} referrerPolicy="no-referrer" srcDoc={document}
                 onLoad={event => { if (component) {
                     clearTimeout(loadTimer.current);
                     const loadedFrame = event.currentTarget;
                     if (initializedFrames.current.has(loadedFrame)) {
-                        setError("组件预览已停止：预览框发生了页面导航，请重新打开制品。");
+                        setError("组件预览已停止：预览框发生了页面导航，请重新打开 Artifact。");
                         return;
                     }
                     initializedFrames.current.add(loadedFrame);
-                    loadTimer.current = setTimeout(() => setError("组件运行时未响应：本地预览脚本加载或初始化失败，请重新打开制品。"), 10000);
+                    loadTimer.current = setTimeout(() => setError("组件运行时未响应：本地预览脚本加载或初始化失败，请重新打开 Artifact。"), 10000);
                     loadedFrame.contentWindow?.postMessage({ type: "aipp-preview-component", language: preview.language.toLowerCase(), code: preview.code }, "*");
                 } }}
                 className="border-0 bg-white w-full h-full" style={{ zoom }} />}

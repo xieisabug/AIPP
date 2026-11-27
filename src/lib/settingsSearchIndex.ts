@@ -332,7 +332,7 @@ export const SETTINGS_SEARCH_INDEX: SettingsSearchItem[] = [
         id: "runtimes",
         title: "本地运行环境（Bun / uv / Python）",
         section: "运行环境与预览",
-        description: "检测、安装与更新用于制品预览和脚本执行的 Bun、uv 与 Python 环境",
+        description: "检测、安装与更新用于 Artifact 预览和脚本执行的 Bun、uv 与 Python 环境",
         keywords: ["bun", "uv", "python", "runtime", "node", "环境", "运行时", "安装", "更新"],
         menu: "runtime-preview-config",
         subNav: "#runtimes",

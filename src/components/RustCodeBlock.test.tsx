@@ -101,7 +101,7 @@ describe("RustCodeBlock", () => {
         window.addEventListener("aipp:mobile-preview", preview);
         try {
             render(<RustCodeBlock language="text">mobile source</RustCodeBlock>);
-            const button = screen.getByRole("button", { name: "预览制品" });
+            const button = screen.getByRole("button", { name: "预览 Artifact" });
             expect(button).toHaveClass("min-h-11", "min-w-11");
             expect(screen.getByRole("button", { name: "复制代码" })).toHaveClass("min-h-11");
             await userEvent.click(button);

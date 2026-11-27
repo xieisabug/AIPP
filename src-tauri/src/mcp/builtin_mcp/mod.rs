@@ -1567,6 +1567,7 @@ pub async fn execute_aipp_builtin_tool(
                             .get("selector")
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
+                        clip_selector: None,
                         width: args.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
                         height: args.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
                         delay_ms: args.get("delay_ms").and_then(|v| v.as_u64()),

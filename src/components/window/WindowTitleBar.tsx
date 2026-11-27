@@ -5,7 +5,7 @@ import { usePlatform } from "@/hooks/use-platform";
 import { cn } from "@/utils/utils";
 
 /**
- * 桌面窗口（聊天 / 管家 / 设置，以及定时任务 / Artifacts 合集等次级窗口）的标题栏布局，三个桌面平台尽量长得一样：
+ * 桌面窗口（聊天 / 管家 / 设置，以及定时任务 / Artifact 合集等次级窗口）的标题栏布局，三个桌面平台尽量长得一样：
  *
  * - macOS：Overlay 标题栏（`src-tauri/src/window.rs` 的 `with_macos_overlay_titlebar`），
  *   红黄绿按钮悬浮在侧边栏第一行左侧，顶栏内容从 `MAC_TRAFFIC_LIGHTS_SAFE_LEFT` 开始；
@@ -178,7 +178,7 @@ interface WindowTopBarProps {
 }
 
 /**
- * 次级窗口（定时任务、Artifacts 合集）没有侧边栏，用一条横跨窗口的顶栏承担标题栏：
+ * 次级窗口（定时任务、Artifact 合集）没有侧边栏，用一条横跨窗口的顶栏承担标题栏：
  * 与主窗口头部同高（`WINDOW_HEADER_HEIGHT`），macOS 左侧让出红黄绿按钮，Windows 右侧排窗口控制按钮，
  * 空白处与标题可拖动窗口。Linux 保留系统标题栏，这里只作为页面标题行；非桌面平台不渲染。
  */

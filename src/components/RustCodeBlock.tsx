@@ -314,7 +314,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     title="复制代码"
                     className={mobile ? "min-h-11 min-w-11" : undefined}
                 />
-                {mobilePreviewAvailable && <IconButton title="预览制品" className="min-h-11 min-w-11" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => previewMobile({ language, code })} />}
+                {mobilePreviewAvailable && <IconButton title="预览 Artifact" className="min-h-11 min-w-11" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => previewMobile({ language, code })} />}
                 {codeRunAvailable && (
                     <IconButton title="运行代码" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
                 )}

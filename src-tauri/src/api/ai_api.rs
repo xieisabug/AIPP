@@ -356,20 +356,23 @@ fn repeats_last_section(history: &[String], section: &str, tags: &[&str]) -> boo
     current.is_some() && current == crate::utils::turn_context::last_element(history, tags)
 }
 
-/// 组装本轮附加上下文：当前时间、外部渠道/插件前缀、工作记录、工作上下文、长期记忆。
-/// 每轮都会变或只属于这一轮的（时间、渠道来源、引用的工作）照常附带；
+/// 组装本轮附加上下文：当前时间、外部渠道/插件前缀、`#` 引用的小工具、工作记录、工作上下文、长期记忆。
+/// 每轮都会变或只属于这一轮的（时间、渠道来源、引用的小工具、引用的工作）照常附带；
 /// 工作记录、近期工作与历史里最近一次相同时不再重复；长期记忆只附带变化（见 butler_memory::turn_block）。
 fn build_turn_context(
     app_handle: &tauri::AppHandle,
     conversation_id: Option<i64>,
     caller_prefix: Option<&str>,
+    referenced_artifacts: &[String],
     goal_conversation: bool,
     work_prefix: Option<&str>,
     memory_text: &str,
 ) -> Result<Option<String>, AppError> {
     let mut sections: Vec<String> = Vec::new();
     let Some(id) = conversation_id else {
-        return Ok(crate::utils::turn_context::wrap(caller_prefix));
+        return Ok(crate::utils::turn_context::wrap(
+            caller_prefix.into_iter().map(str::to_owned).chain(referenced_artifacts.iter().cloned()),
+        ));
     };
     let db = ConversationDatabase::new(app_handle)?;
     let kind = db.conversation_repo()?.read(id)?.map(|c| c.conversation_kind).unwrap_or_default();
@@ -378,6 +381,7 @@ fn build_turn_context(
         sections.push(time);
     }
     sections.extend(caller_prefix.map(str::to_owned));
+    sections.extend(referenced_artifacts.iter().cloned());
     if !butler && !goal_conversation && work_prefix.is_none() {
         return Ok(crate::utils::turn_context::wrap(sections));
     }
@@ -1650,10 +1654,19 @@ pub async fn ask_ai(
     };
     // 本轮附加上下文（当前时间、外部渠道/插件前缀、工作记录、工作上下文、长期记忆）和用户原话一起存进正文末尾，
     // 之后逐字回放给模型，界面只显示原话。见 utils/turn_context.rs。
+    // 输入框里 `#收藏名` 引用的小工具：代码与修改方式随本轮上下文给模型，会话建好后再放进工作区（见 artifacts::references）
+    let artifact_references = crate::artifacts::references::prepare(
+        &app_handle,
+        processed_request.conversation_id.parse::<i64>().ok(),
+        &processed_request.prompt,
+    );
+    let artifact_reference_sections: Vec<String> =
+        artifact_references.iter().map(crate::artifacts::references::context_section).collect();
     let turn_context_block = build_turn_context(
         &app_handle,
         processed_request.conversation_id.parse::<i64>().ok(),
         runtime_user_prompt_prefix.as_deref(),
+        &artifact_reference_sections,
         butler_goal_conversation,
         work_context.prefix.as_deref(),
         &processed_request.prompt,
@@ -1863,6 +1876,7 @@ pub async fn ask_ai(
         crate::host_bridge::chat::bind_message(&app_handle,conversation_id,user_message_id,request.conversation_id.is_empty()).await
             .map_err(|e| AppError::UnknownError(e.to_string()))?;
     }
+    crate::artifacts::references::apply(&app_handle, conversation_id, &artifact_references);
     if request.conversation_id.is_empty() {
         if let Some(key) = request.client_request_id {
             let _ = window.emit_to(window.label(), "composer_conversation_created", serde_json::json!({

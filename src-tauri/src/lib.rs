@@ -166,7 +166,7 @@ use crate::artifacts::env_installer::{
     update_acp_library, update_bun, update_bun_with_proxy, update_uv, update_uv_with_proxy,
 };
 use crate::artifacts::preview_router::{
-    confirm_environment_install, preview_react_component, restore_artifact_preview,
+    confirm_environment_install, pop_out_artifact_preview, preview_react_component, restore_artifact_preview,
     retry_preview_after_install, run_artifacts,
 };
 use crate::artifacts::react_preview::{
@@ -1352,6 +1352,10 @@ pub fn run() {
             list_artifact_versions,
             get_artifact_version,
             restore_artifact_preview,
+            pop_out_artifact_preview,
+            crate::artifacts::workspace::capture_artifact_element,
+            crate::mcp::builtin_mcp::choices::artifact_build::build_artifact_version,
+            crate::mcp::builtin_mcp::choices::artifact_build::open_artifact_version_build,
             save_artifact_to_collection,
             get_artifacts_collection,
             get_artifact_by_id,

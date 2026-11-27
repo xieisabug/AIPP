@@ -13,7 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 describe("MobileArtifactPreview component changes", () => {
     it("should not resend component source when an initialized frame loads again", async () => {
         render(<MobileArtifactPreview preview={{ language: "react", code: "export default () => null" }} />);
-        const frame = await screen.findByTitle("隔离制品预览") as HTMLIFrameElement;
+        const frame = await screen.findByTitle("隔离 Artifact 预览") as HTMLIFrameElement;
         const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
         fireEvent.load(frame);
         fireEvent.load(frame);
@@ -23,16 +23,16 @@ describe("MobileArtifactPreview component changes", () => {
     it("replaces the iframe for different code or language while keeping identical preview state", async () => {
         const first = { language: "react", code: "export default () => null", title: "example" };
         const { rerender } = render(<MobileArtifactPreview preview={first} />);
-        const frame = await screen.findByTitle("隔离制品预览");
+        const frame = await screen.findByTitle("隔离 Artifact 预览");
         fireEvent.click(screen.getByRole("button", { name: "放大" }));
         rerender(<MobileArtifactPreview preview={{ ...first }} />);
-        expect(screen.getByTitle("隔离制品预览")).toBe(frame);
+        expect(screen.getByTitle("隔离 Artifact 预览")).toBe(frame);
         expect(screen.getByText("125%")).toBeTruthy();
         rerender(<MobileArtifactPreview preview={{ ...first, code: "export default () => 1" }} />);
-        await waitFor(() => expect(screen.getByTitle("隔离制品预览")).not.toBe(frame));
-        const second = screen.getByTitle("隔离制品预览");
+        await waitFor(() => expect(screen.getByTitle("隔离 Artifact 预览")).not.toBe(frame));
+        const second = screen.getByTitle("隔离 Artifact 预览");
         rerender(<MobileArtifactPreview preview={{ ...first, language: "vue", code: "<template>Vue</template>" }} />);
-        await waitFor(() => expect(screen.getByTitle("隔离制品预览")).not.toBe(second));
+        await waitFor(() => expect(screen.getByTitle("隔离 Artifact 预览")).not.toBe(second));
     });
     it("opens the save-to-collection dialog", async () => {
         render(<MobileArtifactPreview preview={{ language: "markdown", code: "# hi", title: "note" }} />);

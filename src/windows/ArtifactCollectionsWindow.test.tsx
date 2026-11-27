@@ -12,6 +12,8 @@ vi.mock("@/components/window/WindowTitleBar", () => ({
     useWindowTitleBarLayout: () => true,
 }));
 vi.mock("@/components/EditArtifactDialog", () => ({ default: () => null }));
+const chat = vi.hoisted(() => ({ startConversationInChat: vi.fn().mockResolvedValue(undefined), openConversationInChat: vi.fn() }));
+vi.mock("@/utils/openConversationInChat", () => chat);
 
 const source = (version: number) => JSON.stringify({ conversation_id: 7, artifact_key: "timer", version });
 
@@ -74,5 +76,16 @@ describe("ArtifactCollectionsWindow", () => {
         expect(screen.getAllByRole("button", { name: "编辑" })).toHaveLength(2);
         fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
         expect(await screen.findByText(/确定要删除 "番茄钟"/)).toBeTruthy();
+    });
+
+    it("should start a new conversation referencing a tool that has no source", async () => {
+        render(<ArtifactCollectionsWindow />);
+        await waitFor(() => expect(cardNames()).toHaveLength(2));
+        // 有来源的「番茄钟」显示回原会话，没有来源的「记账本」显示在新会话里修改
+        const buttons = screen.getAllByRole("button", { name: "在新会话里修改" });
+        expect(buttons).toHaveLength(1);
+        expect(screen.getAllByRole("button", { name: "回到原会话继续修改" })).toHaveLength(1);
+        fireEvent.click(buttons[0]);
+        expect(chat.startConversationInChat).toHaveBeenCalledWith("#记账本 ");
     });
 });

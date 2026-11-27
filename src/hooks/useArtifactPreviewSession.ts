@@ -41,6 +41,11 @@ export interface UseArtifactPreviewSessionOptions {
     onData?: (data: ArtifactData) => void;
     /** 当前会话的 Artifact 被重新发布时，重新加载本窗口缓存的预览。 */
     followManifestUpdates?: boolean;
+    /**
+     * 窗口关闭时结束预览服务器（默认开启）。注意 Tauri 的 `onCloseRequested` 处理完会销毁窗口，
+     * 嵌在聊天窗口这类「关闭即隐藏」的窗口里必须关掉，只在卸载时结束。
+     */
+    stopOnWindowClose?: boolean;
 }
 
 /**
@@ -48,7 +53,7 @@ export interface UseArtifactPreviewSessionOptions {
  * 渲染交给 ArtifactViewer；三个预览入口（预览窗口、侧栏、收藏窗口）共用。
  */
 export function useArtifactPreviewSession(options: UseArtifactPreviewSessionOptions) {
-    const { windowType, readyWindow, sourceWindow, followManifestUpdates = false } = options;
+    const { windowType, readyWindow, sourceWindow, followManifestUpdates = false, stopOnWindowClose = true } = options;
     const optionsRef = useRef(options);
     optionsRef.current = options;
 
@@ -218,6 +223,20 @@ export function useArtifactPreviewSession(options: UseArtifactPreviewSessionOpti
         };
     }, [isProject, conversationId, artifactKey, currentVersion, addLog]);
 
+    /** 读取某个版本的全部文件（「与上一版对比」）。 */
+    const loadVersionFiles = useCallback(
+        async (version: number): Promise<{ entryFile: string; files: ProjectFiles } | null> => {
+            if (conversationId === undefined || !artifactKey) return null;
+            const detail = await invoke<{ entry_file: string; files: ProjectFiles } | null>("get_artifact_version", {
+                conversationId,
+                artifactKey,
+                version,
+            });
+            return detail ? { entryFile: detail.entry_file, files: detail.files } : null;
+        },
+        [conversationId, artifactKey],
+    );
+
     /** 切换到某个历史版本：后端按版本快照重新推送（React/Vue 会重启预览服务）。 */
     const selectVersion = useCallback(
         (version: number) => {
@@ -254,19 +273,21 @@ export function useArtifactPreviewSession(options: UseArtifactPreviewSessionOpti
     useEffect(() => {
         let unlisten: (() => void) | null = null;
         let disposed = false;
-        getCurrentWebviewWindow()
-            .onCloseRequested(() => stopRuntime(contentRef.current))
-            .then((fn) => {
-                if (disposed) fn();
-                else unlisten = fn;
-            })
-            .catch(() => {});
+        if (stopOnWindowClose) {
+            getCurrentWebviewWindow()
+                .onCloseRequested(() => stopRuntime(contentRef.current))
+                .then((fn) => {
+                    if (disposed) fn();
+                    else unlisten = fn;
+                })
+                .catch(() => {});
+        }
         return () => {
             disposed = true;
             unlisten?.();
             void stopRuntime(contentRef.current);
         };
-    }, [stopRuntime]);
+    }, [stopRuntime, stopOnWindowClose]);
 
     return {
         content,
@@ -276,6 +297,7 @@ export function useArtifactPreviewSession(options: UseArtifactPreviewSessionOpti
         currentVersion,
         versions,
         selectVersion,
+        loadVersionFiles,
         projectFiles,
         logs: events.logs,
         addLog,

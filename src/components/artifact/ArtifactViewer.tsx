@@ -31,11 +31,13 @@ import ArtifactPreviewCodeBlock from "@/components/ArtifactPreviewCodeBlock";
 import { useArtifactBridge } from "@/hooks/useArtifactBridge";
 import type { LogLine } from "@/hooks/useArtifactEvents";
 import type { ArtifactBridgeConfig } from "@/data/ArtifactCollection";
+import type { ArtifactProjectBuild } from "@/hooks/useArtifactVersionBuild";
 import { cn } from "@/utils/utils";
 import MermaidPreview from "./MermaidPreview";
 import MarkdownPreview from "./MarkdownPreview";
 import DrawioPreview from "./DrawioPreview";
 import ProjectFrame, { readProjectFile, type ProjectFiles } from "./ProjectFrame";
+import { countChanges, diffLines } from "./lineDiff";
 import {
     ArtifactConsoleEntry,
     ArtifactPreviewType,
@@ -70,23 +72,34 @@ export interface ArtifactViewerProps {
     compact?: boolean;
     /** 宿主专属按钮（保存、临时配置等），放在工具栏右侧。 */
     actions?: ReactNode;
+    /** 工具栏最末尾（视图切换之后）：关闭面板、窗口按钮等。 */
+    toolbarEnd?: ReactNode;
     /** 替代默认预览（比选快照等引用型内容）。 */
     previewOverride?: ReactNode;
     /** 加载中界面顶部的内容（收藏项的图标与名称）。 */
     loadingHeader?: ReactNode;
     /** 把报错或「选择元素修改」的要求填进原会话输入框；返回 false 表示没有界面接收。不传则不显示这两个操作。 */
-    onFixWithAI?: (report: string) => Promise<boolean>;
+    onFixWithAI?: (report: string, attachments?: string[]) => Promise<boolean>;
+    /**
+     * 「选择元素修改」时在后台截取选中元素，返回本机图片路径，随修改要求一起加进输入框。
+     * 不传则只附带元素定位（收藏、旧版本等没有可截图的工作区文件）。
+     */
+    onCaptureElement?: (selector: string, size: { width: number; height: number }) => Promise<string>;
     /** 在独立窗口打开（侧栏使用）。 */
     onOpenInWindow?: () => void;
     /** Draw.io 编辑后的最新内容。 */
     onCodeChange?: (code: string) => void;
     /** 多文件版本的全部文件（`type === "project"` 时使用）与入口。 */
     projectFiles?: ProjectFiles | null;
+    /** 多文件版本的 Bun 构建（会话 Artifact 才有）：构建过则预览构建输出，否则带 package.json 时提供构建入口。 */
+    projectBuild?: ArtifactProjectBuild;
     entryFile?: string;
     /** 会话 Artifact 的版本：多于一个时工具栏可切换。 */
     versions?: { version: number; created_at: string }[];
     currentVersion?: number;
     onSelectVersion?: (version: number) => void;
+    /** 读取某个版本的文件；提供后代码视图可「与上一版对比」。 */
+    loadVersionFiles?: (version: number) => Promise<{ entryFile: string; files: ProjectFiles } | null>;
 }
 
 function formatVersionTime(value: string): string {
@@ -96,6 +109,8 @@ function formatVersionTime(value: string): string {
 }
 
 const MAX_RUNTIME_ENTRIES = 500;
+/** 提交修改要求时最多等元素截图多久（React/Vue 截图要启动一次后台预览）。 */
+const CAPTURE_WAIT_MS = 20_000;
 
 function buildLogLevel(type: LogLine["type"]): ArtifactConsoleEntry["level"] {
     return type === "error" ? "error" : type === "success" ? "success" : "log";
@@ -115,16 +130,20 @@ export default function ArtifactViewer({
     bridgeConfig,
     compact = false,
     actions,
+    toolbarEnd,
     previewOverride,
     loadingHeader,
     onFixWithAI,
+    onCaptureElement,
     onOpenInWindow,
     onCodeChange,
     projectFiles,
+    projectBuild,
     entryFile,
     versions = [],
     currentVersion,
     onSelectVersion,
+    loadVersionFiles,
 }: ArtifactViewerProps) {
     const rootRef = useRef<HTMLDivElement | null>(null);
     const previewAreaRef = useRef<HTMLDivElement | null>(null);
@@ -136,11 +155,21 @@ export default function ArtifactViewer({
     const [mermaidSvg, setMermaidSvg] = useState<string | null>(null);
     const [isSendingFix, setIsSendingFix] = useState(false);
     const [codeFile, setCodeFile] = useState<string | null>(null);
+    const [buildOutputDir, setBuildOutputDir] = useState("dist");
+    // 与上一版对比：上一版的文件（按版本缓存一份）与是否显示对比
+    const [comparing, setComparing] = useState(false);
+    const [previousFiles, setPreviousFiles] = useState<{ version: number; entryFile: string; files: ProjectFiles } | null>(null);
+    const [compareError, setCompareError] = useState("");
     // 选择元素修改：picking = 页面处于点选模式；picked = 已点中、等待填写修改要求的元素
     const [picking, setPicking] = useState(false);
     const [picked, setPicked] = useState<PickedElement | null>(null);
     const [editInstruction, setEditInstruction] = useState("");
     const [isSendingEdit, setIsSendingEdit] = useState(false);
+    // 选中元素的截图：点中后就在后台开始，提交时等它（最多 CAPTURE_WAIT_MS）
+    const [captureState, setCaptureState] = useState<"idle" | "capturing" | "done" | "failed">("idle");
+    const captureRef = useRef<Promise<string | null> | null>(null);
+    const onCaptureElementRef = useRef(onCaptureElement);
+    onCaptureElementRef.current = onCaptureElement;
 
     const { sendConfig } = useArtifactBridge({
         iframeRef: urlIframeRef,
@@ -160,7 +189,35 @@ export default function ArtifactViewer({
         setCodeFile(null);
         setPicking(false);
         setPicked(null);
+        setComparing(false);
+        setCompareError("");
+        captureRef.current = null;
+        setCaptureState("idle");
     }, [contentKey]);
+
+    const startElementCapture = (selector: string) => {
+        const capture = onCaptureElementRef.current;
+        if (!capture || !selector) {
+            captureRef.current = null;
+            setCaptureState("idle");
+            return;
+        }
+        const area = previewAreaRef.current?.getBoundingClientRect();
+        const size = { width: Math.round(area?.width || 1024), height: Math.round(area?.height || 768) };
+        setCaptureState("capturing");
+        const pending: Promise<string | null> = capture(selector, size).then(
+            (path) => {
+                if (captureRef.current === pending) setCaptureState("done");
+                return path;
+            },
+            (error) => {
+                console.warn("[ArtifactViewer] element screenshot failed", error);
+                if (captureRef.current === pending) setCaptureState("failed");
+                return null;
+            },
+        );
+        captureRef.current = pending;
+    };
 
     // 只接收本查看器内 iframe 里的诊断脚本消息
     useEffect(() => {
@@ -176,6 +233,7 @@ export default function ArtifactViewer({
                 if (pick.state === "picked") {
                     setPicked(pick.element);
                     setEditInstruction("");
+                    startElementCapture(pick.element.selector);
                 }
                 return;
             }
@@ -280,8 +338,20 @@ export default function ArtifactViewer({
         if (!onFixWithAI || !picked || !editInstruction.trim()) return;
         setIsSendingEdit(true);
         try {
+            const pending = captureRef.current;
+            const screenshot = pending
+                ? await Promise.race([pending, new Promise<null>((resolve) => setTimeout(() => resolve(null), CAPTURE_WAIT_MS))])
+                : null;
             const delivered = await onFixWithAI(
-                buildElementEditRequest({ title, type, version: currentVersion, element: picked, instruction: editInstruction }),
+                buildElementEditRequest({
+                    title,
+                    type,
+                    version: currentVersion,
+                    element: picked,
+                    instruction: editInstruction,
+                    withScreenshot: Boolean(screenshot),
+                }),
+                screenshot ? [screenshot] : undefined,
             );
             if (delivered) {
                 toast.success("已把修改要求填入会话输入框");
@@ -294,6 +364,28 @@ export default function ArtifactViewer({
             setIsSendingEdit(false);
         }
     }, [onFixWithAI, picked, editInstruction, title, type, currentVersion]);
+
+    // 上一版：版本列表按新到旧排列，取当前版本的下一项
+    const currentIndex = currentVersion === undefined ? -1 : versions.findIndex((item) => item.version === currentVersion);
+    const previousVersion = currentIndex >= 0 ? versions[currentIndex + 1]?.version : undefined;
+    const canCompare = Boolean(loadVersionFiles) && previousVersion !== undefined;
+
+    const toggleCompare = useCallback(async () => {
+        if (comparing) {
+            setComparing(false);
+            return;
+        }
+        setComparing(true);
+        if (!loadVersionFiles || previousVersion === undefined || previousFiles?.version === previousVersion) return;
+        setCompareError("");
+        try {
+            const loaded = await loadVersionFiles(previousVersion);
+            if (loaded) setPreviousFiles({ version: previousVersion, ...loaded });
+            else setCompareError(`v${previousVersion} 已不存在`);
+        } catch (error) {
+            setCompareError(`读取 v${previousVersion} 失败：${String(error)}`);
+        }
+    }, [comparing, loadVersionFiles, previousVersion, previousFiles]);
 
     const toggleFullscreen = useCallback(async () => {
         try {
@@ -439,6 +531,19 @@ export default function ArtifactViewer({
                     />
                 );
             case "project":
+                if (projectBuild?.url) {
+                    return (
+                        <iframe
+                            key={`${contentKey}-${reloadNonce}-build`}
+                            src={projectBuild.url}
+                            className="flex-1 w-full min-h-0 border-0 bg-white"
+                            sandbox="allow-scripts"
+                            referrerPolicy="no-referrer"
+                            title={title || "Artifact"}
+                            data-aipp-slot="artifact-viewer-build-frame"
+                        />
+                    );
+                }
                 return (
                     <ProjectFrame
                         key={`${contentKey}-${reloadNonce}`}
@@ -515,38 +620,96 @@ export default function ArtifactViewer({
         </div>
     );
 
+    const renderDiff = (current: string, fileName: string | null) => {
+        if (compareError) return <p className="p-3 text-xs text-destructive">{compareError}</p>;
+        if (!previousFiles || previousFiles.version !== previousVersion) {
+            return <p className="p-3 text-xs text-muted-foreground">正在读取 v{previousVersion}…</p>;
+        }
+        const name = fileName ?? previousFiles.entryFile;
+        const before = previousFiles.files[name] !== undefined ? readProjectFile(previousFiles.files, name) : "";
+        const lines = diffLines(before, current);
+        const { added, removed } = countChanges(lines);
+        return (
+            <div className="flex-1 overflow-auto min-h-0" data-aipp-slot="artifact-viewer-diff">
+                <p className="sticky top-0 border-b border-border bg-background px-3 py-1 text-xs text-muted-foreground">
+                    {added === 0 && removed === 0
+                        ? `与 v${previousVersion} 相同`
+                        : `相比 v${previousVersion}：+${added} 行，-${removed} 行`}
+                    {previousFiles.files[name] === undefined && "（上一版没有这个文件）"}
+                </p>
+                <pre className="m-0 p-0 font-mono text-xs leading-5">
+                    {lines.map((line, index) => (
+                        <div
+                            key={index}
+                            className={cn(
+                                "flex whitespace-pre-wrap break-all px-3",
+                                line.kind === "add" && "bg-foreground/[0.07]",
+                                line.kind === "del" && "bg-muted text-muted-foreground line-through decoration-muted-foreground/40",
+                            )}
+                        >
+                            <span className="w-4 shrink-0 select-none text-muted-foreground">
+                                {line.kind === "add" ? "+" : line.kind === "del" ? "-" : ""}
+                            </span>
+                            <span className="min-w-0 flex-1">{line.text || " "}</span>
+                        </div>
+                    ))}
+                </pre>
+            </div>
+        );
+    };
+
     const renderCode = () => {
         const projectFile = projectFiles && shownCodeFile ? shownCodeFile : null;
+        const currentText = projectFile ? readProjectFile(projectFiles!, projectFile) : code;
         return (
             <div className="flex-1 flex flex-col min-h-0">
-                {projectFiles && (
+                {(projectFiles || canCompare) && (
                     <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
-                        <span>文件</span>
-                        <select
-                            aria-label="工程文件"
-                            className="h-7 max-w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
-                            value={shownCodeFile ?? ""}
-                            onChange={(event) => setCodeFile(event.target.value)}
-                        >
-                            {projectFileNames.map((name) => (
-                                <option key={name} value={name}>
-                                    {name === entryFile ? `${name}（入口）` : name}
-                                </option>
-                            ))}
-                        </select>
-                        <span>共 {projectFileNames.length} 个</span>
+                        {projectFiles && (
+                            <>
+                                <span>文件</span>
+                                <select
+                                    aria-label="工程文件"
+                                    className="h-7 max-w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
+                                    value={shownCodeFile ?? ""}
+                                    onChange={(event) => setCodeFile(event.target.value)}
+                                >
+                                    {projectFileNames.map((name) => (
+                                        <option key={name} value={name}>
+                                            {name === entryFile ? `${name}（入口）` : name}
+                                        </option>
+                                    ))}
+                                </select>
+                                <span>共 {projectFileNames.length} 个</span>
+                            </>
+                        )}
+                        {canCompare && (
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="ml-auto h-7 px-2 text-xs aria-pressed:bg-accent aria-pressed:text-accent-foreground"
+                                aria-pressed={comparing}
+                                onClick={() => void toggleCompare()}
+                            >
+                                对比 v{previousVersion}
+                            </Button>
+                        )}
                     </div>
                 )}
+                {comparing && canCompare ? (
+                    renderDiff(currentText, projectFile)
+                ) : (
                 <div className="flex-1 overflow-auto min-h-0 p-3">
                     <div className="w-full [&_pre]:!overflow-visible [&_pre]:!m-0 [&_pre]:!p-0 [&_pre]:!bg-transparent">
                         <ArtifactPreviewCodeBlock
                             language={projectFile ? codeLanguageForFile(projectFile) : codeLanguageFor(type)}
                             className="bg-transparent"
                         >
-                            {projectFile ? readProjectFile(projectFiles!, projectFile) : code}
+                            {currentText}
                         </ArtifactPreviewCodeBlock>
                     </div>
                 </div>
+                )}
             </div>
         );
     };
@@ -679,9 +842,39 @@ export default function ArtifactViewer({
                         </TabsTrigger>
                     </TabsList>
                 </Tabs>
+                {toolbarEnd}
             </div>
 
             <div ref={previewAreaRef} className="relative flex flex-1 flex-col min-h-0">
+                {view === "preview" && type === "project" && projectBuild && !projectBuild.url && projectFiles?.["package.json"] && (
+                    <form
+                        className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground"
+                        data-aipp-slot="artifact-viewer-build"
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void projectBuild.build(buildOutputDir.trim());
+                        }}
+                    >
+                        <span>工程带 package.json，需要 npm 依赖时可本机构建</span>
+                        <label className="ml-auto flex items-center gap-1">
+                            输出目录
+                            <input
+                                className="h-7 w-20 rounded border border-border bg-background px-1.5 text-foreground"
+                                value={buildOutputDir}
+                                onChange={(event) => setBuildOutputDir(event.target.value)}
+                                aria-label="构建输出目录"
+                            />
+                        </label>
+                        <Button type="submit" variant="outline" size="sm" disabled={projectBuild.building || !buildOutputDir.trim()}>
+                            {projectBuild.building ? "正在构建…" : "用 Bun 安装依赖并构建"}
+                        </Button>
+                        {projectBuild.error && (
+                            <p role="alert" className="w-full whitespace-pre-wrap text-destructive">
+                                {projectBuild.error}
+                            </p>
+                        )}
+                    </form>
+                )}
                 {/* 预览始终挂载，切到代码/控制台不重载页面、不丢运行状态 */}
                 <div className={cn("flex flex-1 flex-col min-h-0", view !== "preview" && "hidden")}>{renderPreview()}</div>
                 {view === "code" && renderCode()}
@@ -715,6 +908,15 @@ export default function ArtifactViewer({
                                 {picked.selector}
                             </span>
                         </div>
+                        {captureState !== "idle" && (
+                            <p className="text-xs text-muted-foreground" data-aipp-slot="artifact-viewer-pick-capture">
+                                {captureState === "capturing"
+                                    ? "正在截取元素截图…"
+                                    : captureState === "done"
+                                      ? "已截取元素截图，会一起加进输入框"
+                                      : "元素截图失败，只附带元素定位"}
+                            </p>
+                        )}
                         {picked.text && (
                             <p className="truncate text-xs text-muted-foreground" title={picked.text}>
                                 {picked.text}

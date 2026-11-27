@@ -88,7 +88,55 @@ pub(crate) fn schema(conn: &Connection) -> rusqlite::Result<()> {
             assistant_id INTEGER,
             created_at TEXT NOT NULL,
             PRIMARY KEY (conversation_id, artifact_key, version));",
-    )
+    )?;
+    // 多文件版本用 Bun 构建后的静态输出（与比选工程的 build 同格式）；旧库补列
+    let has_build: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('artifact_version') WHERE name='build'")?
+        .exists([])?;
+    if !has_build {
+        conn.execute("ALTER TABLE artifact_version ADD COLUMN build TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// 保存某个版本的构建输出（文件名 → base64）。版本不存在时返回 false。
+pub(crate) fn set_build_in(
+    conn: &Connection,
+    conversation_id: i64,
+    artifact_key: &str,
+    version: i64,
+    build: &Project,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE artifact_version SET build=?4 WHERE conversation_id=?1 AND artifact_key=?2 AND version=?3",
+        params![conversation_id, artifact_key, version, serde_json::to_string(build)?],
+    )?;
+    Ok(changed > 0)
+}
+
+/// 某个版本的构建输出（JSON），没有构建过时为 None。
+pub(crate) fn get_build_in(
+    conn: &Connection,
+    conversation_id: i64,
+    artifact_key: &str,
+    version: i64,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT build FROM artifact_version WHERE conversation_id=?1 AND artifact_key=?2 AND version=?3",
+            params![conversation_id, artifact_key, version],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+pub fn set_build(app: &AppHandle, conversation_id: i64, artifact_key: &str, version: i64, build: &Project) -> Result<bool> {
+    set_build_in(&db(app)?, conversation_id, artifact_key, version, build)
+}
+
+pub fn get_build(app: &AppHandle, conversation_id: i64, artifact_key: &str, version: i64) -> Result<Option<String>> {
+    get_build_in(&db(app)?, conversation_id, artifact_key, version)
 }
 
 fn db(app: &AppHandle) -> Result<Connection> {

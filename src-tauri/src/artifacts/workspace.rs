@@ -150,6 +150,9 @@ pub struct CaptureArtifactScreenshotRequest {
     pub preview_type: Option<String>,
     pub output_mode: Option<String>,
     pub selector: Option<String>,
+    /// 只截这个元素（CSS 选择器）；不传则截整个视口。供「选择元素修改」附带元素截图。
+    #[serde(default)]
+    pub clip_selector: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub delay_ms: Option<u64>,
@@ -429,6 +432,55 @@ pub fn show_artifact(
     })
 }
 
+/// 截图时要点击的元素（`selector`）与只截的元素（`clip_selector`）。
+#[derive(Clone, Copy)]
+#[cfg_attr(not(desktop), allow(dead_code))]
+struct CaptureTarget<'a> {
+    click: Option<&'a str>,
+    clip: Option<&'a str>,
+}
+
+impl<'a> CaptureTarget<'a> {
+    #[cfg_attr(not(desktop), allow(dead_code))]
+    fn of(request: &'a CaptureArtifactScreenshotRequest) -> Self {
+        Self { click: request.selector.as_deref(), clip: request.clip_selector.as_deref() }
+    }
+}
+
+/// 「选择元素修改」：在后台截取会话 Artifact（工作区当前文件）里的一个元素，返回临时 PNG 路径。
+#[tauri::command]
+pub async fn capture_artifact_element(
+    app_handle: AppHandle,
+    conversation_id: i64,
+    artifact_key: String,
+    selector: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<String, String> {
+    let item = list_published_artifacts(&app_handle, conversation_id)?
+        .into_iter()
+        .find(|item| item.artifact_key == artifact_key)
+        .ok_or_else(|| format!("会话 {conversation_id} 里找不到 Artifact {artifact_key}"))?;
+    let response = capture_artifact_screenshot(
+        &app_handle,
+        CaptureArtifactScreenshotRequest {
+            conversation_id,
+            artifact_key,
+            entry_file: item.entry_file,
+            language: Some(item.language),
+            preview_type: Some(item.preview_type),
+            output_mode: Some("path".to_string()),
+            selector: None,
+            clip_selector: Some(selector),
+            width,
+            height,
+            delay_ms: Some(500),
+        },
+    )
+    .await?;
+    response.path.ok_or_else(|| "截图没有生成文件".to_string())
+}
+
 #[cfg(desktop)]
 pub async fn capture_artifact_screenshot(
     app_handle: &AppHandle,
@@ -446,7 +498,7 @@ pub async fn capture_artifact_screenshot(
             capture_html_screenshot(
                 app_handle,
                 &html,
-                request.selector.as_deref(),
+                CaptureTarget::of(&request),
                 width,
                 height,
                 delay_ms,
@@ -458,7 +510,7 @@ pub async fn capture_artifact_screenshot(
             capture_html_screenshot(
                 app_handle,
                 &html,
-                request.selector.as_deref(),
+                CaptureTarget::of(&request),
                 width,
                 height,
                 delay_ms,
@@ -469,7 +521,7 @@ pub async fn capture_artifact_screenshot(
             capture_component_preview_screenshot(
                 app_handle,
                 &prepared,
-                request.selector.as_deref(),
+                CaptureTarget::of(&request),
                 width,
                 height,
                 delay_ms,
@@ -480,7 +532,7 @@ pub async fn capture_artifact_screenshot(
             capture_component_preview_screenshot(
                 app_handle,
                 &prepared,
-                request.selector.as_deref(),
+                CaptureTarget::of(&request),
                 width,
                 height,
                 delay_ms,
@@ -492,7 +544,7 @@ pub async fn capture_artifact_screenshot(
                 capture_component_preview_screenshot(
                     app_handle,
                     &prepared,
-                    request.selector.as_deref(),
+                    CaptureTarget::of(&request),
                     width,
                     height,
                     delay_ms,
@@ -574,6 +626,7 @@ pub async fn check_artifact_runtime(
         preview_type,
         output_mode: None,
         selector: None,
+        clip_selector: None,
         width: None,
         height: None,
         delay_ms: None,
@@ -874,7 +927,7 @@ fn prepare_artifact_capture(
 async fn capture_component_preview_screenshot(
     app_handle: &AppHandle,
     prepared: &PreparedArtifactCapture,
-    selector: Option<&str>,
+    target: CaptureTarget<'_>,
     width: u32,
     height: u32,
     delay_ms: u64,
@@ -884,7 +937,7 @@ async fn capture_component_preview_screenshot(
     remove_legacy_capture_dirs(app_handle);
     let session = launch_component_preview(app_handle, prepared).await?;
     let capture_result =
-        capture_url_screenshot(app_handle, &session.url, selector, width, height, delay_ms).await;
+        capture_url_screenshot(app_handle, &session.url, target, width, height, delay_ms).await;
     session.cleanup(app_handle);
     capture_result
 }
@@ -1061,7 +1114,7 @@ async fn wait_for_local_url_ready(port: u16, timeout_duration: Duration) -> Resu
 async fn capture_html_screenshot(
     app_handle: &AppHandle,
     html: &str,
-    selector: Option<&str>,
+    target: CaptureTarget<'_>,
     width: u32,
     height: u32,
     delay_ms: u64,
@@ -1078,8 +1131,8 @@ async fn capture_html_screenshot(
             .await
             .map_err(|e| format!("Failed to set page content: {}", e))?;
         wait_for_render_stability(&page, delay_ms).await?;
-        click_selector_if_requested(&page, selector, delay_ms).await?;
-        take_png_screenshot(&page).await
+        click_selector_if_requested(&page, target.click, delay_ms).await?;
+        take_png_screenshot(&page, target.clip).await
     }
     .await;
 
@@ -1094,7 +1147,7 @@ async fn capture_html_screenshot(
 async fn capture_url_screenshot(
     app_handle: &AppHandle,
     url: &str,
-    selector: Option<&str>,
+    target: CaptureTarget<'_>,
     width: u32,
     height: u32,
     delay_ms: u64,
@@ -1109,8 +1162,8 @@ async fn capture_url_screenshot(
         configure_capture_viewport(&page, width, height).await?;
         page.goto(url).await.map_err(|e| format!("Failed to open preview URL '{}': {}", url, e))?;
         wait_for_render_stability(&page, delay_ms).await?;
-        click_selector_if_requested(&page, selector, delay_ms).await?;
-        take_png_screenshot(&page).await
+        click_selector_if_requested(&page, target.click, delay_ms).await?;
+        take_png_screenshot(&page, target.clip).await
     }
     .await;
 
@@ -1239,7 +1292,18 @@ async fn click_selector_if_requested(
 }
 
 #[cfg(desktop)]
-async fn take_png_screenshot(page: &chromiumoxide::Page) -> Result<Vec<u8>, String> {
+async fn take_png_screenshot(page: &chromiumoxide::Page, clip: Option<&str>) -> Result<Vec<u8>, String> {
+    if let Some(selector) = clip {
+        let element = page
+            .find_element(selector)
+            .await
+            .map_err(|e| format!("Element '{}' not found for screenshot: {}", selector, e))?;
+        let _ = element.scroll_into_view().await;
+        return element
+            .screenshot(CaptureScreenshotFormat::Png)
+            .await
+            .map_err(|e| format!("Failed to capture element '{}': {}", selector, e));
+    }
     page.screenshot(
         ScreenshotParams::builder()
             .format(CaptureScreenshotFormat::Png)
@@ -1741,7 +1805,7 @@ mod tests {
             .await
             .expect("set content");
             click_selector_if_requested(&page, Some("#toggle"), 50).await.expect("click selector");
-            let bytes = take_png_screenshot(&page).await.expect("take screenshot");
+            let bytes = take_png_screenshot(&page, None).await.expect("take screenshot");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
 
             let _ = page.close().await;

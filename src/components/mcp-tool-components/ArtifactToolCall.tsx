@@ -5,6 +5,7 @@ import { AlertTriangle, AppWindow, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ConversationArtifactItem } from "@/hooks/useExplicitArtifacts";
 import type { McpToolComponentProps } from "@/services/mcpToolComponentRegistry";
+import { artifactPreviewTarget } from "@/components/artifact/artifactPane";
 
 export interface ShowArtifactResult {
     artifact_key: string;
@@ -135,6 +136,7 @@ export default function ArtifactToolCall(props: McpToolComponentProps) {
                 artifactKey: item.artifact_key,
                 entryFile: item.entry_file,
                 version: result.version,
+                ...artifactPreviewTarget(),
             });
         } catch (error) {
             toast.error(`打开 Artifact 失败：${error instanceof Error ? error.message : String(error)}`);

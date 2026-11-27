@@ -1,4 +1,5 @@
 import { SavedChoicePreview, readPreviewReference } from "@/components/choices/ChoicePreview";
+import { useArtifactVersionBuild } from "@/hooks/useArtifactVersionBuild";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Bot, Database, Settings2 } from "lucide-react";
@@ -10,6 +11,7 @@ import { previewInstanceId } from "@/components/artifact/artifactRuntime";
 import { useTheme } from "../hooks/useTheme";
 import { useArtifactPreviewSession } from "@/hooks/useArtifactPreviewSession";
 import type { ArtifactData } from "../hooks/useArtifactEvents";
+import { elementCapture } from "@/components/artifact/elementCapture";
 import { requestArtifactFix } from "@/utils/artifactFixRequest";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -196,6 +198,14 @@ export default function ArtifactPreviewWindow() {
         </>
     );
 
+
+    // 多文件版本的 Bun 构建（只在看多文件版本时打开）
+    const projectBuild = useArtifactVersionBuild({
+        conversationId: session.conversationId,
+        artifactKey: session.artifactKey,
+        version: session.currentVersion,
+        enabled: session.content?.type === "project",
+    });
     return (
         <div className="flex h-screen bg-background overflow-hidden" data-aipp-window={WINDOW_LABEL} data-aipp-slot="window-root">
             <div
@@ -213,14 +223,19 @@ export default function ArtifactPreviewWindow() {
                     actions={actions}
                     previewOverride={choiceReference ? <SavedChoicePreview reference={choiceReference} /> : undefined}
                     onFixWithAI={
-                        conversationId !== undefined ? (report) => requestArtifactFix(conversationId, report) : undefined
+                        conversationId !== undefined
+                            ? (report, attachments) => requestArtifactFix(conversationId, report, attachments)
+                            : undefined
                     }
+                    onCaptureElement={elementCapture(conversationId, session)}
                     onCodeChange={session.updateCode}
                     projectFiles={session.projectFiles}
+                    projectBuild={projectBuild}
                     entryFile={content?.data.entry_file}
                     versions={session.versions}
                     currentVersion={session.currentVersion}
                     onSelectVersion={session.selectVersion}
+                loadVersionFiles={session.loadVersionFiles}
                 />
             </div>
 

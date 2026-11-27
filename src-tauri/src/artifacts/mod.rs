@@ -12,6 +12,9 @@ pub mod powershell;
 pub mod preview_router;
 pub mod react_preview;
 pub mod react_runner;
+pub mod references;
+#[cfg(test)]
+mod references_tests;
 pub mod shared_components;
 pub mod vue_preview;
 pub mod versions;

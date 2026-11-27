@@ -227,7 +227,7 @@ pub fn get_artifact_by_id(
     load_collection_item(&app_handle, &db, id)
 }
 
-fn load_collection_item(
+pub(crate) fn load_collection_item(
     app: &tauri::AppHandle, db: &ArtifactsDatabase, id: i64,
 ) -> Result<Option<ArtifactCollection>, String> {
     let Some(mut item) = db.get_artifact_by_id(id).map_err(|e| e.to_string())? else { return Ok(None) };

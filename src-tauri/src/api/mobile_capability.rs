@@ -54,7 +54,7 @@ pub fn tool_issue(transport: &str, command: Option<&str>, tool: Option<&str>) ->
     match (command, tool) {
         ("aipp:search", Some("search_web")) => Some(issue("browser_search", "当前搜索依赖桌面 Chromium；HTTP fetch_url 不受此限制")),
         ("aipp:operation", Some("execute_bash" | "get_bash_output" | "kill_bash")) => Some(issue("script_execution", "该工具依赖桌面 Shell 进程")),
-        ("aipp:artifact", Some("capture_artifact_screenshot")) => Some(issue("artifact_screenshot", "制品截图依赖桌面浏览器，移动端暂不支持")),
+        ("aipp:artifact", Some("capture_artifact_screenshot")) => Some(issue("artifact_screenshot", "Artifact 截图依赖桌面浏览器，移动端暂不支持")),
         _ => None,
     }
 }

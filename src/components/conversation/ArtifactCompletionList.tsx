@@ -1,6 +1,7 @@
 import React, { useRef, useEffect } from "react";
 import { ArtifactCollectionItem } from "../../data/ArtifactCollection";
 import { formatIconDisplay } from "@/utils/emojiUtils";
+import { ExternalLink } from "lucide-react";
 
 interface ArtifactCompletionListProps {
     artifactListVisible: boolean;
@@ -87,7 +88,7 @@ export default function ArtifactCompletionList({
                 left: cursorPosition.left,
             }}
         >
-            <div className="artifact-completion-hint">Tab 补全名称 • Enter 打开</div>
+            <div className="artifact-completion-hint">Enter 引用（发送时把它的代码附带给 AI）• Ctrl/⌘+Enter 打开</div>
             {artifacts.map((artifact, index) => (
                 <div
                     key={artifact.id}
@@ -111,6 +112,20 @@ export default function ArtifactCompletionList({
                         </span>
                         <span className="artifact-completion-name">{artifact.name}</span>
                         <span className="artifact-completion-type">{artifact.artifact_type}</span>
+                        <button
+                            type="button"
+                            className="artifact-completion-open ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                            title="打开"
+                            aria-label={`打开 ${artifact.name}`}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                setArtifactListVisible(false);
+                                onArtifactSelect?.(artifact, "open");
+                            }}
+                        >
+                            <ExternalLink className="size-3.5" />
+                        </button>
                     </div>
                     {artifact.description && (
                         <div className="artifact-completion-description">{artifact.description}</div>

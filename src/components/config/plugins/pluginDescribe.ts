@@ -3,7 +3,7 @@ import { pluginTypeLabel, type InstalledPlugin, type PluginEntry } from './plugi
 /** 把 manifest 里的 contributions / permissions 翻译成用户能看懂的话；不显示原始字段名。 */
 
 const DATA_LABELS: Record<string, string> = {
-    conversation: '对话', llm: '模型', assistant: '助手', system: '系统设置', plugin: '插件', mcp: '应用与工具', artifacts: '制品',
+    conversation: '对话', llm: '模型', assistant: '助手', system: '系统设置', plugin: '插件', mcp: '应用与工具', artifacts: 'Artifact',
 };
 
 export function describePermission(permission: string): string {

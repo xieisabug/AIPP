@@ -16,3 +16,18 @@ export async function openConversationInChat(conversationId: number): Promise<vo
         setTimeout(unlisten, 10_000);
     }
 }
+
+/** 聊天窗口切到新会话并把 `text` 放进输入框的事件（不自动发送）。 */
+export const START_CONVERSATION_WITH_DRAFT_EVENT = "start_conversation_with_draft";
+
+/** 在聊天窗口开一个新会话，输入框预填 `text`（例如合集「在新会话里修改」填入 `#收藏名 `）。 */
+export async function startConversationInChat(text: string): Promise<void> {
+    const start = () => void emitTo("chat_ui", START_CONVERSATION_WITH_DRAFT_EVENT, { text });
+    const unlisten = await once("chat-ui-window-load", start);
+    start();
+    try {
+        await invoke("open_chat_ui_window");
+    } finally {
+        setTimeout(unlisten, 10_000);
+    }
+}

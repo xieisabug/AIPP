@@ -554,8 +554,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         // 预览窗口「让 AI 修复」：报错填进本会话输入框（接在已有草稿后），由用户补充后发送
-        useArtifactFixRequests(conversationId ? Number(conversationId) : null, (text) => {
+        useArtifactFixRequests(conversationId ? Number(conversationId) : null, (text, attachments) => {
             setInputText((prev) => (prev.trim() ? `${prev}\n\n${text}` : text));
+            if (attachments.length > 0) void addLocalPaths(attachments);
             const currentWindow = getCurrentWebviewWindow();
             void currentWindow.unminimize().catch(() => {});
             void currentWindow.show().catch(() => {});

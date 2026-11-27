@@ -123,7 +123,7 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
             </Button>
             <AppUpdateNotice />
             {canShowArtifacts && (
-                <Button iconLabel="打开制品合集" onClick={openArtifactsCollections} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-artifacts">
+                <Button iconLabel="打开 Artifact 合集" onClick={openArtifactsCollections} variant={"ghost"} {...actionButtonProps} data-aipp-slot="chat-info-open-artifacts">
                     <PackageOpen />
                 </Button>
             )}

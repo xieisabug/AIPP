@@ -90,7 +90,7 @@ export default function ArtifactWindow() {
                     onCodeChange={session.updateCode}
                     onFixWithAI={
                         sourceConversationId !== null
-                            ? (text) => requestArtifactFixOpening(sourceConversationId, text)
+                            ? (text, attachments) => requestArtifactFixOpening(sourceConversationId, text, attachments)
                             : undefined
                     }
                     currentVersion={info?.source_version}

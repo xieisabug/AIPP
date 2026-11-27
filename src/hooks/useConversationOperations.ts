@@ -12,6 +12,7 @@ import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
 import { splitTurnContext, withTurnContext } from "../utils/turnContext";
 import type { ArtifactRunBinding } from "../components/chat-sidebar/types";
+import { artifactPreviewTarget } from "@/components/artifact/artifactPane";
 
 export interface UseConversationOperationsProps {
     conversation?: Conversation;
@@ -281,7 +282,7 @@ export function useConversationOperations({
     // 代码运行处理
     const handleArtifact = useCallback((lang: string, inputStr: string, binding?: ArtifactRunBinding) => {
         const conversationId = conversation?.id;
-        invoke("run_artifacts", { lang, inputStr, conversationId, ...binding })
+        invoke("run_artifacts", { lang, inputStr, conversationId, ...binding, ...artifactPreviewTarget() })
             .then((res) => {
                 console.log(res);
             })

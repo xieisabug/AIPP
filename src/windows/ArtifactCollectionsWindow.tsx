@@ -23,10 +23,10 @@ import { useToast } from "@/hooks/use-toast";
 import { useTheme } from "@/hooks/useTheme";
 import { formatIconDisplay } from "@/utils/emojiUtils";
 import { cn } from "@/utils/utils";
-import { Search, Folder, PackageOpen, Pencil, Trash2, MessageSquareShare, RefreshCw } from "lucide-react";
+import { Search, Folder, PackageOpen, Pencil, Trash2, MessageSquareShare, MessageSquarePlus, RefreshCw } from "lucide-react";
 import { WindowTopBar, dragRegionProps, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import EditArtifactDialog from "@/components/EditArtifactDialog";
-import { openConversationInChat } from "@/utils/openConversationInChat";
+import { openConversationInChat, startConversationInChat } from "@/utils/openConversationInChat";
 import {
     COLLECTION_SORT_LABELS,
     collectTags,
@@ -169,6 +169,13 @@ export default function ArtifactCollectionsWindow() {
         );
     };
 
+    // 新会话里输入框预填 `#名称 `：发送时附带它的代码，模型发布新版本后可在这里更新收藏
+    const iterateInNewConversation = (artifact: ArtifactCollection) => {
+        startConversationInChat(`#${artifact.name} `).catch((error) =>
+            toast({ title: "打开聊天窗口失败", description: String(error), variant: "destructive" }),
+        );
+    };
+
     // 把收藏换成原会话里的最新版本
     const syncFromSource = async (artifact: ArtifactCollection) => {
         setSyncingId(artifact.id);
@@ -223,7 +230,7 @@ export default function ArtifactCollectionsWindow() {
     return (
         <div className="flex flex-col h-screen bg-background" data-aipp-window="artifact_collections" data-aipp-slot="window-root">
             {/* 桌面统一标题栏：标题移到顶栏，与聊天 / 管家窗口头部同高 */}
-            <WindowTopBar title="Artifacts 合集" icon={<PackageOpen />} data-aipp-slot="artifact-collections-titlebar">
+            <WindowTopBar title="Artifact 合集" icon={<PackageOpen />} data-aipp-slot="artifact-collections-titlebar">
                 <span className="shrink-0 select-none text-xs text-muted-foreground" {...dragRegionProps(framelessTitleBar)}>共 {artifacts.length} 个</span>
             </WindowTopBar>
             <div className="flex min-h-0 flex-1 flex-col p-6">
@@ -231,9 +238,9 @@ export default function ArtifactCollectionsWindow() {
                 {!titleBarLayout && (
                 <div className="flex items-center justify-between">
                     <div>
-                        <h1 className="text-2xl font-bold">Artifacts 合集</h1>
+                        <h1 className="text-2xl font-bold">Artifact 合集</h1>
                         <p className="text-muted-foreground">
-                            管理您保存的所有 artifacts，共 {artifacts.length} 个项目
+                            管理您保存的所有 Artifact，共 {artifacts.length} 个项目
                         </p>
                     </div>
                 </div>
@@ -312,7 +319,7 @@ export default function ArtifactCollectionsWindow() {
                         <div className="text-center">
                             <Folder className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
                             <p className="text-muted-foreground">
-                                {isFiltering ? "没有找到匹配的 artifacts" : "还没有保存任何 artifacts"}
+                                {isFiltering ? "没有找到匹配的 Artifact" : "还没有保存任何 Artifact"}
                             </p>
                         </div>
                     </div>
@@ -343,9 +350,13 @@ export default function ArtifactCollectionsWindow() {
                                         data-aipp-slot="artifact-collections-card"
                                     >
                                         <div className="absolute right-1 top-1 flex gap-0.5" onClick={(event) => event.stopPropagation()}>
-                                            {source && (
+                                            {source ? (
                                                 <Button variant="ghost" iconLabel="回到原会话继续修改" className={CARD_ACTION_CLASS} onClick={() => openSource(source)}>
                                                     <MessageSquareShare className="size-3.5" />
+                                                </Button>
+                                            ) : (
+                                                <Button variant="ghost" iconLabel="在新会话里修改" className={CARD_ACTION_CLASS} onClick={() => iterateInNewConversation(artifact)}>
+                                                    <MessageSquarePlus className="size-3.5" />
                                                 </Button>
                                             )}
                                             <Button variant="ghost" iconLabel="编辑" className={CARD_ACTION_CLASS} onClick={() => handleEdit(artifact)}>
@@ -406,9 +417,10 @@ export default function ArtifactCollectionsWindow() {
                                     <ContextMenuItem onClick={() => handleEdit(artifact)}>编辑</ContextMenuItem>
                                     {source && (
                                         <ContextMenuItem onClick={() => openSource(source)}>
-                                            回到原会话继续修改（v{source.version}）
+                                            回到原会话继续修改{source.version > 0 ? `（v${source.version}）` : ""}
                                         </ContextMenuItem>
                                     )}
+                                    <ContextMenuItem onClick={() => iterateInNewConversation(artifact)}>在新会话里修改</ContextMenuItem>
                                     {update && (
                                         <ContextMenuItem disabled={syncing} onClick={() => void syncFromSource(artifact)}>
                                             更新到原会话的 v{update.latest_version}

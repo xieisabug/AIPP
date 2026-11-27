@@ -253,6 +253,8 @@ export function buildElementEditRequest(options: {
     version?: number | null;
     element: PickedElement;
     instruction: string;
+    /** 是否附带了元素截图（作为输入框附件）。 */
+    withScreenshot?: boolean;
 }): string {
     const { element } = options;
     const name = options.title ? `「${options.title}」` : "";
@@ -261,6 +263,7 @@ export function buildElementEditRequest(options: {
     const lines = [`请修改 Artifact${name}${kind}${version}里的这个元素：${options.instruction.trim()}`, "", `- 元素：\`<${element.tag}>\``];
     if (element.selector) lines.push(`- 位置：\`${element.selector}\``);
     if (element.text) lines.push(`- 文字：${element.text}`);
+    if (options.withScreenshot) lines.push("- 截图：见附件");
     if (element.html) {
         const fence = element.html.includes("```") ? "~~~~" : "```";
         lines.push("", "页面中渲染出的 HTML（可能与源码写法不同）：", `${fence}html`, element.html, fence);

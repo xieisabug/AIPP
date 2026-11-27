@@ -100,3 +100,24 @@ fn multi_file_flag_is_stored() {
     assert!(summary.multi_file);
     assert_eq!(summary.file_count, 2);
 }
+
+#[test]
+fn build_output_is_stored_per_version() {
+    let conn = conn();
+    let files = project(&[("index.html", "<script src=\"./main.js\"></script>"), ("main.js", "1"), ("package.json", "{}")]);
+    let first = record_version_in(&conn, files, new_version("index.html"), "t1").unwrap();
+    assert_eq!(get_build_in(&conn, 7, "ui/card", first.version).unwrap(), None);
+
+    let output = project(&[("index.html", "<p>built</p>")]);
+    assert!(set_build_in(&conn, 7, "ui/card", first.version, &output).unwrap());
+    let stored: Project = serde_json::from_str(&get_build_in(&conn, 7, "ui/card", first.version).unwrap().unwrap()).unwrap();
+    assert_eq!(stored, output);
+    assert!(!set_build_in(&conn, 7, "ui/card", 99, &output).unwrap());
+}
+
+#[test]
+fn schema_adds_build_column_once() {
+    let conn = conn();
+    schema(&conn).unwrap();
+    schema(&conn).unwrap();
+}

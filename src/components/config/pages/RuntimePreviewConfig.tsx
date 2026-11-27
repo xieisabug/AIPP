@@ -204,7 +204,7 @@ export const RuntimePreviewConfig: React.FC<RuntimePreviewConfigProps> = ({
         <>
             <SettingsPageShell
                 title="运行环境与预览"
-                description="管理用于制品构建、脚本运行的本地运行时，以及 HTML/React/Vue 预览的外部资源安全白名单。"
+                description="管理用于 Artifact 构建、脚本运行的本地运行时，以及 HTML/React/Vue 预览的外部资源安全白名单。"
                 headerExtra={
                     isDirty ? (
                         <span className="rounded-full border border-foreground/30 bg-muted px-2.5 py-0.5 text-xs font-medium">
@@ -235,7 +235,7 @@ export const RuntimePreviewConfig: React.FC<RuntimePreviewConfigProps> = ({
                                         ) : null}
                                     </span>
                                 }
-                                description="用于 React / Vue 制品预览与前端项目临时构建。"
+                                description="用于 React / Vue Artifact 预览与前端项目临时构建。"
                             />
                             <div className="flex shrink-0 items-center gap-1.5">
                                 {!bunInstalled ? (

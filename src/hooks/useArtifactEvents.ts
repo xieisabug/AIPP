@@ -1,5 +1,20 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { listen, emit } from '@tauri-apps/api/event';
+import { listen, emit, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+
+/**
+ * 只收发给本窗口的预览事件。后端按目标窗口 `emit_to`，这里按本窗口标签监听：
+ * 侧栏、独立预览窗口、聊天窗口分栏各自的预览互不串内容；全局广播的事件（如安装完成）照常收到。
+ */
+function listenHere<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+    let label: string | undefined;
+    try {
+        label = getCurrentWebviewWindow().label;
+    } catch {
+        label = undefined;
+    }
+    return label ? listen<T>(event, handler, { target: label }) : listen<T>(event, handler);
+}
 
 export interface LogLine {
     type: 'log' | 'error' | 'success';
@@ -331,16 +346,16 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
             try {
                 // 1. 先注册所有监听器
                 const unlisteners = await Promise.all([
-                    listen(dataEvent, handleArtifactData),
-                    listen(logEvent, createLogHandler('log')),
-                    listen(errorEvent, createLogHandler('error')),
-                    listen(successEvent, createLogHandler('success')),
-                    listen(redirectEvent, handleRedirect),
-                    listen('environment-check', handleEnvironmentCheck),
-                    listen('environment-install-started', handleEnvironmentInstallStarted),
-                    listen('bun-install-finished', handleBunInstallFinished),
-                    listen('uv-install-finished', handleUvInstallFinished),
-                    listen('artifact-preview-reset', handleReset),
+                    listenHere(dataEvent, handleArtifactData),
+                    listenHere(logEvent, createLogHandler('log')),
+                    listenHere(errorEvent, createLogHandler('error')),
+                    listenHere(successEvent, createLogHandler('success')),
+                    listenHere(redirectEvent, handleRedirect),
+                    listenHere('environment-check', handleEnvironmentCheck),
+                    listenHere('environment-install-started', handleEnvironmentInstallStarted),
+                    listenHere('bun-install-finished', handleBunInstallFinished),
+                    listenHere('uv-install-finished', handleUvInstallFinished),
+                    listenHere('artifact-preview-reset', handleReset),
                 ]);
 
 

@@ -86,7 +86,7 @@ impl ReactPreviewManager {
         let preview_id = crate::artifacts::shared_components::preview_instance_id("react", &target_window_name);
         println!("🚀 [React Preview] 开始创建预览, ID: {}", preview_id);
         if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
-            let _ = window.emit(
+            let _ = window.emit_to(window.label(), 
                 "artifact-preview-log",
                 serde_json::json!({
                     "message": "开始创建 React 预览...",
@@ -113,7 +113,7 @@ impl ReactPreviewManager {
         let process_id = self.start_dev_server(&template_path, port, need_install_deps)?;
         println!("🚀 [React Preview] 开发服务器已启动, PID: {}", process_id);
         if let Some(window) = self.app_handle.get_webview_window(&target_window_name) {
-            let _ = window.emit(
+            let _ = window.emit_to(window.label(), 
                 "artifact-preview-log",
                 serde_json::json!({ "message": "预览服务启动", "request_id": request_id }),
             );
@@ -137,7 +137,7 @@ impl ReactPreviewManager {
             // 等待服务器启动
             println!("🚀 [React Preview] 等待服务器启动...");
             if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                let _ = window.emit(
+                let _ = window.emit_to(window.label(), 
                     "artifact-preview-log",
                     serde_json::json!({ "message": "等待服务器启动完毕...", "request_id": request_id }),
                 );
@@ -161,7 +161,7 @@ impl ReactPreviewManager {
                     let preview_url = format!("http://localhost:{}", port);
                     println!("🚀 [React Preview] 预览已准备完成: {}", preview_url);
                     if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                        let _ = window.emit(
+                        let _ = window.emit_to(window.label(), 
                             "artifact-preview-success",
                             serde_json::json!({ "message": "预览服务器已启动完成", "request_id": request_id }),
                         );
@@ -169,7 +169,7 @@ impl ReactPreviewManager {
 
                     // 发送跳转事件，让前端窗口自动跳转到预览页面
                     if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                        let _ = window.emit(
+                        let _ = window.emit_to(window.label(), 
                             "artifact-preview-redirect",
                             serde_json::json!({ "url": preview_url, "request_id": request_id }),
                         );
@@ -178,7 +178,7 @@ impl ReactPreviewManager {
                 PreviewMode::Window => {
                     println!("🚀 [React Preview] 尝试打开预览窗口");
                     if let Some(window) = app_handle.get_webview_window(&target_window_name) {
-                        let _ = window.emit(
+                        let _ = window.emit_to(window.label(), 
                             "artifact-preview-log",
                             serde_json::json!({ "message": "打开预览窗口...", "request_id": request_id }),
                         );
@@ -318,7 +318,7 @@ impl ReactPreviewManager {
         if need_install_deps {
             println!("📦 [Setup] 需要安装/更新依赖");
             if let Some(window) = self.app_handle.get_webview_window(target_window_name) {
-                let _ = window.emit(
+                let _ = window.emit_to(window.label(), 
                     "artifact-preview-log",
                     serde_json::json!({
                         "message": "安装/更新依赖",

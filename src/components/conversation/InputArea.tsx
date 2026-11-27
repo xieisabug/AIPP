@@ -1178,28 +1178,28 @@ const InputArea = React.memo(
                             }
                         }
                     } else if (artifactListVisible) {
-                        // Open artifact - 阻止表单提交
+                        // Enter 引用（插入 #名称，发送时附带给 AI）；Ctrl/⌘+Enter 直接打开 - 阻止表单提交
                         e.preventDefault();
                         const selectedArtifact = filteredArtifacts[selectedArtifactIndex];
                         const textarea = e.currentTarget as HTMLTextAreaElement;
                         const cursorPosition = textarea.selectionStart;
                         const hashIndex = textarea.value.lastIndexOf("#", cursorPosition - 1);
+                        const openInstead = e.ctrlKey || e.metaKey;
 
                         if (hashIndex !== -1) {
-                            // Clear the #artifact_name from input
                             const beforeHash = textarea.value.substring(0, hashIndex);
                             const afterHash = textarea.value.substring(cursorPosition);
-                            setInputText(beforeHash + afterHash);
+                            const inserted = openInstead ? "" : `#${selectedArtifact.name} `;
+                            setInputText(beforeHash + inserted + afterHash);
 
-                            // Set cursor position at the hash position
                             setTimeout(() => {
-                                textarea.setSelectionRange(hashIndex, hashIndex);
+                                const newPosition = hashIndex + inserted.length;
+                                textarea.setSelectionRange(newPosition, newPosition);
                             }, 0);
                         }
                         setArtifactListVisible(false);
 
-                        // Open the artifact
-                        void openArtifact(selectedArtifact.id);
+                        if (openInstead) void openArtifact(selectedArtifact.id);
                     } else if (assistantListVisible) {
                         // Select assistant - 阻止表单提交
                         e.preventDefault();
@@ -1659,13 +1659,7 @@ const InputArea = React.memo(
                         setInputText={setInputText}
                         setArtifactListVisible={setArtifactListVisible}
                         onArtifactSelect={(artifact, action) => {
-                            if (action === "open") {
-                                // Open artifact when Enter is pressed
-                                void openArtifact(artifact.id);
-                            } else {
-                                // Tab key completion - just log for now
-                                console.log("Artifact completed:", artifact.name);
-                            }
+                            if (action === "open") void openArtifact(artifact.id);
                         }}
                     />
                 </div>
