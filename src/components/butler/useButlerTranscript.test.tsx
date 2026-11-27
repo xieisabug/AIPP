@@ -62,3 +62,29 @@ it("should show a new live report when an earlier turn reported the same text", 
     render(<Transcript running calls={calls} messages={[...history, hiddenTrigger, message(4, "response")]} />);
     expect(screen.getAllByText(text)).toHaveLength(2);
 });
+
+it("should keep the previous turn reply published when a sending optimistic user row is active while held", () => {
+    const prevReply = { ...message(2, "response", "上一轮完整回复"), finish_time: new Date(2000) } as Message;
+    const sendingUser = {
+        ...message(-7_000_000_000_000, "user", "下一轮提问"),
+        sendStatus: "sending" as const,
+        clientRequestId: "22222222-2222-4222-8222-222222222222",
+    } as Message;
+    let latestRows: Message[] = [];
+    function Capture({ running, messages }: { running: boolean; messages: Message[] }) {
+        latestRows = useButlerTranscript({
+            conversationId,
+            compact: true,
+            running,
+            messages,
+            calls: new Map(),
+            activities: new Map(),
+        });
+        return null;
+    }
+    const view = render(<Capture running messages={[message(1, "user", "第一轮"), prevReply]} />);
+    view.rerender(<Capture running={false} messages={[message(1, "user", "第一轮"), prevReply]} />);
+    // Still within the 1200ms linger window (held = true) when the user sends the next turn:
+    view.rerender(<Capture running messages={[message(1, "user", "第一轮"), prevReply, sendingUser]} />);
+    expect(latestRows.map(row => row.id)).toContain(prevReply.id);
+    expect(latestRows.map(row => row.id)).toContain(sendingUser.id);

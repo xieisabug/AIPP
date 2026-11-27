@@ -179,4 +179,17 @@ describe("Butler transcript", () => {
         expect(shown.content).toBe("下午两点。");
         expect(shown.reply_quote).toBeUndefined();
     });
+
+    it("should preserve the previous completed reply while a sending optimistic user row has a negative id", () => {
+        const sendingUser = message(-7_000_000_000_000, "user", "继续排查", {
+            sendStatus: "sending",
+            clientRequestId: "11111111-1111-4111-8111-111111111111",
+        });
+        const pendingResponse = message(6, "response", "", { finish_time: null });
+        expect(butlerTranscript([...history, sendingUser, pendingResponse])).toEqual([
+            history[0],
+            history[4],
+            sendingUser,
+        ]);
+    });
 });

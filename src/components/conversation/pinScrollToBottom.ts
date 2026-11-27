@@ -668,6 +668,9 @@ export function followScrollContainerBottom({
             stop();
             return;
         }
+        if (!pausedByUser) {
+            noteHeightChange(container.scrollHeight);
+        }
         schedulePin();
     });
 
@@ -694,6 +697,9 @@ export function followScrollContainerBottom({
             return;
         }
         observeKnownElements();
+        if (!pausedByUser) {
+            noteHeightChange(container.scrollHeight);
+        }
         schedulePin();
     });
     mutationObserver.observe(container, {

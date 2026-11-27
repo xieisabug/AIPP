@@ -17,4 +17,9 @@ describe("newComposerMessage attachments", () => {
             { id: 2, attachment_type: "Text", attachment_url: "C:/files/notes.md", attachment_content: undefined },
         ]);
     });
+
+    it("should allocate optimistic IDs outside butlerTimeline synthetic ranges", () => {
+        const row = newComposerMessage(3, "hi");
+        expect(row.id).toBeLessThanOrEqual(-7_000_000_000_000);
+    });
 });

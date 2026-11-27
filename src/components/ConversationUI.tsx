@@ -2,7 +2,7 @@ import { claudePermissionModes } from "@/data/claudePermissionModes";
 import { useClaudeComposerPermissions } from "@/hooks/useClaudeComposerPermissions";
 import { useNextAgentPermissions } from "@/hooks/useNextAgentPermissions";
 import { composerKey, upsertPersistedRow, type ComposerReceipt } from "@/utils/composerMessage";
-import { afterSendMotion } from "./conversation/sendMotion";
+import { afterSendMotion, isSendMotionRunning } from "./conversation/sendMotion";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { useMobileResume } from "@/hooks/useMobileResume";
 import MobileRecoveryNotice from "./conversation/MobileRecoveryNotice";
@@ -452,6 +452,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return () => { void subscription.then(stop => stop()); };
         }, [onChangeConversationId]);
         const beginComposerMessage = useCallback((row: Message) => {
+            syncScrollPositionRef.current = null;
             submitting.current.set(row.clientRequestId!, {conversationId: row.conversation_id, accepted: false});
             setComposerRows(previous => [...previous.filter(item => item.conversation_id !== row.conversation_id
                 || item.sendStatus !== "failed"), row]);
@@ -480,7 +481,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 : snapshot);
             return snapshot;
         }, []);
-        const syncScrollPositionRef = useRef<{ conversationId: string; top: number } | null>(null);
+        const syncScrollPositionRef = useRef<{ conversationId: string; top: number; messages: Message[] } | null>(null);
         const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
         const smartScrollRef = useRef<
@@ -633,6 +634,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         const request = key ? submitting.current.get(key) : undefined;
                         if (request) request.accepted = true;
                         if (snapshotInFlight.current) snapshotDeltas.current.set(id, row);
+                        syncScrollPositionRef.current = null;
                         setPersistedSnapshot(previous => previous?.conversation.id === row.conversation_id
                             ? { ...previous, messages: upsertPersistedRow(previous.messages, row) } : previous);
                         setMessages(previous => upsertPersistedRow(previous, row));
@@ -710,7 +712,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // message_add precedes this receipt but can still be waiting for the send motion to end.
             afterSendMotion(() => {
                 submitting.current.delete(key);
-                if (request?.accepted || currentView.current !== String(id)) return;
+                if (request?.accepted || currentView.current !== String(id) || rowReads.current.has(messageId)) return;
                 handleMessageAdd({ message_id: messageId, message_type: "user" }, true);
             });
             return false;
@@ -1651,10 +1653,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // 不使用清理函数的取消标记，依赖 requestId 判定最新请求
         }, [conversationId]);
 
+        const hasActiveComposerSend = composerRows.some(
+            (row) => row.conversation_id === Number(conversationId) && row.sendStatus === "sending",
+        );
         const refreshPersistedConversation = useDataRefresh({
             events: ["conversation_data_changed"],
             identity: conversationId,
-            paused: effectiveAiIsResponsing,
+            paused: effectiveAiIsResponsing || hasActiveComposerSend,
             refresh: async (isCurrent) => {
                 if (!conversationId) return;
                 const requestId = ++loadRequestIdRef.current;
@@ -1666,12 +1671,29 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 const accepted = acceptPersistedSnapshot(result, snapshotRevision);
                 if (!accepted) return;
                 setConversation(result.conversation);
-                const container = scrollContainerRef.current;
-                if (container) syncScrollPositionRef.current = { conversationId, top: container.scrollTop };
                 // The local run has finished: the persisted snapshot is authoritative,
                 // including remote edits that shorten content or delete messages.
                 clearStreamingMessages();
-                setMessages((previous) => reuseEquivalentMessages(previous, accepted.messages));
+                setMessages((previous) => {
+                    const next = reuseEquivalentMessages(previous, accepted.messages);
+                    const container = scrollContainerRef.current;
+                    if (
+                        next !== previous
+                        && container
+                        && !isSendMotionRunning()
+                        && !container.dataset.sendPhase
+                        && submitting.current.size === 0
+                    ) {
+                        syncScrollPositionRef.current = {
+                            conversationId,
+                            top: container.scrollTop,
+                            messages: next,
+                        };
+                    } else if (next === previous) {
+                        syncScrollPositionRef.current = null;
+                    }
+                    return next;
+                });
                 setIsLoadingShow(false);
             },
             onError: (error) => toast.error(`同步后刷新聊天失败（conversation=${conversationId}）: ${String(error)}`),
@@ -1681,8 +1703,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         useLayoutEffect(() => {
             const position = syncScrollPositionRef.current;
             syncScrollPositionRef.current = null;
-            if (position?.conversationId === conversationId && scrollContainerRef.current) {
-                scrollContainerRef.current.scrollTop = position.top;
+            const container = scrollContainerRef.current;
+            if (
+                position?.conversationId === conversationId
+                && position.messages === messages
+                && container
+                && !isSendMotionRunning()
+                && !container.dataset.sendPhase
+            ) {
+                container.scrollTop = position.top;
                 syncScrollState();
             }
         }, [messages, conversationId, syncScrollState]);

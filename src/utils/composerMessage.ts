@@ -6,7 +6,8 @@ export interface ComposerReceipt {
     error?: string;
 }
 
-let nextTemporaryId = -4_000_000_000_000;
+// Keep composer optimistic IDs disjoint from butlerTimeline synthetic ranges (-4e12 / -5e12 / -6e12).
+let nextTemporaryId = -7_000_000_000_000;
 
 /**
  * 输入框里的附件按后端 message_attachment 的字段画进待发送气泡：后端要先抽取 Office 文本、编码 PDF 才落库，

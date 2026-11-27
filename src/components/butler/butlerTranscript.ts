@@ -19,7 +19,7 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
     let needLast = true;
     for (let index = messages.length - 1; index >= 0; index--) {
         const message = messages[index];
-        if (message.message_type === "user" && message.id > 0) needLast = true;
+        if (message.message_type === "user" && (message.id > 0 || message.sendStatus === "sending")) needLast = true;
         if ((needLast || beforeWake.has(message.id)) && (message.message_type === "response" || message.message_type === "assistant")) {
             lastResponses.add(message);
             needLast = false;

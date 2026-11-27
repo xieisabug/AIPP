@@ -642,5 +642,27 @@ describe("useScrollManagement", () => {
         });
     });
 
+    it("does not scroll while a send animation owns the scroll container", () => {
+        const container = {
+            scrollTop: 400,
+            scrollHeight: 1200,
+            clientHeight: 400,
+            dataset: { sendPhase: "scroll" },
+            scrollTo: vi.fn(),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll(true, "auto");
+        });
+
+        expect(container.scrollTo).not.toHaveBeenCalled();
+    });
+
 });
 

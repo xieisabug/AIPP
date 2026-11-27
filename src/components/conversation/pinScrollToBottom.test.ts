@@ -852,6 +852,45 @@ describe("followScrollContainerBottom", () => {
         }
     });
 
+    it("should not falsely pause when height shrinks and recovers via ResizeObserver before the clamped scroll event fires", () => {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+        vi.useFakeTimers({
+            toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+        });
+        try {
+            const { container, setScrollHeight } = makeContainer(2000);
+            const onUserPause = vi.fn();
+            const stop = followScrollContainerBottom({
+                container,
+                shouldContinue: () => true,
+                onUserPause,
+            });
+            flushRaf();
+
+            // 高度短暂塌缩夹紧 scrollTop，ResizeObserver 先看到收缩，随后高度又恢复到原值，
+            // 浏览器异步派发 clamped scroll 事件时 scrollHeight 已与原基线相同。
+            setScrollHeight(1700);
+            container.scrollTop = 1300;
+            triggerResize();
+            setScrollHeight(2000);
+            container.dispatchEvent(new Event("scroll"));
+            flushRaf();
+
+            expect(onUserPause).not.toHaveBeenCalled();
+            expect(container.scrollTop).toBe(1600);
+            stop();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it("should not pull scrollTop backward when already past bottomOffsetPx and should not break concurrent followers", () => {
         const rafQueue: FrameRequestCallback[] = [];
         vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {

@@ -29,7 +29,7 @@ export function useButlerTranscript({ conversationId, compact, running, messages
         for (let index = messages.length - 1; index >= 0; index--) {
             const message = messages[index];
             ids.add(message.id);
-            if (message.message_type === "user" && message.id > 0) break;
+            if (message.message_type === "user" && (message.id > 0 || message.sendStatus === "sending")) break;
         }
         return ids;
     }, [compact, messages]);

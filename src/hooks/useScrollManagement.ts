@@ -252,6 +252,9 @@ export function useScrollManagement(
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
         if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
+        if (scrollContainerRef.current?.dataset?.sendPhase) {
+            return;
+        }
         if (isChatScrollPerfProbeActive()) {
             return;
         }
@@ -277,6 +280,7 @@ export function useScrollManagement(
 
         const scrollToBottom = () => {
             if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
+            if (scrollContainerRef.current?.dataset?.sendPhase) return;
             const options = smartScrollOptionsRef.current;
             // 用户已经开始滚（滚轮或滚动条）时，排队中的强制滚动也不能再抢到底部。
             if (
@@ -330,6 +334,9 @@ export function useScrollManagement(
         if (observed && observedTailElementRef.current !== observed) {
             resizeObserverRef.current?.disconnect();
             resizeObserverRef.current = new ResizeObserver(() => {
+                if (scrollContainerRef.current?.dataset?.sendPhase) {
+                    return;
+                }
                 if (hasRecentUserScrollIntent() || isUserScrolledUpRef.current) {
                     resizeObserverRef.current?.disconnect();
                     resizeObserverRef.current = null;
