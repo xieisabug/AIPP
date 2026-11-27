@@ -1,6 +1,8 @@
 use crate::api::ai::{acp::apply_network_proxy_to_env_vars, agent_driver::native_agents::auth,
     codex_app_server, config::agent_network_proxy};
-use crate::db::llm_db::LLMDatabase;
+use crate::db::assistant_db::AssistantDatabase;
+use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::db::llm_db::{LLMDatabase, LLMProviderConfig};
 use crate::vault::config_ref;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder, StatusCode};
@@ -13,9 +15,42 @@ mod antigravity;
 mod cache;
 use cache::{QuotaCache, QuotaReading};
 
+pub(crate) const SHOW_QUOTA_IN_CHAT_CONFIG: &str = "show_quota_in_chat";
+
 const GO_USAGE: &str = "https://opencode.ai/inference/go/v1/usage";
 const CURSOR_KEYS: &str = "https://api2.cursor.sh/auth/exchange_user_api_key";
 const CURSOR_USAGE: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatQuotaProvider {
+    pub provider_id: i64,
+    pub provider_name: String,
+    pub api_type: String,
+    pub label: String,
+}
+
+pub(crate) fn supports_quota(api_type: &str) -> bool {
+    matches!(api_type, "opencode_go" | "codex_app_server" | "cursor" | "antigravity")
+}
+
+pub(crate) fn quota_label(api_type: &str) -> &'static str {
+    if api_type == "antigravity" { "本机 Antigravity CLI 额度" } else { "订阅额度" }
+}
+
+fn config_value<'a>(configs: &'a [LLMProviderConfig], name: &str) -> Option<&'a str> {
+    configs.iter().find(|c| c.name == name).map(|c| c.value.trim()).filter(|v| !v.is_empty())
+}
+
+pub(crate) fn show_quota_in_chat_enabled(api_type: &str, configs: &[LLMProviderConfig]) -> bool {
+    if !supports_quota(api_type) || config_value(configs, SHOW_QUOTA_IN_CHAT_CONFIG) != Some("true") {
+        return false;
+    }
+    if api_type == "opencode_go" {
+        return config_value(configs, "api_key").is_some();
+    }
+    true
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +153,68 @@ async fn fetch(request: RequestBuilder, operation: &str) -> Result<Value, String
         return Err(format!("{operation} 返回 HTTP {status}：{reason}"));
     }
     response.json().await.map_err(|e| format!("{operation} 响应解析失败：{e}"))
+}
+
+/// 查询某个对话或助手是否应在聊天标题栏展示订阅额度。
+/// 满足条件时返回对应的提供商信息，否则返回 `None`。
+#[tauri::command]
+pub(crate) async fn get_chat_quota_provider(
+    app_handle: tauri::AppHandle,
+    conversation_id: Option<i64>,
+    assistant_id: Option<i64>,
+) -> Result<Option<ChatQuotaProvider>, String> {
+    let mut resolved_assistant_id = assistant_id.filter(|id| *id > 0);
+    let mut resolved_provider_id: Option<i64> = None;
+
+    if let Some(cid) = conversation_id.filter(|id| *id > 0) {
+        let conversation = {
+            let conv_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+            let repo = conv_db.conversation_repo().map_err(|e| e.to_string())?;
+            repo.read(cid).map_err(|e| e.to_string())?
+        };
+        if let Some(conversation) = conversation {
+            if conversation.conversation_kind == "butler_main" {
+                resolved_provider_id = crate::api::butler_api::get_butler_model_selection(&app_handle)
+                    .await
+                    .ok()
+                    .map(|selection| selection.provider_id)
+                    .filter(|id| *id > 0);
+            }
+            if resolved_assistant_id.is_none() {
+                resolved_assistant_id = conversation.assistant_id.filter(|id| *id > 0);
+            }
+        }
+    }
+
+    if resolved_provider_id.is_none() {
+        if let Some(aid) = resolved_assistant_id {
+            let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+            let models = assistant_db.get_assistant_model(aid).map_err(|e| e.to_string())?;
+            resolved_provider_id = models.first().map(|m| m.provider_id).filter(|id| *id > 0);
+        }
+    }
+
+    let Some(provider_id) = resolved_provider_id else {
+        return Ok(None);
+    };
+
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let Ok(provider) = llm_db.get_llm_provider(provider_id) else {
+        return Ok(None);
+    };
+    if !supports_quota(&provider.api_type) {
+        return Ok(None);
+    }
+    let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    if !show_quota_in_chat_enabled(&provider.api_type, &configs) {
+        return Ok(None);
+    }
+    Ok(Some(ChatQuotaProvider {
+        provider_id,
+        provider_name: provider.name,
+        label: quota_label(&provider.api_type).into(),
+        api_type: provider.api_type,
+    }))
 }
 
 #[tauri::command]

@@ -9,7 +9,14 @@ vi.mock("@/hooks/feature/useFeatureConfig", () => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("sonner", () => ({ toast: { error: mocks.error, success: vi.fn() } }));
-vi.mock("@/hooks/useDataRefresh", () => ({ useDataRefresh: (options: { refresh: typeof mocks.refresh }) => { mocks.refresh = options.refresh; } }));
+vi.mock("@/hooks/useDataRefresh", () => ({
+    useDataRefresh: (options: { events?: string[]; refresh: typeof mocks.refresh }) => {
+        if (options.events?.includes("llm_provider_changed")) {
+            mocks.refresh = options.refresh;
+        }
+        return vi.fn();
+    },
+}));
 vi.mock("@/hooks/useCopilot", () => ({ useCopilot: () => ({ authInfo: {} }) }));
 vi.mock("@/hooks/feature/useAcpEnvironment", () => ({ useAcpEnvironment: mocks.cliEnvironment }));
 vi.mock("./TagInputContainer", () => ({ default: () => null }));
@@ -19,12 +26,14 @@ vi.mock("../ConfigForm", async () => {
     const { Controller } = await import("react-hook-form");
     return { default: ({ useFormReturn, config }: { useFormReturn: any; config: any[] }) => {
         const apiKey = config.find(item => item.key === "api_key")?.config;
-        return <div>
+        const quota = config.find(item => item.key === "subscription_quota")?.config;
+        return <div data-testid="mock-config-form" data-field-keys={config.map(item => item.key).join(",")}>
             <input aria-label="endpoint" {...useFormReturn.register("endpoint")} />
             {/* API Key 走真实的 customRender（保险箱引用字段），与 ConfigForm 的 custom 类型一致 */}
             <Controller control={useFormReturn.control} name="api_key" render={({ field }) => apiKey?.customRender(field)} />
             {config.find(item => item.key === "deepseek_capabilities")?.config.customRender()}
-            <span>{config.find(item => item.key === "subscription_quota")?.config.label}</span>
+            <span>{quota?.label}</span>
+            {quota?.customRender?.()}
             {config.find(item => item.key === "advanced_config")?.config.customRender()}
             <span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span><span>{apiKey?.hint}</span>
         </div>;
@@ -51,6 +60,38 @@ describe("LLM provider field autosave", () => {
             isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
         await refresh();
         expect(screen.queryByText(/^(订阅额度|本机 Antigravity CLI 额度)$/)?.textContent ?? null).toBe(expected);
+        const keys = screen.getByTestId("mock-config-form").getAttribute("data-field-keys")?.split(",") ?? [];
+        if (expected) {
+            expect(keys.indexOf("subscription_quota")).toBeGreaterThan(0);
+            expect(keys.indexOf("subscription_quota")).toBeLessThan(keys.indexOf("advanced_config"));
+        }
+    });
+    it("persists the subscription quota show-in-chat switch", async () => {
+        mocks.invoke.mockImplementation((command: string) => {
+            if (command === "get_llm_provider_config") {
+                return Promise.resolve([
+                    { name: "api_key", value: "sk-go" },
+                    { name: "show_quota_in_chat", value: "false" },
+                ]);
+            }
+            if (command === "get_llm_models") return Promise.resolve([]);
+            if (command === "get_provider_quota") {
+                return Promise.resolve({
+                    checkedAt: Date.now(),
+                    expiresAt: Date.now() + 15 * 60_000,
+                    windows: [{ label: "5 小时", remainingPercent: 80, resetsAt: null }],
+                });
+            }
+            return Promise.resolve();
+        });
+        render(<LLMProviderConfigForm id="9" index={0} apiType="opencode_go" name="OpenCode Go" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
+        await refresh();
+        fireEvent.click(await screen.findByRole("switch", { name: "在聊天窗口展示订阅额度" }));
+        await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", {
+            llmProviderId: "9",
+            name: "show_quota_in_chat",
+            value: "true",
+        }));
     });
     it.each([
         ["codex_app_server", "codex", "codex_cli_command"],

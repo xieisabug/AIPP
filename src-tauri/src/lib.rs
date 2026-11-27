@@ -1187,6 +1187,7 @@ pub fn run() {
             get_llm_models,
             fetch_model_list,
             api::provider_quota::get_provider_quota,
+            api::provider_quota::get_chat_quota_provider,
             crate::api::deepseek_api::get_deepseek_balance,
             crate::api::deepseek_api::get_deepseek_chat_balance_provider,
             preview_model_list,

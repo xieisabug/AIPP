@@ -75,6 +75,7 @@ import {
 import ButlerConfigCenter from "@/components/config/butler/ButlerConfigCenter";
 import { ConversationStatsDialog } from "@/components/token-statistics";
 import DeepSeekBalanceBadge from "@/components/conversation/DeepSeekBalanceBadge";
+import ProviderQuotaBadge from "@/components/conversation/ProviderQuotaBadge";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
 import { ButlerQuoteContext, type ButlerQuoteTarget } from "@/components/butler/ButlerQuote";
 import { taskQuestionItems, useButlerTaskQuestions } from "@/components/butler/butlerTaskQuestions";
@@ -1217,6 +1218,11 @@ function ButlerExperimentWindow() {
                                 <div className="flex min-w-0 items-center justify-end gap-1 self-stretch" {...drag}>
                                     <OnboardingSetupChip />
                                     <DeepSeekBalanceBadge
+                                        conversationId={Number(activeConversationId) || null}
+                                        assistantId={contact?.assistantId ?? null}
+                                        className="mr-1"
+                                    />
+                                    <ProviderQuotaBadge
                                         conversationId={Number(activeConversationId) || null}
                                         assistantId={contact?.assistantId ?? null}
                                         className="mr-1"

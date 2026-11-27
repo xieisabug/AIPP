@@ -1,59 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { cn } from "@/utils/utils";
+import {
+    classifyQuotaDisplay,
+    QuotaDetailsList,
+    QuotaRingsChart,
+    type QuotaReading,
+} from "./quotaVisuals";
 
-interface QuotaWindow {
-    group?: string;
-    label: string;
-    remainingPercent: number | null;
-    remainingAmount?: number;
-    resetsAt: string | null;
+export interface ProviderQuotaProps {
+    providerId: number;
+    label?: string;
+    showInChat?: boolean;
+    onShowInChatChange?: (enabled: boolean) => void;
 }
 
-interface QuotaReading {
-    windows: QuotaWindow[];
-    checkedAt: number;
-    expiresAt: number;
-}
-
-function WindowReading({ window }: { window: QuotaWindow }) {
-    const percent = window.remainingPercent;
-    let remaining = "未提供剩余额度";
-    if (percent != null) remaining = `剩余 ${percent.toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
-    else if (window.remainingAmount != null) remaining = `剩余 ${window.remainingAmount.toLocaleString()}`;
-
-    return <div className="space-y-1">
-        <div className="flex flex-wrap justify-between gap-x-3">
-            <span>{window.label}</span>
-            <span className="tabular-nums">{remaining}</span>
-        </div>
-        {percent != null && <div className="h-1 overflow-hidden rounded bg-muted">
-            <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
-        </div>}
-        <p className="text-xs text-muted-foreground">{window.resetsAt
-            ? <>重置于 <time dateTime={window.resetsAt}>{new Date(window.resetsAt).toLocaleString()}</time></>
-            : "服务未提供重置时间"}</p>
-    </div>;
-}
-
-function QuotaWindows({ windows }: { windows: QuotaWindow[] }) {
-    const groups = new Map<string | undefined, QuotaWindow[]>();
-    for (const window of windows) {
-        const existing = groups.get(window.group);
-        if (existing) existing.push(window);
-        else groups.set(window.group, [window]);
-    }
-    return Array.from(groups, ([name, items]) => {
-        const rows = items.map((item, index) => <WindowReading key={`${item.label}-${index}`} window={item} />);
-        return name ? <section key={name} aria-label={name} className="space-y-2">
-            <h4 className="font-medium">{name}</h4>{rows}
-        </section> : <div key="" className="space-y-2">{rows}</div>;
-    });
-}
-
-export function ProviderQuota({ providerId, label = "订阅额度" }: { providerId: number; label?: string }) {
+export function ProviderQuota({
+    providerId,
+    label = "订阅额度",
+    showInChat,
+    onShowInChatChange,
+}: ProviderQuotaProps) {
     const [reading, setReading] = useState<QuotaReading | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -61,19 +32,26 @@ export function ProviderQuota({ providerId, label = "订阅额度" }: { provider
     const refresh = useDataRefresh({
         identity: providerId,
         events: [`cursor-account-changed-${providerId}`],
-        onInvalidate: fromEvent => {
+        onInvalidate: (fromEvent) => {
             if (fromEvent || !intent.current) setReading(null);
             setLoading(true);
             setError("");
         },
-        onError: cause => { setLoading(false); setError(String(cause)); },
-        refresh: async isCurrent => {
+        onError: (cause) => {
+            setLoading(false);
+            setError(String(cause));
+        },
+        refresh: async (isCurrent) => {
             const force = intent.current === "manual";
             intent.current = null;
             const result = await invoke<QuotaReading>("get_provider_quota", { providerId, force });
-            if (isCurrent()) { setReading(result); setLoading(false); }
+            if (isCurrent()) {
+                setReading(result);
+                setLoading(false);
+            }
         },
     });
+
     useEffect(() => {
         // Let autosaved credential edits settle before contacting the provider.
         const timer = setTimeout(refresh, 700);
@@ -83,22 +61,94 @@ export function ProviderQuota({ providerId, label = "订阅额度" }: { provider
     useEffect(() => {
         if (loading || (!reading && !error)) return;
         const delay = error ? 15 * 60_000 : Math.max(0, reading!.expiresAt - Date.now());
-        const timer = setTimeout(() => { intent.current = "expiry"; refresh(); }, delay);
+        const timer = setTimeout(() => {
+            intent.current = "expiry";
+            refresh();
+        }, delay);
         return () => clearTimeout(timer);
     }, [refresh, reading, loading, error]);
 
-    return <section aria-label={label} className="space-y-2 rounded-md border p-3 text-sm">
-        <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-muted-foreground" role="status">
-                {reading ? `更新于 ${new Date(reading.checkedAt).toLocaleTimeString()}` :
-                    loading ? "正在查询额度…" : "额度查询失败"}
-            </span>
-            <Button type="button" size="icon" variant="ghost" iconLabel={`刷新${label}`}
-                disabled={loading} onClick={() => { intent.current = "manual"; refresh(); }}>
-                <RefreshCw className="h-4 w-4" />
-            </Button>
-        </div>
-        {error && <p role="alert" className="whitespace-pre-wrap break-words text-xs text-destructive">刷新额度失败：{error}</p>}
-        {reading && <QuotaWindows windows={reading.windows} />}
-    </section>;
+    const display = useMemo(
+        () => (reading ? classifyQuotaDisplay(reading.windows) : null),
+        [reading],
+    );
+
+    const handleManualRefresh = () => {
+        if (loading) return;
+        intent.current = "manual";
+        refresh();
+    };
+
+    return (
+        <section
+            aria-label={label}
+            className="overflow-hidden rounded-lg border border-border bg-card text-sm"
+            data-aipp-slot="provider-quota-card"
+        >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/30 px-3.5 py-2">
+                <div className="flex min-w-0 items-center gap-2.5">
+                    {display?.kind === "rings" && (
+                        <button
+                            type="button"
+                            onClick={handleManualRefresh}
+                            disabled={loading}
+                            title={`点击刷新${label}`}
+                            aria-label={`点击刷新${label}`}
+                            className="inline-flex shrink-0 cursor-pointer items-center rounded-md transition-opacity hover:opacity-80 disabled:cursor-wait disabled:opacity-60"
+                        >
+                            <QuotaRingsChart clusters={display.clusters} size={24} />
+                        </button>
+                    )}
+                    <span className="truncate text-xs text-muted-foreground" role="status">
+                        {reading
+                            ? `更新于 ${new Date(reading.checkedAt).toLocaleTimeString()}`
+                            : loading
+                                ? "正在查询额度…"
+                                : "额度查询失败"}
+                    </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-2.5">
+                    {onShowInChatChange && (
+                        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground select-none">
+                            <span>聊天窗口展示</span>
+                            <Switch
+                                aria-label={`在聊天窗口展示${label}`}
+                                checked={!!showInChat}
+                                onCheckedChange={onShowInChatChange}
+                            />
+                        </label>
+                    )}
+                    <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 text-muted-foreground"
+                        iconLabel={`刷新${label}`}
+                        disabled={loading}
+                        onClick={handleManualRefresh}
+                    >
+                        <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+                    </Button>
+                </div>
+            </div>
+            {(error || reading) && (
+                <div className="space-y-3 p-3.5">
+                    {error && (
+                        <p
+                            role="alert"
+                            className="whitespace-pre-wrap break-words rounded-md bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive"
+                        >
+                            刷新额度失败：{error}
+                        </p>
+                    )}
+                    {reading && display && (
+                        <QuotaDetailsList
+                            windows={reading.windows}
+                            colorByIndex={display.colorByIndex}
+                        />
+                    )}
+                </div>
+            )}
+        </section>
+    );
 }

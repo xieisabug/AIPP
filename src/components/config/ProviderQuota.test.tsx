@@ -44,6 +44,22 @@ it("should show each local CLI model group's windows under its own heading", asy
     expect(screen.getByRole("button", { name: "刷新本机 Antigravity CLI 额度" })).toBeEnabled();
 });
 
+it("should render the show-in-chat toggle and ring preview when enabled", async () => {
+    const onToggle = vi.fn();
+    mockInvokeHandler("get_provider_quota", () => reading([
+        { label: "5 小时", remainingPercent: 65, resetsAt: null },
+        { label: "每周", remainingPercent: 40, resetsAt: null },
+        { label: "每月", remainingPercent: 90, resetsAt: null },
+    ]));
+    render(<ProviderQuota providerId={42} showInChat={false} onShowInChatChange={onToggle} />);
+    expect(await screen.findByText("剩余 65%", {}, { timeout: 3000 })).toBeVisible();
+    expect(screen.getAllByTestId("quota-ring")).toHaveLength(3);
+    const toggle = screen.getByRole("switch", { name: "在聊天窗口展示订阅额度" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(onToggle).toHaveBeenCalledWith(true);
+});
+
 it("should refresh at the original cache expiry and restart the timer after a manual refresh", async () => {
     vi.useFakeTimers();
     const minute = 60_000;

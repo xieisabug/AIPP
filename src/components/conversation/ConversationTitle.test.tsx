@@ -13,6 +13,7 @@ vi.mock("@/hooks/useConversationManager", () => ({
     default: () => ({ deleteConversation: vi.fn() }),
 }));
 vi.mock("./DeepSeekBalanceBadge", () => ({ default: () => null }));
+vi.mock("./ProviderQuotaBadge", () => ({ default: () => null }));
 vi.mock("../token-statistics", () => ({
     ConversationStatsDialog: () => <button type="button">统计</button>,
 }));

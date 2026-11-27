@@ -94,6 +94,40 @@ fn test_antigravity_windows_reject_non_command_output_and_surface_cli_errors() {
         "command":{"name":"usage","data":{"groups":[]}}})).is_err());
 }
 
+#[test]
+fn test_show_quota_in_chat_enabled_respects_provider_type_toggle_and_key() {
+    let config = |name: &str, value: &str| LLMProviderConfig {
+        id: 1,
+        name: name.into(),
+        llm_provider_id: 42,
+        value: value.into(),
+        append_location: String::new(),
+        is_addition: false,
+    };
+
+    let toggle_on = vec![config(SHOW_QUOTA_IN_CHAT_CONFIG, "true")];
+    let toggle_off = vec![config(SHOW_QUOTA_IN_CHAT_CONFIG, "false")];
+    let opencode_go_ready = vec![
+        config(SHOW_QUOTA_IN_CHAT_CONFIG, "true"),
+        config("api_key", "sk-go"),
+    ];
+    let opencode_go_blank_key = vec![
+        config(SHOW_QUOTA_IN_CHAT_CONFIG, "true"),
+        config("api_key", "   "),
+    ];
+
+    assert!(show_quota_in_chat_enabled("codex_app_server", &toggle_on));
+    assert!(show_quota_in_chat_enabled("cursor", &toggle_on));
+    assert!(show_quota_in_chat_enabled("antigravity", &toggle_on));
+    assert!(!show_quota_in_chat_enabled("codex_app_server", &toggle_off));
+    assert!(!show_quota_in_chat_enabled("cursor", &[]));
+    assert!(!show_quota_in_chat_enabled("openai_api", &opencode_go_ready));
+    assert!(!show_quota_in_chat_enabled("deepseek", &opencode_go_ready));
+    assert!(show_quota_in_chat_enabled("opencode_go", &opencode_go_ready));
+    assert!(!show_quota_in_chat_enabled("opencode_go", &toggle_on));
+    assert!(!show_quota_in_chat_enabled("opencode_go", &opencode_go_blank_key));
+}
+
 #[tokio::test]
 #[ignore = "requires a locally installed and signed-in official agy CLI"]
 async fn test_antigravity_quota_from_local_cli() {

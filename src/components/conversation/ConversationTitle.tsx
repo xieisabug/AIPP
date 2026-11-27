@@ -9,6 +9,7 @@ import useConversationManager from "../../hooks/useConversationManager";
 import { ConversationStatsDialog } from "../token-statistics";
 import ConversationExportDialog from "./ConversationExportDialog";
 import DeepSeekBalanceBadge from "./DeepSeekBalanceBadge";
+import ProviderQuotaBadge from "./ProviderQuotaBadge";
 import { WindowControls, dragRegionProps, useFramelessTitleBar } from "../window/WindowTitleBar";
 import { cn } from "@/utils/utils";
 
@@ -112,6 +113,10 @@ const ConversationTitle: React.FC<{
                     data-aipp-slot="chat-conversation-title-actions"
                 >
                     <DeepSeekBalanceBadge
+                        conversationId={conversation?.id ?? null}
+                        assistantId={conversation?.assistant_id ?? null}
+                    />
+                    <ProviderQuotaBadge
                         conversationId={conversation?.id ?? null}
                         assistantId={conversation?.assistant_id ?? null}
                     />

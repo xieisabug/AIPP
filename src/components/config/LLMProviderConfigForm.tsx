@@ -161,6 +161,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             api_key: "",
             deepseek_web_enabled: "false",
             deepseek_show_balance_in_chat: "false",
+            show_quota_in_chat: "false",
             proxy_enabled: "false",
             acp_cli_command: "",
             acp_claude_auth_mode: "claude_settings",
@@ -193,6 +194,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const legacyClaudePlan = form.watch("claude_permission_mode") === "plan";
     const webEnabled = form.watch("deepseek_web_enabled") === "true";
     const showBalanceInChat = form.watch("deepseek_show_balance_in_chat") === "true";
+    const showQuotaInChat = form.watch("show_quota_in_chat") === "true";
     const proxyEnabled = form.watch("proxy_enabled");
     const endpoint = form.watch("endpoint");
     const endpointStatus = useMemo(() => getProviderEndpointStatus(endpoint), [endpoint]);
@@ -1060,6 +1062,38 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         [enabled, onToggleEnabled, index, onDelete, onShare],
     );
 
+    const finalConfigFields = useMemo(() => {
+        if (!supportsQuota) return configFields;
+        const quotaField = {
+            key: "subscription_quota",
+            config: {
+                type: "custom" as const,
+                label: quotaLabel,
+                value: "",
+                customRender: () => (
+                    <ProviderQuota
+                        key={`${id}-${quotaRevision}`}
+                        providerId={Number(id)}
+                        label={quotaLabel}
+                        showInChat={showQuotaInChat}
+                        onShowInChatChange={(enabled) => {
+                            form.setValue("show_quota_in_chat", String(enabled));
+                            updateField("show_quota_in_chat", String(enabled));
+                        }}
+                    />
+                ),
+            },
+        };
+        const anchorKey = apiType === "opencode_go" ? "api_key" : "apiType";
+        const anchorIndex = configFields.findIndex((item) => item.key === anchorKey);
+        const insertIndex = anchorIndex >= 0 ? anchorIndex + 1 : 0;
+        return [
+            ...configFields.slice(0, insertIndex),
+            quotaField,
+            ...configFields.slice(insertIndex),
+        ];
+    }, [supportsQuota, configFields, quotaLabel, id, quotaRevision, showQuotaInChat, form, updateField, apiType]);
+
     // 表单部分结束
     return (
         <>
@@ -1068,11 +1102,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     key={id}
                     title={name}
                     description={description}
-                    config={supportsQuota ? [
-                        ...configFields,
-                        { key: "subscription_quota", config: { type: "custom", label: quotaLabel, value: "",
-                            customRender: () => <ProviderQuota key={`${id}-${quotaRevision}`} providerId={Number(id)} label={quotaLabel} /> } },
-                    ] : configFields}
+                    config={finalConfigFields}
                     classNames="bottom-space"
                     extraButtons={extraButtons}
                     useFormReturn={form}
