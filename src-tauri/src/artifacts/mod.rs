@@ -4,6 +4,9 @@ pub mod artifact_data_db;
 pub mod artifacts_db;
 pub mod code_utils;
 pub mod collection_api;
+pub mod collection_source;
+#[cfg(test)]
+mod collection_source_tests;
 pub mod env_installer;
 pub mod powershell;
 pub mod preview_router;

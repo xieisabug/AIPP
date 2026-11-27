@@ -39,6 +39,48 @@ export interface UseArtifactBridgeReturn {
 }
 
 /**
+ * 解析本次请求实际使用的绑定资源。
+ *
+ * 数据库和助手只认宿主侧绑定（保存/运行配置里用户选定的值）；页面代码可以重复传入同一个值，
+ * 但不能借 payload 换成别的数据库或助手。
+ */
+export function resolveBoundTarget<T extends string | number>(
+    bound: T | null | undefined,
+    requested: unknown,
+    kind: 'db' | 'assistant',
+): T {
+    const hasRequest = requested !== undefined && requested !== null && requested !== '';
+    if (bound === undefined || bound === null || bound === '') {
+        if (hasRequest) {
+            throw new Error(kind === 'db'
+                ? '此 Artifact 未绑定数据库，不能访问其他数据库'
+                : '此 Artifact 未绑定 AI 助手，不能调用其他助手');
+        }
+        throw new Error(kind === 'db'
+            ? 'No database ID configured'
+            : '未配置 AI 助手，请在 Artifact 设置中选择一个助手');
+    }
+    if (hasRequest && String(requested) !== String(bound)) {
+        throw new Error(kind === 'db'
+            ? `Artifact 只能访问绑定的数据库「${bound}」`
+            : 'Artifact 只能调用绑定的 AI 助手');
+    }
+    return bound;
+}
+
+/** iframe 当前地址的 origin；取不到时返回 null（不广播配置）。 */
+export function iframeTargetOrigin(iframe: HTMLIFrameElement | null, allowedOrigins: string[]): string | null {
+    const src = iframe?.src;
+    if (!src) return null;
+    try {
+        const origin = new URL(src).origin;
+        return allowedOrigins.some((allowed) => origin.startsWith(allowed)) ? origin : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Artifact Bridge Hook
  * 
  * 负责处理 iframe 内的 artifact 与主应用之间的通信
@@ -138,10 +180,7 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
             switch (message.type) {
                 case 'db_query': {
                     const payload = message.payload as { sql: string; params?: unknown[]; db_id?: string };
-                    const targetDbId = payload.db_id || dbId;
-                    if (!targetDbId) {
-                        throw new Error('No database ID configured');
-                    }
+                    const targetDbId = resolveBoundTarget(dbId, payload.db_id, 'db');
                     const result = await handleDbQuery(targetDbId, payload.sql, payload.params || []);
                     response = { id: message.id, success: true, data: result };
                     break;
@@ -149,10 +188,7 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
 
                 case 'db_execute': {
                     const payload = message.payload as { sql: string; params?: unknown[]; db_id?: string };
-                    const targetDbId = payload.db_id || dbId;
-                    if (!targetDbId) {
-                        throw new Error('No database ID configured');
-                    }
+                    const targetDbId = resolveBoundTarget(dbId, payload.db_id, 'db');
                     const result = await handleDbExecute(targetDbId, payload.sql, payload.params || []);
                     response = { id: message.id, success: true, data: result };
                     break;
@@ -160,10 +196,7 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
 
                 case 'db_batch_execute': {
                     const payload = message.payload as { sql: string; db_id?: string };
-                    const targetDbId = payload.db_id || dbId;
-                    if (!targetDbId) {
-                        throw new Error('No database ID configured');
-                    }
+                    const targetDbId = resolveBoundTarget(dbId, payload.db_id, 'db');
                     await handleDbBatchExecute(targetDbId, payload.sql);
                     response = { id: message.id, success: true };
                     break;
@@ -171,10 +204,7 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
 
                 case 'db_get_tables': {
                     const payload = message.payload as { db_id?: string } | undefined;
-                    const targetDbId = payload?.db_id || dbId;
-                    if (!targetDbId) {
-                        throw new Error('No database ID configured');
-                    }
+                    const targetDbId = resolveBoundTarget(dbId, payload?.db_id, 'db');
                     const result = await handleDbGetTables(targetDbId);
                     response = { id: message.id, success: true, data: result };
                     break;
@@ -182,10 +212,7 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
 
                 case 'db_get_columns': {
                     const payload = message.payload as { table_name: string; db_id?: string };
-                    const targetDbId = payload.db_id || dbId;
-                    if (!targetDbId) {
-                        throw new Error('No database ID configured');
-                    }
+                    const targetDbId = resolveBoundTarget(dbId, payload.db_id, 'db');
                     const result = await handleDbGetColumns(targetDbId, payload.table_name);
                     response = { id: message.id, success: true, data: result };
                     break;
@@ -198,10 +225,7 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
                         system_prompt?: string;
                         assistant_id?: number;
                     };
-                    const targetAssistantId = payload.assistant_id || assistantId;
-                    if (!targetAssistantId) {
-                        throw new Error('未配置 AI 助手，请在 Artifact 设置中选择一个助手');
-                    }
+                    const targetAssistantId = resolveBoundTarget(assistantId, payload.assistant_id, 'assistant');
                     const result = await handleAiAsk(
                         targetAssistantId,
                         payload.prompt,
@@ -241,29 +265,15 @@ export function useArtifactBridge(options: UseArtifactBridgeOptions): UseArtifac
         }
     }, [isValidOrigin, handleDbQuery, handleDbExecute, handleDbBatchExecute, handleDbGetTables, handleDbGetColumns, handleAiAsk, handleGetAssistants, iframeRef]);
 
-    // 发送配置到 iframe
+    // 发送配置到 iframe：只发给 iframe 当前地址的 origin，页面跳到外站后不会再收到绑定信息
     const sendConfig = useCallback(() => {
-        if (iframeRef.current?.contentWindow) {
-            const configMessage = {
-                type: 'aipp_config',
-                config: configRef.current
-            };
-            // 尝试多个可能的 origin
-            for (const origin of allowedOrigins) {
-                try {
-                    iframeRef.current.contentWindow.postMessage(configMessage, origin + ':*');
-                } catch {
-                    // 忽略错误，尝试下一个
-                }
-            }
-            // 也尝试 *（不推荐，但作为后备）
-            try {
-                iframeRef.current.contentWindow.postMessage(configMessage, '*');
-            } catch {
-                // 忽略
-            }
-            setIsConnected(true);
+        const iframe = iframeRef.current;
+        const targetOrigin = iframeTargetOrigin(iframe, allowedOrigins);
+        if (!iframe?.contentWindow || !targetOrigin) {
+            return;
         }
+        iframe.contentWindow.postMessage({ type: 'aipp_config', config: configRef.current }, targetOrigin);
+        setIsConnected(true);
     }, [iframeRef, allowedOrigins]);
 
     // 监听消息

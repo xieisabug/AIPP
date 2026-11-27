@@ -156,8 +156,8 @@ use crate::artifacts::artifacts_db::ArtifactsDatabase;
 use crate::artifacts::collection_api::{
     delete_artifact_collection, generate_artifact_metadata, get_artifact_by_id,
     get_artifacts_collection, get_artifacts_for_completion, get_artifacts_statistics,
-    open_artifact_window, save_artifact_to_collection, search_artifacts_collection,
-    update_artifact_collection,
+    get_collection_source_updates, open_artifact_window, save_artifact_to_collection,
+    search_artifacts_collection, update_artifact_collection, update_collection_from_source,
 };
 use crate::artifacts::env_installer::{
     check_acp_library, check_acp_library_update, check_bun_update, check_bun_update_with_proxy,
@@ -1356,6 +1356,8 @@ pub fn run() {
             get_artifact_by_id,
             search_artifacts_collection,
             update_artifact_collection,
+            get_collection_source_updates,
+            update_collection_from_source,
             delete_artifact_collection,
             open_artifact_window,
             open_artifact_collections_window,

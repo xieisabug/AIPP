@@ -104,6 +104,75 @@ describe("ArtifactViewer", () => {
         expect(screen.queryByRole("button", { name: /让 AI 修复/ })).toBeNull();
     });
 
+    it("should fill an element edit request into the conversation after picking an element", async () => {
+        const onFixWithAI = vi.fn().mockResolvedValue(true);
+        const { container } = render(
+            <ArtifactViewer
+                type="html"
+                code="<button>开始</button>"
+                contentKey={1}
+                title="番茄钟"
+                buildLogs={[]}
+                versions={[{ version: 2, created_at: "2026-11-27T10:00:00Z" }]}
+                currentVersion={2}
+                onFixWithAI={onFixWithAI}
+            />,
+        );
+        const frame = container.querySelector("iframe")!;
+        const postToFrame = vi.spyOn(frame.contentWindow!, "postMessage");
+
+        fireEvent.click(screen.getByRole("button", { name: "选择元素修改" }));
+        expect(postToFrame).toHaveBeenCalledWith({ __aippArtifactPick: "start" }, "*");
+        expect(screen.getByText(/点击页面中想修改的元素/)).toBeTruthy();
+
+        // 其他来源的点选结果不处理
+        const picked = { __aippArtifactPick: 1, state: "picked", element: { tag: "button", selector: "body > button", text: "开始", html: "<button>开始</button>" } };
+        act(() => {
+            window.dispatchEvent(new MessageEvent("message", { data: picked, source: null }));
+        });
+        expect(screen.queryByLabelText("修改要求")).toBeNull();
+
+        act(() => {
+            window.dispatchEvent(new MessageEvent("message", { data: picked, source: frame.contentWindow }));
+        });
+        expect(screen.queryByText(/点击页面中想修改的元素/)).toBeNull();
+        expect(screen.getByText("body > button")).toBeTruthy();
+
+        const submit = screen.getByRole("button", { name: "填入会话" }) as HTMLButtonElement;
+        expect(submit.disabled).toBe(true);
+        fireEvent.change(screen.getByLabelText("修改要求"), { target: { value: "改成圆角" } });
+        await act(async () => {
+            fireEvent.click(submit);
+        });
+
+        expect(onFixWithAI).toHaveBeenCalledTimes(1);
+        const request = onFixWithAI.mock.calls[0][0] as string;
+        expect(request).toContain("「番茄钟」（HTML） v2里的这个元素：改成圆角");
+        expect(request).toContain("`body > button`");
+        expect(screen.queryByLabelText("修改要求")).toBeNull();
+    });
+
+    it("should leave pick mode on Escape while focus is still in the host page", () => {
+        const { container } = render(
+            <ArtifactViewer type="html" code="<p>a</p>" contentKey={1} buildLogs={[]} onFixWithAI={vi.fn()} />,
+        );
+        const postToFrame = vi.spyOn(container.querySelector("iframe")!.contentWindow!, "postMessage");
+        fireEvent.click(screen.getByRole("button", { name: "选择元素修改" }));
+        expect(screen.getByText(/点击页面中想修改的元素/)).toBeTruthy();
+
+        fireEvent.keyDown(window, { key: "Escape" });
+
+        expect(screen.queryByText(/点击页面中想修改的元素/)).toBeNull();
+        expect(postToFrame).toHaveBeenLastCalledWith({ __aippArtifactPick: "stop" }, "*");
+    });
+
+    it("should not offer element picking without a receiving conversation or for static types", () => {
+        const { rerender } = render(<ArtifactViewer type="html" code="<p>a</p>" contentKey={1} buildLogs={[]} />);
+        expect(screen.queryByRole("button", { name: "选择元素修改" })).toBeNull();
+        rerender(<ArtifactViewer type="markdown" code="# a" contentKey={1} buildLogs={[]} onFixWithAI={vi.fn()} />);
+        expect(screen.queryByRole("button", { name: "选择元素修改" })).toBeNull();
+    });
+
     it("shows the version switcher only when there is history and marks old versions", () => {
         const versions = [
             { version: 3, created_at: "2026-11-27T10:00:00Z" },

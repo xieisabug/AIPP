@@ -13,11 +13,13 @@ import {
     Loader2,
     Maximize2,
     Minimize2,
+    MousePointerClick,
     PanelTopOpen,
     RotateCw,
     Wand2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
     DropdownMenu,
@@ -37,14 +39,18 @@ import ProjectFrame, { readProjectFile, type ProjectFiles } from "./ProjectFrame
 import {
     ArtifactConsoleEntry,
     ArtifactPreviewType,
+    PickedElement,
+    buildElementEditRequest,
     buildFixReport,
     codeLanguageFor,
     codeLanguageForFile,
     injectConsoleScript,
     needsDevServer,
     previewTypeLabel,
+    readPickMessage,
     readRuntimeConsoleMessage,
     sourceFileExtension,
+    supportsElementPick,
 } from "./artifactRuntime";
 
 export type ArtifactViewerView = "preview" | "code" | "console";
@@ -68,7 +74,7 @@ export interface ArtifactViewerProps {
     previewOverride?: ReactNode;
     /** 加载中界面顶部的内容（收藏项的图标与名称）。 */
     loadingHeader?: ReactNode;
-    /** 把报错交给 AI；返回 false 表示没有界面接收。不传则不显示该操作。 */
+    /** 把报错或「选择元素修改」的要求填进原会话输入框；返回 false 表示没有界面接收。不传则不显示这两个操作。 */
     onFixWithAI?: (report: string) => Promise<boolean>;
     /** 在独立窗口打开（侧栏使用）。 */
     onOpenInWindow?: () => void;
@@ -130,6 +136,11 @@ export default function ArtifactViewer({
     const [mermaidSvg, setMermaidSvg] = useState<string | null>(null);
     const [isSendingFix, setIsSendingFix] = useState(false);
     const [codeFile, setCodeFile] = useState<string | null>(null);
+    // 选择元素修改：picking = 页面处于点选模式；picked = 已点中、等待填写修改要求的元素
+    const [picking, setPicking] = useState(false);
+    const [picked, setPicked] = useState<PickedElement | null>(null);
+    const [editInstruction, setEditInstruction] = useState("");
+    const [isSendingEdit, setIsSendingEdit] = useState(false);
 
     const { sendConfig } = useArtifactBridge({
         iframeRef: urlIframeRef,
@@ -147,16 +158,28 @@ export default function ArtifactViewer({
         setMermaidSvg(null);
         setView("preview");
         setCodeFile(null);
+        setPicking(false);
+        setPicked(null);
     }, [contentKey]);
 
     // 只接收本查看器内 iframe 里的诊断脚本消息
     useEffect(() => {
         const handleMessage = (event: MessageEvent) => {
             const entry = readRuntimeConsoleMessage(event.data);
-            if (!entry) return;
+            const pick = entry ? null : readPickMessage(event.data);
+            if (!entry && !pick) return;
             const frames = previewAreaRef.current?.querySelectorAll("iframe") ?? [];
             const fromOwnFrame = Array.from(frames).some((frame) => frame.contentWindow === event.source);
             if (!fromOwnFrame) return;
+            if (pick) {
+                setPicking(false);
+                if (pick.state === "picked") {
+                    setPicked(pick.element);
+                    setEditInstruction("");
+                }
+                return;
+            }
+            if (!entry) return;
             setRuntimeEntries((prev) =>
                 prev.length >= MAX_RUNTIME_ENTRIES ? [...prev.slice(1), entry] : [...prev, entry],
             );
@@ -202,8 +225,75 @@ export default function ArtifactViewer({
 
     const reload = useCallback(() => {
         setRuntimeEntries([]);
+        setPicking(false);
         setReloadNonce((n) => n + 1);
     }, []);
+
+    /** 通知预览页面进入/退出点选模式（页面里的诊断脚本只认父窗口发来的指令）。 */
+    const postPickCommand = useCallback((command: "start" | "stop") => {
+        const frames = previewAreaRef.current?.querySelectorAll("iframe") ?? [];
+        for (const frame of Array.from(frames)) {
+            try {
+                frame.contentWindow?.postMessage({ __aippArtifactPick: command }, "*");
+            } catch {
+                // 页面已卸载
+            }
+        }
+    }, []);
+
+    const canPickElement = Boolean(onFixWithAI) && supportsElementPick(type) && isReady && !previewOverride;
+
+    const togglePicking = useCallback(() => {
+        if (picking) {
+            postPickCommand("stop");
+            setPicking(false);
+            return;
+        }
+        setPicked(null);
+        setView("preview");
+        setPicking(true);
+        postPickCommand("start");
+    }, [picking, postPickCommand]);
+
+    // 离开预览时退出点选模式
+    useEffect(() => {
+        if (view !== "preview" && picking) {
+            postPickCommand("stop");
+            setPicking(false);
+        }
+    }, [view, picking, postPickCommand]);
+
+    // 点了工具栏按钮后焦点还在宿主页面，页面里收不到 Esc：宿主这边也接 Esc
+    useEffect(() => {
+        if (!picking) return;
+        const handleKey = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            postPickCommand("stop");
+            setPicking(false);
+        };
+        window.addEventListener("keydown", handleKey, true);
+        return () => window.removeEventListener("keydown", handleKey, true);
+    }, [picking, postPickCommand]);
+
+    const sendElementEdit = useCallback(async () => {
+        if (!onFixWithAI || !picked || !editInstruction.trim()) return;
+        setIsSendingEdit(true);
+        try {
+            const delivered = await onFixWithAI(
+                buildElementEditRequest({ title, type, version: currentVersion, element: picked, instruction: editInstruction }),
+            );
+            if (delivered) {
+                toast.success("已把修改要求填入会话输入框");
+                setPicked(null);
+                setEditInstruction("");
+            } else {
+                toast.error("没有打开该 Artifact 所在的会话，请先打开原会话再试");
+            }
+        } finally {
+            setIsSendingEdit(false);
+        }
+    }, [onFixWithAI, picked, editInstruction, title, type, currentVersion]);
 
     const toggleFullscreen = useCallback(async () => {
         try {
@@ -537,6 +627,18 @@ export default function ArtifactViewer({
                         </DropdownMenu>
                     </>
                 )}
+                {canPickElement && (
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        iconLabel={picking ? "退出选择元素" : "选择元素修改"}
+                        aria-pressed={picking}
+                        className="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
+                        onClick={togglePicking}
+                    >
+                        <MousePointerClick className={iconSize} />
+                    </Button>
+                )}
                 {isReady && (type === "html" || type === "svg" || type === "xml" || type === "project" || needsDevServer(type)) && (
                     <Button variant="ghost" size="icon" iconLabel="重新加载" onClick={reload}>
                         <RotateCw className={iconSize} />
@@ -584,6 +686,70 @@ export default function ArtifactViewer({
                 <div className={cn("flex flex-1 flex-col min-h-0", view !== "preview" && "hidden")}>{renderPreview()}</div>
                 {view === "code" && renderCode()}
                 {view === "console" && renderConsole()}
+
+                {view === "preview" && picking && (
+                    <div
+                        className="flex flex-shrink-0 items-center gap-2 border-t border-border bg-background px-3 py-1.5 text-xs text-muted-foreground"
+                        data-aipp-slot="artifact-viewer-pick-hint"
+                    >
+                        <MousePointerClick className="h-3.5 w-3.5" />
+                        <span>点击页面中想修改的元素，按 Esc 取消</span>
+                        <Button variant="ghost" size="sm" className="ml-auto" onClick={togglePicking}>
+                            取消
+                        </Button>
+                    </div>
+                )}
+
+                {view === "preview" && picked && (
+                    <form
+                        className="flex flex-shrink-0 flex-col gap-2 border-t border-border bg-background px-3 py-2"
+                        data-aipp-slot="artifact-viewer-pick-edit"
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void sendElementEdit();
+                        }}
+                    >
+                        <div className="flex min-w-0 items-baseline gap-2 text-xs">
+                            <code className="shrink-0 text-foreground">&lt;{picked.tag}&gt;</code>
+                            <span className="min-w-0 truncate font-mono text-muted-foreground" title={picked.selector}>
+                                {picked.selector}
+                            </span>
+                        </div>
+                        {picked.text && (
+                            <p className="truncate text-xs text-muted-foreground" title={picked.text}>
+                                {picked.text}
+                            </p>
+                        )}
+                        <Textarea
+                            autoFocus
+                            rows={2}
+                            value={editInstruction}
+                            onChange={(event) => setEditInstruction(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                                    event.preventDefault();
+                                    void sendElementEdit();
+                                } else if (event.key === "Escape") {
+                                    setPicked(null);
+                                }
+                            }}
+                            placeholder="想怎么改这个元素？例如：改成圆角按钮，文字换成「开始」"
+                            className="min-h-0 resize-none text-sm"
+                            aria-label="修改要求"
+                        />
+                        <div className="flex items-center justify-end gap-1">
+                            <Button type="button" variant="ghost" size="sm" onClick={togglePicking}>
+                                重新选择
+                            </Button>
+                            <Button type="button" variant="ghost" size="sm" onClick={() => setPicked(null)}>
+                                取消
+                            </Button>
+                            <Button type="submit" size="sm" disabled={!editInstruction.trim() || isSendingEdit}>
+                                填入会话
+                            </Button>
+                        </div>
+                    </form>
+                )}
 
                 {view === "preview" && runtimeErrorCount > 0 && (
                     <div className="flex flex-shrink-0 items-center gap-2 border-t border-border bg-background px-3 py-1.5 text-xs">

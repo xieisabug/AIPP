@@ -34,6 +34,9 @@ pub struct ArtifactCollection {
     pub use_count: i64,
     pub db_id: Option<String>,     // 独立数据库标识
     pub assistant_id: Option<i64>, // 关联的助手 ID
+    /// 本机来源，见 [`ArtifactCollectionItem::source`]。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -146,6 +149,24 @@ impl ArtifactsDatabase {
         Ok(())
     }
 
+    /// 所有记有来源的收藏：`(id, source JSON)`。
+    pub fn list_sources(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source FROM artifacts_collection WHERE source IS NOT NULL AND source != '' ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// 用来源会话里的新版本替换收藏内容；名称、图标、标签和绑定保持不变。
+    pub fn replace_content(&self, id: i64, artifact_type: &str, code: &str, source: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE artifacts_collection SET artifact_type=?1, code=?2, source=?3 WHERE id=?4",
+            params![artifact_type, code, source, id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Get all artifacts with optional type filter
     pub fn get_artifacts(&self, artifact_type: Option<&str>) -> Result<Vec<ArtifactCollectionItem>> {
         self.list_metadata(artifact_type, None)
@@ -170,7 +191,7 @@ impl ArtifactsDatabase {
     /// Get artifact by ID
     pub fn get_artifact_by_id(&self, id: i64) -> Result<Option<ArtifactCollection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id 
+            "SELECT id, name, icon, description, artifact_type, code, tags, created_time, last_used_time, use_count, db_id, assistant_id, source 
              FROM artifacts_collection 
              WHERE id = ?"
         )?;
@@ -189,6 +210,7 @@ impl ArtifactsDatabase {
                 use_count: row.get(9)?,
                 db_id: row.get(10)?,
                 assistant_id: row.get(11)?,
+                source: row.get(12)?,
             })
         })?;
 
@@ -345,6 +367,20 @@ mod tests {
         db.create_tables().expect("First create should succeed");
         let result = db.create_tables();
         assert!(result.is_ok(), "Second create should also succeed (IF NOT EXISTS)");
+    }
+
+    #[test]
+    fn test_replace_content_keeps_metadata_and_updates_source() {
+        let db = setup_test_db();
+        let id = db.save_artifact(create_sample_artifact("Tool", "react")).unwrap();
+        db.set_source(id, r#"{"conversation_id":1,"artifact_key":"a","version":1}"#).unwrap();
+
+        assert!(db.replace_content(id, "html", "<p>v2</p>", r#"{"conversation_id":1,"artifact_key":"a","version":2}"#).unwrap());
+
+        let item = db.get_artifact_by_id(id).unwrap().unwrap();
+        assert_eq!((item.name.as_str(), item.artifact_type.as_str(), item.code.as_str()), ("Tool", "html", "<p>v2</p>"));
+        assert_eq!(db.list_sources().unwrap(), vec![(id, r#"{"conversation_id":1,"artifact_key":"a","version":2}"#.to_string())]);
+        assert!(!db.replace_content(id + 100, "html", "x", "{}").unwrap());
     }
 
     // ============================================

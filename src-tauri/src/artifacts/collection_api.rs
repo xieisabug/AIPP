@@ -10,6 +10,7 @@ use crate::db::llm_db::LLMDatabase;
 use crate::FeatureConfigState;
 
 use crate::mcp::builtin_mcp::choices::archive;
+use super::collection_source::{self, CollectionSourceUpdate};
 use super::artifacts_db::{
     ArtifactCollection, ArtifactsDatabase, NewArtifactCollection, UpdateArtifactCollection,
 };
@@ -47,7 +48,6 @@ fn pinned_version_content(
     source: &CollectionSource,
     requested_type: &str,
 ) -> Result<(String, String), String> {
-    use crate::mcp::builtin_mcp::choices::snapshot::Candidate;
     let detail = crate::artifacts::versions::get_version(
         app_handle,
         source.conversation_id,
@@ -56,9 +56,17 @@ fn pinned_version_content(
     )
     .map_err(|e| format!("读取 Artifact 版本：{e:#}"))?
     .ok_or_else(|| "该 Artifact 版本已不存在".to_string())?;
+    version_content(detail, requested_type)
+}
+
+fn version_content(
+    detail: crate::artifacts::versions::ArtifactVersionDetail,
+    single_file_type: &str,
+) -> Result<(String, String), String> {
+    use crate::mcp::builtin_mcp::choices::snapshot::Candidate;
     let entry_code = detail.entry_code().map_err(|e| format!("{e:#}"))?;
     if !detail.summary.multi_file {
-        return Ok((requested_type.to_string(), entry_code));
+        return Ok((single_file_type.to_string(), entry_code));
     }
     let archive = archive::Archive {
         candidate: Candidate {
@@ -141,15 +149,60 @@ pub fn save_artifact_to_collection(
         }
     }
 
-    let windows_to_notify = ["artifact_collections", "ask", "chat_ui"];
-    for window_name in windows_to_notify.iter() {
-        if let Some(window) = app_handle.get_webview_window(window_name) {
-            let _ = window.emit("artifact-collection-updated", artifact_id);
-        }
-    }
-    crate::sync::schedule_sync_after_local_change(&app_handle);
+    notify_collection_changed(&app_handle, artifact_id);
 
     Ok(artifact_id)
+}
+
+/// 通知收藏相关窗口刷新，并安排同步。
+fn notify_collection_changed(app_handle: &tauri::AppHandle, id: i64) {
+    for window_name in ["artifact_collections", "ask", "chat_ui"] {
+        if let Some(window) = app_handle.get_webview_window(window_name) {
+            let _ = window.emit("artifact-collection-updated", id);
+        }
+    }
+    crate::sync::schedule_sync_after_local_change(app_handle);
+}
+
+/// 原会话里已有新版本的收藏（只看本机记下的来源）。
+#[tauri::command]
+pub fn get_collection_source_updates(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<CollectionSourceUpdate>, String> {
+    let db = ArtifactsDatabase::new(&app_handle)
+        .map_err(|e| format!("Database connection failed: {}", e))?;
+    let sources = db.list_sources().map_err(|e| e.to_string())?;
+    Ok(collection_source::find_updates(&sources, |conversation_id| {
+        crate::artifacts::versions::latest_versions(&app_handle, conversation_id)
+            .map_err(|e| tracing::warn!(conversation_id, error = %e, "Failed to read artifact versions"))
+            .ok()
+    }))
+}
+
+/// 把收藏换成原会话里该 Artifact 的最新版本，返回同步后的版本号。
+#[tauri::command]
+pub fn update_collection_from_source(app_handle: tauri::AppHandle, id: i64) -> Result<i64, String> {
+    let db = ArtifactsDatabase::new(&app_handle)
+        .map_err(|e| format!("Database connection failed: {}", e))?;
+    let item = db.get_artifact_by_id(id).map_err(|e| e.to_string())?.ok_or("收藏已不存在")?;
+    let source = item
+        .source
+        .as_deref()
+        .and_then(collection_source::parse_source)
+        .ok_or("这个收藏没有记录来源会话")?;
+    let detail = crate::artifacts::versions::get_version(&app_handle, source.conversation_id, &source.artifact_key, None)
+        .map_err(|e| format!("读取 Artifact 版本：{e:#}"))?
+        .ok_or("原会话里已找不到这个 Artifact")?;
+    let latest = detail.summary.version;
+    if latest <= source.version {
+        return Ok(source.version);
+    }
+    let single_file_type = collection_source::collection_type(&detail.summary.preview_type, &item.artifact_type);
+    let (artifact_type, code) = version_content(detail, &single_file_type)?;
+    let updated_source = serde_json::to_string(&CollectionSource { version: latest, ..source }).map_err(|e| e.to_string())?;
+    db.replace_content(id, &artifact_type, &code, &updated_source).map_err(|e| e.to_string())?;
+    notify_collection_changed(&app_handle, id);
+    Ok(latest)
 }
 
 #[tauri::command]
@@ -224,13 +277,7 @@ pub fn update_artifact_collection(
 
     db.update_artifact(update).map_err(|e| format!("Failed to update artifact: {}", e))?;
 
-    let windows_to_notify = ["artifact_collections", "ask", "chat_ui"];
-    for window_name in windows_to_notify.iter() {
-        if let Some(window) = app_handle.get_webview_window(window_name) {
-            let _ = window.emit("artifact-collection-updated", request.id);
-        }
-    }
-    crate::sync::schedule_sync_after_local_change(&app_handle);
+    notify_collection_changed(&app_handle, request.id);
 
     Ok(())
 }
@@ -244,13 +291,7 @@ pub fn delete_artifact_collection(app_handle: tauri::AppHandle, id: i64) -> Resu
         db.delete_artifact(id).map_err(|e| format!("Failed to delete artifact: {}", e))?;
 
     if deleted {
-        let windows_to_notify = ["artifact_collections", "ask", "chat_ui"];
-        for window_name in windows_to_notify.iter() {
-            if let Some(window) = app_handle.get_webview_window(window_name) {
-                let _ = window.emit("artifact-collection-updated", id);
-            }
-        }
-        crate::sync::schedule_sync_after_local_change(&app_handle);
+        notify_collection_changed(&app_handle, id);
     }
 
     Ok(deleted)
@@ -279,6 +320,8 @@ pub async fn open_artifact_window(
     let Some(window) = app_handle.get_webview_window("artifact") else {
         return Ok(());
     };
+    // 从会话收藏的小工具：带上来源会话，预览里的「让 AI 修复」「选择元素修改」交回原会话
+    let source = artifact.source.as_deref().and_then(collection_source::parse_source);
     let payload = |preview_type: &str, code: &str| {
         serde_json::json!({
             "id": artifact.id,
@@ -293,6 +336,8 @@ pub async fn open_artifact_window(
             "use_count": artifact.use_count,
             "db_id": artifact.db_id,
             "assistant_id": artifact.assistant_id,
+            "source_conversation_id": source.as_ref().map(|s| s.conversation_id),
+            "source_version": source.as_ref().map(|s| s.version),
         })
     };
 

@@ -28,6 +28,9 @@ export interface ArtifactData {
     entry_file?: string;
     multi_file?: boolean;
     language?: string;
+    /** 合集里从会话收藏的小工具：来源会话与收藏时的版本。 */
+    source_conversation_id?: number;
+    source_version?: number;
 }
 
 export interface EnvironmentCheckData {

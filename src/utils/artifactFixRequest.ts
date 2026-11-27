@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
+import { openConversationInChat } from "./openConversationInChat";
 
 /**
  * 预览窗口把 Artifact 报错交给原会话：广播请求，正在显示该会话的聊天界面把报告填进输入框
@@ -33,6 +34,31 @@ export async function requestArtifactFix(conversationId: number, text: string): 
         clearTimeout(timer);
         unlisten();
     }
+}
+
+/**
+ * 发给不一定开着的会话（合集里的小工具）：没有界面接收时先在聊天窗口打开该会话，等它切换过去后重试。
+ * `open` 与 `wait` 可替换，便于测试。
+ */
+export async function requestArtifactFixOpening(
+    conversationId: number,
+    text: string,
+    deps: {
+        request?: typeof requestArtifactFix;
+        open?: (conversationId: number) => Promise<void>;
+        wait?: (ms: number) => Promise<void>;
+    } = {},
+): Promise<boolean> {
+    const request = deps.request ?? requestArtifactFix;
+    const open = deps.open ?? openConversationInChat;
+    const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    if (await request(conversationId, text)) return true;
+    await open(conversationId);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+        await wait(500);
+        if (await request(conversationId, text)) return true;
+    }
+    return false;
 }
 
 /** 聊天界面接收发给当前会话的修复请求。 */

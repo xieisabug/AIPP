@@ -168,7 +168,7 @@ export const db = {
      * 执行 SQL 查询语句 (SELECT)
      * @param sql SQL 语句
      * @param params 参数数组
-     * @param dbId 可选的数据库 ID（默认使用配置的 db_id）
+     * @param dbId 兼容旧代码，可省略；只能填绑定的 db_id，填其他值会被宿主拒绝
      */
     async query(sql: string, params: unknown[] = [], dbId?: string): Promise<QueryResult> {
         return sendMessage<QueryResult>('db_query', { sql, params, db_id: dbId });
@@ -178,7 +178,7 @@ export const db = {
      * 执行 SQL 修改语句 (INSERT/UPDATE/DELETE/CREATE/DROP)
      * @param sql SQL 语句
      * @param params 参数数组
-     * @param dbId 可选的数据库 ID
+     * @param dbId 兼容旧代码，可省略；只能填绑定的 db_id
      */
     async execute(sql: string, params: unknown[] = [], dbId?: string): Promise<ExecuteResult> {
         return sendMessage<ExecuteResult>('db_execute', { sql, params, db_id: dbId });
@@ -187,7 +187,7 @@ export const db = {
     /**
      * 批量执行 SQL 语句（用于初始化表结构等）
      * @param sql 多条 SQL 语句
-     * @param dbId 可选的数据库 ID
+     * @param dbId 兼容旧代码，可省略；只能填绑定的 db_id
      */
     async batchExecute(sql: string, dbId?: string): Promise<void> {
         return sendMessage<void>('db_batch_execute', { sql, db_id: dbId });
@@ -195,7 +195,7 @@ export const db = {
 
     /**
      * 获取数据库中所有表的信息
-     * @param dbId 可选的数据库 ID
+     * @param dbId 兼容旧代码，可省略；只能填绑定的 db_id
      */
     async getTables(dbId?: string): Promise<TableInfo[]> {
         return sendMessage<TableInfo[]>('db_get_tables', { db_id: dbId });
@@ -204,7 +204,7 @@ export const db = {
     /**
      * 获取指定表的列信息
      * @param tableName 表名
-     * @param dbId 可选的数据库 ID
+     * @param dbId 兼容旧代码，可省略；只能填绑定的 db_id
      */
     async getColumns(tableName: string, dbId?: string): Promise<string[]> {
         return sendMessage<string[]>('db_get_columns', { table_name: tableName, db_id: dbId });
@@ -250,10 +250,10 @@ function tryParseJson<T>(content: string): T | string {
  */
 export const ai = {
     /**
-     * 调用 AI 助手
+     * 调用 AI 助手（固定使用保存时绑定的助手）
      * @param prompt 用户提示
      * @param context 可选的上下文
-     * @param options 可选配置
+     * @param options 可选配置；assistantId 仅兼容旧代码，只能填绑定的助手
      */
     async ask(
         prompt: string,

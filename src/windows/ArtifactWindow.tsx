@@ -8,6 +8,7 @@ import { useTheme } from "../hooks/useTheme";
 import { useArtifactPreviewSession } from "@/hooks/useArtifactPreviewSession";
 import type { ArtifactData } from "../hooks/useArtifactEvents";
 import { formatIconDisplay } from "@/utils/emojiUtils";
+import { requestArtifactFixOpening } from "@/utils/artifactFixRequest";
 
 /** 结束收藏项的 React/Vue 预览服务器（后端按收藏 ID 登记）。 */
 function stopCollectionRuntime(kind: "react" | "vue", artifactId: number | undefined) {
@@ -63,6 +64,9 @@ export default function ArtifactWindow() {
         </div>
     ) : null;
 
+    // 从会话收藏的小工具：报错与「选择元素修改」交回原会话继续改（会话没打开时先打开）
+    const sourceConversationId = typeof info?.source_conversation_id === "number" ? info.source_conversation_id : null;
+
     const archivedChoiceId =
         content?.type === "html" && content.code.startsWith(archivePrefix) && typeof info?.id === "number" ? info.id : null;
 
@@ -84,6 +88,12 @@ export default function ArtifactWindow() {
                         ) : undefined
                     }
                     onCodeChange={session.updateCode}
+                    onFixWithAI={
+                        sourceConversationId !== null
+                            ? (text) => requestArtifactFixOpening(sourceConversationId, text)
+                            : undefined
+                    }
+                    currentVersion={info?.source_version}
                 />
             </div>
             <EnvironmentInstallDialog {...session.environmentDialog} />

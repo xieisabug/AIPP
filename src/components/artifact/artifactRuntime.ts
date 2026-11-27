@@ -208,3 +208,62 @@ export function buildFixReport(options: {
     const fence = body.includes("```") ? "~~~~" : "```";
     return `Artifact${name}${kind}预览时出现以下错误，请修复：\n\n${fence}\n${body}\n${fence}`;
 }
+
+/** 「选择元素修改」：预览页面里点中的元素（由诊断脚本的点选模式发来）。 */
+export interface PickedElement {
+    tag: string;
+    selector: string;
+    text: string;
+    html: string;
+    rect?: { x: number; y: number; width: number; height: number };
+}
+
+export type PickMessage = { state: "picked"; element: PickedElement } | { state: "cancelled" };
+
+/** 能在页面里点选元素的预览类型（页面里有诊断脚本）。 */
+export function supportsElementPick(type: ArtifactPreviewType | null): boolean {
+    return type === "html" || type === "react" || type === "vue" || type === "project";
+}
+
+export function readPickMessage(data: unknown): PickMessage | null {
+    if (!data || typeof data !== "object" || (data as { __aippArtifactPick?: unknown }).__aippArtifactPick !== 1) {
+        return null;
+    }
+    const { state, element } = data as { state?: unknown; element?: Partial<PickedElement> | null };
+    if (state === "cancelled") return { state };
+    if (state !== "picked" || !element || typeof element.tag !== "string" || typeof element.selector !== "string") {
+        return null;
+    }
+    return {
+        state,
+        element: {
+            tag: element.tag,
+            selector: element.selector,
+            text: typeof element.text === "string" ? element.text : "",
+            html: typeof element.html === "string" ? element.html : "",
+            rect: element.rect,
+        },
+    };
+}
+
+/** 填进会话输入框的修改要求：说明改哪个 Artifact 的哪个元素，附上定位信息。 */
+export function buildElementEditRequest(options: {
+    title?: string;
+    type: ArtifactPreviewType | null;
+    version?: number | null;
+    element: PickedElement;
+    instruction: string;
+}): string {
+    const { element } = options;
+    const name = options.title ? `「${options.title}」` : "";
+    const kind = options.type ? `（${previewTypeLabel(options.type)}）` : "";
+    const version = options.version ? ` v${options.version}` : "";
+    const lines = [`请修改 Artifact${name}${kind}${version}里的这个元素：${options.instruction.trim()}`, "", `- 元素：\`<${element.tag}>\``];
+    if (element.selector) lines.push(`- 位置：\`${element.selector}\``);
+    if (element.text) lines.push(`- 文字：${element.text}`);
+    if (element.html) {
+        const fence = element.html.includes("```") ? "~~~~" : "```";
+        lines.push("", "页面中渲染出的 HTML（可能与源码写法不同）：", `${fence}html`, element.html, fence);
+    }
+    return lines.join("\n");
+}
