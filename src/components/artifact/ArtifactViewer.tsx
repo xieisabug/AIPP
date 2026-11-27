@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
@@ -303,7 +303,7 @@ export default function ArtifactViewer({
     };
 
     const renderPreview = () => {
-        if (previewOverride) return previewOverride;
+        if (previewOverride) return <Fragment key={reloadNonce}>{previewOverride}</Fragment>;
         if (!isReady) return renderLoading();
         switch (type) {
             case "mermaid":

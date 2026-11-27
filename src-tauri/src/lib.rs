@@ -1087,6 +1087,8 @@ pub fn run() {
         .manage(crate::api::office_save::OfficeEditCopyOrigins::default())
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                #[cfg(desktop)]
+                window.state::<crate::api::chat_file_preview::LinkedFiles>().release_window(window.label());
                 window.state::<crate::api::office_save::OfficeEditCopyOrigins>().release_window(window.label());
             }
         })
@@ -1094,7 +1096,9 @@ pub fn run() {
         .manage(crate::sync::SyncState::new())
         .manage(FeishuButlerState::default());
     #[cfg(desktop)]
-    let app = app.manage(CopilotLspState::default());
+    let app = app.manage(CopilotLspState::default())
+        .manage(crate::api::chat_file_preview::LinkedFiles::default())
+        .register_asynchronous_uri_scheme_protocol("aipp-file", crate::api::chat_file_preview::serve);
     let app = app.manage(CopilotTokenManagerState::new());
     let app = app
         .invoke_handler(tauri::generate_handler![
@@ -1656,6 +1660,14 @@ pub fn run() {
             read_authorized_office_file,
             #[cfg(desktop)]
             crate::api::office_api::handle_office_file_link,
+            #[cfg(desktop)]
+            crate::api::chat_file_preview::open_chat_preview_file,
+            #[cfg(desktop)]
+            crate::api::chat_file_preview::close_chat_preview_file,
+            #[cfg(desktop)]
+            crate::api::chat_file_preview::reveal_chat_file,
+            #[cfg(desktop)]
+            crate::mcp::builtin_mcp::interaction::prepare_chat_text_file_preview,
             open_office_file_externally,
             register_office_selection_ref,
             get_office_file_ref_status,

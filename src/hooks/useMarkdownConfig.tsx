@@ -2,7 +2,7 @@ import { createContext, useContext, useMemo, useCallback } from "react";
 import React from "react";
 import { Components } from "react-markdown";
 import { MarkdownLink } from "@/components/conversation/MarkdownLink";
-import { rehypeLocalOfficeLinks } from "@/react-markdown/localOfficeLink";
+import { rehypeLocalFileLinks } from "@/react-markdown/localFileLink";
 import rehypeRaw from "rehype-raw";
 import rehypeKatex from "rehype-katex";
 import rehypeSanitize from "rehype-sanitize";
@@ -128,7 +128,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, co
                     </code>
                 );
             },
-            a: (props) => <MarkdownLink {...props} enableOfficeLinks={!isMobilePlatform} conversationId={conversationId} />,
+            a: (props) => <MarkdownLink {...props} enableLocalFileLinks={!isMobilePlatform} conversationId={conversationId} />,
             img: ({ src, alt, ...props }: any) => <LazyImage src={src} alt={alt} {...props} />,
             ...(isMobilePlatform && !disableMarkdownSyntax
                 ? {
@@ -168,7 +168,7 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, co
         );
         return [
             rehypeRaw,
-            ...(!isMobilePlatform ? [rehypeLocalOfficeLinks] : []),
+            ...(!isMobilePlatform ? [rehypeLocalFileLinks] : []),
             [rehypeSanitize, sanitizeSchema],
             ...(!disableMarkdownSyntax ? [rehypeKatex] : []),
         ];

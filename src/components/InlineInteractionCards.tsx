@@ -6,6 +6,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Button } from "@/components/ui/button";
 import { CompactDialogHeader, Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
+import RustCodeBlock from "@/components/RustCodeBlock";
 import { cn } from "@/utils/utils";
 import { Check, ChevronDown, CircleCheck, FileText, Files, Globe, ImageIcon, Maximize2, MessageCircleQuestion } from "lucide-react";
 import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
@@ -520,7 +521,7 @@ const resolvePdfSrc = (file: PreviewFileItem): string | null => {
 const FRAME_CLASS = "block h-[60vh] w-full bg-background";
 
 /** 文件内容贴边铺满卡片，不再套额外边框；文本类内容自带内边距。 */
-const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
+export const PreviewFileContent: React.FC<{ file: PreviewFileItem; expandedCode?: boolean }> = ({ file, expandedCode }) => {
     if (file.type === "markdown") {
         return (
             <div className="prose prose-sm max-w-none px-3 py-2 dark:prose-invert [&>:first-child]:mt-0! [&>:last-child]:mb-0!">
@@ -534,7 +535,9 @@ const PreviewFileContent: React.FC<{ file: PreviewFileItem }> = ({ file }) => {
         if (file.language) {
             return (
                 <div className="px-3 py-2">
-                    <UnifiedMarkdown noProseWrapper>{`\`\`\`${file.language}\n${text}\n\`\`\``}</UnifiedMarkdown>
+                    {expandedCode
+                        ? <RustCodeBlock language={file.language} disableCollapse>{text}</RustCodeBlock>
+                        : <UnifiedMarkdown noProseWrapper>{`\`\`\`${file.language}\n${text}\n\`\`\``}</UnifiedMarkdown>}
                 </div>
             );
         }
@@ -636,6 +639,29 @@ function FileWindowPreviewButton({ file, conversationId }: { file: PreviewFileIt
     );
 }
 
+export function PreviewFileResources({ request, onChange }: {
+    request: PreviewFileRequest;
+    onChange: (request: PreviewFileRequest) => void;
+}) {
+    const [open, setOpen] = useState(false);
+    if (!hasActionablePreviewResources(request.externalResources)) return null;
+    return (
+        <>
+            <Button type="button" variant="ghost" size="sm" className="h-6 gap-1 px-2 text-xs"
+                onClick={() => setOpen(true)}>
+                <Globe className="size-3.5" />
+                加载外部资源
+            </Button>
+            <PreviewExternalResourcesDialog<unknown, PreviewFileRequest>
+                externalResources={request.externalResources} open={open} onOpenChange={setOpen}
+                onAuthorized={(result: PreviewResourceAuthorizationResult<unknown, PreviewFileRequest>) => {
+                    if (result.previewFile) onChange(result.previewFile);
+                }}
+            />
+        </>
+    );
+}
+
 export function PreviewFileCard({
     request,
     isOpen,
@@ -645,7 +671,6 @@ export function PreviewFileCard({
     const [activeTab, setActiveTab] = useState(0);
     const [collapsed, setCollapsed] = useState(!isLatestTurn);
     const [currentRequest, setCurrentRequest] = useState<PreviewFileRequest | null>(request);
-    const [isResourceDialogOpen, setIsResourceDialogOpen] = useState(false);
     const bodyId = useId();
 
     useEffect(() => {
@@ -667,8 +692,6 @@ export function PreviewFileCard({
     const activeIndex = Math.min(activeTab, Math.max(files.length - 1, 0));
     const activeFile = useTabs ? files[activeIndex] : undefined;
     const headerFile = activeFile ?? (files.length === 1 ? files[0] : undefined);
-    const showExternalResourceButton =
-        hasActionablePreviewResources(currentRequest.externalResources);
     const origin = currentRequest.metadata?.origin;
 
     const renderHeading = () => {
@@ -777,18 +800,7 @@ export function PreviewFileCard({
                         {headerFile && (
                             <FileWindowPreviewButton file={headerFile} conversationId={currentRequest.conversation_id} />
                         )}
-                        {showExternalResourceButton && (
-                            <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 gap-1 px-2 text-xs has-[>svg]:px-2"
-                                onClick={() => setIsResourceDialogOpen(true)}
-                            >
-                                <Globe className="size-3.5" />
-                                加载外部资源
-                            </Button>
-                        )}
+                        <PreviewFileResources request={currentRequest} onChange={setCurrentRequest} />
                         <Button
                             type="button"
                             variant="ghost"
@@ -808,16 +820,6 @@ export function PreviewFileCard({
                     {renderBody()}
                 </div>
             </div>
-            <PreviewExternalResourcesDialog<unknown, PreviewFileRequest>
-                externalResources={currentRequest.externalResources}
-                open={isResourceDialogOpen}
-                onOpenChange={setIsResourceDialogOpen}
-                onAuthorized={(result: PreviewResourceAuthorizationResult<unknown, PreviewFileRequest>) => {
-                    if (result.previewFile) {
-                        setCurrentRequest(result.previewFile);
-                    }
-                }}
-            />
         </div>
     );
 }

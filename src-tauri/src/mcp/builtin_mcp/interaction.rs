@@ -363,7 +363,7 @@ impl Default for PreviewFileRelayState {
     }
 }
 
-fn is_allowed_preview_relay_origin(origin: &str) -> bool {
+pub(crate) fn is_allowed_preview_relay_origin(origin: &str) -> bool {
     let trimmed = origin.trim();
     if trimmed.is_empty() {
         return false;
@@ -503,6 +503,9 @@ pub(super) fn resolve_local_file_path(raw_url: &str) -> Option<PathBuf> {
 fn inline_text_file_content(file: &mut PreviewFileItem, local_path: &Path) -> Result<(), String> {
     let metadata = std::fs::metadata(local_path)
         .map_err(|e| format!("Failed to read metadata for '{}': {}", local_path.display(), e))?;
+    if !metadata.is_file() {
+        return Err(format!("链接目标不是普通文件：{}", local_path.display()));
+    }
     if metadata.len() > PREVIEW_FILE_RELAY_MAX_BYTES {
         return Err(format!(
             "Local preview file is too large ({} bytes): {}",
@@ -516,6 +519,50 @@ fn inline_text_file_content(file: &mut PreviewFileItem, local_path: &Path) -> Re
     file.content = Some(content);
     file.url = None;
     Ok(())
+}
+
+/// 桌面用户点击 Markdown 或源码链接后，复用 preview_file 的文本预览和外部资源授权流程。
+#[cfg(desktop)]
+#[derive(Serialize)]
+pub struct ChatTextFilePreview {
+    #[serde(flatten)]
+    preview: PreviewFileRequestEvent,
+    source: Option<String>,
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn prepare_chat_text_file_preview(
+    app_handle: AppHandle,
+    path: String,
+    language: String,
+    conversation_id: Option<i64>,
+) -> Result<ChatTextFilePreview, String> {
+    let app = app_handle.clone();
+    let (file, source) = tokio::task::spawn_blocking(move || {
+        let target = crate::api::agent_workspace_api::resolve_chat_file_link(&app, &path, conversation_id)?;
+        let title = Path::new(&path).file_name().and_then(|name| name.to_str())
+            .ok_or_else(|| format!("无法识别文件名：{path}"))?;
+        let mut file = PreviewFileItem {
+            title: title.to_owned(),
+            file_type: match language.as_str() { "markdown" => "markdown", "html" | "svg" => "html", _ => "text" }.into(),
+            language: Some(language),
+            content: None, url: None, description: None,
+        };
+        inline_text_file_content(&mut file, &target)?;
+        let content = file.content.as_deref().unwrap_or("");
+        let source = if file.file_type == "html" { Some(content.to_owned()) } else { None };
+        if (source.is_some() || file.file_type == "markdown") && !content.trim().is_empty() {
+            file.url = Some(reqwest::Url::from_file_path(&target).map_err(|_| format!("无法解析文件位置：{path}"))?.to_string());
+        }
+        if file.language.as_deref() == Some("xml") {
+            file.language = Some(crate::artifacts::preview_router::resolve_preview_language("xml",content).to_owned());
+        }
+        Ok::<_, String>((file,source))
+    }).await.map_err(|e| format!("读取聊天文件链接时线程异常退出：{e}"))??;
+    let request = PreviewFileRequest { files: vec![file], view_mode: None, metadata: None };
+    let preview = prepare_preview_file_request_for_ui(app_handle, conversation_id, request).await?;
+    Ok(ChatTextFilePreview { preview, source })
 }
 
 pub(crate) fn inline_local_text_preview_files(files: &mut [PreviewFileItem]) -> Result<(), String> {

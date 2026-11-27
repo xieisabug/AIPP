@@ -220,6 +220,21 @@ pub(super) fn resolve_conversation_working_directory(
     Ok(PathBuf::from(directory))
 }
 
+#[cfg(desktop)]
+pub(crate) fn resolve_chat_file_link(
+    app: &tauri::AppHandle,
+    path: &str,
+    conversation_id: Option<i64>,
+) -> Result<PathBuf, String> {
+    let mut candidate = PathBuf::from(path);
+    if !candidate.is_absolute() {
+        let id = conversation_id.ok_or_else(|| format!("缺少会话工作目录，无法定位相对路径：{path}"))?;
+        candidate = resolve_conversation_working_directory(app, id)?.join(candidate);
+    }
+    dunce::canonicalize(&candidate)
+        .map_err(|e| format!("无法定位文件 {}：{e}", candidate.display()))
+}
+
 // ---------------------------------------------------------------------------
 // 按目录执行的核心逻辑（不依赖 AppHandle）
 // ---------------------------------------------------------------------------

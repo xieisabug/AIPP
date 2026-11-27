@@ -71,11 +71,12 @@
             ],
             "csp": {
                 "default-src": "'self'",
-                "frame-src": "'self' http://localhost:* https://localhost:* http://*.aipp-choice.localhost:* https://embed.diagrams.net aipp-choice: http://aipp-choice.localhost https://aipp-choice.localhost aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost",
-                "connect-src": "'self' http://localhost:* https://localhost:* ipc: http://ipc.localhost",
+                "frame-src": "'self' http://localhost:* https://localhost:* http://*.aipp-choice.localhost:* https://embed.diagrams.net aipp-choice: http://aipp-choice.localhost https://aipp-choice.localhost aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost aipp-file: http://aipp-file.localhost https://aipp-file.localhost",
+                "connect-src": "'self' http://localhost:* https://localhost:* ipc: http://ipc.localhost aipp-file: http://aipp-file.localhost https://aipp-file.localhost",
                 "style-src": "'self' 'unsafe-inline'",
+                "media-src": "'self' data: aipp-file: http://aipp-file.localhost https://aipp-file.localhost",
                 "font-src": "'self' data:",
-                "img-src": "'self' asset: http://asset.localhost data: aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost https://aipp-helper.xiejingyang.com",
+                "img-src": "'self' asset: http://asset.localhost data: aipp-preview: http://aipp-preview.localhost aipp-office: http://aipp-office.localhost https://aipp-helper.xiejingyang.com aipp-file: http://aipp-file.localhost https://aipp-file.localhost",
                 "script-src": "'self' 'unsafe-eval'"
             },
             "assetProtocol": {

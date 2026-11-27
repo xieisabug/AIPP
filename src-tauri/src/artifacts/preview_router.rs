@@ -63,7 +63,7 @@ use std::sync::LazyLock;
 static LAST_ARTIFACT_CACHE: LazyLock<Arc<Mutex<HashMap<String, LastArtifactCache>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-fn resolve_preview_language<'a>(lang: &'a str, input: &str) -> &'a str {
+pub(crate) fn resolve_preview_language<'a>(lang: &'a str, input: &str) -> &'a str {
     if lang != "xml" {
         return lang;
     }

@@ -1,3 +1,4 @@
+import { inferLanguageFromPath } from "@/utils/fileLanguage";
 import { deepSeekWebContextId, readWebReport } from '@/utils/deepSeekWeb';
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -390,40 +391,6 @@ const buildPreviewItems = (value: unknown): ContextPreviewListItem[] | undefined
         .filter((item): item is ContextPreviewListItem => item !== null);
 
     return items.length > 0 ? items : undefined;
-};
-
-const inferLanguageFromPath = (path?: string): string | undefined => {
-    const ext = path?.split('.').pop()?.toLowerCase();
-    switch (ext) {
-        case 'ts':
-        case 'tsx':
-            return 'typescript';
-        case 'js':
-        case 'jsx':
-            return 'javascript';
-        case 'rs':
-            return 'rust';
-        case 'py':
-            return 'python';
-        case 'go':
-            return 'go';
-        case 'json':
-            return 'json';
-        case 'md':
-        case 'markdown':
-            return 'markdown';
-        case 'html':
-            return 'html';
-        case 'css':
-            return 'css';
-        case 'sql':
-            return 'sql';
-        case 'yaml':
-        case 'yml':
-            return 'yaml';
-        default:
-            return undefined;
-    }
 };
 
 const inferContentType = (

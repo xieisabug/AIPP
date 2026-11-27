@@ -749,14 +749,7 @@ pub async fn handle_office_file_link(
 ) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         classify_office_extension(&path).map_err(|e| e.message)?;
-        let mut candidate = PathBuf::from(&path);
-        if !candidate.is_absolute() {
-            let id = conversation_id.ok_or_else(|| format!("缺少会话工作目录，无法定位相对路径：{path}"))?;
-            let root = super::agent_workspace_api::resolve_conversation_working_directory(&app_handle, id)?;
-            candidate = root.join(candidate);
-        }
-        let target = dunce::canonicalize(&candidate)
-            .map_err(|e| format!("无法定位文件 {}：{e}", candidate.display()))?;
+        let target = super::agent_workspace_api::resolve_chat_file_link(&app_handle, &path, conversation_id)?;
         let metadata = fs::metadata(&target).map_err(|e| format!("读取文件信息失败（{path}）：{e}"))?;
         if !metadata.is_file() {
             return Err(format!("链接目标不是文件：{path}"));

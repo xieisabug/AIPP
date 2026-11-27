@@ -137,7 +137,9 @@ export function CollectedChoicePreview({ collectionId }: { collectionId: number 
     if (!snapshot) return <PreviewLoading label="正在读取收藏快照…" />;
     return <ChoicePreview candidate={snapshot.candidate} reference={{ collectionId }} projectFiles={snapshot.files ?? undefined} />;
 }
-function PreparedFrame({ ready, scripts, title }: { ready: PreviewCodeRequestEvent; scripts: boolean; title: string }) {
+export function PreparedFrame({ ready, scripts, title, fill = false }: {
+    ready: Pick<PreviewCodeRequestEvent,"code"|"externalResources">; scripts: boolean; title: string; fill?: boolean;
+}) {
     const [src, setSrc] = useState(""),
         [frameReady, setFrameReady] = useState(false),
         [error, setError] = useState("");
@@ -169,6 +171,7 @@ function PreparedFrame({ ready, scripts, title }: { ready: PreviewCodeRequestEve
     }, [ready, scripts]);
     if (error) return <p role="alert">{error}</p>;
     if (!src) return <PreviewLoading label="正在准备预览…" />;
+    if (fill) return <iframe title={title} className="min-h-0 w-full flex-1 border-0 bg-white" sandbox="allow-scripts" referrerPolicy="no-referrer" src={src}/>;
     return (
         <div className="relative w-full">
             {/* 文档 CSP（document.rs）决定哪些脚本可运行：不允许脚本的候选只运行测高脚本。 */}
@@ -255,7 +258,7 @@ function MarkupPreview({ candidate, reference, files }: { candidate: Candidate; 
 function source(files: Files, name: string) {
     return new TextDecoder().decode(Uint8Array.from(atob(files[name]), (c) => c.charCodeAt(0)));
 }
-function DrawioPreview({ candidate }: { candidate: Candidate }) {
+export function ReadOnlyDrawioPreview({ title, content, fill = false }: { title: string; content?: string | null; fill?: boolean }) {
     const [allowed, setAllowed] = useState(false);
     const frame = useRef<HTMLIFrameElement>(null);
     useEffect(() => {
@@ -266,7 +269,7 @@ function DrawioPreview({ candidate }: { candidate: Candidate }) {
             try {
                 if (JSON.parse(event.data).event === "init") {
                     frame.current.contentWindow?.postMessage(
-                        JSON.stringify({ action: "load", xml: candidate.content }),
+                        JSON.stringify({ action: "load", xml: content }),
                         event.origin
                     );
                 }
@@ -276,18 +279,18 @@ function DrawioPreview({ candidate }: { candidate: Candidate }) {
         }
         window.addEventListener("message", message);
         return () => window.removeEventListener("message", message);
-    }, [allowed, candidate.content]);
+    }, [allowed, content]);
     return allowed ? (
         <iframe
             ref={frame}
-            title={candidate.title}
+            title={title}
             sandbox="allow-scripts allow-same-origin"
             referrerPolicy="no-referrer"
-            className="h-96 w-full border-0"
+            className={fill ? "min-h-0 w-full flex-1 border-0" : "h-96 w-full border-0"}
             src="https://embed.diagrams.net/?embed=1&ui=min&proto=json&noSaveBtn=1&noExitBtn=1"
         />
     ) : (
-        <Button size="sm" variant="outline" onClick={() => setAllowed(true)}>
+        <Button className={fill ? "m-auto" : undefined} size="sm" variant="outline" onClick={() => setAllowed(true)}>
             允许将此图交给 diagrams.net 预览
         </Button>
     );
@@ -448,7 +451,7 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
             ) : html !== undefined ? (
                 <MarkupPreview candidate={{ ...candidate, type: "html", content: html }} reference={reference} files={files} />
             ) : /\.drawio$/i.test(candidate.entry_file || "") ? (
-                mobile ? <p>此 Drawio 工程可在桌面端授权预览，也可切换到源码视图查看文件。</p> : <DrawioPreview candidate={candidate} />
+                mobile ? <p>此 Drawio 工程可在桌面端授权预览，也可切换到源码视图查看文件。</p> : <ReadOnlyDrawioPreview title={candidate.title} content={candidate.content} />
             ) : /\.(md|markdown)$/i.test(candidate.entry_file || "") ? (
                 <MarkupPreview candidate={{ ...candidate, type: "markdown" }} reference={reference} files={files} />
             ) : !/\.(?:html?|[cm]?[jt]sx?|vue|svg|mmd|mermaid|txt)$/i.test(candidate.entry_file || "") ? (

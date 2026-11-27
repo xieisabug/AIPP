@@ -32,6 +32,7 @@ dependencies = [
  "hmac",
  "htmd",
  "http-body-util",
+ "http-range",
  "hyper",
  "hyper-util",
  "if-addrs",
