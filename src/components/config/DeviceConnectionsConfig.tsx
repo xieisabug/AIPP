@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { AssistantListItem } from "@/data/Assistant";
 import SettingsPageShell from "./pages/SettingsPageShell";
 
@@ -31,14 +33,14 @@ function PairDecision({ phone, decide, busy }: {
         <h3 className="font-medium">{phone.name} 请求配对</h3>
         <p className="text-sm text-muted-foreground">选择这部手机可以访问的助手和管家会话。</p>
         {assistants.map(a => <label className="flex items-center gap-2" key={a.id}>
-            <input type="checkbox" checked={grant.assistants.includes(a.id)}
-                onChange={e => setGrant({ ...grant, assistants: e.target.checked ? [...grant.assistants, a.id] : grant.assistants.filter(id => id !== a.id) })} />
+            <Checkbox checked={grant.assistants.includes(a.id)}
+                onCheckedChange={v => setGrant({ ...grant, assistants: v === true ? [...grant.assistants, a.id] : grant.assistants.filter(id => id !== a.id) })} />
             {a.name}
         </label>)}
-        <label className="flex items-center gap-2"><input type="checkbox" checked={grant.butler}
-            onChange={e => setGrant({ ...grant, butler: e.target.checked })} />总管家和所选助手的管家私聊</label>
-        <label className="flex items-center gap-2"><input type="checkbox" checked={grant.chat}
-            onChange={e => setGrant({ ...grant, chat: e.target.checked })} />允许发送消息和停止本手机发起的回复</label>
+        <label className="flex items-center gap-2"><Checkbox checked={grant.butler}
+            onCheckedChange={v => setGrant({ ...grant, butler: v === true })} />总管家和所选助手的管家私聊</label>
+        <label className="flex items-center gap-2"><Checkbox checked={grant.chat}
+            onCheckedChange={v => setGrant({ ...grant, chat: v === true })} />允许发送消息和停止本手机发起的回复</label>
         {grant.chat && <p className="text-sm text-muted-foreground">使用电脑上相应助手或管家的模型、工作区和工具权限。需要批准的操作仍在电脑上确认。</p>}
         {error && <p role="alert">{error}</p>}
         <div className="flex gap-2"><Button disabled={busy || (!grant.butler && !grant.assistants.length)} onClick={() => decide(grant)}>允许配对</Button>
@@ -90,9 +92,10 @@ export default function DeviceConnectionsConfig() {
                 </div> : <div className="space-y-3">
                     <Label htmlFor="host-bridge-name">电脑名称</Label><Input id="host-bridge-name" maxLength={64} value={name} onChange={e => setName(e.target.value)} />
                     <Label htmlFor="host-bridge-address">局域网地址</Label>
-                    <select id="host-bridge-address" className="block rounded-md border bg-background p-2" value={chosen} onChange={e => setAddress(e.target.value)}>
-                        {status.addresses.map(ip => <option key={ip}>{ip}</option>)}
-                    </select>
+                    <Select value={chosen} onValueChange={setAddress}>
+                        <SelectTrigger id="host-bridge-address" className="bg-background"><SelectValue /></SelectTrigger>
+                        <SelectContent>{status.addresses.map(ip => <SelectItem key={ip} value={ip}>{ip}</SelectItem>)}</SelectContent>
+                    </Select>
                     {!chosen && <p className="text-sm">请连接局域网后重新检测网卡。</p>}
                     <Button variant="outline" disabled={busy} onClick={() => void act(refresh)}>重新检测</Button>{" "}
                     <Button disabled={busy || !chosen || !name.trim()} onClick={() => void act(async () => {
@@ -105,8 +108,8 @@ export default function DeviceConnectionsConfig() {
                     decide={grant => void act(() => invoke("bridge_decide", { id: status.pending!.id, grant }))} />}
                 {!!status.devices.length && <section className="space-y-2"><h3 className="font-medium">已配对手机</h3>
                     {status.devices.map(device => <div key={device.id} className="flex items-center justify-between gap-4 border-b py-2">
-                        <span>{device.name}</span><label className="flex items-center gap-2"><input type="checkbox" disabled={busy}
-                            checked={!!device.access.chat} onChange={e => { const allowed = e.target.checked;
+                        <span>{device.name}</span><label className="flex items-center gap-2"><Checkbox disabled={busy}
+                            checked={!!device.access.chat} onCheckedChange={v => { const allowed = v === true;
                                 void act(() => invoke("bridge_set_chat_permission", { id:device.id,allowed }));
                             }} />允许对话</label><Button variant="outline" disabled={busy} onClick={() => void act(() => invoke("bridge_revoke", { id: device.id }))}>撤销配对</Button>
                     </div>)}</section>}

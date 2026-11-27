@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -24,6 +24,9 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -66,6 +69,30 @@ export default function InlineChoicesCard(props: ChoicesCardProps) {
     }
     const key = JSON.stringify([cid, props.requestId, props.llmCallId, binding.generation]);
     return <ChoicesCard key={key} {...props} conversationId={cid} callId={callId} />;
+}
+
+/** 单选作答时候选列表即单选组，候选头部的 RadioGroupItem 依赖它提供选中状态。 */
+function CandidateList({
+    className,
+    radio,
+    value,
+    onValueChange,
+    children,
+}: {
+    className: string;
+    radio: boolean;
+    value: string;
+    onValueChange: (id: string) => void;
+    children: ReactNode;
+}) {
+    // 始终用同一个容器元素：作答前后（流式 → 可选）切换时不能重挂候选，否则预览 iframe 会重新加载。
+    // 不作单选时去掉 radiogroup 语义（Radix 让传入的 role 覆盖默认值）。
+    return (
+        <RadioGroup className={className || "block"} value={value} onValueChange={onValueChange}
+            role={radio ? undefined : "presentation"}>
+            {children}
+        </RadioGroup>
+    );
 }
 
 function ChoicesCard(props: ChoicesCardProps) {
@@ -261,15 +288,16 @@ function ChoicesCard(props: ChoicesCardProps) {
             >
                 <div className="flex min-w-0 items-center gap-2">
                     <label className={cn("flex min-w-0 flex-1 items-center gap-2", actions && "cursor-pointer")}>
-                        {actions && (
-                            <input
-                                type={req.selection_mode === "multiple" ? "checkbox" : "radio"}
-                                className="size-4 shrink-0 accent-primary"
-                                aria-label={"选择 " + title(i)}
-                                checked={picked}
-                                onChange={() => select(c.id)}
-                            />
-                        )}
+                        {actions &&
+                            (req.selection_mode === "multiple" ? (
+                                <Checkbox
+                                    aria-label={"选择 " + title(i)}
+                                    checked={picked}
+                                    onCheckedChange={() => select(c.id)}
+                                />
+                            ) : (
+                                <RadioGroupItem aria-label={"选择 " + title(i)} value={c.id} />
+                            ))}
                         <strong className="min-w-0 break-words">{title(i)}</strong>
                         {picked && !actions && (
                             <span className="inline-flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground">
@@ -308,18 +336,22 @@ function ChoicesCard(props: ChoicesCardProps) {
     }
     function picker(label: string, value: number, change: (n: number) => void) {
         return (
-            <select
-                aria-label={label}
-                className={cn("max-w-48 rounded-md border bg-background px-2 text-sm", mobile ? "h-11" : "h-8")}
-                value={value}
-                onChange={(e) => change(Number(e.target.value))}
-            >
-                {Array.from({ length: count }, (_, i) => (
-                    <option key={i} value={i}>
-                        {title(i)}
-                    </option>
-                ))}
-            </select>
+            <Select value={String(value)} onValueChange={(v) => change(Number(v))}>
+                <SelectTrigger
+                    aria-label={label}
+                    size={mobile ? "default" : "sm"}
+                    className={cn("max-w-48 bg-background px-2", mobile && "data-[size=default]:h-11")}
+                >
+                    <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                    {Array.from({ length: count }, (_, i) => (
+                        <SelectItem key={i} value={String(i)}>
+                            {title(i)}
+                        </SelectItem>
+                    ))}
+                </SelectContent>
+            </Select>
         );
     }
     function candidateTabs() {
@@ -438,14 +470,19 @@ function ChoicesCard(props: ChoicesCardProps) {
                         <p>请选择两个不同的文本版本。</p>
                     )
                 ) : (
-                    <div className={mode === "tabs" ? "" : "grid grid-cols-2 gap-2"}>
+                    <CandidateList
+                        className={mode === "tabs" ? "" : "grid grid-cols-2 gap-2"}
+                        radio={actions && req.selection_mode !== "multiple"}
+                        value={chosen[0] ?? ""}
+                        onValueChange={select}
+                    >
                         {(mode === "grid"
                             ? Array.from({ length: count }, (_, i) => i)
                             : mode === "split"
                               ? [...new Set([active, other])]
                               : [active]
                         ).map(candidateAt)}
-                    </div>
+                    </CandidateList>
                 )}
                 {!record && !terminal && (
                     <p className="flex items-center gap-1.5 text-xs text-muted-foreground">

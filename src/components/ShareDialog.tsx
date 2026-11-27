@@ -9,6 +9,7 @@ import {
     CompactDialogFooter,
 } from './ui/dialog';
 import { Label } from './ui/label';
+import { Checkbox } from './ui/checkbox';
 import { Textarea } from './ui/textarea';
 import { providerShareMessage } from "@/utils/providerShareMessage";
 import { toast } from 'sonner';
@@ -104,7 +105,7 @@ const ShareDialog: React.FC<ShareDialogProps> = ({
                         </p>
                     </div>
 
-                    {provider ? <div className="space-y-3 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={includePassword} onChange={e => setIncludePassword(e.target.checked)} />消息里包含密码</label><p>拿到这段消息的人都能用你的 Key 调用模型，费用记在你的账户上。</p></div> : <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+                    {provider ? <div className="space-y-3 text-sm"><label className="flex items-center gap-2"><Checkbox checked={includePassword} onCheckedChange={v => setIncludePassword(v === true)} />消息里包含密码</label><p>拿到这段消息的人都能用你的 Key 调用模型，费用记在你的账户上。</p></div> : <div className="rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
                         <p className="mb-1 font-medium text-foreground">分享说明</p>
                         <ul className="space-y-1">
                             <li>• 将此分享码发送给其他人，他们可以导入相同的配置</li>

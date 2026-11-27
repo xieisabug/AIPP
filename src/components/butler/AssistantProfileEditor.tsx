@@ -42,6 +42,8 @@ import {
     NightcapArtwork,
 } from "@/components/avatar/PlayfulAccessories";
 import { Button } from "@/components/ui/button";
+import { ColorPicker } from "@/components/ui/color-picker";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { navigateMobileConfig } from "@/mobile/navigation";
 import ButlerAvatar from "./ButlerAvatar";
@@ -174,7 +176,7 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
     const palette = (side: "primary" | "secondary", title: string, colors: string[][]) => {
         const current = appearance.colors[side];
         const setColor = (color: string) => update(previous => ({ ...previous, colors: { ...previous.colors, [side]: color } }));
-        // 预设之外的颜色都算自定义；系统取色器返回小写，统一转大写后与预设比较。
+        // 预设之外的颜色都算自定义；旧数据可能是小写，统一转大写后与预设比较。
         const custom = !colors.some(([, color]) => color === current.toUpperCase());
         return <fieldset className="space-y-2.5">
             <legend className="mb-2.5 text-sm font-medium">{title}</legend>
@@ -186,15 +188,20 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                     style={{ backgroundColor: color, color: markColor(color) }}>
                     {current.toUpperCase() === color && <Check className="size-4" />}
                 </button>)}
-                <label title="自定义颜色" data-custom={custom || undefined}
-                    className="relative flex size-11 cursor-pointer items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-muted-foreground outline-offset-4 has-focus-visible:outline-2 has-focus-visible:outline-ring data-custom:border-solid data-custom:border-black/15 data-custom:ring-2 data-custom:ring-foreground data-custom:ring-offset-2 data-custom:ring-offset-background"
-                    style={custom ? { backgroundColor: current, color: markColor(current) } : undefined}>
-                    {custom ? <Check className="size-4" /> : <Plus className="size-4" />}
-                    {/* 透明的原生取色器盖满色块：点击即打开系统取色面板，面板也锚定在色块位置。 */}
-                    <input type="color" aria-label={`${title}：自定义颜色`} value={current.toLowerCase()}
-                        onChange={event => setColor(event.target.value.toUpperCase())}
-                        className="absolute inset-0 size-full cursor-pointer rounded-full opacity-0" />
-                </label>
+                {/* 自定义色块打开应用内取色器，面板锚定在色块位置。 */}
+                <Popover>
+                    <PopoverTrigger asChild>
+                        <button type="button" title="自定义颜色" aria-label={`${title}：自定义颜色`} data-custom={custom || undefined}
+                            className="relative flex size-11 cursor-pointer items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-muted-foreground outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring data-custom:border-solid data-custom:border-black/15 data-custom:ring-2 data-custom:ring-foreground data-custom:ring-offset-2 data-custom:ring-offset-background"
+                            style={custom ? { backgroundColor: current, color: markColor(current) } : undefined}>
+                            {custom ? <Check className="size-4" /> : <Plus className="size-4" />}
+                        </button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" className="w-auto p-3">
+                        <ColorPicker label={`${title}：自定义颜色`} value={current}
+                            onChange={value => setColor(value.toUpperCase())} />
+                    </PopoverContent>
+                </Popover>
             </div>
         </fieldset>;
     };

@@ -24,6 +24,7 @@ describe("AppUpdateNotice", () => {
         const first = render(<AppUpdateNotice rounded />);
         fireEvent.click(await screen.findByRole("button", { name: /正在下载/ }));
         expect(screen.getByText(/50%/)).toBeVisible();
+        expect(screen.getByRole("progressbar", { name: "下载进度" })).toHaveAttribute("aria-valuenow", "50");
         first.unmount();
 
         mockInvokeHandler("get_app_update_status", () => ({ ...downloading, downloaded: 768 }));
@@ -58,7 +59,9 @@ describe("AppUpdateNotice", () => {
         render(<AppUpdateNotice />);
         fireEvent.click(await screen.findByRole("button", { name: /正在下载/ }));
         expect(screen.getByText("已下载 512 B")).toBeVisible();
-        expect(screen.getByRole("progressbar")).not.toHaveAttribute("value");
+        const progress = screen.getByRole("progressbar", { name: "下载进度" });
+        expect(progress).not.toHaveAttribute("aria-valuenow");
+        expect(progress).toHaveAttribute("data-state", "indeterminate");
         await act(() => emit("app-update-status", { ...downloading, revision: 3, phase: "failed", error: "连接中断" }));
         expect(screen.getByRole("alert")).toHaveTextContent("连接中断");
         fireEvent.click(screen.getByRole("button", { name: "使用代理检查并下载更新" }));

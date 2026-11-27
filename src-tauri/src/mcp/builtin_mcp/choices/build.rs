@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use crate::utils::consent::{self, Consent};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
@@ -75,15 +75,22 @@ async fn step(exe: &Path, dir: &Path, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
-async fn build(app: &AppHandle, cid: i64, id: &str, candidate: &str, output: &str) -> Result<()> {
+async fn build(app: &AppHandle, cid: i64, id: &str, candidate: &str, output: &str, confirmed: Option<&str>) -> Result<Consent<()>> {
     let (c, files) = project(app, cid, id, candidate)?;
-    let result = compile_project(app, &c, &files, output).await?;
+    let result = match compile_project(app, &c, &files, output, confirmed).await? {
+        Consent::Done { value } => value,
+        Consent::Confirm { prompt } => return Ok(Consent::Confirm { prompt }),
+    };
     db(app)?.execute("INSERT INTO choice_build(request_id,candidate_id,files) VALUES(?1,?2,?3) ON CONFLICT(request_id,candidate_id) DO NOTHING",
         params![id,candidate,serde_json::to_string(&result)?])?;
-    Ok(())
+    Ok(Consent::Done { value: () })
 }
 
-pub(super) async fn compile_project(app: &AppHandle, c: &snapshot::Candidate, files: &Project, output: &str) -> Result<Project> {
+/// 在临时副本上用 Bun 安装依赖并构建。执行前须经用户在应用内确认：`confirmed` 与本次生成的确认文案
+/// 不一致时不执行，返回 `Consent::Confirm` 交给前端询问（见 `utils::consent`）。
+pub(super) async fn compile_project(
+    app: &AppHandle, c: &snapshot::Candidate, files: &Project, output: &str, confirmed: Option<&str>,
+) -> Result<Consent<Project>> {
     ensure!(cfg!(desktop), "移动端不支持本机构建");
     let output = snapshot::relative(output)?;
     let pkg = STANDARD.decode(files.get("package.json").context("工程缺少 package.json")?)?;
@@ -92,17 +99,9 @@ pub(super) async fn compile_project(app: &AppHandle, c: &snapshot::Candidate, fi
     let frozen = ["bun.lock", "bun.lockb"].iter().any(|key| files.contains_key(*key));
     let args = if frozen { vec!["install", "--frozen-lockfile"] } else { vec!["install"] };
     let prompt=format!("工程：{}\n\n将使用本机 Bun 在此版本的临时副本中执行：\nbun {}\nbun run build\n\nbuild 脚本：{}\n输出目录：{}\n\n安装及构建脚本使用当前用户权限，可访问本机文件和网络。",c.title,args.join(" "),script,output.display());
-    let handle = app.clone();
-    let approved = tauri::async_runtime::spawn_blocking(move || {
-        handle
-            .dialog()
-            .message(prompt)
-            .title("确认安装依赖并构建工程")
-            .buttons(MessageDialogButtons::OkCancelCustom("安装并构建".into(), "取消".into()))
-            .blocking_show()
-    })
-    .await?;
-    ensure!(approved, "用户取消了本次构建");
+    if !consent::approved(&prompt, confirmed) {
+        return Ok(Consent::Confirm { prompt });
+    }
     let exe = bun(app)?;
     let work = tempfile::tempdir()?;
     for (name, bytes) in files {
@@ -118,7 +117,7 @@ pub(super) async fn compile_project(app: &AppHandle, c: &snapshot::Candidate, fi
     let mut budget = snapshot::LIMIT;
     snapshot::collect_tree(&root, &root, &mut result, &mut budget, 0)?;
     ensure!(result.contains_key("index.html"), "构建输出缺少 index.html");
-    Ok(result)
+    Ok(Consent::Done { value: result })
 }
 #[tauri::command]
 pub async fn build_choice_project(
@@ -127,8 +126,9 @@ pub async fn build_choice_project(
     request_id: String,
     candidate_id: String,
     output_dir: String,
-) -> Result<(), String> {
-    build(&app_handle, conversation_id, &request_id, &candidate_id, &output_dir)
+    confirmed_prompt: Option<String>,
+) -> Result<Consent<()>, String> {
+    build(&app_handle, conversation_id, &request_id, &candidate_id, &output_dir, confirmed_prompt.as_deref())
         .await
         .map_err(|e| format!("构建候选 {candidate_id}：{e:#}"))
 }

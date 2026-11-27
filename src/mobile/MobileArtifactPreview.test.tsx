@@ -66,7 +66,7 @@ it("should preview a published Markdown project and browse its snapshot on mobil
     expect(frame.getAttribute("srcdoc")).toMatch(/script-src 'nonce-[0-9a-f]{32}'/);
     expect(frame.getAttribute("srcdoc")).toContain('src="data:image/png;base64,AA=="');
     fireEvent.click(screen.getByRole("radio", { name: "工程源码" }));
-    expect(screen.getByRole("combobox")).toHaveValue("docs/index.md");
+    expect(screen.getByRole("combobox", { name: "工程文件" })).toHaveTextContent("docs/index.md");
     fireEvent.click(screen.getByRole("radio", { name: "预览" }));
     expect(await screen.findByTitle("Book")).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("open_choice_build", expect.anything());

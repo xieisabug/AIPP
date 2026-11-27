@@ -1,6 +1,7 @@
 pub mod async_thread;
 pub(crate) mod background_process;
 pub mod bun_utils;
+pub mod consent;
 pub mod db_utils;
 pub mod path_utils;
 pub mod prompt_image;

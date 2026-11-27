@@ -1,6 +1,7 @@
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
+import { withConsent, type Consent } from '@/utils/consent';
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import ConfirmDialog from "../ConfirmDialog";
 import { importProvider, populateImported, detail, explain } from "@/components/onboarding/onboardingService";
@@ -198,12 +199,13 @@ const LLMProviderConfig: React.FC<LLMProviderConfigProps> = ({ subNav, onSubNavC
     // 确认导出（设置密码后）
     const handleConfirmExport = useCallback(async (password: string) => {
         if (!selectedProvider) return false;
-        const code = await invoke<string | null>('export_llm_provider', {
+        const exported = await withConsent(confirmedPrompt => invoke<Consent<string>>('export_llm_provider', {
             providerId: selectedProvider.id,
-            password
-        });
-        if (code === null) return false;
-        setShareCode(code);
+            password,
+            confirmedPrompt,
+        }), { title: '确认分享保险箱凭据', confirmText: '包含 API Key 并生成分享码' });
+        if (!exported) return false;
+        setShareCode(exported.value);
         setSharePassword(password);
         setShareDialogOpen(true);
         return true;

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { TimePicker } from "@/components/ui/time-picker";
 import { SettingRowText, SettingsGroup, settingRowClassName, stackedRowClassName } from "@/components/config/SettingsGroup";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredModels } from "@/hooks/useFilteredModels";
@@ -52,7 +53,7 @@ function CheckboxGroup<K extends keyof ProactiveConfig>({ items, value, onToggle
 }
 
 const TimeInput = ({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) =>
-    <Input type="time" aria-label={label} className="w-32" value={value} onChange={e => onChange(e.target.value)} />;
+    <TimePicker aria-label={label} className="w-32" value={value} onChange={onChange} />;
 
 const Row = ({ label, description, children }: { label: ReactNode; description?: ReactNode; children: ReactNode }) =>
     <div className={settingRowClassName}>

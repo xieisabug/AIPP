@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { PROJECT_BUILD_CONFIRM, withConsent, type Consent } from "@/utils/consent";
 
 interface BuildView {
     url: string;
@@ -59,8 +60,13 @@ export function useArtifactVersionBuild(options: {
             setBuilding(true);
             setError("");
             try {
-                await invoke("build_artifact_version", { conversationId, artifactKey, version, outputDir });
-                setGeneration((value) => value + 1);
+                const built = await withConsent(
+                    (confirmedPrompt) => invoke<Consent<null>>("build_artifact_version", {
+                        conversationId, artifactKey, version, outputDir, confirmedPrompt,
+                    }),
+                    PROJECT_BUILD_CONFIRM,
+                );
+                if (built) setGeneration((value) => value + 1);
             } catch (e) {
                 setError(String(e));
             } finally {

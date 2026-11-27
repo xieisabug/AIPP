@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
+import { TimePicker } from "@/components/ui/time-picker";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -108,7 +110,7 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
 function ScheduleFields({ draft, onChange }: { draft: ScheduleDraft; onChange: (draft: ScheduleDraft) => void }) {
     const set = (patch: Partial<ScheduleDraft>) => onChange({ ...draft, ...patch });
     const timeInput = (
-        <Input type="time" value={draft.time} onChange={(e) => set({ time: e.target.value })} className="h-8 w-28 text-sm" aria-label="时刻" />
+        <TimePicker value={draft.time} onChange={(time) => set({ time })} className="h-8 w-28 text-sm" aria-label="时刻" />
     );
     return (
         <div className="space-y-3">
@@ -129,7 +131,7 @@ function ScheduleFields({ draft, onChange }: { draft: ScheduleDraft; onChange: (
             </ToggleGroup>
             {draft.mode === "once" && (
                 <div className="flex flex-wrap items-center gap-2">
-                    <Input type="date" value={draft.date} onChange={(e) => set({ date: e.target.value })} className="h-8 w-40 text-sm" aria-label="日期" />
+                    <DatePicker value={draft.date} onChange={(date) => set({ date })} className="h-8 w-40 text-sm" aria-label="日期" />
                     {timeInput}
                 </div>
             )}
@@ -398,7 +400,7 @@ export default function ScheduleTaskEditor({ open, task, assistants, saving, onO
                             <div className="grid grid-cols-1 gap-3 rounded-md border border-border p-3 md:grid-cols-3">
                                 <div className="space-y-1.5">
                                     <FieldLabel>截止日期</FieldLabel>
-                                    <Input type="date" value={form.endsAt} onChange={(e) => set({ endsAt: e.target.value })} className="h-8 text-sm" aria-label="截止日期" />
+                                    <DatePicker value={form.endsAt} onChange={(endsAt) => set({ endsAt })} placeholder="不限" clearable className="h-8 w-full text-sm" aria-label="截止日期" />
                                 </div>
                                 <div className="space-y-1.5">
                                     <FieldLabel>最多运行</FieldLabel>

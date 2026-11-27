@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "../../__tests__/mocks/tauri";
 import LLMProviderConfig from "./LLMProviderConfig";
+import { ConfirmHost } from "@/components/common/ConfirmHost";
 
 const platformState = vi.hoisted(() => ({ value: "windows" }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
@@ -58,14 +59,21 @@ describe("LLMProviderConfig new provider wizard", () => {
 
     it("should only show a share code after a completed export", async () => {
         mockBackend([openai]);
-        const exportProvider = vi.fn().mockReturnValueOnce(null).mockReturnValueOnce("test-share-code");
+        const prompt = "分享提供商「OpenAI」时，将一并分享保险箱凭据。";
+        const exportProvider = vi.fn((args?: Record<string, unknown>) => args?.confirmedPrompt === prompt
+            ? { status: "done", value: "test-share-code" }
+            : { status: "confirm", prompt });
         mockInvokeHandler("export_llm_provider", exportProvider);
-        render(<LLMProviderConfig />);
+        render(<><LLMProviderConfig /><ConfirmHost /></>);
         for (const completed of [false, true]) {
             fireEvent.click(await screen.findByRole("button", { name: "分享提供商" }));
             fireEvent.change(screen.getByLabelText(/设置密码/), { target: { value: "test-password" } });
             fireEvent.change(screen.getByLabelText(/确认密码/), { target: { value: "test-password" } });
             fireEvent.click(screen.getByRole("button", { name: "确认导出" }));
+            // 确认文案显示在应用内确认框里，而不是系统原生对话框
+            const dialog = await screen.findByRole("alertdialog");
+            expect(dialog).toHaveTextContent(prompt);
+            fireEvent.click(screen.getByRole("button", { name: completed ? "包含 API Key 并生成分享码" : "取消" }));
             await waitFor(() => expect(screen.queryByRole("button", { name: "确认导出" })).not.toBeInTheDocument());
             if (completed) {
                 expect((screen.getByLabelText("分享消息") as HTMLTextAreaElement).value).toContain("test-share-code");
@@ -74,7 +82,9 @@ describe("LLMProviderConfig new provider wizard", () => {
                 expect(toast.success).not.toHaveBeenCalledWith("导出成功");
             }
         }
-        expect(exportProvider).toHaveBeenCalledTimes(2);
+        // 取消：只询问一次；确认：询问后带原文案重试一次
+        expect(exportProvider).toHaveBeenCalledTimes(3);
+        expect(exportProvider).toHaveBeenLastCalledWith(expect.objectContaining({ confirmedPrompt: prompt }));
     });
 
     it("should keep the saved state and explain the error when disabling fails", async () => {

@@ -3,6 +3,7 @@ use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+use crate::utils::consent::Consent;
 
 pub const PREFIX: &str = "AIPP_CHOICE_ARCHIVE_V1\n";
 pub const REFERENCE: &str = "AIPP_CHOICE_PREVIEW_V1\n";
@@ -80,12 +81,17 @@ pub fn get_collected_choice(app_handle: AppHandle, collection_id: i64) -> Result
 }
 
 #[tauri::command]
-pub async fn build_collected_choice(app_handle: AppHandle, collection_id: i64, output_dir: String) -> Result<(), String> {
-    async fn run(app: &AppHandle, id: i64, output: &str) -> Result<()> {
+pub async fn build_collected_choice(
+    app_handle: AppHandle, collection_id: i64, output_dir: String, confirmed_prompt: Option<String>,
+) -> Result<Consent<()>, String> {
+    async fn run(app: &AppHandle, id: i64, output: &str, confirmed: Option<&str>) -> Result<Consent<()>> {
         let (raw, mut archive) = stored(app, id)?;
-        if archive.build.is_some() { return Ok(()) }
+        if archive.build.is_some() { return Ok(Consent::Done { value: () }) }
         let files = archive.files.as_ref().context("收藏没有工程文件")?;
-        archive.build = Some(super::build::compile_project(app, &archive.candidate, files, output).await?);
+        archive.build = Some(match super::build::compile_project(app, &archive.candidate, files, output, confirmed).await? {
+            Consent::Done { value } => value,
+            Consent::Confirm { prompt } => return Ok(Consent::Confirm { prompt }),
+        });
         let db = crate::artifacts::artifacts_db::ArtifactsDatabase::new(app)?;
         let updated = db.conn.execute("UPDATE artifacts_collection SET code=?1 WHERE id=?2 AND code=?3",
             params![archive.encode()?, id, raw])?;
@@ -93,9 +99,9 @@ pub async fn build_collected_choice(app_handle: AppHandle, collection_id: i64, o
             ensure!(stored(app, id)?.1.build.is_some(), "构建期间收藏已变更，请重新打开");
         }
         crate::sync::schedule_sync_after_local_change(app);
-        Ok(())
+        Ok(Consent::Done { value: () })
     }
-    run(&app_handle, collection_id, &output_dir).await.map_err(|e| format!("构建收藏 {collection_id}：{e:#}"))
+    run(&app_handle, collection_id, &output_dir, confirmed_prompt.as_deref()).await.map_err(|e| format!("构建收藏 {collection_id}：{e:#}"))
 }
 
 #[tauri::command]

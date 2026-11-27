@@ -106,6 +106,7 @@ import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Bot, Check, ChevronDown, LoaderCircle, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/utils/utils";
@@ -2649,13 +2650,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             }}
                             acpAvailableCommands={acpSessionState?.available_commands ?? []}
                             permissionControl={isClaudeComposer && !isMobilePlatform ? (
-                                <select className="input-area-plan-mode" aria-label="Claude Code 权限模式"
-                                    title={claudePlan ? "关闭 Plan 模式后可选择权限" : "下一条消息使用的 Claude Code 权限模式"}
-                                    disabled={claudePlan || Boolean(acpMutationKey)} value={claudeMode} onChange={event => chooseClaudeMode(event.target.value, claudePlan)}>
-                                    {claudePermissionModes.map(choice => (
-                                        <option key={choice.value} value={choice.value}>{choice.label}</option>
-                                    ))}
-                                </select>
+                                <Select disabled={claudePlan || Boolean(acpMutationKey)} value={claudeMode} onValueChange={value => chooseClaudeMode(value, claudePlan)}>
+                                    <SelectTrigger className="input-area-plan-mode border-0 shadow-none [&_svg]:size-3" aria-label="Claude Code 权限模式"
+                                        title={claudePlan ? "关闭 Plan 模式后可选择权限" : "下一条消息使用的 Claude Code 权限模式"}>
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {claudePermissionModes.map(choice => (
+                                            <SelectItem key={choice.value} value={choice.value}>{choice.label}</SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
                             ) : undefined}
                             planMode={isPlanMode}
                             planModeSwitching={planModeSwitching}

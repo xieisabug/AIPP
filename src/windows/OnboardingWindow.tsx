@@ -20,6 +20,7 @@ import {
 import { WindowTopBar } from "@/components/window/WindowTitleBar";
 import { useTheme } from "@/hooks/useTheme";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
     AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
     AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
@@ -194,19 +195,20 @@ export default function OnboardingWindow() {
     }, []);
     function protocolPicker(model?: Role | null) {
         if (!model) return null;
-        return <select aria-label={`请求协议 · ${model.code}`} defaultValue="" disabled={busy}
-            className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground"
-            onChange={event => {
-                const requestMode = event.target.value;
-                void run(() => invoke("update_llm_model_request_mode", {
-                    llmProviderId: model.providerId, modelCode: model.code, requestMode,
-                }));
-            }}>
-            <option value="" disabled>选择请求协议</option>
-            <option value="responses">Responses</option>
-            <option value="chat_completions">Chat Completions</option>
-            <option value="anthropic_messages">Anthropic Messages</option>
-        </select>;
+        return <Select disabled={busy} onValueChange={requestMode => {
+            void run(() => invoke("update_llm_model_request_mode", {
+                llmProviderId: model.providerId, modelCode: model.code, requestMode,
+            }));
+        }}>
+            <SelectTrigger size="sm" aria-label={`请求协议 · ${model.code}`} className="bg-background text-xs text-foreground">
+                <SelectValue placeholder="选择请求协议" />
+            </SelectTrigger>
+            <SelectContent>
+                <SelectItem value="responses">Responses</SelectItem>
+                <SelectItem value="chat_completions">Chat Completions</SelectItem>
+                <SelectItem value="anthropic_messages">Anthropic Messages</SelectItem>
+            </SelectContent>
+        </Select>;
     }
     const refresh = useCallback(async () => {
         const rev = ++sourceGeneration.current;

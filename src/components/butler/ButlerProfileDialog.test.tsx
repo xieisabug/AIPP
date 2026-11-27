@@ -163,14 +163,20 @@ describe("Butler profile editor", () => {
         expect(screen.getByText("左侧", { selector: "legend" })).toBeInTheDocument();
         expect(screen.getByText("右侧", { selector: "legend" })).toBeInTheDocument();
         expect(screen.queryByText(/亮色|深色/)).toBeNull();
-        fireEvent.change(screen.getByLabelText("左侧：自定义颜色"), { target: { value: "#12ab34" } });
-        fireEvent.change(screen.getByLabelText("右侧：自定义颜色"), { target: { value: "#f0e0d0" } });
+        // 自定义色块打开应用内取色器，在其中的十六进制输入框里填色。
+        const setCustomColor = (area: string, hex: string) => {
+            const hexInput = `${area}：自定义颜色：十六进制`;
+            if (!screen.queryByLabelText(hexInput)) fireEvent.click(screen.getByRole("button", { name: `${area}：自定义颜色` }));
+            fireEvent.change(screen.getByLabelText(hexInput), { target: { value: hex } });
+        };
+        setCustomColor("左侧", "#12ab34");
+        setCustomColor("右侧", "#f0e0d0");
         // 自定义颜色不落在预设上时，所有预设都不显示选中，由自定义色块标记当前色。
         expect(screen.queryAllByRole("button", { pressed: true, name: /^(左侧|右侧)：/ })).toHaveLength(0);
-        expect(screen.getByLabelText("左侧：自定义颜色").closest("label")).toHaveAttribute("data-custom");
+        expect(screen.getByRole("button", { name: "左侧：自定义颜色" })).toHaveAttribute("data-custom");
         fireEvent.click(screen.getByRole("button", { name: "右侧：纯黑" }));
-        expect(screen.getByLabelText("右侧：自定义颜色").closest("label")).not.toHaveAttribute("data-custom");
-        fireEvent.change(screen.getByLabelText("右侧：自定义颜色"), { target: { value: "#f0e0d0" } });
+        expect(screen.getByRole("button", { name: "右侧：自定义颜色" })).not.toHaveAttribute("data-custom");
+        setCustomColor("右侧", "#f0e0d0");
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", expect.objectContaining({
             colors: { primary: "#12AB34", secondary: "#F0E0D0" },

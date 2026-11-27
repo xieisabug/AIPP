@@ -5,6 +5,7 @@ import { useMobileResume } from "@/hooks/useMobileResume";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import ConfigPageLoading from "@/components/common/ConfigPageLoading";
 import {
     butlerTaskStatusLabel,
@@ -109,7 +110,7 @@ export default function MobileTasksConfig() {
         {actionError && <p role="alert" className="break-all text-sm">{actionError}</p>}
         <section className="space-y-3"><h2 className="text-sm font-medium">Butler 任务</h2>
             {overview?.main_conversation_id == null ? <Button disabled={busy || !overview} className="min-h-11" onClick={() => void act("初始化 Butler", () => invoke("load_butler_main_conversation", { reconcile: false }))}>初始化本机任务入口</Button> : <>
-                <label className="block">执行助手<select className="block w-full min-h-11 border rounded bg-background" value={assistantId} onChange={event => setAssistantId(event.target.value)}><option value="">请选择助手</option>{assistants.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+                <label className="block">执行助手<Select value={assistantId} onValueChange={setAssistantId}><SelectTrigger aria-label="执行助手" className="w-full min-h-11 bg-background"><SelectValue placeholder="请选择助手" /></SelectTrigger><SelectContent>{assistants.map(a => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}</SelectContent></Select></label>
                 {assistantId && (capability?.id !== assistantId ? <p role="status" className="text-sm">正在检查本机执行能力…</p> : !capability.available ? <p role="status" className="text-sm break-words">此助手无法在本机执行：{capability.reason}</p> : null)}
                 <Input aria-label="任务标题" value={title} onChange={event => setTitle(event.target.value)} placeholder="任务标题" />
                 <Textarea aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} placeholder="任务目标" />

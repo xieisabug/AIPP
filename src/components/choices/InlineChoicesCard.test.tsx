@@ -135,8 +135,8 @@ it("should switch layout, swap sides and toggle diff through icon controls when 
     expect(screen.getByText("温和亲切")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "交换两侧版本" }));
-    expect(screen.getByRole("combobox", { name: "版本" })).toHaveValue("1");
-    expect(screen.getByRole("combobox", { name: "对照版本" })).toHaveValue("0");
+    expect(screen.getByRole("combobox", { name: "版本" })).toHaveTextContent("乙");
+    expect(screen.getByRole("combobox", { name: "对照版本" })).toHaveTextContent("甲");
 
     const diff = screen.getByRole("button", { name: "对比差异" });
     fireEvent.click(diff);

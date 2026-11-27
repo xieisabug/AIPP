@@ -7,6 +7,7 @@ import { useVisualViewportInsets } from "./hooks/useVisualViewportInsets";
 import MobileShell from "./mobile/MobileShell";
 import LoadingScreen from "./components/LoadingScreen";
 import { Toaster } from "./components/ui/sonner.tsx";
+import { ConfirmHost } from "./components/common/ConfirmHost";
 import { startOfficeEditRunner } from "./services/officeEditRunner";
 
 // Office 预览窗口只在打开时才需要，懒加载避免增加首屏体积
@@ -59,6 +60,7 @@ function App() {
                 <OfficePreviewModal />
             </Suspense>
             <Toaster richColors />
+            <ConfirmHost />
         </>
     );
 }

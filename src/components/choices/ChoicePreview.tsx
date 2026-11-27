@@ -8,6 +8,8 @@ import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
 import type { PreviewCodeRequestEvent } from "@/utils/previewCode";
@@ -17,6 +19,7 @@ import { useIsMobilePlatform } from "@/hooks/use-platform";
 import runtimeUrl from "./projectRuntime.ts?worker&url";
 import { Code, Eye, Loader2 } from "lucide-react";
 import { cn } from "@/utils/utils";
+import { PROJECT_BUILD_CONFIRM, withConsent, type Consent } from "@/utils/consent";
 import { ChoiceSegmented, type SegmentOption } from "./ChoiceControls";
 import { FitFrame, FRAME_HEIGHT_SCRIPT } from "./FitFrame";
 
@@ -391,16 +394,22 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
                     onChange={(view) => setShowSource(view === "source")}
                 />
                 {showSource && (
-                    <select
-                        aria-label="工程文件"
-                        className={cn("max-w-full rounded-md border bg-background px-2 text-sm", mobile ? "h-11" : "h-8")}
-                        value={file}
-                        onChange={(e) => setFile(e.target.value)}
-                    >
-                        {Object.keys(files).map((p) => (
-                            <option key={p}>{p}</option>
-                        ))}
-                    </select>
+                    <Select value={file} onValueChange={setFile}>
+                        <SelectTrigger
+                            aria-label="工程文件"
+                            size={mobile ? "default" : "sm"}
+                            className={cn("max-w-full bg-background px-2", mobile && "data-[size=default]:h-11")}
+                        >
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {Object.keys(files).map((p) => (
+                                <SelectItem key={p} value={p}>
+                                    {p}
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
                 )}
             </div>
             {!mobile && !buildView && files["package.json"] && (
@@ -408,8 +417,9 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
                     <summary>工程构建</summary>
                     <label>
                         构建输出目录{" "}
-                        <input
-                            className="w-32 rounded border px-1"
+                        <Input
+                            aria-label="构建输出目录"
+                            className="inline-flex h-8 w-32"
                             value={output}
                             onChange={(e) => setOutput(e.target.value)}
                         />
@@ -421,7 +431,14 @@ function ProjectPreview({ candidate, reference, projectFiles }: { candidate: Can
                             setBuilding(true);
                             setBuildError("");
                             try {
-                                await invoke(reference.collectionId !== undefined ? "build_collected_choice" : "build_choice_project", { ...reference, outputDir: output });
+                                const built = await withConsent(
+                                    (confirmedPrompt) => invoke<Consent<null>>(
+                                        reference.collectionId !== undefined ? "build_collected_choice" : "build_choice_project",
+                                        { ...reference, outputDir: output, confirmedPrompt },
+                                    ),
+                                    PROJECT_BUILD_CONFIRM,
+                                );
+                                if (!built) return;
                                 setGeneration((v) => v + 1);
                                 setShowSource(false);
                             } catch (e) {

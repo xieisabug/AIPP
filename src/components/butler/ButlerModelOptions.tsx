@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmDialog } from "@/components/common/ConfirmHost";
 import { SelectGroup, SelectItem, SelectLabel } from "@/components/ui/select";
 import type { ModelForSelect } from "@/hooks/useFilteredModels";
 
@@ -17,8 +17,9 @@ export function ButlerModelOptions({ api, agents }: { api: ModelForSelect[]; age
 
 export async function saveButlerModel(next: string, save: () => Promise<unknown>): Promise<boolean> {
     const changed = await invoke<boolean>("butler_channel_change_required", { next });
-    if (changed && !await ask("切换总管家的大脑会开始一段新的主会话，之前的对话可以在历史里查看。", {
-        title: "切换总管家模型", okLabel: "切换并开始新会话", cancelLabel: "取消",
+    if (changed && !await confirmDialog({
+        title: "切换总管家模型", description: "切换总管家的大脑会开始一段新的主会话，之前的对话可以在历史里查看。",
+        confirmText: "切换并开始新会话",
     })) return false;
     await save();
     return true;

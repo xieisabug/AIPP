@@ -3,6 +3,7 @@ import { ArrowUpFromLine, Download, Globe } from "lucide-react";
 import type { AppUpdateStatus } from "@/data/Update";
 import { checkAppUpdate, installAppUpdate, useAppUpdater } from "@/hooks/useAppUpdater";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import {
     Dialog,
     CompactDialogContent,
@@ -31,8 +32,9 @@ export function AppUpdateDetails({ status }: { status: AppUpdateStatus }) {
             {version && `v${version} · `}{phaseLabel[phase]}
         </p>}
         {phase === "downloading" && <div className="space-y-1">
-            <progress className="block h-2 w-full accent-primary" aria-label="下载进度"
-                max={total || undefined} value={total ? Math.min(downloaded, total) : undefined} />
+            {/* 总大小未知时不给 value（Radix 视为 indeterminate），用整条轨道脉动表示进行中。 */}
+            <Progress aria-label="下载进度" className={total ? undefined : "animate-pulse bg-primary/40"}
+                value={total ? Math.min(100, downloaded / total * 100) : null} />
             <p className="text-xs tabular-nums text-muted-foreground">
                 {total ? `${Math.min(100, Math.floor(downloaded / total * 100))}% · ${byteSize(downloaded)} / ${byteSize(total)}`
                     : `已下载 ${byteSize(downloaded)}`}

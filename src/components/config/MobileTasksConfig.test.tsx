@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import MobileTasksConfig from "./MobileTasksConfig";
 
@@ -44,8 +45,9 @@ describe("mobile task controls", () => {
         let rejectDispatch: (reason: unknown) => void = () => {};
         vi.mocked(invoke).mockImplementation((command, args) => command === "spawn_butler_task_conversation" ? new Promise((_, reject) => { rejectDispatch = reject; }) : original(command, args));
         render(<MobileTasksConfig />);
-        await screen.findByText("API 助手");
-        fireEvent.change(screen.getByRole("combobox"), { target: { value: "4" } });
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole("combobox", { name: "执行助手" }));
+        await user.click(await screen.findByRole("option", { name: "API 助手" }));
         fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "测试任务" } });
         fireEvent.change(screen.getByLabelText("任务目标"), { target: { value: "保留内容" } });
         await waitFor(() => expect(screen.getByText("在本机派发")).toBeEnabled());
@@ -64,12 +66,13 @@ describe("mobile task controls", () => {
             return original(command, args);
         });
         render(<MobileTasksConfig />);
-        await screen.findByText("桌面助手");
-        fireEvent.change(screen.getByRole("combobox"), { target: { value: "8" } });
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole("combobox", { name: "执行助手" }));
+        await user.click(await screen.findByRole("option", { name: "桌面助手" }));
         fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "测试任务" } });
         fireEvent.change(screen.getByLabelText("任务目标"), { target: { value: "保留目标" } });
         await screen.findByText(/此助手无法在本机执行.*本地 CLI/);
-        expect(screen.getByRole("combobox")).toHaveValue("8");
+        expect(screen.getByRole("combobox", { name: "执行助手" })).toHaveTextContent("桌面助手");
         expect(screen.getByText("在本机派发")).toBeDisabled();
         expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "spawn_butler_task_conversation")).toBe(false);
     });

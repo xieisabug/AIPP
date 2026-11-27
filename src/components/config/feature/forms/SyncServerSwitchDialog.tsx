@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { getErrorMessage } from "@/utils/error";
 import { cn } from "@/utils/utils";
 
@@ -101,25 +102,27 @@ export function SyncServerSwitchDialog({ id, oldUrl, serverUrl, initialToken, in
                 {!confirming && <>
                     {initialChoice !== "new" && <fieldset disabled={busy} className="space-y-2">
                         <legend className="mb-1.5 text-sm font-medium">请选择连接方式</legend>
-                        {[
-                            ["migration", "服务器迁移", "原服务器数据已完整搬到新地址，保留同步进度。"],
-                            ["new", "新同步服务器", "与服务器已有数据合并，可能产生冲突或重复。"],
-                            ["auto", "不知道，帮我检查", "比较同步位置并抽样核对最多 10 条记录。"],
-                        ].map(([value, labelTitle, help]) => (
-                            <label
-                                key={value}
-                                className={cn(
-                                    "flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5 transition-colors hover:bg-muted/60",
-                                    choice === value && "border-foreground/40 bg-muted/60",
-                                )}
-                            >
-                                <input className="mt-0.5" type="radio" name="sync-server-choice" value={value} checked={choice === value} onChange={() => { setChoice(value); setResult(null); }} />
-                                <span className="min-w-0 flex-1">
-                                    <span className="block text-sm font-medium">{labelTitle}</span>
-                                    <span className="block text-xs text-muted-foreground">{help}</span>
-                                </span>
-                            </label>
-                        ))}
+                        <RadioGroup className="gap-2" name="sync-server-choice" value={choice} onValueChange={value => { setChoice(value); setResult(null); }}>
+                            {[
+                                ["migration", "服务器迁移", "原服务器数据已完整搬到新地址，保留同步进度。"],
+                                ["new", "新同步服务器", "与服务器已有数据合并，可能产生冲突或重复。"],
+                                ["auto", "不知道，帮我检查", "比较同步位置并抽样核对最多 10 条记录。"],
+                            ].map(([value, labelTitle, help]) => (
+                                <label
+                                    key={value}
+                                    className={cn(
+                                        "flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5 transition-colors hover:bg-muted/60",
+                                        choice === value && "border-foreground/40 bg-muted/60",
+                                    )}
+                                >
+                                    <RadioGroupItem className="mt-0.5" value={value} />
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block text-sm font-medium">{labelTitle}</span>
+                                        <span className="block text-xs text-muted-foreground">{help}</span>
+                                    </span>
+                                </label>
+                            ))}
+                        </RadioGroup>
                         {choice === "credentials" && <p className="text-xs text-muted-foreground">先验证新 Token 是否仍对应原账号。</p>}
                     </fieldset>}
                     {initialChoice === "new" && <p className="text-sm text-muted-foreground">将本地数据与服务器同步；已有数据会合并，可能产生冲突或重复。</p>}
@@ -137,14 +140,16 @@ export function SyncServerSwitchDialog({ id, oldUrl, serverUrl, initialToken, in
                     <p className="text-sm font-medium">{result?.mode === "migration" ? "保留现有同步进度，继续同步。" : "重新同步本地与服务器的数据，保留本地现有内容。"}</p>
                     <fieldset disabled={busy} className="space-y-2 text-sm">
                         <legend className="mb-1.5 text-sm font-medium">API Key 同步加密口令</legend>
-                        <label className={cn("flex cursor-pointer items-center gap-2.5 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/60", !changePhrase && "border-foreground/40 bg-muted/60")}>
-                            <input type="radio" name="sync-phrase" checked={!changePhrase} onChange={() => setChangePhrase(false)} />
-                            <span>沿用当前口令（未设置则保持未设置）</span>
-                        </label>
-                        <label className={cn("flex cursor-pointer items-center gap-2.5 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/60", changePhrase && "border-foreground/40 bg-muted/60", !result?.key_known && "opacity-60")}>
-                            <input type="radio" name="sync-phrase" checked={changePhrase} disabled={!result?.key_known} onChange={() => setChangePhrase(true)} />
-                            <span>{result?.has_remote_key ? "输入目标服务器的口令" : "输入口令（未设置时可启用加密同步）"}</span>
-                        </label>
+                        <RadioGroup className="gap-2" name="sync-phrase" value={changePhrase ? "change" : "keep"} onValueChange={value => setChangePhrase(value === "change")}>
+                            <label className={cn("flex cursor-pointer items-center gap-2.5 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/60", !changePhrase && "border-foreground/40 bg-muted/60")}>
+                                <RadioGroupItem value="keep" />
+                                <span>沿用当前口令（未设置则保持未设置）</span>
+                            </label>
+                            <label className={cn("flex cursor-pointer items-center gap-2.5 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:bg-muted/60", changePhrase && "border-foreground/40 bg-muted/60", !result?.key_known && "opacity-60")}>
+                                <RadioGroupItem value="change" disabled={!result?.key_known} />
+                                <span>{result?.has_remote_key ? "输入目标服务器的口令" : "输入口令（未设置时可启用加密同步）"}</span>
+                            </label>
+                        </RadioGroup>
                         {changePhrase && <PasswordInput aria-label="目标服务器加密口令" value={phrase} onChange={e => setPhrase(e.target.value)} autoComplete="new-password" />}
                         {!result?.key_known && <p className="text-xs text-muted-foreground">此服务器不支持口令预检查，将沿用当前设置；如不匹配，同步状态会提示输入目标口令。</p>}
                     </fieldset>

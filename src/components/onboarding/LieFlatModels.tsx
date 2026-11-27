@@ -3,9 +3,14 @@ import { ModelTestField } from "./ModelTestField";
 import { createPortal } from "react-dom";
 import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { localLightWarning, roleKey, role, selectAuxiliaryRole, type Config } from "./onboardingService";
 import { modelRoles, selectRecommendedRoles } from "./roleRecommendations";
 import { catalogRoleChecker, lieFlatSelection, type Checked, type ModelSource } from "./verifySources";
+
+/** Radix Select 的选项不能是空字符串，“不配置”用占位值表示。 */
+const NONE = "__none__";
+const triggerClass = "w-full min-w-0 rounded-xl bg-background";
 
 interface Props {
     source: ModelSource;
@@ -43,14 +48,15 @@ export function LieFlatModels({ source, footer, busy, run, onChecked }: Props) {
             <ModelTestField label="主力模型" selected={config.chat} provider={agent ?? provider}>
                 {agent ? <p className="self-center text-sm">主力模型 · {agent.name}</p> : (
                     <label className="grid gap-1.5 text-sm">主力模型
-                        <select className="h-9 w-full min-w-0 rounded-xl border border-input bg-background px-2"
-                            value={config.chat.code} onChange={e => setConfig({
-                                ...config, chat: role(provider.id, e.target.value),
-                                notes: { ...config.notes, chat: { reason: "手动选择" } },
-                            })}>
-                            <option value="" disabled>请选择</option>
-                            {codes.map(code => <option key={code} value={code}>{code}</option>)}
-                        </select>
+                        <Select value={config.chat.code} onValueChange={code => setConfig({
+                            ...config, chat: role(provider.id, code),
+                            notes: { ...config.notes, chat: { reason: "手动选择" } },
+                        })}>
+                            <SelectTrigger aria-label="主力模型" className={triggerClass}><SelectValue placeholder="请选择" /></SelectTrigger>
+                            <SelectContent>
+                                {codes.map(code => <SelectItem key={code} value={code}>{code}</SelectItem>)}
+                            </SelectContent>
+                        </Select>
                     </label>
                 )}
             </ModelTestField>
@@ -62,10 +68,10 @@ export function LieFlatModels({ source, footer, busy, run, onChecked }: Props) {
                         provider={agent && config[key]?.providerId === agent.id ? agent : provider}>
                         <label className="grid gap-1.5 text-sm">
                             {key === "light" ? "轻量模型" : "审核模型"}
-                            <select className="h-9 w-full min-w-0 rounded-xl border border-input bg-background px-2"
-                                value={(agent && config[key]?.providerId === agent.id ? roleKey(config[key]) : config[key]?.code) ?? ""}
-                                onChange={e => {
-                                    const value = e.target.value;
+                            <Select
+                                value={(agent && config[key]?.providerId === agent.id ? roleKey(config[key]) : config[key]?.code) || NONE}
+                                onValueChange={picked => {
+                                    const value = picked === NONE ? "" : picked;
                                     const selected = agent && agentCodes.find(code => roleKey(role(agent.id, code)) === value);
                                     const model = selected && agent ? role(agent.id, selected) : value ? role(provider.id, value) : null;
                                     const next = selectAuxiliaryRole(config, key, model);
@@ -74,12 +80,16 @@ export function LieFlatModels({ source, footer, busy, run, onChecked }: Props) {
                                         setConfig(selectAuxiliaryRole(next, "review", selected ? null : model));
                                     } else setConfig(next);
                                 }}>
-                                <option value="">不配置</option>
-                                {codes.map(code => <option key={code} value={code}>{code}</option>)}
-                                {agent && key === "light" && <optgroup label={agent.name}>
-                                    {agentCodes.map(code => <option key={code} value={roleKey(role(agent.id, code))}>{code}</option>)}
-                                </optgroup>}
-                            </select>
+                                <SelectTrigger aria-label={key === "light" ? "轻量模型" : "审核模型"} className={triggerClass}><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value={NONE}>不配置</SelectItem>
+                                    {codes.map(code => <SelectItem key={code} value={code}>{code}</SelectItem>)}
+                                    {agent && key === "light" && agentCodes.length > 0 && <SelectGroup>
+                                        <SelectLabel>{agent.name}</SelectLabel>
+                                        {agentCodes.map(code => <SelectItem key={code} value={roleKey(role(agent.id, code))}>{code}</SelectItem>)}
+                                    </SelectGroup>}
+                                </SelectContent>
+                            </Select>
                         </label>
                     </ModelTestField>
                 ))}

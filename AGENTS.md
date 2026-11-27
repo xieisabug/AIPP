@@ -16,7 +16,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **凭据保险箱（红线）**：个人保险箱在 `sync/personal_vault.rs`（system.db `vault_item`，每个条目一个键一个值，值为 `secrets::seal` 信封，AAD=`pvault:{uuid}`，与连接凭据共用 Vault 密钥、换钥与端到端同步，同步类型 `vault.entry`）。助手在任意工具参数里写 `<vault:键>` 占位符，`execute_tool_by_transport` 统一经 `vault/placeholder.rs::prepare` 审批、替换并在结果里遮盖；内置 `aipp:vault` 只提供 `vault_list` / `vault_request_input` / `vault_http_request`，`butler_tools::inject` 与 `prepare_scheduled_run_tools` 对所有会话类型注入。三条不可破坏：①任何 Tauri 命令、工具结果、日志、同步明文、存库的工具参数都不包含值或其片段（含掩码尾号）；用户填写走 `vault_submit_input` 直接入库，不经 ask-user 的答案通道；②替换、去向判定、遮盖只在 `vault/placeholder.rs`（工具调用；Shell 命令以 `AIPP_VAULT_<KEY>` 环境变量传值，不把值拼进命令文本）与 `vault/config_ref.rs`（MCP 请求头/环境变量、Provider API Key、内置搜索 `HTTP_SEARCH_API_KEY` 里的 `vault://<uuid>` 引用；内置搜索的去向是实际调用的搜索 API 源站，其余内置命令仍不支持引用）做，新入口必须经过这两处而不是自己读值；Provider 请求必须先经 `prepare_provider_configs` 解析，`create_client_with_config` 对未解析或未确认的引用 fail-closed，Claude Code 不接收保险箱 Key；明文迁移只通过 `vault/migration.rs` 后端扫描与逐项替换，候选命令仅返回配置元数据，不能把明文值给前端；③每次使用由用户在审批卡（`vault/approval.rs`）上批准，「总是允许」只能针对网络地点（写入 `allowed_sites`），本机命令、本机文件、stdio 程序每次都问，模型无法写 `allowed_sites`；无人值守（`scheduled_run` 或没有会话）只认这份名单，其余直接失败；配置引用的目标（`config_bindings`）只在设置页保存命令（`add/update_mcp_server`、`add_or_update_aipp_builtin_server`、`update_llm_provider_config`、`update_llm_provider`）或保险箱页「确认」时记录，SuperAdmin 直接写库不算确认。用户批准后的去向不再做额外限制。见 [凭据保险箱](./docs/product/22-凭据保险箱.md)。
 
-分享含保险箱引用的提供商时，设置窗口每次通过原生对话框确认；`vault/config_ref.rs::export_provider_share` 在确认后读取凭据、核对接口授权并返回加密分享码。授权只对本次导出生效。
+分享含保险箱引用的提供商时，设置窗口每次通过应用内确认框确认（`utils/consent.rs`：后端返回确认文案，用户同意后原样传回、与重新生成的文案一致才执行）；`vault/config_ref.rs::export_provider_share` 在确认后读取凭据、核对接口授权并返回加密分享码。授权只对本次导出生效。
 
 **Office 选区与副本**：Office 编辑只在 `office-preview-plugin` 查看器（BetterOffice）里执行。用户把选区交给助手时登记 `office_file_ref`（`db/office_refs.rs`，绑定会话、记 SHA-256），`office_edit`（`aipp:office`，`mcp/builtin_mcp/office.rs`）只认本会话引用号、不接受路径；指纹变化即 `stale_reference`。执行经 `office-edit-request` 由任一窗口认领（`services/officeEditRunner.ts`，隐藏 iframe），结果只写到 `<应用数据>/office_outputs/` 的新副本；手动编辑与另存一律走 `api/office_save.rs` 的临时文件 + 重命名、不覆盖（覆盖须用户二次确认）。不得新增改写原文件或绕过引用号读取文件的入口。见 [对话系统](./docs/product/01-对话系统.md#office-选区交给-ai-修改330)。
 
@@ -24,7 +24,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 联系人间的 `message_bot` 默认单向投递，收件时结束跟踪。发送方可用 `watch_completion` 登记完成提醒，接收方用 `reply_to` 主动报告结果，两种方式共用一次回信投递。独立任务收尾只等待已订阅的消息和旧版协作。
 
-**方案比选**：`present_choices` 在原执行会话等待作答。候选文件与完整 Artifact 工程固定为快照，历史、独立窗口和发布均按请求与候选 ID 读取。桌面每次通过原生确认后才可在临时副本上用 Bun 安装依赖和运行构建。飞书来源收到桌面作答提示。见[内置工具](./docs/product/05-内置工具.md)和[制品预览与执行](./docs/product/06-制品预览与执行.md)。
+**方案比选**：`present_choices` 在原执行会话等待作答。候选文件与完整 Artifact 工程固定为快照，历史、独立窗口和发布均按请求与候选 ID 读取。桌面每次经应用内确认（同 `utils/consent.rs`）后才可在临时副本上用 Bun 安装依赖和运行构建。飞书来源收到桌面作答提示。见[内置工具](./docs/product/05-内置工具.md)和[制品预览与执行](./docs/product/06-制品预览与执行.md)。
 
 **管家开工提示**：总管家、联系人、任务助手与群成员使用 `report_progress` 说明准备做什么，工具回执后沿既有执行链路继续。按执行会话广播 `butler_progress_summary`，私聊与群成员行以气泡显示上报原话。辅助模型的最新总结在私聊居中显示，在群聊与发言气泡左对齐并标明成员名。最终交付仍由原会话处理。
 
@@ -156,6 +156,7 @@ let config = state.configs.lock().await;
 ### Component Patterns
 
 -   Prefer shadcn/ui components from `@/components/ui`
+-   **不用原生控件与系统对话框**：下拉用 `ui/select`、勾选用 `ui/checkbox`、单选用 `ui/radio-group`、日期用 `ui/date-picker`、时间用 `ui/time-picker`、取色用 `ui/color-picker`、进度用 `ui/progress`，不写原生 `<select>` / `<input type="checkbox|radio|date|time|color">` / `<progress>`。确认询问用 `confirmDialog()`（`components/common/ConfirmHost.tsx`，App 根已挂载），不用 `window.alert/confirm/prompt` 或 `plugin-dialog` 的 `ask/message/confirm`；需要后端把关的确认走 `utils/consent.rs` + `src/utils/consent.ts` 的 `withConsent`，Rust 不弹 `dialog().message()`。只有选文件/保存文件（`plugin-dialog` 的 `open`/`save`）保留系统面板。
 -   Use Radix UI primitives for complex interactions
 -   Follow existing component structure and naming conventions
 -   Keep complex logic in Rust, UI logic in React

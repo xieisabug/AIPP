@@ -2,6 +2,7 @@ use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
 use crate::db::llm_db::{http_provider_modes, is_openai_http, resolve_request_mode_or_default, LLMDatabase};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
+use crate::utils::consent::{self, Consent};
 use crate::FeatureConfigState;
 use genai::Modality;
 use serde::{Deserialize, Serialize};
@@ -989,7 +990,8 @@ pub async fn export_llm_provider(
     window: tauri::WebviewWindow,
     provider_id: i64,
     password: String,
-) -> Result<Option<String>, String> {
+    confirmed_prompt: Option<String>,
+) -> Result<Consent<String>, String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Get provider information
@@ -1014,7 +1016,9 @@ pub async fn export_llm_provider(
     let share_data =
         ProviderShareData { name: provider.name, api_type: provider.api_type, endpoint, api_key };
     if !crate::vault::config_ref::contains(&share_data.api_key) {
-        return encrypt_provider_data(&share_data, &password).map(Some).map_err(|e| e.to_string());
+        return encrypt_provider_data(&share_data, &password)
+            .map(|value| Consent::Done { value })
+            .map_err(|e| e.to_string());
     }
     if cfg!(desktop) && window.label() != "config" {
         return Err("请在设置的模型提供商页面分享保险箱凭据".into());
@@ -1022,14 +1026,17 @@ pub async fn export_llm_provider(
     if password.encode_utf16().count() < 6 {
         return Err("分享密码至少需要 6 个字符".into());
     }
+    // 确认文案由前端应用内确认框展示；用户同意后原样传回，与本次重新生成的文案一致才读取凭据。
     tokio::task::spawn_blocking(move || {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-        crate::vault::config_ref::export_provider_share(&app_handle, share_data, &password, |message| {
-            let dialog = app_handle.dialog().message(message).title("确认分享保险箱凭据")
-                .buttons(MessageDialogButtons::OkCancelCustom("包含 API Key 并生成分享码".into(), "取消".into()));
-            #[cfg(desktop)]
-            let dialog = dialog.parent(&window);
-            dialog.blocking_show()
+        let mut prompt = String::new();
+        let code = crate::vault::config_ref::export_provider_share(&app_handle, share_data, &password, |message| {
+            let ok = consent::approved(&message, confirmed_prompt.as_deref());
+            prompt = message;
+            ok
+        })?;
+        Ok(match code {
+            Some(value) => Consent::Done { value },
+            None => Consent::Confirm { prompt },
         })
     }).await.map_err(|e| format!("生成保险箱凭据分享码失败：{e}"))?
 }

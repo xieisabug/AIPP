@@ -10,6 +10,8 @@ vi.mock("@tauri-apps/api/core", async () => ({
         onmessage = () => {};
     },
 }));
+// 引导页的下拉是 Radix Select；这里换成原生 <select> 以便用 fireEvent.change 驱动表单逻辑
+vi.mock("@/components/ui/select", () => import("@/__tests__/mocks/nativeSelect"));
 vi.mock("@/components/avatar/AnimatedAvatar", () => ({ default: () => null }));
 vi.mock("@/components/window/WindowTitleBar", () => ({ WindowTopBar: () => null }));
 vi.mock("@/hooks/useTheme", () => ({ useTheme: () => {} }));
@@ -221,8 +223,8 @@ describe("first-run window", () => {
         const primary = await screen.findByLabelText("新对话默认使用");
         await waitFor(() => expect(primary.querySelector("option[value='main%%6']")).not.toBeNull());
         fireEvent.change(primary, { target: { value: "main%%6" } });
-        expect(screen.getByLabelText("轻量模型")).toHaveValue("keep");
-        expect(screen.getByLabelText("审核模型")).toHaveValue("keep");
+        expect(screen.getByLabelText("轻量模型")).toHaveDisplayValue("沿用已有配置");
+        expect(screen.getByLabelText("审核模型")).toHaveDisplayValue("沿用已有配置");
         fireEvent.change(screen.getByLabelText("轻量模型"), { target: { value: "" } });
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
         await screen.findByRole("heading", { name: "选择主界面" });
@@ -292,7 +294,7 @@ describe("first-run window", () => {
                 expect(invoke).toHaveBeenCalledWith("update_onboarding_roles", { clearReview: true });
                 expect(invoke.mock.calls.filter(([name]) => name === "probe_chat_model")).toHaveLength(0);
                 fireEvent.click(screen.getByRole("button", { name: "换一个" }));
-                expect(await screen.findByLabelText("审核模型")).toHaveValue("");
+                expect(await screen.findByLabelText("审核模型")).toHaveDisplayValue("不配置");
             }
         }
     );
@@ -460,7 +462,7 @@ describe("first-run window", () => {
         fireEvent.click(await screen.findByRole("button", { name: /躺平/ }));
         fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "synthetic" } });
         fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-        expect(await screen.findByLabelText("审核模型")).toHaveValue("");
+        expect(await screen.findByLabelText("审核模型")).toHaveDisplayValue("不配置");
         fireEvent.click(screen.getByRole("button", {name:"帮我选"}));
         expect(screen.getByLabelText("审核模型")).toHaveValue("small");
         fireEvent.click(screen.getByRole("button", {name:"应用"}));

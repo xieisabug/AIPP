@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { ModelTestField } from "./ModelTestField";
-import { Check, CheckCircle2, ChevronDown, ChevronRight, Sparkles, Zap } from "lucide-react";
+import { Check, CheckCircle2, ChevronRight, Sparkles, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import AnimatedAvatar from "@/components/avatar/AnimatedAvatar";
 import { defaultAppearance } from "@/components/butler/butlerAppearance";
 import { MainWorkspaceFields } from "@/components/butler/steps/StepWorkspaceConfig";
@@ -16,6 +17,10 @@ import type { ModelForSelect } from "@/hooks/useFilteredModels";
 import { modelRoles, type ModelRole } from "./roleRecommendations";
 import type { Config, Provider, Role } from "./onboardingService";
 import { local, localLightWarning, roleKey, roleOf, selectAuxiliaryRole } from "./onboardingService";
+
+/** Radix Select 的选项不能是空字符串：“不配置”与“沿用已有配置”用占位值表示。 */
+const NONE = "__none__";
+const KEEP = "__keep__";
 
 export function RoleSelect({
     label,
@@ -38,43 +43,42 @@ export function RoleSelect({
         <ModelTestField label={label} selected={value} provider={providers.find(p => p.id === value?.providerId)}>
             <label className="grid gap-1.5 text-sm font-medium">
                 <span className="text-[13px] text-foreground/85">{label}</span>
-                <div className="relative">
-                    <select
+                <Select
+                    value={!value && keepExisting ? KEEP : roleKey(value) || (optional ? NONE : "")}
+                    onValueChange={(picked) => {
+                        const m = models.find((m) => roleKey(roleOf(m)) === picked);
+                        onChange(m ? roleOf(m) : null);
+                    }}
+                >
+                    <SelectTrigger
                         aria-label={label}
-                        className="h-9 w-full appearance-none rounded-xl border border-border/70 bg-background/90 pl-3.5 pr-8 text-sm font-normal text-foreground transition-colors hover:border-foreground/25 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40"
-                        value={!value && keepExisting ? "keep" : roleKey(value)}
-                        onChange={(e) => {
-                            const m = models.find((m) => roleKey(roleOf(m)) === e.target.value);
-                            onChange(m ? roleOf(m) : null);
-                        }}
+                        className="w-full rounded-xl border-border/70 bg-background/90 pl-3.5 font-normal text-foreground hover:border-foreground/25"
                     >
-                        {!value && keepExisting && <option value="keep" disabled>沿用已有配置</option>}
-                        <option value="" disabled={!optional}>
-                            {optional ? "不配置" : "请选择"}
-                        </option>
+                        <SelectValue placeholder="请选择" />
+                    </SelectTrigger>
+                    <SelectContent>
+                        {!value && keepExisting && <SelectItem value={KEEP} disabled>沿用已有配置</SelectItem>}
+                        {optional && <SelectItem value={NONE}>不配置</SelectItem>}
                         {[false, true].map((isAgent) => {
                             const group = models.filter((m) =>
                                 providers.some((p) => p.id === m.llm_provider_id && local(p.api_type) === isAgent)
                             );
                             return (
                                 group.length > 0 && (
-                                    <optgroup key={String(isAgent)} label={isAgent ? "本机智能体" : "API 聊天模型"}>
+                                    <SelectGroup key={String(isAgent)}>
+                                        <SelectLabel>{isAgent ? "本机智能体" : "API 聊天模型"}</SelectLabel>
                                         {group.map((m) => (
-                                            <option value={roleKey(roleOf(m))} key={roleKey(roleOf(m))}>
+                                            <SelectItem value={roleKey(roleOf(m))} key={roleKey(roleOf(m))}>
                                                 {providers.find((p) => p.id === m.llm_provider_id)?.name} /{" "}
                                                 {m.id === 0 ? "默认模型" : m.code}
-                                            </option>
+                                            </SelectItem>
                                         ))}
-                                    </optgroup>
+                                    </SelectGroup>
                                 )
                             );
                         })}
-                    </select>
-                    <ChevronDown
-                        aria-hidden="true"
-                        className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-                    />
-                </div>
+                    </SelectContent>
+                </Select>
             </label>
         </ModelTestField>
     );

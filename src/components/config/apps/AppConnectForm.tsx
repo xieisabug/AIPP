@@ -9,8 +9,7 @@ import { Input } from '@/components/ui/input';
 import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-
-const selectClass = 'border-input dark:bg-input/30 h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 function Intro({ app, connection }: { app: AppDefinition; connection?: AppConnection }) {
     const reconfiguring = !!connection;
@@ -102,10 +101,13 @@ export default function AppConnectForm({ app, connection, updateDefinition, onCo
                     </div>
                     : <Label htmlFor={id}>{field.label}{field.required ? ' *' : ''}</Label>}
                 {field.kind === 'select'
-                    ? <select {...common} className={selectClass} value={values[field.key] ?? ''} onChange={e => update(field.key, e.target.value)}>
-                        <option value="">请选择</option>
-                        {field.options?.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-                    </select>
+                    ? <Select disabled={locked} required={field.required} value={values[field.key] ?? ''} onValueChange={value => update(field.key, value)}>
+                        <SelectTrigger id={id} className="w-full"><SelectValue placeholder="请选择" /></SelectTrigger>
+                        <SelectContent>
+                            {/* Radix 不允许空值选项；空值即未选择，由占位文字表示。 */}
+                            {field.options?.filter(option => option.value !== '').map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+                        </SelectContent>
+                    </Select>
                     : field.kind === 'boolean' ? null
                         : field.secret || field.kind === 'password'
                             ? <PasswordInput {...common} value={values[field.key] ?? ''} onChange={e => update(field.key, e.target.value)} autoComplete="off" />
