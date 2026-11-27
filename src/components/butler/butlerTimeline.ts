@@ -32,6 +32,7 @@ export interface PeerPost {
     speaker_assistant?: number | null;
     /** Exchange identity for quote replies; absent for task events. */
     exchange_id?: number | null;
+    watch_completion?: boolean | null;
 }
 
 export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number,

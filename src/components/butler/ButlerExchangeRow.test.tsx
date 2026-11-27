@@ -7,6 +7,12 @@ import type { PeerPost } from "./butlerTimeline";
 const post: PeerPost = {id:2,anchor:1,occurred_at:"2026-11-05T01:00:00Z",outgoing:false,peer:"审稿",peer_conversation:20,peer_assistant:2,text:"第二轮通过",status:"delivered",error:null,root:1};
 describe("Butler exchange context", () => {
     afterEach(clearAllMockHandlers);
+    it("shows an incoming peer message without claiming it answered the user", () => {
+        const view = render(<ButlerExchangeRow conversationId={10} posts={[{...post, watch_completion:false, to_user:true}]}/>);
+        expect(screen.getByRole("button", {name:/消息来自.*审稿/})).toBeVisible();
+        view.rerender(<ButlerExchangeRow conversationId={10} posts={[{...post, task_reply:true, watch_completion:true, to_user:true}]}/>);
+        expect(screen.getByRole("button", {name:/消息来自.*审稿/})).toBeVisible();
+    });
     it("should open the full episode in a dialog when clicking a reply receipt", async () => {
         mockInvokeHandler("get_butler_exchange_context", args => {
             expect(args).toEqual({conversationId:10,postIds:[2]});

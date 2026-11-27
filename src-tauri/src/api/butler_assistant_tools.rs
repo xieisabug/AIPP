@@ -56,7 +56,7 @@ async fn runtime(app: &AppHandle, assistant_id: i64) -> anyhow::Result<Value> {
         let conn=ConversationDatabase::new(app)?.get_connection()?;
         let id=contact(&conn,assistant_id)?;
         let queued: i64=conn.query_row("SELECT count(*) FROM butler_peer_exchange WHERE target=?1 AND state='queued'",[id],|r|r.get(0))?;
-        let waiting_reply: i64=conn.query_row("SELECT count(*) FROM butler_peer_exchange WHERE owner=?1 AND state IN ('queued','sending','waiting','returning','reply_sending')",[id],|r|r.get(0))?;
+        let waiting_reply: i64=conn.query_row("SELECT count(*) FROM butler_peer_exchange WHERE owner=?1 AND watch_completion IS NULL AND state IN ('queued','sending','waiting','returning','reply_sending')",[id],|r|r.get(0))?;
         (id,queued,waiting_reply)
     };
     let Some(id)=conversation_id else { return Ok(json!({"conversation_id":null,"state":"not_started"})) };
@@ -210,11 +210,11 @@ pub(super) fn exchange_tool(conn: &Connection, current: i64, name: &str, args: &
     let before=args.get("before_id").map(|_|positive(args,"before_id")).transpose()?.unwrap_or(i64::MAX);
     let context=args.get("include_context").map(|v|v.as_bool().context("include_context 必须为布尔值")).transpose()?.unwrap_or(false);
     let body=if context {"body,reply"} else {"NULL,NULL"};
-    let mut stmt=conn.prepare(&format!("SELECT id,root,owner,target,sender,recipient,state,round_no,max_rounds,stop_requested,error,{body} FROM butler_peer_exchange WHERE (?1 IS NOT NULL AND root=?1 OR ?1 IS NULL AND (owner=?2 OR target=?2)) AND id<?3 ORDER BY id DESC LIMIT ?4"))?;
+    let mut stmt=conn.prepare(&format!("SELECT id,root,owner,target,sender,recipient,state,round_no,max_rounds,stop_requested,error,{body},watch_completion FROM butler_peer_exchange WHERE (?1 IS NOT NULL AND root=?1 OR ?1 IS NULL AND (owner=?2 OR target=?2)) AND id<?3 ORDER BY id DESC LIMIT ?4"))?;
     let mut items=stmt.query_map(params![root,current,before,limit as i64+1],|r| Ok(json!({
         "exchange_id":r.get::<_,i64>(0)?,"root":r.get::<_,i64>(1)?,"sender_conversation_id":r.get::<_,i64>(2)?,"recipient_conversation_id":r.get::<_,i64>(3)?,
         "sender":r.get::<_,String>(4)?,"recipient":r.get::<_,String>(5)?,"state":r.get::<_,String>(6)?,"round":r.get::<_,i64>(7)?,"max_rounds":r.get::<_,i64>(8)?,"stop_requested":r.get::<_,bool>(9)?,"error":r.get::<_,Option<String>>(10)?,
-        "request":r.get::<_,Option<String>>(11)?,"reply":r.get::<_,Option<String>>(12)?,
+        "watch_completion":r.get::<_,Option<bool>>(13)?.unwrap_or(true),"request":r.get::<_,Option<String>>(11)?,"reply":r.get::<_,Option<String>>(12)?,
     })))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more=items.len()>limit; items.truncate(limit);
     let next=if more {items.last().and_then(|v|v["exchange_id"].as_i64())} else {None};

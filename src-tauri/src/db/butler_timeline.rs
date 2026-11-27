@@ -60,12 +60,13 @@ pub struct Post {
     pub(super) speaker_assistant:Option<i64>,
     /// 协作记录身份（引用回复用）；任务事件为空。
     pub(super) exchange_id:Option<i64>,
+    pub(super) watch_completion:Option<bool>,
 }
 pub fn list(conn:&Connection,conversation:i64)->rusqlite::Result<Vec<Post>> {
     let mut stmt=conn.prepare("SELECT p.id,p.anchor,p.occurred_at,p.outgoing,
         CASE WHEN p.conversation_id=e.owner THEN e.recipient ELSE e.sender END,c.id,c.assistant_id,
         CASE p.leg WHEN 'request' THEN e.body ELSE e.reply END,e.state,e.error,e.root,
-        p.leg='reply',e.report_to_user,e.parent,e.id
+        p.leg IN ('reply','manual_reply'),e.report_to_user,e.parent,e.id,e.watch_completion
         FROM butler_peer_post p JOIN butler_peer_exchange e ON e.id=p.exchange_id JOIN conversation c ON c.id=
         CASE WHEN p.conversation_id=e.owner THEN e.target ELSE e.owner END
         WHERE p.conversation_id=?1 ORDER BY p.id")?;
@@ -74,7 +75,7 @@ pub fn list(conn:&Connection,conversation:i64)->rusqlite::Result<Vec<Post>> {
         text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:r.get(11)?,root:r.get(10)?,
         // 受托助手的答复本就是它自己会话里的真实消息；发起方（如总管家）只显示一行事件，不重复展示正文。
         direct:false,
-        to_user:r.get(12)?,parent:r.get(13)?,speaker:None,speaker_assistant:None,exchange_id:r.get(14)?}))?;
+        to_user:r.get(12)?,parent:r.get(13)?,speaker:None,speaker_assistant:None,exchange_id:r.get(14)?,watch_completion:r.get(15)?}))?;
     rows.collect()
 }
 
@@ -165,6 +166,7 @@ pub fn task_posts(
             speaker: None,
             speaker_assistant: None,
             exchange_id: None,
+            watch_completion: None,
         };
         let mut posts = Vec::new();
         if in_conversation(&request.occurred_at) { posts.push(request); }
@@ -193,6 +195,7 @@ pub fn task_posts(
                     .unwrap_or_else(|| format!("助手 #{executor}"))),
                 speaker_assistant: (!owner_view).then_some(executor),
                 exchange_id: None,
+                watch_completion: None,
             });
         }
         Ok(posts)

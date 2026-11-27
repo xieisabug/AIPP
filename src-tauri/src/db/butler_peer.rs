@@ -42,6 +42,9 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     }
     // 有界多层协作：parent 指向受托方正在处理的上级委托，depth 为层数，expires_at 为整条协作链的有效期。
     for (column, ddl) in [
+        // NULL keeps the return contract of exchanges created before one-way messages.
+        ("watch_completion", "ALTER TABLE butler_peer_exchange ADD COLUMN watch_completion INTEGER"),
+        ("reply_key", "ALTER TABLE butler_peer_exchange ADD COLUMN reply_key TEXT"),
         ("parent", "ALTER TABLE butler_peer_exchange ADD COLUMN parent INTEGER"),
         ("depth", "ALTER TABLE butler_peer_exchange ADD COLUMN depth INTEGER NOT NULL DEFAULT 1"),
         ("expires_at", "ALTER TABLE butler_peer_exchange ADD COLUMN expires_at TEXT"),
@@ -96,8 +99,10 @@ pub struct Exchange {
     /// 所属工作（协作链）标识。
     pub chain: i64,
     pub stop_note: Option<String>,
+    pub watch_completion: Option<bool>,
+    pub reply_key: Option<String>,
 }
-const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note FROM butler_peer_exchange";
+const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note,watch_completion,reply_key FROM butler_peer_exchange";
 /// 仍在进行、尚未交付的协作状态。
 const ACTIVE: &str = "('queued','sending','waiting','returning','reply_sending')";
 /// 协作链最多层数：总管家→甲→乙→丙。
@@ -137,6 +142,8 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
         expires_at: r.get(18)?,
         chain: r.get(19)?,
         stop_note: r.get(20)?,
+        watch_completion: r.get(21)?,
+        reply_key: r.get(22)?,
     })
 }
 
@@ -313,10 +320,51 @@ pub struct NewRequest<'a> {
     /// None 按默认规则：用户或助手自主发起的委托由受托助手向用户交付；
     /// 受托期间为完成上级委托而请求的协助、独立任务请来的协助默认是内部协作。
     pub report_to_user: Option<bool>,
+    pub watch_completion: Option<bool>,
 }
 
 pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exchange> {
     enqueue_reviewed(conn, req, None)
+}
+
+/// A completion message and the optional watcher use the same return leg. Only the
+/// original receiving conversation may publish it, including after a user interjection.
+pub fn notify_sender(conn: &mut Connection, id: i64, current: i64, recipient_id: i64, key: &str, body: &str, anchor: Option<i64>) -> anyhow::Result<Exchange> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let ex = read(&tx, id)?;
+    anyhow::ensure!(ex.target == current && assistant_of(&tx, ex.owner)? == Some(recipient_id),
+        "消息 #{id} 的收件会话或原发件人不匹配");
+    anyhow::ensure!(!ex.stop_requested, "消息 #{id} 的工作已停止");
+    if ex.reply_key.as_deref() == Some(key) {
+        anyhow::ensure!(ex.reply.as_deref() == Some(body), "同一 request_id 已用于不同回信");
+        anyhow::ensure!(ex.state != "failed", "消息 #{id} 回信投递失败：{}", ex.error.as_deref().unwrap_or("投递记录缺少原因"));
+        return Ok(ex);
+    }
+    super::butler_control::ensure_delegation(&tx, current)?;
+    if let Some(anchor) = anchor {
+        let newer: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM message WHERE conversation_id=?1 AND message_type='user' AND id>?2)",
+            params![current, anchor], |r| r.get(0))?;
+        anyhow::ensure!(!newer, "发信回合已结束");
+    }
+    anyhow::ensure!(ex.input_id.is_some(), "消息 #{id} 尚未送达");
+    super::butler_goal::assert_message_current(&tx, current, ex.input_id)?;
+    if ex.reply_key.is_none() && ex.reply.is_some() && matches!(ex.state.as_str(), "returning" | "reply_sending" | "delivered") {
+        // The background watcher already claimed this completion.
+        anyhow::ensure!(ex.reply.as_deref() == Some(body), "消息 #{id} 的完成提醒已登记；请将补充内容作为新消息发送");
+        return Ok(ex);
+    }
+    anyhow::ensure!(ex.reply.is_none() && matches!(ex.state.as_str(), "waiting" | "delivered"), "消息 #{id} 已有结果或已结束");
+    tx.execute("UPDATE butler_peer_exchange SET state='returning',reply=?2,reply_key=?3 WHERE id=?1", params![id,body,key])?;
+    let anchor = match anchor {
+        Some(id) => id,
+        None => tx.query_row("SELECT max(id) FROM message WHERE conversation_id=?1", [current], |r| r.get(0))?,
+    };
+    // The tool call positions the outgoing note in chat. It is not a final response
+    // message that preview_message may read as the answer.
+    super::butler_timeline::record(&tx, id, current, "manual_reply", true, anchor)?;
+    let result = read(&tx, id)?;
+    tx.commit()?;
+    Ok(result)
 }
 
 pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Option<RoundLimit>) -> anyhow::Result<Exchange> {
@@ -352,12 +400,22 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
     } else {
         (turn, None)
     };
+    // Ordinary messages to the sender are new messages within the same work.
+    // Return to its actual conversation (it may have sent from an independent task).
+    let mut req = req;
+    let mut return_note = false;
+    if let Some(incoming) = &parent {
+        let target_id = assistant_of(&tx, req.target)?;
+        return_note = req.watch_completion == Some(false) && incoming.watch_completion.is_some()
+            && target_id.is_some() && target_id == assistant_of(&tx, incoming.owner)?;
+        if return_note { req.target = incoming.owner; }
+    }
     // 独立任务请来的协助是任务的资料：最终交付由任务本身负责，默认不让协助方直接向用户交付。
     let owner_is_task = tx
         .query_row("SELECT conversation_kind FROM conversation WHERE id=?1", [req.owner], |r| r.get::<_, String>(0))
         .optional()?
         .is_some_and(|kind| kind == "butler_task");
-    let report_to_user = req.report_to_user.unwrap_or(parent.is_none() && !owner_is_task);
+    let report_to_user = req.report_to_user.unwrap_or(return_note || (parent.is_none() && !owner_is_task));
     let chain = match &parent {
         Some(p) => p.chain,
         None => chain_of(&tx, root, req.owner)?,
@@ -372,7 +430,8 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
     {
         anyhow::ensure!(
             old.owner == req.owner && old.target == req.target && old.body == req.body
-                && old.report_to_user == report_to_user,
+                && old.report_to_user == report_to_user
+                && old.watch_completion.is_none_or(|v| Some(v) == req.watch_completion),
             "同一 request_id 已用于不同请求"
         );
         return Ok(old);
@@ -385,12 +444,13 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
     }
     if let Some(p) = &parent {
         anyhow::ensure!(
-            p.target == req.owner && p.state == "waiting" && !p.stop_requested,
+            p.target == req.owner && !p.stop_requested && (p.state == "waiting"
+                || (p.watch_completion.is_some() && matches!(p.state.as_str(), "delivered" | "returning" | "reply_sending"))),
             "所属协作 #{} 已结束或已停止，不能再为它联系其他助手；请直接说明现有结果",
             p.id
         );
         anyhow::ensure!(
-            p.depth < MAX_DEPTH,
+            return_note || p.depth < MAX_DEPTH,
             "协作已达到 {MAX_DEPTH} 层上限，不能继续转派；请自行完成，或在答复中写明还需要谁协助"
         );
         // 循环保护按助手身份判断：协作链上已出现的助手（无论在联系人、任务还是主会话里）不能再被拉回来。
@@ -408,7 +468,7 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
             };
             seen.retain(|conversation| *conversation == req.target);
             anyhow::ensure!(
-                seen.is_empty() && !same_identity,
+                return_note || (seen.is_empty() && !same_identity),
                 "{} 已在本条协作链中，不能形成循环协作；需要对方补充信息时请在答复中直接提出",
                 req.recipient
             );
@@ -426,12 +486,12 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
     anyhow::ensure!(stopped == 0, "该协作已停止，请向用户汇报现有结果");
 
     let busy: bool = tx.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE root=?1 AND target=?2 AND state IN {ACTIVE})"),
+        &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE root=?1 AND target=?2 AND watch_completion IS NULL AND state IN {ACTIVE})"),
         params![root, req.target],
         |r| r.get(0),
     )?;
     anyhow::ensure!(!busy, "与该助手的上一轮仍在进行，收到回复后可继续发送");
-    let depth = parent.as_ref().map_or(1, |p| p.depth + 1);
+    let depth = parent.as_ref().map_or(1, |p| if return_note { p.depth } else { p.depth + 1 });
     anyhow::ensure!(chain_expiry.is_none_or(|at| at > Utc::now()), "协作链已过期");
     let boundary = RoundLimit { chain, limit };
     if let Some(grant) = approved {
@@ -450,10 +510,10 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
         .and_then(|p| p.expires_at)
         .or(chain_expiry)
         .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(TTL_MINUTES));
-    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user,parent,depth,expires_at,chain)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10,?11,?12,?13,?14)",
+    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user,parent,depth,expires_at,chain,watch_completion)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10,?11,?12,?13,?14,?15)",
         params![root,req.owner,req.target,req.sender,req.recipient,req.key,req.body,count+1,limit,report_to_user,
-            parent.as_ref().map(|p| p.id),depth,expires_at,chain])?;
+            parent.as_ref().map(|p| p.id),depth,expires_at,chain,req.watch_completion])?;
     let ex = read(&tx, tx.last_insert_rowid())?;
     let anchor = match req.tool_message_id {
         Some(id) => id,
@@ -497,6 +557,17 @@ pub fn write_input(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ex = tx.query_row(&format!("{SELECT} WHERE id=?1"), [id], row)?;
     anyhow::ensure!(matches!(leg, "request" | "reply" | "receipt"), "未知投递方向 {leg}");
+    if ex.watch_completion.is_some() {
+        anyhow::ensure!(!ex.stop_requested, "消息 #{id} 所属工作已停止");
+        let anchor = tx.query_row("SELECT anchor FROM butler_peer_post WHERE exchange_id=?1 AND leg='request' AND outgoing=1",
+            [id], |r| r.get::<_, i64>(0))?;
+        if let Err(error) = super::butler_goal::assert_message_current(&tx, ex.owner, Some(anchor)) {
+            let detail = format!("消息 #{id} 的发件目标已失效，已取消投递：{error:#}");
+            tx.execute("UPDATE butler_peer_exchange SET state='stopped',stop_requested=1,error=?2,receipt_state=NULL WHERE id=?1", params![id,detail])?;
+            tx.commit()?;
+            anyhow::bail!(detail);
+        }
+    }
     let audience = audience(&tx, &ex, leg)?;
     if leg == "receipt" {
         anyhow::ensure!(
@@ -541,7 +612,7 @@ pub fn write_input(
     tx.execute("UPDATE conversation SET updated_time=?1 WHERE id=?2", params![now, conversation])?;
     tx.execute("DELETE FROM conversation_summary WHERE conversation_id=?1", [conversation])?;
     tx.execute("UPDATE butler_peer_exchange SET state=?1,input_id=CASE WHEN ?2 THEN ?3 ELSE input_id END WHERE id=?4",
-        params![if request{"waiting"}else{"delivered"},request,message,id])?;
+        params![if request && ex.watch_completion != Some(false) {"waiting"}else{"delivered"},request,message,id])?;
     super::butler_timeline::record(&tx,id,conversation,leg,false,message)?;
     tx.commit()?;
     Ok(message)
@@ -565,7 +636,7 @@ pub fn audience(conn: &Connection, ex: &Exchange, leg: &str) -> rusqlite::Result
 /// 受托方为本协作向其他助手发出、尚未结束的下级协作（含待送回执）。
 pub fn has_open_children(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE parent=?1
+        &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE parent=?1 AND coalesce(watch_completion,1)
             AND (state IN {ACTIVE} OR receipt_state IN ('pending','sending')))"),
         [id],
         |r| r.get(0),
@@ -575,7 +646,7 @@ pub fn has_open_children(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
 /// 会话（如独立任务）自己发起、仍未闭环的协作。任务据此暂缓收尾，避免把“已请人协助”当成最终交付。
 pub fn has_open_owned(conn: &Connection, conversation: i64) -> rusqlite::Result<bool> {
     conn.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE owner=?1
+        &format!("SELECT EXISTS(SELECT 1 FROM butler_peer_exchange WHERE owner=?1 AND coalesce(watch_completion,1)
             AND ((state IN {ACTIVE} AND stop_requested=0) OR receipt_state IN ('pending','sending')))"),
         [conversation],
         |r| r.get(0),
@@ -590,16 +661,17 @@ pub fn expire(conn: &Connection, ex: &Exchange, now: DateTime<Utc>) -> rusqlite:
     Ok(conn.execute(
         "UPDATE butler_peer_exchange SET state='failed',
             error='协作超过有效期仍未完成，已停止等待；对方可能已部分执行，结果以对方会话为准',
-            receipt_state=coalesce(receipt_state,'pending')
-         WHERE id=?1 AND state IN ('queued','waiting') AND stop_requested=0",
-        [ex.id],
+            receipt_state=CASE WHEN coalesce(watch_completion,1) THEN coalesce(receipt_state,'pending') END
+         WHERE id=?1 AND state=?2 AND state IN ('queued','waiting') AND stop_requested=0",
+        params![ex.id,ex.state],
     )? == 1)
 }
 
 /// 标记失败并排队一次回执给发起方，避免发起方无限等待。
 pub fn fail(conn: &Connection, id: i64, detail: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE butler_peer_exchange SET state='failed',error=?1,receipt_state=coalesce(receipt_state,'pending')
+        "UPDATE butler_peer_exchange SET state='failed',error=?1,receipt_state=CASE
+            WHEN watch_completion IS NULL OR (watch_completion=1 AND reply IS NULL) THEN coalesce(receipt_state,'pending') END
          WHERE id=?2 AND state!='stopped'",
         params![detail, id],
     )?;
@@ -611,7 +683,7 @@ pub fn fail(conn: &Connection, id: i64, detail: &str) -> rusqlite::Result<()> {
 pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE butler_peer_exchange SET state='failed',error='投递过程中应用退出，对方是否已收到并执行未知，未重复投递',
-            receipt_state=coalesce(receipt_state,'pending')
+            receipt_state=CASE WHEN coalesce(watch_completion,1) THEN coalesce(receipt_state,'pending') END
          WHERE state IN ('sending','reply_sending')",
         [],
     )?;
@@ -669,10 +741,30 @@ struct ReplyCandidate {
 }
 
 pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Result<bool> {
-    let trigger = ex.input_id.ok_or_else(|| anyhow::anyhow!("exchange={} 缺少接收消息", ex.id))?;
+    // A manual result may have been queued since the worker selected this row.
+    // Keep the state check and the decision to fail/return in the same transaction.
+    let tx = conn.unchecked_transaction()?;
+    let current = read(&tx, ex.id)?;
+    if current.state != "waiting" { return Ok(false); }
+    let changed = settle_waiting(&tx, &current, recovering)?;
+    tx.commit()?;
+    Ok(changed)
+}
+
+fn settle_waiting(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Result<bool> {
+    let mut trigger = ex.input_id.ok_or_else(|| anyhow::anyhow!("exchange={} 缺少接收消息", ex.id))?;
     // 受托方还在等它请来的协助：本协作尚未完成，不能把“已请人协助”当成答复。
     if has_open_children(conn, ex.id)? {
         return Ok(false);
+    }
+    // A child result can resume this work after an unrelated user conversation.
+    // Only the response to this work's latest input can fulfill its watch.
+    if ex.watch_completion == Some(true) {
+        trigger = conn.query_row("SELECT coalesce(max(m.id),?2) FROM message m
+            WHERE m.conversation_id=?1 AND m.id>?2 AND m.message_type='user' AND CASE WHEN json_valid(m.metadata_json) THEN
+                json_extract(m.metadata_json,'$.origin')='butler_peer' AND json_extract(m.metadata_json,'$.leg') IN ('reply','receipt')
+                AND json_extract(m.metadata_json,'$.exchange_id') IN (SELECT id FROM butler_peer_exchange WHERE parent=?3) END",
+            params![ex.target,trigger,ex.id], |r| r.get(0))?;
     }
     // 下级协作的答复与回执属于本项工作的继续，不是新的用户消息。
     let boundary: Option<i64> = conn.query_row(
@@ -699,6 +791,7 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
             fail(conn,ex.id,"接收方目标已变更，旧回复仅保留为记录，不作为本次协作结果")?;
             return Ok(true);
         }
+        let body = super::butler_execution::agent_final_text(&body, meta.as_deref()).unwrap_or(body);
         let meta = meta
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .unwrap_or_default();
@@ -708,13 +801,14 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
             fail(conn, ex.id, &format!("接收方回合终止：{kind} {body}"))?;
             return Ok(true);
         }
-        if super::butler_execution::is_completed_content(&kind,&body,finished,calls.as_deref())
+        let silent = ex.watch_completion == Some(true) && finished && matches!(kind.as_str(), "assistant" | "response")
+            && body.trim() == "[[NO_REPLY]]" && calls.as_deref().is_none_or(|s| matches!(s.trim(), "" | "[]" | "null"));
+        if silent || super::butler_execution::is_completed_content(&kind,&body,finished,calls.as_deref())
         {
-            let tx=conn.unchecked_transaction()?;
-            let changed=tx.execute("UPDATE butler_peer_exchange SET state='returning',reply=?1 WHERE id=?2 AND state='waiting'",
-                params![body,ex.id])?;
-            if changed>0 { super::butler_timeline::record(&tx,ex.id,ex.target,"reply",true,reply_id)?; }
-            tx.commit()?;
+            let result = if silent { "收件助手已处理消息，没有附加说明。" } else { body.as_str() };
+            let changed=conn.execute("UPDATE butler_peer_exchange SET state='returning',reply=?1 WHERE id=?2 AND state='waiting'",
+                params![result,ex.id])?;
+            if changed>0 && !silent { super::butler_timeline::record(conn,ex.id,ex.target,"reply",true,reply_id)?; }
             return Ok(changed>0);
         }
     }
@@ -753,7 +847,7 @@ fn stop_rows(conn: &Connection, filter: &str, key: i64) -> rusqlite::Result<usiz
     // 被停止的进行中协作也给发起方一次回执；已送达或已失败的保持原状。
     conn.execute(
         &format!("UPDATE butler_peer_exchange SET stop_requested=1,
-            receipt_state=CASE WHEN state IN ('delivered','failed','stopped') THEN receipt_state ELSE coalesce(receipt_state,'pending') END,
+            receipt_state=CASE WHEN watch_completion IS NOT NULL THEN NULL WHEN state IN ('delivered','failed','stopped') THEN receipt_state ELSE coalesce(receipt_state,'pending') END,
             state=CASE WHEN state IN ('delivered','failed') THEN state ELSE 'stopped' END
          WHERE {filter}"),
         [key],

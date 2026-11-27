@@ -496,13 +496,15 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             crate::api::butler_memory::definition(),
             BuiltinToolInfo {
                 name: "message_bot".into(),
-                description: "Send a self-contained request (goal, materials, expected result) to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting, or when you need another member's help for your current work. The receipt is not its answer. End this turn; its answer wakes you later. Never send acknowledgements. deliver_to decides who receives the answer: \"user\" means the receiver delivers results or asks questions to the user in its own conversation under its own name and you must not restate it; \"sender\" means the answer comes back only to you as material for your own work or for a summary the user asked for. Default: \"user\" when you act on a user message; \"sender\" while handling another assistant's request or executing an independent task. Chains are limited in depth, rounds and lifetime, and assistants already in the chain cannot be messaged again (loop).".into(),
+                description: "Send a one-way message to a Butler contact and continue your work. Use this when the user names a contact or you need to coordinate. Set watch_completion when you need one notification of the outcome. The application checks in the background. To send the original sender your result, set reply_to to the original exchange_id. This also fulfills any completion watch. Decide whether the user needs a reply after reading a message. Use [[NO_REPLY]] for a silent turn.".into(),
                 input_schema: serde_json::json!({"type":"object","required":["to","message","request_id"],"properties":{
                     "to":{"type":"string","description":"Exact contact name or #assistant_id"},
                     "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
                     "request_id":{"type":"string","description":"Reuse on retry; use a new key for a new round"},
                     "max_rounds":{"type":"integer","minimum":1,"maximum":50,"description":"Initial shared collaboration budget (default 50). Additional blocks of 50 require review automatically when needed."},
-                    "deliver_to":{"type":"string","enum":["user","sender"],"description":"Who receives the answer. See tool description for the default."},
+                    "watch_completion":{"type":"boolean","description":"Subscribe to one outcome notification. Default false, or true when deliver_to=sender is explicitly requested."},
+                    "reply_to":{"type":"integer","minimum":1,"description":"Original exchange_id when sending its result to its sender. Omit for a new independent message."},
+                    "deliver_to":{"type":"string","enum":["user","sender"],"description":"user: recipient may deliver to the user in its own chat. sender: internal material. Defaults to user for a user-initiated message and sender inside delegated work."},
                     "report_to_user":{"type":"boolean","description":"Deprecated alias: true equals deliver_to=user, false equals deliver_to=sender."}
                 }}),
             },

@@ -5,11 +5,11 @@ fn test_contact_activity_includes_all_tasks_and_preserves_owner() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY,assistant_id INTEGER,conversation_kind TEXT,butler_task_status TEXT);
         CREATE TABLE butler_task_definition(task_conversation_id INTEGER,executor_assistant_id INTEGER);
-        CREATE TABLE butler_peer_exchange(owner INTEGER,state TEXT,report_to_user INTEGER,stop_requested INTEGER);
+        CREATE TABLE butler_peer_exchange(owner INTEGER,state TEXT,report_to_user INTEGER,stop_requested INTEGER,watch_completion INTEGER);
         INSERT INTO conversation VALUES(1,NULL,'butler_main',NULL),(2,99,'butler_main',NULL),(3,8,'butler_contact',NULL),(4,8,'normal',NULL),
             (5,NULL,'butler_contact',NULL),(6,NULL,'butler_task','running'),(7,NULL,'butler_task','running'),(8,8,'butler_task','running');
         INSERT INTO butler_task_definition VALUES(7,8);
-        INSERT INTO butler_peer_exchange VALUES(3,'waiting',0,0),(1,'waiting',1,0),(7,'waiting',0,1);").unwrap();
+        INSERT INTO butler_peer_exchange VALUES(3,'waiting',0,0,NULL),(1,'waiting',1,0,NULL),(7,'waiting',0,1,NULL),(7,'queued',0,0,0),(7,'waiting',0,0,1);").unwrap();
     for id in 10..130 {
         conn.execute("INSERT INTO conversation VALUES(?1,99,'butler_task','running')", [id]).unwrap();
         conn.execute("INSERT INTO butler_task_definition VALUES(?1,8)", [id]).unwrap();

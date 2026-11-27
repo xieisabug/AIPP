@@ -32,10 +32,133 @@ pub(super) fn request<'a>(key: &'a str, body: &'a str) -> NewRequest<'a> {
         tool_message_id: None,
         limit: 2,
         report_to_user: Some(false),
+        watch_completion: None,
     }
 }
 fn reread(conn: &Connection, id: i64) -> Exchange {
     conn.query_row(&format!("{SELECT} WHERE id=?1"), [id], row).unwrap()
+}
+
+#[test]
+fn ordinary_messages_finish_on_delivery_and_can_be_answered_later() {
+    let mut db = database();
+    message(&db, 20, "user", "让审稿助手知悉");
+    let req = NewRequest { watch_completion: Some(false), ..request("note", "周五发布") };
+    let note = enqueue(&mut db, req).unwrap();
+    assert!(!has_open_owned(&db, 20).unwrap());
+    assert!(claim(&db, &note).unwrap());
+    write_input(&mut db, note.id, "request", 30, "周五发布", 1, "m").unwrap();
+    assert_eq!(reread(&db, note.id).state, "delivered");
+    assert!(pending_exchanges(&db).unwrap().is_empty());
+    let back = enqueue(&mut db, NewRequest { owner: 30, target: 20,
+        watch_completion: Some(false), ..request("detail", "我还有一个问题") }).unwrap();
+    assert_eq!(back.target, 20);
+    assert!(!has_open_children(&db, note.id).unwrap());
+    message(&db, 30, "user", "先看另一个问题");
+    assert!(notify_sender(&mut db, note.id, 10, 2, "result", "检查通过", None).is_err());
+    assert!(notify_sender(&mut db, note.id, 30, 1, "result", "检查通过", None).is_err());
+    let result = notify_sender(&mut db, note.id, 30, 2, "result", "检查通过", None).unwrap();
+    assert!(claim(&db, &result).unwrap());
+    write_input(&mut db, note.id, "reply", 20, "检查通过", 1, "m").unwrap();
+    assert_eq!(notify_sender(&mut db, note.id, 30, 2, "result", "检查通过", None).unwrap().state, "delivered");
+    let posts = crate::db::butler_timeline::list(&db, 30).unwrap();
+    assert_eq!(posts.iter().filter(|p| p.outgoing && p.task_reply && p.text == "检查通过").count(), 1);
+    assert_eq!(reply_message_id(&db, note.id).unwrap(), None);
+    assert!(notify_sender(&mut db, note.id, 30, 2, "result", "不同结果", None).is_err());
+}
+
+#[test]
+fn watched_message_has_one_completion_and_stopping_suppresses_late_notifications() {
+    for manual_first in [true, false] {
+        let mut db = database();
+        message(&db, 20, "user", "我需要结果");
+        let ex = enqueue(&mut db, NewRequest { watch_completion: Some(true), ..request("watch", "核对日期") }).unwrap();
+        assert!(has_open_owned(&db, 20).unwrap());
+        assert!(claim(&db, &ex).unwrap());
+        write_input(&mut db, ex.id, "request", 30, "核对日期", 1, "m").unwrap();
+        let waiting = reread(&db, ex.id);
+        message(&db, 30, "response", "日期正确");
+        if manual_first {
+            notify_sender(&mut db, ex.id, 30, 2, "done", "日期正确", None).unwrap();
+            assert!(!settle(&db, &waiting, false).unwrap());
+        } else {
+            assert!(settle(&db, &waiting, false).unwrap());
+            notify_sender(&mut db, ex.id, 30, 2, "done", "日期正确", None).unwrap();
+        }
+        assert_eq!(pending_exchanges(&db).unwrap().len(), 1);
+        assert!(claim(&db, &reread(&db, ex.id)).unwrap());
+        stop_subtree(&db, ex.id).unwrap();
+        assert!(write_input(&mut db, ex.id, "reply", 20, "迟到", 1, "m").is_err());
+        assert!(notify_sender(&mut db, ex.id, 30, 2, "late", "迟到", None).is_err());
+        assert!(pending_receipts(&db).unwrap().is_empty());
+        assert!(!has_open_owned(&db, 20).unwrap());
+    }
+}
+
+#[test]
+fn background_watch_accepts_silent_completion_and_ignores_unrelated_replies() {
+    for silent in [true, false] {
+        let mut db = database();
+        message(&db, 20, "user", "关注结果");
+        let ex = enqueue(&mut db, NewRequest { watch_completion: Some(true), ..request("watch", "核对") }).unwrap();
+        claim(&db, &ex).unwrap();
+        write_input(&mut db, ex.id, "request", 30, "核对", 1, "m").unwrap();
+        if silent { message(&db, 30, "response", "[[NO_REPLY]]"); }
+        message(&db, 30, "user", "顺便问件事");
+        message(&db, 30, "response", "另外一件事的回复");
+        assert!(settle(&db, &reread(&db, ex.id), false).unwrap());
+        let result = reread(&db, ex.id);
+        if silent {
+            assert_eq!(result.state, "returning");
+            assert_eq!(result.reply.as_deref(), Some("收件助手已处理消息，没有附加说明。"));
+        } else {
+            assert_eq!(result.state, "failed");
+            assert!(result.reply.is_none());
+        }
+    }
+}
+
+#[test]
+fn nested_watch_resumes_original_work_after_user_interjection() {
+    let mut db = database();
+    message(&db, 10, "user", "请核对后汇总");
+    let original = enqueue(&mut db, NewRequest { watch_completion: Some(true),
+        ..delegate(10, 20, "verify", "核对日期") }).unwrap();
+    claim(&db, &original).unwrap();
+    write_input(&mut db, original.id, "request", 20, "核对日期", 1, "m").unwrap();
+    let child = enqueue(&mut db, NewRequest { watch_completion: Some(true),
+        ..delegate(20, 30, "source", "查原始日期") }).unwrap();
+    message(&db, 20, "response", "[[NO_REPLY]]");
+    message(&db, 20, "user", "先聊别的");
+    message(&db, 20, "response", "答复新问题");
+    claim(&db, &child).unwrap();
+    write_input(&mut db, child.id, "request", 30, "查原始日期", 1, "m").unwrap();
+    let reply = notify_sender(&mut db, child.id, 30, 2, "date", "周五", None).unwrap();
+    assert!(claim(&db, &reply).unwrap());
+    write_input(&mut db, child.id, "reply", 20, "周五", 1, "m").unwrap();
+    assert!(!settle(&db, &original, false).unwrap());
+    message(&db, 20, "response", "核对后确认为周五");
+    assert!(settle(&db, &original, false).unwrap());
+    assert_eq!(reread(&db, original.id).reply.as_deref(), Some("核对后确认为周五"));
+}
+
+#[test]
+fn replaced_sender_goal_withdraws_a_queued_completion() {
+    let mut db = database();
+    db.execute_batch("ALTER TABLE message ADD COLUMN parent_id INTEGER").unwrap();
+    let goal = crate::db::butler_goal::apply(&db, 20, "replace", "核对").unwrap().unwrap();
+    let root = message(&db, 20, "user", "核对");
+    crate::db::butler_goal::bind_turn(&db, 20, root, goal.revision).unwrap();
+    let ex = enqueue(&mut db, NewRequest { watch_completion: Some(true), ..request("check", "核对") }).unwrap();
+    claim(&db, &ex).unwrap();
+    write_input(&mut db, ex.id, "request", 30, "核对", 1, "m").unwrap();
+    let reply = notify_sender(&mut db, ex.id, 30, 2, "done", "完成", None).unwrap();
+    claim(&db, &reply).unwrap();
+    crate::db::butler_goal::apply(&db, 20, "replace", "新目标").unwrap();
+    assert!(write_input(&mut db, ex.id, "reply", 20, "旧结果", 1, "m").is_err());
+    let stopped = reread(&db, ex.id);
+    assert!(stopped.stop_requested);
+    assert!(pending_receipts(&db).unwrap().is_empty());
 }
 #[test]
 fn test_butler_peer_round_trip_duplicate_limit_and_late_stop() {

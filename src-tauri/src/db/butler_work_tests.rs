@@ -6,7 +6,7 @@ fn test_butler_work_failed_exchange_returns_original_error_with_access_control()
     conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES(100,10,'user','请写作写诗')", []).unwrap();
     let ex = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
         owner:10,target:20,sender:"总管家",recipient:"写作",key:"repair",body:"写诗",
-        limit:6,tool_message_id:None,report_to_user:None,
+        limit:6,tool_message_id:None,watch_completion:None,report_to_user:None,
     }).unwrap();
     crate::db::butler_peer::fail(&conn,ex.id,"HTTP 400: unsupported temperature; conversation=20").unwrap();
     let view = resolve(&conn,10,"exchange",ex.id).unwrap();
@@ -77,7 +77,7 @@ fn test_butler_work_message_quote_follows_real_turn_and_reports_missing_records(
         (100,10,'user','让写作写诗'),(101,20,'user','私聊：帮我改标题'),(102,20,'response','新标题：秋');").unwrap();
     let ex = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
         owner: 10, target: 20, sender: "总管家", recipient: "写作", key: "poem", body: "写一首秋天的诗",
-        limit: 6, tool_message_id: None, report_to_user: None,
+        limit: 6, tool_message_id: None, watch_completion: None, report_to_user: None,
     }).unwrap();
     assert!(crate::db::butler_peer::claim(&conn, &ex).unwrap());
     crate::db::butler_peer::write_input(&mut conn, ex.id, "request", 20, "写一首秋天的诗", 1, "m").unwrap();
@@ -219,13 +219,13 @@ fn test_butler_followup_subtree_stop_preserves_sibling_requests() {
     let mut conn = fixture();
     conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES (100,10,'user','parallel help')",[]).unwrap();
     let a = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
-        owner:10,target:20,sender:"总管家",recipient:"写作",key:"a",body:"change weekly",limit:6,tool_message_id:None,report_to_user:None
+        owner:10,target:20,sender:"总管家",recipient:"写作",key:"a",body:"change weekly",limit:6,tool_message_id:None,watch_completion:None,report_to_user:None
     }).unwrap();
     assert!(crate::db::butler_peer::claim(&conn,&a).unwrap());
     crate::db::butler_peer::write_input(&mut conn,a.id,"request",20,"change weekly",1,"m").unwrap();
     let (first,_) = enqueue_followup(&mut conn,20,41,"a","change weekly",Some(100)).unwrap();
     let b = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
-        owner:10,target:30,sender:"总管家",recipient:"审稿",key:"b",body:"change monthly",limit:6,tool_message_id:None,report_to_user:None
+        owner:10,target:30,sender:"总管家",recipient:"审稿",key:"b",body:"change monthly",limit:6,tool_message_id:None,watch_completion:None,report_to_user:None
     }).unwrap();
     assert!(crate::db::butler_peer::claim(&conn,&b).unwrap());
     crate::db::butler_peer::write_input(&mut conn,b.id,"request",30,"change monthly",1,"m").unwrap();

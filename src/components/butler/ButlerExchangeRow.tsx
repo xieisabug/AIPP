@@ -57,13 +57,13 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
     const sent = posts.every(p => p.outgoing);
     const incoming = posts.every(p => !p.outgoing);
     const incomplete = posts.some(p => ["failed", "stopped"].includes(p.status));
-    const incomingRequest = incoming && posts.every(p => !p.task_reply);
+    const incomingRequest = incoming && posts.every(p => !p.task_reply && p.watch_completion == null);
     const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给")
         : incomingRequest ? (posts.every(p => p.to_user) ? "接手工作，来自" : posts.every(p => p.to_user === false) ? "协助请求来自" : "消息来自")
         : incoming ? "消息来自" : `${posts.length} 条消息往来`;
     const directReport = posts.length === 1 && first.direct && (first.text.trim() !== "" || !!first.error);
     // 发起方仅显示交付事件，不重复助手正文。
-    const answeredUser = !incomplete && incoming && posts.every(p => p.task_reply && p.to_user && p.status === "delivered");
+    const answeredUser = !incomplete && incoming && posts.every(p => p.task_reply && p.to_user && p.watch_completion == null && p.status === "delivered");
     const speaker = first.speaker ?? first.peer;
     const speakerAvatar = first.speaker_assistant ?? first.peer_assistant ?? first.peer_conversation;
     // 直接交付可引用回复：任务结果按任务身份，助手委托按协作身份。
@@ -123,7 +123,8 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
                         <div className="whitespace-pre-wrap break-words">{message.text}</div>
                     </div>)}
                     {!["delivered", "succeeded"].includes(episode.status) && <p className="text-xs text-muted-foreground">
-                        {["failed", "stopped"].includes(episode.status) ? "本次对话未完成" : "等待后续回复…"}
+                        {["failed", "stopped"].includes(episode.status) ? "本次对话未完成"
+                            : ["queued", "sending", "returning", "reply_sending"].includes(episode.status) ? "消息待送达" : "等待后续回复…"}
                     </p>}
                 </section>)}
             </CompactDialogBody>
