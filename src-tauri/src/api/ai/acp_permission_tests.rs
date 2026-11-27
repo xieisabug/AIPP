@@ -1,6 +1,37 @@
 use super::*;
 use tokio::sync::oneshot::error::TryRecvError;
 
+#[test]
+fn kimi_permission_requires_structured_mcp_identity_and_input_for_exemption() {
+    use serde_json::{from_value, json};
+
+    // Kimi 2.5.2 emits this same permission description for both list and delete.
+    let title = "mcp__AIPP_MCP_Tools__aipp_t102_schedule_task";
+    let mut frame = json!({
+        "sessionId": "local-test",
+        "options": [{"optionId": "approve_once", "name": "Approve once", "kind": "allow_once"}],
+        "toolCall": {
+            "toolCallId": "0:call3", "title": title,
+            "content": [{"type": "content", "content": {
+                "type": "text", "text": format!("Requesting approval to Approve {title}")
+            }}]
+        }
+    });
+    let request = |frame: &serde_json::Value| from_value::<acp::RequestPermissionRequest>(frame.clone()).unwrap();
+    assert!(acp_permission_mcp_call(&request(&frame)).is_none());
+
+    let registered = "aipp_t102_schedule_task";
+    let identity = json!({"mcp": {"serverName": "AIPP MCP Tools", "toolName": registered}});
+    let input = json!({"action": "list"});
+    frame["toolCall"]["_meta"] = identity.clone();
+    assert!(acp_permission_mcp_call(&request(&frame)).is_none());
+    frame["toolCall"].as_object_mut().unwrap().remove("_meta");
+    frame["toolCall"]["rawInput"] = input.clone();
+    assert!(acp_permission_mcp_call(&request(&frame)).is_none());
+    frame["toolCall"]["_meta"] = identity;
+    assert_eq!(acp_permission_mcp_call(&request(&frame)), Some((registered, &input)));
+}
+
 async fn pending(state: &AcpPermissionState, id: &str, conversation: Option<i64>) -> oneshot::Receiver<AcpPermissionDecision> {
     let (tx, rx) = oneshot::channel();
     state.store_request(AcpPermissionRequestEvent {

@@ -307,6 +307,8 @@ Claude Code 的流式思考和完整思考消息合并为同一段，工具完�
 - node-shebang 脚本类 CLI（如 npm/bun 全局 bin）统一通过显式 node 运行时启动，保证 Windows 可用
 - 启动失败时会按 CLI 给出对应的安装提示
 
+Kimi Code CLI 2.5.2 通过通用 ACP 调用 `message_bot`、`report_progress` 和 `schedule_task` 时，仍按会话的审批设置处理。该版本在权限请求中只提供工具标题和说明，任务查询与删除的说明相同。AIPP 只在请求携带可核对的 MCP 来源和结构化实参时判断内置工具免审。
+
 ### ACP CLI 命令配置
 - 从 `llm_provider_config` 读取 ACP CLI 命令
 - 从 `assistant_model_config` 读取助手覆盖配置
