@@ -70,7 +70,7 @@ Security enforced by architecture, not prompt instructions. AIPP isolates sensit
 
 - **Personal Credential Vault**: Secrets stay encrypted via your OS keychain. Assistants only pass `<vault:key>` placeholders in tool arguments; the runtime injects real values at dispatch and redacts outputs—keeping plaintext out of model context, logs, and chat history.
 - **Approval & Site Allowlists**: Approve each use via inline confirmation cards; restrict reusable approvals to explicit web origins while always prompting for local shell or file access. MCP servers and model providers can safely reference vault entries too.
-- **Local-First & E2E Sync**: All data lives in local SQLite with zero telemetry. Includes an anti-leakage masking mode and an optional self-hosted end-to-end encrypted sync server ([`sync-server/`](sync-server)).
+- **Local-First with Optional Sync**: All data is stored in local SQLite by default, with zero telemetry. AIPP includes a privacy masking mode and optional self-hosted sync ([`sync-server/`](sync-server)). Vault credential values that you choose to sync are end-to-end encrypted once you set a sync passphrase.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/readme/vault-dark.png" />
@@ -158,7 +158,7 @@ cargo test --manifest-path src-tauri/Cargo.toml  # Backend tests
 
 - **Dependencies**: Cargo automatically fetches the pinned `rust-genai` fork; no sibling checkout required.
 - **Android**: Requires Android SDK / NDK and JDK 17—see [`scripts/android-dev.ps1`](scripts/android-dev.ps1).
-- **Self-Hosted Sync**: Optionally run [`sync-server/`](sync-server) (FastAPI + SQLite). The server stores encrypted envelopes and cursors only and never holds decryption keys.
+- **Self-Hosted Sync**: Optionally run [`sync-server/`](sync-server) (FastAPI + SQLite). The server stores ordinary synced records such as chat messages, which are not end-to-end encrypted. Once a sync passphrase is set, the server receives synced Vault credential values as ciphertext.
 - **Contributing**: Please read [AGENTS.md](AGENTS.md) and [Architecture Overview](docs/architecture.md) before making changes.
 
 | Layer | Stack |

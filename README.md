@@ -70,7 +70,7 @@
 
 - **个人凭据保险箱**：密钥由系统钥匙串加密保存；助手在工具参数中只填写 `<vault:键>` 占位符，由 Rust 执行层在发出请求前替换并自动遮盖响应中的真值——模型上下文、日志与历史库均不落明文。
 - **逐次审批与去向白名单**：网页请求可按站点域名授权白名单，本机命令与文件调用每次必须人工确认；MCP 服务与模型提供商配置同样支持安全引用保险箱条目。
-- **本地优先与端到端同步**：全部数据默认保存在本机 SQLite、零遥测；支持界面防泄露脱敏模式，以及可选自建端到端加密同步服务（[`sync-server/`](sync-server)）。
+- **本地优先与可选同步**：全部数据默认保存在本机 SQLite、零遥测；支持界面防泄露脱敏模式，以及可选自建数据同步（[`sync-server/`](sync-server)）。设置同步口令后，开启同步的保险箱凭据值会端到端加密。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/readme/vault-dark.png" />
@@ -158,7 +158,7 @@ cargo test --manifest-path src-tauri/Cargo.toml  # 运行后端测试
 
 - **依赖说明**：Cargo 会自动拉取固定提交的 `rust-genai` 依赖，无需手动克隆同级目录。
 - **Android 开发**：需要 Android SDK / NDK 与 JDK 17，参见 [`scripts/android-dev.ps1`](scripts/android-dev.ps1)。
-- **自建同步服务**：可选部署 [`sync-server/`](sync-server)（FastAPI + SQLite），服务端仅保存密文信封与同步游标，不接触解密密钥。
+- **自建同步服务**：可选部署 [`sync-server/`](sync-server)（FastAPI + SQLite）。服务端会保存已同步的聊天等普通记录，这些记录不使用端到端加密。设置同步口令后，服务端收到的保险箱凭据值是密文。
 - **贡献指引**：参与开发前请先阅读 [AGENTS.md](AGENTS.md) 与 [架构总览](docs/architecture.md)。
 
 | 层级 | 技术栈 |
