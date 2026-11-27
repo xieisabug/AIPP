@@ -268,13 +268,17 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
           return;
         }
         approvals.set(id, { id: frame.id, options: offered });
-        emit({ type: 'permission', turn, id, title: frame.params.toolCall?.title, input: frame.params.toolCall?.rawInput,
-          toolMeta: permissionToolMeta(driver, config.mcp, frame.params.toolCall),
+        const toolCall = frame.params.toolCall;
+        const toolMeta = permissionToolMeta(driver, config.mcp, toolCall);
+        // Prefer the dispatch name over a generated title when identifying the tool to the user.
+        const title = driver === 'antigravity' && toolMeta?.mcp?.serverName === 'aipp'
+          && typeof toolMeta.mcp.toolName === 'string' ? `mcp_aipp_${toolMeta.mcp.toolName}` : toolCall?.title;
+        emit({ type: 'permission', turn, id, title, input: toolCall?.rawInput, toolMeta,
           options: [...offered.map(option => ({ id: option.optionId,
             name: `${option.name || option.optionId}${option.kind === 'allow_always' ? '（会保存到智能体权限规则）' : ''}${option._meta?.['agy.security.warning']?.message ? `：${String(option._meta['agy.security.warning'].message).slice(0, 512)}` : ''}`,
             kind: option.kind })),
             // ACP cancelled outcome is always available, even without reject_once.
-            { id: '__aipp_cancel_permission__', name: '拒绝', kind: 'reject_once' }] });
+            { id: '__aipp_cancel_permission__', name: '取消请求', kind: 'reject_once' }] });
       } else if (frame.id !== undefined) send({ id: frame.id, error: { code: -32601, message: `AIPP does not implement ${frame.method}` } });
       return;
     }

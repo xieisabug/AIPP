@@ -246,6 +246,9 @@ export function OperationPermissionDialog({
     );
 }
 
+// The native ACP bridge maps this reserved choice to ACP's cancelled outcome.
+const bridgeCancelOption = "__aipp_cancel_permission__";
+
 const acpOptionLabel = (option: AcpPermissionOption) => {
     switch (option.kind) {
         case "allow_once":
@@ -265,12 +268,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+const historySearchTitle = "搜索管家聊天记录（含归档会话）";
+const historyArgumentLabels = { bot_id: "助手编号", query: "搜索词", before_message_id: "早于消息编号" };
+
+function PermissionArguments({ args, labels }: { args: [string, unknown][]; labels: Map<string, string> }) {
+    if (!args.length) return null;
+    return <dl className="space-y-2">
+        {args.map(([key, value]) => <div key={key} className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-3">
+            <dt className="break-all text-muted-foreground">{labels.get(key) || key}</dt>
+            <dd className="min-w-0 whitespace-pre-wrap break-all text-foreground">{typeof value === "string" && value.length ? value : JSON.stringify(value, null, 2)}</dd>
+        </div>)}
+    </dl>;
+}
+
 function McpApprovalDetails({ server, meta }: { server: string; meta: Record<string, unknown> }) {
     const name = typeof meta.tool_name === "string" ? meta.tool_name : "";
     const historySearch = server === "aipp" && /^(?:aipp_t\d+_)?search_bot_history$/.test(name);
-    const labels = new Map<string, string>(historySearch ? [
-        ["bot_id", "助手编号"], ["query", "搜索词"], ["before_message_id", "早于消息编号"],
-    ] : []);
+    const labels = new Map(historySearch ? Object.entries(historyArgumentLabels) : []);
     const displayValues = new Map<string, unknown>();
     if (Array.isArray(meta.tool_params_display)) {
         for (const field of meta.tool_params_display) {
@@ -284,19 +298,49 @@ function McpApprovalDetails({ server, meta }: { server: string; meta: Record<str
     // Use the actual invocation values even when a display hint abbreviates or omits them.
     const args = isRecord(meta.tool_params) ? Object.entries(meta.tool_params) : [...displayValues];
     return <>
-        <p className="break-words font-medium">{historySearch ? "搜索管家聊天记录（含归档会话）" : "调用 MCP 工具"}</p>
+        <p className="break-words font-medium">{historySearch ? historySearchTitle : "调用 MCP 工具"}</p>
         <p className="break-all text-xs text-muted-foreground">{server} / {name || "未提供工具名"}</p>
-        {args.length > 0 && <dl className="space-y-2">
-            {args.map(([key, value]) => <div key={key} className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-3">
-                <dt className="break-all text-muted-foreground">{labels.get(key) || key}</dt>
-                <dd className="min-w-0 whitespace-pre-wrap break-all text-foreground">{typeof value === "string" && value.length ? value : JSON.stringify(value, null, 2)}</dd>
-            </div>)}
-        </dl>}
+        <PermissionArguments args={args} labels={labels} />
         {typeof meta.tool_description === "string" && <details open={!historySearch}>
             <summary className="cursor-pointer text-xs">工具说明</summary>
             <p className="mt-1 whitespace-pre-wrap break-words">{meta.tool_description}</p>
         </details>}
     </>;
+}
+
+const antigravityArgumentLabels = new Map(Object.entries({
+    ...historyArgumentLabels, assistant_id: "助手编号", message_id: "消息编号", group_id: "群编号",
+    action: "操作", command: "命令", path: "路径", toolSummary: "调用摘要",
+}));
+
+const antigravityToolLabels = new Map(Object.entries({
+    search_bot_history: historySearchTitle, search_own_history: "搜索自己的聊天记录",
+    read_bot_message_context: "读取消息前后文", read_group_history: "读取本群聊天记录",
+    read_work_context: "查看工作上下文", list_assistants: "查询助手列表",
+    get_assistant_details: "查看助手资料", get_assistant_exchange: "查看助手协作记录",
+    butler_memory: "管家长期记忆", superadmin_execute: "执行管家管理操作", superadmin_batch: "批量执行管家管理操作",
+}));
+
+function AntigravityPermissionDetails({ request }: { request: AcpPermissionRequest }) {
+    const title = request.title || "未提供工具名";
+    // Only format the displayed title. The native bridge verifies identity for review.
+    const registered = /^(?:Run )?mcp_aipp_aipp_t\d+_([\w-]+)$/.exec(title)?.[1];
+    const tool = registered || title.replace(/^Run (?=[\w.-]+$)/, "");
+    const label = registered && antigravityToolLabels.get(registered);
+    let parameters: unknown = request.parameters;
+    try { parameters = JSON.parse(request.parameters ?? "null"); } catch { /* Display the original text. */ }
+    return <div className={permissionDetailPanelClassName}>
+        <p className="break-all font-medium">{label || tool}</p>
+        {label && <p className="text-xs text-muted-foreground">{tool}</p>}
+        {isRecord(parameters)
+            ? <PermissionArguments args={Object.entries(parameters)} labels={antigravityArgumentLabels} />
+            : request.parameters && <pre className={permissionCodeBlockClassName}>{request.parameters}</pre>}
+        <details>
+            <summary className="cursor-pointer text-xs">请求详情</summary>
+            <p className="break-all">{title}</p>
+            <p>请求编号 {request.tool_call_id}</p>
+        </details>
+    </div>;
 }
 
 function PermissionReviewNotice({ review }: { review: NonNullable<AcpPermissionRequest["review"]> }) {
@@ -358,6 +402,14 @@ export function AcpPermissionDialog({
 }: AcpPermissionDialogProps) {
     if (!request) return null;
 
+    const nativeAcp = request.agent_kind === "antigravity" || request.agent_kind === "kiro";
+    const isBridgeCancel = (option: AcpPermissionOption) => nativeAcp && option.option_id === bridgeCancelOption;
+    const hasCancel = request.options.some(option => option.option_id === "cancel" || isBridgeCancel(option));
+    function optionLabel(option: AcpPermissionOption) {
+        if (isBridgeCancel(option)) return "取消请求";
+        if (request?.agent_kind === "codex_app_server") return option.name;
+        return acpOptionLabel(option);
+    }
     return (
         <PermissionSurface key={request.request_id} conversationId={request.conversation_id} open={isOpen}
             width="sm:!max-w-xl"
@@ -368,8 +420,8 @@ export function AcpPermissionDialog({
                     : `${({ pi: "Pi", cursor: "Cursor", opencode: "OpenCode", kiro: "Kiro", antigravity: "Antigravity", claude_sdk: "Claude Code" } as Record<string, string>)[request.agent_kind ?? ""] ?? "ACP"} 工具权限请求`}
             </>}
             actions={
-                <div className="grid min-w-0 w-full grid-cols-1 gap-2 sm:grid-cols-2">
-                    {!request.options.some(option => option.option_id === "cancel") && <Button
+                <div className={`grid min-w-0 w-full grid-cols-1 gap-2 ${nativeAcp && hasCancel && request.options.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+                    {!hasCancel && <Button
                         variant="outline"
                         onClick={() => onDecision(request.request_id, undefined, true)}
                         disabled={isSubmitting}
@@ -391,14 +443,15 @@ export function AcpPermissionDialog({
                             ) : (
                                 <ShieldAlert className="h-4 w-4 shrink-0" />
                             )}
-                            {request.agent_kind === "codex_app_server" ? option.name : acpOptionLabel(option)}
+                            {optionLabel(option)}
                         </Button>
                     ))}
                 </div>
             }>
             <div className={permissionDialogBodyClassName}>
                 {request.review && request.review.verdict !== "manual" && <PermissionReviewNotice review={request.review} />}
-                {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
+                {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} />
+                    : request.agent_kind === "antigravity" ? <AntigravityPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
                     <div className="flex items-start gap-2 text-sm">
                         <span className="shrink-0 font-medium text-foreground">标题:</span>
                         <span className="min-w-0 break-words text-muted-foreground">

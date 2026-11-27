@@ -488,6 +488,10 @@ fn test_review_exempt_tools_require_builtin_identity() {
         ("aipp:agent", "load_skill"), ("aipp:agent", "load_mcp_tool"),
         ("aipp:agent", "load_mcp_server"), ("aipp:agent", "todo_write"),
         ("aipp:agent", "spawn_task_conversation"), ("aipp:agent", "preview_message"),
+        ("aipp:agent", "search_own_history"), ("aipp:agent", "search_bot_history"),
+        ("aipp:agent", "read_bot_message_context"), ("aipp:agent", "read_group_history"),
+        ("aipp:agent", "read_work_context"), ("aipp:agent", "list_assistants"),
+        ("aipp:agent", "get_assistant_details"), ("aipp:agent", "get_assistant_exchange"),
         ("aipp:ui_interaction", "preview_code"), ("aipp:ui_interaction", "preview_file"),
         ("aipp:ui_interaction", "ask_user_question"),
         ("aipp:operation", "get_bash_output"), ("aipp:artifact", "show_artifact"),
@@ -526,6 +530,11 @@ fn test_message_bot_review_exemption_requires_builtin_agent() {
 #[test]
 fn test_review_exempt_suboperations_fail_closed() {
     let agent = |tool: &str, args: &str| is_review_exempt_tool(true, Some("aipp:agent"), tool, args);
+    for action in ["recall", "source", "remember", "update", "forget", "unknown"] {
+        assert_eq!(agent("butler_memory", &serde_json::json!({"action": action}).to_string()),
+            matches!(action, "recall" | "source"), "{action}");
+    }
+    assert!(!agent("butler_memory", "{}"));
     assert!(agent("task_conversation_operation", r#"{"action":"read"}"#));
     assert!(agent("task_conversation_operation", r#"{"action":"reply_prompt"}"#));
     for action in ["mcp_tool_execute", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond", "unknown"] {
@@ -540,6 +549,17 @@ fn test_review_exempt_suboperations_fail_closed() {
     assert!(!agent("load_skill", "invalid"));
     assert!(!agent("load_skill", "null"));
     let admin = |tool: &str, args: &str| is_review_exempt_tool(true, Some("aipp:superadmin"), tool, args);
+    for id in ["assistant.get_channel_config", "assistant.get_mcp_config", "assistant.get_skill_config",
+        "conversation.group_list", "conversation.group_get"] {
+        assert!(admin("superadmin_execute", &serde_json::json!({"action_id":id,"args":{}}).to_string()), "{id}");
+    }
+    for action in ["list", "add", "remove", "set_directory", "unknown"] {
+        let item = serde_json::json!({"action_id": "assistant.workspace", "args": {"action": action}});
+        assert_eq!(admin("superadmin_execute", &item.to_string()), action == "list");
+        let batch = serde_json::json!({"actions": [{"action_id":"conversation.group_get","args":{}}, item]});
+        assert_eq!(admin("superadmin_batch", &batch.to_string()), action == "list");
+    }
+    assert!(!admin("superadmin_execute", r#"{"action_id":"assistant.workspace","args":{}}"#));
     assert!(admin("superadmin_execute", r#"{"action_id":"llm.get_model","args":{}}"#));
     assert!(!admin("superadmin_execute", r#"{"action_id":"llm.get_models","args":{}}"#));
     assert!(!admin("superadmin_execute", r#"{"action_id":"unknown","args":{},"dry_run":true}"#));

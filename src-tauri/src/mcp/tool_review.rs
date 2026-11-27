@@ -139,6 +139,9 @@ pub fn is_review_exempt_tool(
             "preview_message" | "report_progress" => true,
             // 助手间消息只发起内部协作；接收方后续工具调用仍独立审核。
             "message_bot" => true,
+            "search_own_history" | "search_bot_history" | "read_bot_message_context" | "read_group_history"
+            | "read_work_context" | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" => true,
+            "butler_memory" => matches!(args["action"].as_str(), Some("recall" | "source")),
             "task_conversation_operation" => matches!(args["action"].as_str(), Some("read" | "reply_prompt")),
             // 只读查看、暂停，以及总管家对无人值守操作的裁决（裁决本身就是审核结论）。
             "schedule_task" => matches!(args["action"].as_str(), Some("list" | "get" | "runs" | "pause" | "decide")),
@@ -164,8 +167,14 @@ pub fn is_review_exempt_tool(
 }
 
 fn is_review_exempt_action(request: &serde_json::Value) -> bool {
-    request["args"].is_object() && matches!(request["action_id"].as_str(), Some(
+    if !request["args"].is_object() { return false; }
+    if request["action_id"] == "assistant.workspace" {
+        return request["args"]["action"] == "list";
+    }
+    matches!(request["action_id"].as_str(), Some(
         "assistant.list" | "assistant.get" | "assistant.create" | "assistant.reset_conversation"
+        | "assistant.get_channel_config" | "assistant.get_mcp_config" | "assistant.get_skill_config"
+        | "conversation.group_list" | "conversation.group_get"
         | "conversation.list" | "conversation.get" | "conversation.create" | "conversation.group_reset_member"
         | "task.list" | "task.get" | "task.cancel"
         | "schedule.list" | "schedule.get" | "mcp.list" | "mcp.get"

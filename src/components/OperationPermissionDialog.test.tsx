@@ -81,4 +81,29 @@ describe("AcpPermissionDialog", () => {
         render(<AcpPermissionDialog request={request} isOpen onDecision={vi.fn()} />);
         expect(screen.queryByRole("status")).not.toBeInTheDocument();
     });
+
+    it("should show the Antigravity tool and arguments and distinguish rejection from cancellation", () => {
+        const decide = vi.fn();
+        const cancel = "__aipp_cancel_permission__";
+        render(<AcpPermissionDialog isOpen onDecision={decide} request={{
+            ...request, agent_kind: "antigravity", title: "Run mcp_aipp_aipp_t62_search_bot_history",
+            parameters: JSON.stringify({ bot_id: 43, query: "5b121932", toolSummary: "查找回归结果" }),
+            options: [...request.options, { option_id: cancel, name: "拒绝", kind: "reject_once" }],
+        }} />);
+        for (const label of ["搜索管家聊天记录（含归档会话）", "助手编号", "43", "搜索词", "5b121932", "调用摘要", "查找回归结果"]) {
+            expect(screen.getByText(label)).toBeVisible();
+        }
+        expect(screen.getAllByRole("button")).toHaveLength(3);
+        fireEvent.click(screen.getByRole("button", { name: "本次拒绝" }));
+        fireEvent.click(screen.getByRole("button", { name: "取消请求" }));
+        expect(decide.mock.calls).toEqual([[request.request_id, "deny", false], [request.request_id, cancel, false]]);
+    });
+
+    it("should preserve unfamiliar tool names and unstructured Antigravity parameters", () => {
+        render(<AcpPermissionDialog isOpen onDecision={vi.fn()} request={{
+            ...request, agent_kind: "antigravity", title: "Run mcp_aipp_aipp_t91_custom_tool", parameters: "plain text",
+        }} />);
+        expect(screen.getByText("custom_tool")).toBeVisible();
+        expect(screen.getByText("plain text")).toBeVisible();
+    });
 });

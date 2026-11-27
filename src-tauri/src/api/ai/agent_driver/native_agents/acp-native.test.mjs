@@ -158,6 +158,7 @@ test('should identify the Antigravity message permission from the native dispatc
     };
     const permission = request({});
     assert.equal(permission.type, 'permission');
+    assert.equal(request({ title: 'Run tool' }).title, name);
     assert.deepEqual(permission.toolMeta, { mcp: { serverName: 'aipp', toolName: 'aipp_t61_message_bot' } });
     assert.deepEqual(permission.input, args);
     assert.equal(request({ name: undefined }).toolMeta, undefined);
@@ -166,6 +167,26 @@ test('should identify the Antigravity message permission from the native dispatc
     assert.equal(request({ args: { message: 'different' } }).toolMeta, undefined);
     const external = { mcp: { serverName: 'external', toolName: 'aipp_t61_message_bot' } };
     assert.deepEqual(request({ _meta: external }).toolMeta, external);
+    f.finish(); await prompt;
+  } finally { await runtime.close(); }
+});
+
+test('should send distinct outcomes for Antigravity rejection and cancellation', async () => {
+  const f = fixture();
+  const runtime = await f.open('antigravity');
+  try {
+    const prompt = runtime.prompt('task', 'turn');
+    for (const [id, choice, outcome] of [
+      [80, 'deny', { outcome: 'selected', optionId: 'deny' }],
+      [81, '__aipp_cancel_permission__', { outcome: 'cancelled' }],
+    ]) {
+      f.permission(id, { toolCallId: 't', title: 'Run tool' }, [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ]);
+      await runtime.reply(String(id), choice);
+      assert.deepEqual(f.commands.find(c => c.id === id).result.outcome, outcome);
+    }
     f.finish(); await prompt;
   } finally { await runtime.close(); }
 });
