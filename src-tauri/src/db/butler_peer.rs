@@ -1,5 +1,4 @@
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 #[cfg(test)]
@@ -40,15 +39,14 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_receipt_attempts {
         conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN receipt_attempts INTEGER NOT NULL DEFAULT 0")?;
     }
-    // 有界多层协作：parent 指向受托方正在处理的上级委托，depth 为层数，expires_at 为整条协作链的有效期。
+    // 有界多层协作：parent 指向受托方正在处理的上级委托，depth 为层数。
     for (column, ddl) in [
         // NULL keeps the return contract of exchanges created before one-way messages.
         ("watch_completion", "ALTER TABLE butler_peer_exchange ADD COLUMN watch_completion INTEGER"),
         ("reply_key", "ALTER TABLE butler_peer_exchange ADD COLUMN reply_key TEXT"),
         ("parent", "ALTER TABLE butler_peer_exchange ADD COLUMN parent INTEGER"),
         ("depth", "ALTER TABLE butler_peer_exchange ADD COLUMN depth INTEGER NOT NULL DEFAULT 1"),
-        ("expires_at", "ALTER TABLE butler_peer_exchange ADD COLUMN expires_at TEXT"),
-        // 整条协作链（同一项工作）的标识：轮数预算、有效期、停止都按链计算；独立任务发起的协作挂到派出该任务的工作上。
+        // 整条协作链（同一项工作）的标识：轮数预算和停止都按链计算；独立任务发起的协作挂到派出该任务的工作上。
         ("chain", "ALTER TABLE butler_peer_exchange ADD COLUMN chain INTEGER"),
         // 停止时实际打断了什么、哪些无法确认已停止，供回执与界面如实说明。
         ("stop_note", "ALTER TABLE butler_peer_exchange ADD COLUMN stop_note TEXT"),
@@ -95,21 +93,17 @@ pub struct Exchange {
     /// 受托方发起本协作时正在处理的上级委托（多层协作）。
     pub parent: Option<i64>,
     pub depth: i64,
-    pub expires_at: Option<DateTime<Utc>>,
     /// 所属工作（协作链）标识。
     pub chain: i64,
     pub stop_note: Option<String>,
     pub watch_completion: Option<bool>,
     pub reply_key: Option<String>,
 }
-const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note,watch_completion,reply_key FROM butler_peer_exchange";
+const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,coalesce(chain,root),stop_note,watch_completion,reply_key FROM butler_peer_exchange";
 /// 仍在进行、尚未交付的协作状态。
 const ACTIVE: &str = "('queued','sending','waiting','returning','reply_sending')";
 /// 协作链最多层数：总管家→甲→乙→丙。
 pub const MAX_DEPTH: i64 = 3;
-/// 整条协作链的有效期；排队或等待超时后给发起方失败回执，避免互相等待卡死。
-pub const TTL_MINUTES: i64 = 120;
-
 /// 接收方答复所在的消息（`settle` 记录在时间线上），供回送时附上引用句柄。
 pub fn reply_message_id(conn: &Connection, exchange: i64) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
@@ -139,11 +133,10 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
         receipt_state: r.get(15)?,
         parent: r.get(16)?,
         depth: r.get(17)?,
-        expires_at: r.get(18)?,
-        chain: r.get(19)?,
-        stop_note: r.get(20)?,
-        watch_completion: r.get(21)?,
-        reply_key: r.get(22)?,
+        chain: r.get(18)?,
+        stop_note: r.get(19)?,
+        watch_completion: r.get(20)?,
+        reply_key: r.get(21)?,
     })
 }
 
@@ -476,11 +469,11 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
         }
     }
     // 轮数预算与停止状态按整条工作链计算，不能靠切换会话或新一轮重新计数。
-    let (count, limit, stopped, chain_expiry): (i64, Option<i64>, i64, Option<DateTime<Utc>>) = tx.query_row(
-        "SELECT count(*),max(max_rounds),count(CASE WHEN stop_requested=1 THEN 1 END),min(expires_at)
+    let (count, limit, stopped): (i64, Option<i64>, i64) = tx.query_row(
+        "SELECT count(*),max(max_rounds),count(CASE WHEN stop_requested=1 THEN 1 END)
          FROM butler_peer_exchange WHERE coalesce(chain,root)=?1",
         [chain],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let limit = limit.unwrap_or(req.limit);
     anyhow::ensure!(stopped == 0, "该协作已停止，请向用户汇报现有结果");
@@ -492,7 +485,6 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
     )?;
     anyhow::ensure!(!busy, "与该助手的上一轮仍在进行，收到回复后可继续发送");
     let depth = parent.as_ref().map_or(1, |p| if return_note { p.depth } else { p.depth + 1 });
-    anyhow::ensure!(chain_expiry.is_none_or(|at| at > Utc::now()), "协作链已过期");
     let boundary = RoundLimit { chain, limit };
     if let Some(grant) = approved {
         anyhow::ensure!(grant.chain == chain, "审核期间协作归属已变化");
@@ -504,16 +496,10 @@ pub fn enqueue_reviewed(conn: &mut Connection, req: NewRequest<'_>, approved: Op
     } else {
         return Err(boundary.into());
     };
-    // 有效期由整条链首次发起时确定，后续轮次与下级继承，不重新计时。
-    let expires_at = parent
-        .as_ref()
-        .and_then(|p| p.expires_at)
-        .or(chain_expiry)
-        .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(TTL_MINUTES));
-    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user,parent,depth,expires_at,chain,watch_completion)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10,?11,?12,?13,?14,?15)",
+    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user,parent,depth,chain,watch_completion)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10,?11,?12,?13,?14)",
         params![root,req.owner,req.target,req.sender,req.recipient,req.key,req.body,count+1,limit,report_to_user,
-            parent.as_ref().map(|p| p.id),depth,expires_at,chain,req.watch_completion])?;
+            parent.as_ref().map(|p| p.id),depth,chain,req.watch_completion])?;
     let ex = read(&tx, tx.last_insert_rowid())?;
     let anchor = match req.tool_message_id {
         Some(id) => id,
@@ -651,20 +637,6 @@ pub fn has_open_owned(conn: &Connection, conversation: i64) -> rusqlite::Result<
         [conversation],
         |r| r.get(0),
     )
-}
-
-/// 超过有效期仍在排队或等待的协作：失败并回执发起方。等待用户回答/审批中的回合由调用方跳过。
-pub fn expire(conn: &Connection, ex: &Exchange, now: DateTime<Utc>) -> rusqlite::Result<bool> {
-    if ex.expires_at.is_none_or(|at| at > now) {
-        return Ok(false);
-    }
-    Ok(conn.execute(
-        "UPDATE butler_peer_exchange SET state='failed',
-            error='协作超过有效期仍未完成，已停止等待；对方可能已部分执行，结果以对方会话为准',
-            receipt_state=CASE WHEN coalesce(watch_completion,1) THEN coalesce(receipt_state,'pending') END
-         WHERE id=?1 AND state=?2 AND state IN ('queued','waiting') AND stop_requested=0",
-        params![ex.id,ex.state],
-    )? == 1)
 }
 
 /// 标记失败并排队一次回执给发起方，避免发起方无限等待。

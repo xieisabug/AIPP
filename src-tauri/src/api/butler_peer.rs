@@ -575,16 +575,9 @@ async fn tick(
         return Ok(false);
     }
     let mut changed = false;
-    let now = chrono::Utc::now();
     for ex in exchanges {
         let dest = if ex.state == "returning" { ex.owner } else { ex.target };
         let dest_busy = delivery_busy(app, dest).await?;
-        // 有效期到了且仍在排队：直接失败并回执发起方，避免互相等待卡死。
-        if ex.state == "queued" && peer::expire(&conn, &ex, now)? {
-            changed = true;
-            idle.remove(&ex.id);
-            continue;
-        }
         if ex.state == "queued" && !super::butler_capabilities::enabled(app, super::butler_capabilities::ButlerCapability::PeerCollaboration).await {
             // Rollback pauses only new requests; existing answers/receipts still settle.
             continue;
@@ -595,18 +588,11 @@ async fn tick(
         }
         if ex.state == "waiting" {
             let idle_since = idle.entry(ex.id).or_insert_with(std::time::Instant::now);
-            // 先认领已有的最终答复，再判断过期：下级过期回执后受托方补出的交付不能被丢弃。
-            // 等待用户回答/审批（dest_busy）的回合不会走到这里，因此不会被有效期打断。
-            let settled = peer::settle(
+            changed |= peer::settle(
                 &conn,
                 &ex,
                 recovering || idle_since.elapsed() > Duration::from_secs(15),
             )?;
-            changed |= settled;
-            if !settled && !peer::has_open_children(&conn, ex.id)? && peer::expire(&conn, &ex, now)? {
-                changed = true;
-                idle.remove(&ex.id);
-            }
         } else if peer::claim(&conn, &ex)? {
             changed = true;
             if let Err(e) = deliver(app, &ex).await {
@@ -1000,7 +986,7 @@ mod receipt_prompt_tests {
             body: "请审稿".into(), state: state.into(), input_id: None, reply: None,
             error: error.map(str::to_string), round_no: 1, max_rounds: 6, stop_requested,
             report_to_user: false, receipt_state: Some("sending".into()),
-            parent: None, depth: 1, expires_at: None, chain: 1, stop_note: None, watch_completion: None, reply_key: None,
+            parent: None, depth: 1, chain: 1, stop_note: None, watch_completion: None, reply_key: None,
         }
     }
 

@@ -651,7 +651,6 @@ fn test_butler_peer_delegate_requests_help_and_continues_after_reply() {
     let top = enqueue(&mut db, delegate(10, 20, "write", "写稿")).unwrap();
     assert!(top.report_to_user, "直接受用户委托的工作默认由受托助手答复用户");
     assert_eq!((top.depth, top.parent), (1, None));
-    assert!(top.expires_at.is_some());
     assert!(claim(&db, &top).unwrap());
     let input = write_input(&mut db, top.id, "request", 20, "写稿", 1, "model").unwrap();
     assert_eq!(meta(&db, input)["audience"], "user");
@@ -659,7 +658,6 @@ fn test_butler_peer_delegate_requests_help_and_continues_after_reply() {
     let help = enqueue(&mut db, delegate(20, 30, "review", "请审稿")).unwrap();
     assert_eq!((help.parent, help.depth, help.root), (Some(top.id), 2, top.root));
     assert!(!help.report_to_user, "受托期间请来的协助默认是内部协作");
-    assert_eq!(help.expires_at, top.expires_at, "下级沿用整条协作链的有效期");
     message(&db, 20, "response", "已请审稿协助");
     assert!(!settle(&db, &reread(&db, top.id), false).unwrap(), "下级未返回时上级不能结束");
     assert_eq!(reread(&db, top.id).state, "waiting");
@@ -719,21 +717,6 @@ fn test_butler_peer_silent_reply_is_not_a_delivery() {
     assert_eq!(reread(&db, ex.id).state, "failed", "没有可确认的最终答复");
 }
 
-#[test]
-fn test_butler_peer_expiry_fails_waiting_work_once_with_receipt() {
-    let mut db = chain_database();
-    message(&db, 10, "user", "任务");
-    let ex = enqueue(&mut db, delegate(10, 20, "w", "写")).unwrap();
-    let now = Utc::now();
-    assert!(!expire(&db, &ex, now).unwrap(), "未到有效期");
-    let later = now + chrono::Duration::minutes(TTL_MINUTES + 1);
-    assert!(expire(&db, &ex, later).unwrap());
-    let failed = reread(&db, ex.id);
-    assert_eq!((failed.state.as_str(), failed.receipt_state.as_deref()), ("failed", Some("pending")));
-    assert!(failed.error.unwrap().contains("有效期"));
-    assert!(!expire(&db, &reread(&db, ex.id), later).unwrap(), "只失败一次");
-}
-
 /// 归档联系人私聊前按受理方查找仍在进行的协作：只返回以该会话为接收方、尚未结束的协作。
 #[test]
 fn test_butler_peer_active_in_target_lists_only_open_requests_to_conversation() {
@@ -780,15 +763,14 @@ fn test_butler_peer_loop_is_detected_by_assistant_identity_across_conversations(
     assert!(enqueue(&mut db, delegate(60, 70, "other", "请排版")).is_ok());
 }
 
-/// 同一条链的后续轮次沿用首次确定的有效期；独立任务发起的协作挂到派出它的工作上，共享预算与有效期。
+/// 旧版截止时间已过时仍可投递、回送并继续委托，独立任务沿用同一条链的轮数预算。
 #[test]
-fn test_butler_peer_chain_expiry_and_budget_are_inherited_not_restarted() {
+fn test_butler_peer_continues_after_legacy_deadline_and_shares_round_budget() {
     let mut db = chain_database();
     let root = message(&db, 10, "user", "多轮工作");
     let first = enqueue(&mut db, NewRequest { limit: 3, ..delegate(10, 20, "r1", "第一轮") }).unwrap();
-    // 模拟时间流逝：首轮有效期较早。
-    let early = Utc::now() + chrono::Duration::minutes(5);
-    db.execute("UPDATE butler_peer_exchange SET expires_at=?1 WHERE id=?2", params![early, first.id]).unwrap();
+    db.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN expires_at TEXT").unwrap();
+    db.execute("UPDATE butler_peer_exchange SET expires_at='2000-01-01T00:00:00Z' WHERE id=?1", [first.id]).unwrap();
     assert!(claim(&db, &first).unwrap());
     write_input(&mut db, first.id, "request", 20, "第一轮", 1, "model").unwrap();
     message(&db, 20, "response", "第一轮结果");
@@ -798,12 +780,12 @@ fn test_butler_peer_chain_expiry_and_budget_are_inherited_not_restarted() {
     write_input(&mut db, first.id, "reply", 10, "第一轮结果", 1, "model").unwrap();
     let second = enqueue(&mut db, delegate(10, 30, "r2", "第二轮")).unwrap();
     assert_eq!(second.chain, root);
-    assert_eq!(second.expires_at, Some(early), "后续轮次不能重新计时");
-    // 派出的独立任务属于同一项工作：任务里发起的协作计入同一条链的预算与有效期。
+    assert_eq!(second.round_no, 2);
+    // 派出的独立任务属于同一项工作：任务里发起的协作计入同一条链的轮数预算。
     link_task(&db, 40, root, None).unwrap();
     message(&db, 40, "user", "任务说明");
     let from_task = enqueue(&mut db, delegate(40, 60, "t1", "任务里请资料")).unwrap();
-    assert_eq!((from_task.chain, from_task.expires_at, from_task.round_no), (root, Some(early), 3));
+    assert_eq!((from_task.chain, from_task.round_no), (root, 3));
     let over = enqueue(&mut db, delegate(40, 70, "t2", "超出预算")).unwrap_err().to_string();
     assert!(over.contains("3 轮"), "{over}");
     assert_eq!(linked_tasks(&db, root).unwrap(), vec![40]);
