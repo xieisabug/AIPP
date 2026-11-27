@@ -6,6 +6,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { toast } from "sonner";
 import {
     AlertTriangle,
+    ChevronDown,
     Copy,
     Download,
     ExternalLink,
@@ -32,11 +33,13 @@ import { cn } from "@/utils/utils";
 import MermaidPreview from "./MermaidPreview";
 import MarkdownPreview from "./MarkdownPreview";
 import DrawioPreview from "./DrawioPreview";
+import ProjectFrame, { readProjectFile, type ProjectFiles } from "./ProjectFrame";
 import {
     ArtifactConsoleEntry,
     ArtifactPreviewType,
     buildFixReport,
     codeLanguageFor,
+    codeLanguageForFile,
     injectConsoleScript,
     needsDevServer,
     previewTypeLabel,
@@ -71,6 +74,19 @@ export interface ArtifactViewerProps {
     onOpenInWindow?: () => void;
     /** Draw.io 编辑后的最新内容。 */
     onCodeChange?: (code: string) => void;
+    /** 多文件版本的全部文件（`type === "project"` 时使用）与入口。 */
+    projectFiles?: ProjectFiles | null;
+    entryFile?: string;
+    /** 会话 Artifact 的版本：多于一个时工具栏可切换。 */
+    versions?: { version: number; created_at: string }[];
+    currentVersion?: number;
+    onSelectVersion?: (version: number) => void;
+}
+
+function formatVersionTime(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 const MAX_RUNTIME_ENTRIES = 500;
@@ -98,6 +114,11 @@ export default function ArtifactViewer({
     onFixWithAI,
     onOpenInWindow,
     onCodeChange,
+    projectFiles,
+    entryFile,
+    versions = [],
+    currentVersion,
+    onSelectVersion,
 }: ArtifactViewerProps) {
     const rootRef = useRef<HTMLDivElement | null>(null);
     const previewAreaRef = useRef<HTMLDivElement | null>(null);
@@ -108,6 +129,7 @@ export default function ArtifactViewer({
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [mermaidSvg, setMermaidSvg] = useState<string | null>(null);
     const [isSendingFix, setIsSendingFix] = useState(false);
+    const [codeFile, setCodeFile] = useState<string | null>(null);
 
     const { sendConfig } = useArtifactBridge({
         iframeRef: urlIframeRef,
@@ -124,6 +146,7 @@ export default function ArtifactViewer({
         setRuntimeEntries([]);
         setMermaidSvg(null);
         setView("preview");
+        setCodeFile(null);
     }, [contentKey]);
 
     // 只接收本查看器内 iframe 里的诊断脚本消息
@@ -172,7 +195,10 @@ export default function ArtifactViewer({
     );
 
     const isWaitingForServer = needsDevServer(type) && !previewUrl;
-    const isReady = type !== null && !isWaitingForServer;
+    const isWaitingForFiles = type === "project" && !projectFiles;
+    const isReady = type !== null && !isWaitingForServer && !isWaitingForFiles;
+    const projectFileNames = useMemo(() => (projectFiles ? Object.keys(projectFiles).sort() : []), [projectFiles]);
+    const shownCodeFile = codeFile ?? entryFile ?? projectFileNames[0] ?? null;
 
     const reload = useCallback(() => {
         setRuntimeEntries([]);
@@ -322,6 +348,15 @@ export default function ArtifactViewer({
                         title={title || "Artifact"}
                     />
                 );
+            case "project":
+                return (
+                    <ProjectFrame
+                        key={`${contentKey}-${reloadNonce}`}
+                        title={title || "Artifact"}
+                        files={projectFiles!}
+                        entry={entryFile ?? projectFileNames[0] ?? ""}
+                    />
+                );
             case "react":
             case "vue":
                 return (
@@ -390,18 +425,47 @@ export default function ArtifactViewer({
         </div>
     );
 
-    const renderCode = () => (
-        <div className="flex-1 overflow-auto min-h-0 p-3">
-            <div className="w-full [&_pre]:!overflow-visible [&_pre]:!m-0 [&_pre]:!p-0 [&_pre]:!bg-transparent">
-                <ArtifactPreviewCodeBlock language={codeLanguageFor(type)} className="bg-transparent">
-                    {code}
-                </ArtifactPreviewCodeBlock>
+    const renderCode = () => {
+        const projectFile = projectFiles && shownCodeFile ? shownCodeFile : null;
+        return (
+            <div className="flex-1 flex flex-col min-h-0">
+                {projectFiles && (
+                    <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
+                        <span>文件</span>
+                        <select
+                            aria-label="工程文件"
+                            className="h-7 max-w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
+                            value={shownCodeFile ?? ""}
+                            onChange={(event) => setCodeFile(event.target.value)}
+                        >
+                            {projectFileNames.map((name) => (
+                                <option key={name} value={name}>
+                                    {name === entryFile ? `${name}（入口）` : name}
+                                </option>
+                            ))}
+                        </select>
+                        <span>共 {projectFileNames.length} 个</span>
+                    </div>
+                )}
+                <div className="flex-1 overflow-auto min-h-0 p-3">
+                    <div className="w-full [&_pre]:!overflow-visible [&_pre]:!m-0 [&_pre]:!p-0 [&_pre]:!bg-transparent">
+                        <ArtifactPreviewCodeBlock
+                            language={projectFile ? codeLanguageForFile(projectFile) : codeLanguageFor(type)}
+                            className="bg-transparent"
+                        >
+                            {projectFile ? readProjectFile(projectFiles!, projectFile) : code}
+                        </ArtifactPreviewCodeBlock>
+                    </div>
+                </div>
             </div>
-        </div>
-    );
+        );
+    };
 
     const iconSize = "h-4 w-4";
     const canExportSvg = type === "mermaid" ? Boolean(mermaidSvg) : type === "svg";
+    // 多文件工程导出入口文件，扩展名跟随入口
+    const exportExtension =
+        type === "project" ? entryFile?.split(".").pop() || "txt" : type ? sourceFileExtension(type) : "txt";
 
     return (
         <div ref={rootRef} className="flex flex-1 flex-col min-h-0 bg-background" data-aipp-slot="artifact-viewer">
@@ -416,6 +480,32 @@ export default function ArtifactViewer({
                     {title && <span className="text-foreground">{title}</span>}
                     {type && <span className={cn(title && "ml-2", "text-xs")}>{previewTypeLabel(type)}</span>}
                 </div>
+                {versions.length > 1 && currentVersion !== undefined && onSelectVersion && (
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" aria-label="切换版本">
+                                v{currentVersion}
+                                {currentVersion !== versions[0]?.version && <span className="text-muted-foreground">（旧版）</span>}
+                                <ChevronDown className="h-3.5 w-3.5" />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="max-h-80 overflow-auto">
+                            {versions.map((item, index) => (
+                                <DropdownMenuItem
+                                    key={item.version}
+                                    onSelect={() => onSelectVersion(item.version)}
+                                    className={cn(item.version === currentVersion && "font-medium")}
+                                >
+                                    <span className="w-10">v{item.version}</span>
+                                    <span className="text-xs text-muted-foreground">
+                                        {formatVersionTime(item.created_at)}
+                                        {index === 0 && " · 最新"}
+                                    </span>
+                                </DropdownMenuItem>
+                            ))}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                )}
                 {actions}
                 {type && code && (
                     <>
@@ -431,10 +521,10 @@ export default function ArtifactViewer({
                             <DropdownMenuContent align="end">
                                 <DropdownMenuItem
                                     onSelect={() =>
-                                        void saveToFile(code, sourceFileExtension(type), previewTypeLabel(type))
+                                        void saveToFile(code, exportExtension, previewTypeLabel(type))
                                     }
                                 >
-                                    保存源文件（.{sourceFileExtension(type)}）
+                                    保存源文件（.{exportExtension}）
                                 </DropdownMenuItem>
                                 {canExportSvg && (
                                     <DropdownMenuItem
@@ -447,7 +537,7 @@ export default function ArtifactViewer({
                         </DropdownMenu>
                     </>
                 )}
-                {isReady && (type === "html" || type === "svg" || type === "xml" || needsDevServer(type)) && (
+                {isReady && (type === "html" || type === "svg" || type === "xml" || type === "project" || needsDevServer(type)) && (
                     <Button variant="ghost" size="icon" iconLabel="重新加载" onClick={reload}>
                         <RotateCw className={iconSize} />
                     </Button>
@@ -474,7 +564,7 @@ export default function ArtifactViewer({
                 <Tabs value={view} onValueChange={(value) => setView(value as ArtifactViewerView)}>
                     <TabsList className={compact ? "h-8" : undefined}>
                         <TabsTrigger value="preview">预览</TabsTrigger>
-                        <TabsTrigger value="code" disabled={!code}>
+                        <TabsTrigger value="code" disabled={!code && !projectFiles}>
                             代码
                         </TabsTrigger>
                         <TabsTrigger value="console">

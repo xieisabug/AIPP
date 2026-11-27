@@ -1288,7 +1288,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "show_artifact".into(),
-                description: "将工作区中的文件显式发布为 Artifact。发布后会更新 artifact manifest，Sidebar 将展示该 Artifact。入口文件必须位于 `<workspace_path>/artifacts/<artifact_key>/<entry_file>`。预览只加载入口文件本身，不会加载同目录的其他文件，所以入口要写成自包含的单个文件（HTML 把样式和脚本内联；React/Vue 写成单个组件文件）。发布后默认在后台加载一次预览，结果的 `diagnostics` 给出运行检查：`status` 为 `errors` 时 `errors` 列出运行时错误、编译错误或资源加载失败，应修复后再次调用 show_artifact；`skipped` 表示未能检查（见 `note`）。".into(),
+                description: "将工作区中的文件显式发布为 Artifact，Sidebar 会展示它。入口文件必须位于 `<workspace_path>/artifacts/<artifact_key>/<entry_file>`。每次发布会把 `artifacts/<artifact_key>/` 整个目录固定为一个新版本（内容未变则沿用上一版），用户可在预览里切换历史版本，你也可以用 get_artifact 读取任一版本。预览方式：入口用相对路径引用同目录其他文件（import './x'、<script src>、<link href>、图片）时，按多文件工程在浏览器内加载，只能 import react、react-dom/client、vue 和工程内文件，且不支持 db_id/assistant_id 绑定；否则按单文件预览：HTML 把样式和脚本内联，React/Vue 写成单个组件文件，可使用 db_id/assistant_id。发布后默认在后台加载一次预览，结果的 `diagnostics` 给出运行检查：`status` 为 `errors` 时 `errors` 列出运行时错误、编译错误或资源加载失败，应修复后再次调用 show_artifact；`skipped` 表示未能检查（见 `note`）。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1330,6 +1330,50 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         }
                     },
                     "required": ["artifact_key", "entry_file"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "list_artifacts".into(),
+                description: "列出当前会话的全部 Artifact（含已撤下的），返回 artifact_key、标题、状态（published/unpublished）、预览类型、入口文件、最新版本号与版本数。修改已有 Artifact 前先用它确认 artifact_key。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            BuiltinToolInfo {
+                name: "get_artifact".into(),
+                description: "读取某个 Artifact 版本：返回版本列表、文件清单与一个文件的文本内容（默认入口文件，单个文件最多 10 万字符）。用于回看或恢复旧版本：读出旧版本文件后写回工作区再 show_artifact。读取最新版本也可直接 read_file 工作区文件。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "artifact_key": {
+                            "type": "string",
+                            "description": "Artifact 标识"
+                        },
+                        "version": {
+                            "type": "number",
+                            "description": "可选。版本号，不传取最新"
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": "可选。相对 Artifact 目录的文件名，不传取入口文件"
+                        }
+                    },
+                    "required": ["artifact_key"]
+                }),
+            },
+            BuiltinToolInfo {
+                name: "unpublish_artifact".into(),
+                description: "把 Artifact 从会话侧栏撤下（例如用户不再需要、或已被新的 Artifact 取代）。文件与版本历史保留，再次 show_artifact 即恢复。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "artifact_key": {
+                            "type": "string",
+                            "description": "Artifact 标识"
+                        }
+                    },
+                    "required": ["artifact_key"]
                 }),
             },
             BuiltinToolInfo {
@@ -1990,7 +2034,11 @@ mod tests {
         assert!(describe("get_artifact_workspace").contains("<workspace_path>/artifacts/<artifact_key>/"));
         let show = describe("show_artifact");
         assert!(show.contains("<workspace_path>/artifacts/<artifact_key>/<entry_file>"));
-        assert!(show.contains("预览只加载入口文件本身"));
+        assert!(show.contains("固定为一个新版本"));
+        assert!(show.contains("按多文件工程在浏览器内加载"));
+        for name in ["list_artifacts", "get_artifact", "unpublish_artifact"] {
+            assert!(!describe(name).is_empty());
+        }
     }
 
     #[test]

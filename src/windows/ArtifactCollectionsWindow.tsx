@@ -24,6 +24,26 @@ import { formatIconDisplay } from "@/utils/emojiUtils";
 import { Search, Folder, PackageOpen } from "lucide-react";
 import { WindowTopBar, dragRegionProps, useFramelessTitleBar, useWindowTitleBarLayout } from "@/components/window/WindowTitleBar";
 import EditArtifactDialog from "@/components/EditArtifactDialog";
+import { openConversationInChat } from "@/utils/openConversationInChat";
+
+/** 收藏的本机来源：从哪个会话的哪个 Artifact 版本收藏而来。 */
+interface CollectionSource {
+    conversation_id: number;
+    artifact_key: string;
+    version: number;
+}
+
+function parseSource(raw?: string | null): CollectionSource | null {
+    if (!raw) return null;
+    try {
+        const value = JSON.parse(raw) as Partial<CollectionSource>;
+        return typeof value.conversation_id === "number" && typeof value.artifact_key === "string"
+            ? (value as CollectionSource)
+            : null;
+    } catch {
+        return null;
+    }
+}
 
 interface ArtifactCollection {
     id: number;
@@ -35,6 +55,7 @@ interface ArtifactCollection {
     created_time: string;
     last_used_time?: string;
     use_count: number;
+    source?: string | null;
 }
 
 export default function ArtifactCollectionsWindow() {
@@ -244,6 +265,18 @@ export default function ArtifactCollectionsWindow() {
                                 <ContextMenuContent>
                                     <ContextMenuItem onClick={() => openArtifact(artifact)}>打开</ContextMenuItem>
                                     <ContextMenuItem onClick={() => handleEdit(artifact)}>编辑</ContextMenuItem>
+                                    {parseSource(artifact.source) && (
+                                        <ContextMenuItem
+                                            onClick={() => {
+                                                const source = parseSource(artifact.source)!;
+                                                openConversationInChat(source.conversation_id).catch((error) =>
+                                                    toast({ title: "打开原会话失败", description: String(error), variant: "destructive" }),
+                                                );
+                                            }}
+                                        >
+                                            回到原会话继续修改（v{parseSource(artifact.source)!.version}）
+                                        </ContextMenuItem>
+                                    )}
                                     <ContextMenuSeparator />
                                     <ContextMenuItem variant="destructive" onClick={() => handleDelete(artifact)}>
                                         删除

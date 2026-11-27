@@ -176,6 +176,7 @@ use crate::artifacts::vue_preview::{
     close_vue_preview, create_vue_preview, create_vue_preview_for_artifact,
 };
 use crate::artifacts::workspace::list_conversation_artifacts;
+use crate::artifacts::versions::{get_artifact_version, list_artifact_versions};
 use crate::artifacts::{
     react_runner::{clear_react_artifact_cache, close_react_artifact, run_react_artifact},
     shared_components::clear_all_template_cache,
@@ -1343,6 +1344,8 @@ pub fn run() {
             #[cfg(windows)]
             artifacts::powershell::open_interactive_powershell,
             list_conversation_artifacts,
+            list_artifact_versions,
+            get_artifact_version,
             restore_artifact_preview,
             save_artifact_to_collection,
             get_artifacts_collection,

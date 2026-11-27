@@ -29,6 +29,53 @@ pub struct SaveArtifactRequest {
     pub tags: Option<String>,
     pub db_id: Option<String>,
     pub assistant_id: Option<i64>,
+    /// 从会话 Artifact 的某个版本收藏：按该版本保存（多文件版本保存完整工程），并记下来源。
+    #[serde(default)]
+    pub source: Option<CollectionSource>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CollectionSource {
+    pub conversation_id: i64,
+    pub artifact_key: String,
+    pub version: i64,
+}
+
+/// 收藏某个版本时实际写入的类型与内容：单文件存入口代码，多文件存比选同款工程归档。
+fn pinned_version_content(
+    app_handle: &tauri::AppHandle,
+    source: &CollectionSource,
+    requested_type: &str,
+) -> Result<(String, String), String> {
+    use crate::mcp::builtin_mcp::choices::snapshot::Candidate;
+    let detail = crate::artifacts::versions::get_version(
+        app_handle,
+        source.conversation_id,
+        &source.artifact_key,
+        Some(source.version),
+    )
+    .map_err(|e| format!("读取 Artifact 版本：{e:#}"))?
+    .ok_or_else(|| "该 Artifact 版本已不存在".to_string())?;
+    let entry_code = detail.entry_code().map_err(|e| format!("{e:#}"))?;
+    if !detail.summary.multi_file {
+        return Ok((requested_type.to_string(), entry_code));
+    }
+    let archive = archive::Archive {
+        candidate: Candidate {
+            id: "artifact".into(),
+            title: detail.summary.title.clone(),
+            kind: "artifact".into(),
+            summary: None,
+            language: Some(detail.summary.language.clone()),
+            content: Some(entry_code),
+            url: None,
+            artifact_key: Some(detail.artifact_key.clone()),
+            entry_file: Some(detail.summary.entry_file.clone()),
+        },
+        files: Some(detail.files),
+        build: None,
+    };
+    Ok(("html".to_string(), archive.encode().map_err(|e| format!("{e:#}"))?))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -64,16 +111,22 @@ pub fn save_artifact_to_collection(
     let db = ArtifactsDatabase::new(&app_handle)
         .map_err(|e| format!("Database connection failed: {}", e))?;
 
+    let (artifact_type, code) = if let Some(source) = &request.source {
+        pinned_version_content(&app_handle, source, &request.artifact_type)?
+    } else if request.save_choice_snapshot {
+        (
+            request.artifact_type,
+            archive::capture(&app_handle, &request.code).map_err(|e| format!("收藏候选快照：{e:#}"))?,
+        )
+    } else {
+        (request.artifact_type, request.code)
+    };
     let new_artifact = NewArtifactCollection {
         name: request.name,
         icon: request.icon,
         description: request.description,
-        artifact_type: request.artifact_type,
-        code: if request.save_choice_snapshot {
-            archive::capture(&app_handle, &request.code).map_err(|e| format!("收藏候选快照：{e:#}"))?
-        } else {
-            request.code
-        },
+        artifact_type,
+        code,
         tags: request.tags,
         db_id: request.db_id,
         assistant_id: request.assistant_id,
@@ -81,6 +134,12 @@ pub fn save_artifact_to_collection(
 
     let artifact_id =
         db.save_artifact(new_artifact).map_err(|e| format!("Failed to save artifact: {}", e))?;
+    if let Some(source) = &request.source {
+        let encoded = serde_json::to_string(source).map_err(|e| e.to_string())?;
+        if let Err(e) = db.set_source(artifact_id, &encoded) {
+            tracing::warn!(artifact_id, error = %e, "Failed to record collection source");
+        }
+    }
 
     let windows_to_notify = ["artifact_collections", "ask", "chat_ui"];
     for window_name in windows_to_notify.iter() {

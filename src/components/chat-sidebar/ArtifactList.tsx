@@ -64,7 +64,10 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobil
                     <div className="flex-1 min-w-0">
                         {/* No hover tooltip on touch: let long titles wrap instead of truncating. */}
                         <p className={cn("text-sm", mobile ? "line-clamp-2 wrap-anywhere" : "truncate")}>{artifact.title}</p>
-                        <p className="text-xs text-muted-foreground">{artifact.language}</p>
+                        <p className="text-xs text-muted-foreground">
+                            {artifact.language}
+                            {artifact.versionCount !== undefined && artifact.versionCount > 1 && ` · v${artifact.version}`}
+                        </p>
                     </div>
                     <div className={cn(
                         "flex items-center gap-1 transition-opacity",

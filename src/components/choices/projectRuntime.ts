@@ -160,6 +160,8 @@ window.addEventListener("message", (event) => {
     try {
         mountProject(event.data.files, event.data.entry);
     } catch (e) {
+        // Artifact 查看器的诊断脚本会把它记进控制台
+        console.error("工程预览失败：", e);
         const node = document.createElement("pre");
         node.setAttribute("role", "alert");
         node.textContent = "工程预览失败：" + String(e);

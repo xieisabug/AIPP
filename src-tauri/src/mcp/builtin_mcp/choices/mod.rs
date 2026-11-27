@@ -1,7 +1,7 @@
 pub mod archive;
 pub mod build;
 pub mod document;
-mod snapshot;
+pub(crate) mod snapshot;
 use crate::db::{butler_goal, conversation_db::ConversationDatabase, mcp_db::MCPDatabase};
 use anyhow::{anyhow, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};

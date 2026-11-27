@@ -123,7 +123,7 @@ fn read(path: &Path, budget: &mut usize) -> Result<Vec<u8>> {
     *budget -= bytes.len();
     Ok(bytes)
 }
-pub(super) fn collect_tree(
+pub(crate) fn collect_tree(
     root: &Path,
     dir: &Path,
     files: &mut Project,

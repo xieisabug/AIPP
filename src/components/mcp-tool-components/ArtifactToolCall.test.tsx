@@ -134,6 +134,23 @@ describe("ArtifactToolCall", () => {
         expect(mockInvoke).toHaveBeenCalledWith("list_conversation_artifacts", { conversationId: 9 });
     });
 
+    it("should open the exact version this call published", async () => {
+        mockInvoke.mockImplementation(async (command: string) =>
+            command === "list_conversation_artifacts"
+                ? [{ artifact_key: "tools/ledger", title: "记账本", language: "tsx", preview_type: "tsx", entry_file: "App.tsx", code: "x", updated_at: "" }]
+                : "ok",
+        );
+        const versioned = JSON.stringify([
+            { type: "json", json: { artifact_key: "tools/ledger", title: "记账本", preview_type: "tsx", version: 3 } },
+        ]);
+        render(<ArtifactToolCall toolName="show_artifact" status="success" currentToolCall={call("success", { result: versioned })} />);
+        expect(screen.getByText(/v3/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "打开" }));
+        await waitFor(() =>
+            expect(mockInvoke).toHaveBeenCalledWith("run_artifacts", expect.objectContaining({ artifactKey: "tools/ledger", version: 3 })),
+        );
+    });
+
     it("should tell the user when the artifact no longer exists", async () => {
         mockInvoke.mockResolvedValue([]);
         render(<ArtifactToolCall toolName="show_artifact" status="success" currentToolCall={call("success", { result: RESULT })} />);

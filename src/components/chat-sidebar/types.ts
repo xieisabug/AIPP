@@ -31,6 +31,9 @@ export interface CodeArtifact {
     dbId?: string;
     assistantId?: number;
     updatedAt?: string;
+    /** 会话 Artifact 的最新版本号与版本数。 */
+    version?: number;
+    versionCount?: number;
 }
 
 /** 打开已发布 Artifact 时要带上的发布信息：数据库与助手绑定决定 Artifact 运行时能读写哪个库、调用哪个助手。 */

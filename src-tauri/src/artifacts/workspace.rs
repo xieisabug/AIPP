@@ -75,6 +75,12 @@ pub struct ShowArtifactResponse {
     pub updated_at: String,
     pub db_id: Option<String>,
     pub assistant_id: Option<i64>,
+    /// 本次发布对应的版本号（内容未变时沿用上一版）；版本记录失败时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+    /// 入口引用了目录里的其他文件，预览按多文件工程加载。
+    #[serde(default)]
+    pub multi_file: bool,
     /// 发布后的运行检查结果；调用方关闭检查时为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<ArtifactDiagnostics>,
@@ -174,6 +180,14 @@ pub struct ConversationArtifactItem {
     pub updated_at: String,
     pub db_id: Option<String>,
     pub assistant_id: Option<i64>,
+    /// 最新版本号；早于版本记录的 Artifact 为空。
+    #[serde(default)]
+    pub version: Option<i64>,
+    #[serde(default)]
+    pub version_count: i64,
+    /// 入口引用了目录里的其他文件。
+    #[serde(default)]
+    pub multi_file: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +230,7 @@ struct ArtifactManifestEventArtifact {
     preview_type: String,
     entry_file: String,
     updated_at: String,
+    version: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -269,7 +284,7 @@ pub fn get_artifact_workspace(
         manifest_path: context.manifest_path.to_string_lossy().to_string(),
         recommended_flow: vec![
             "get_artifact_workspace".to_string(),
-            "write_file/edit_file <artifacts_dir>/<artifact_key>/<entry_file>（单个自包含入口文件）".to_string(),
+            "write_file/edit_file <artifacts_dir>/<artifact_key>/ 下的入口及其引用的文件".to_string(),
             "show_artifact artifact_key + entry_file".to_string(),
             "capture_artifact_screenshot".to_string(),
         ],
@@ -358,6 +373,28 @@ pub fn show_artifact(
     write_manifest(&context, &manifest)?;
     write_artifact_json(&artifact_dir_absolute, request.conversation_id, &entry_to_persist)?;
 
+    // 固定为一个版本；失败只影响版本历史，不影响发布。
+    let version = match crate::artifacts::versions::record_version(
+        app_handle,
+        &artifact_dir_absolute,
+        crate::artifacts::versions::NewVersion {
+            conversation_id: request.conversation_id,
+            artifact_key: &entry_to_persist.artifact_key,
+            title: &entry_to_persist.title,
+            language: &entry_to_persist.language,
+            preview_type: &entry_to_persist.preview_type,
+            entry_file: &entry_to_persist.entry_file,
+            db_id: entry_to_persist.db_id.as_deref(),
+            assistant_id: entry_to_persist.assistant_id,
+        },
+    ) {
+        Ok(summary) => Some(summary),
+        Err(e) => {
+            tracing::warn!(error = %e, artifact_key = %entry_to_persist.artifact_key, "Failed to record artifact version");
+            None
+        }
+    };
+
     let event_payload = ArtifactManifestEvent {
         conversation_id: request.conversation_id,
         action: "upsert".to_string(),
@@ -368,6 +405,7 @@ pub fn show_artifact(
             preview_type: entry_to_persist.preview_type.clone(),
             entry_file: entry_to_persist.entry_file.clone(),
             updated_at: entry_to_persist.updated_at.clone(),
+            version: version.as_ref().map(|v| v.version),
         },
     };
     app_handle
@@ -385,6 +423,8 @@ pub fn show_artifact(
         updated_at: entry_to_persist.updated_at,
         db_id: entry_to_persist.db_id,
         assistant_id: entry_to_persist.assistant_id,
+        version: version.as_ref().map(|v| v.version),
+        multi_file: version.as_ref().is_some_and(|v| v.multi_file),
         diagnostics: None,
     })
 }
@@ -675,12 +715,81 @@ async fn collect_runtime_entries(
     serde_json::from_str(&raw).map_err(|e| format!("运行记录格式无效：{}", e))
 }
 
+/// `list_artifacts` 工具：会话里全部 Artifact（含已撤下的）及其最新版本。
+pub fn list_artifacts_for_model(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+) -> Result<serde_json::Value, String> {
+    let context = ensure_workspace_context(app_handle, conversation_id)?;
+    let manifest = read_manifest(&context, conversation_id)?;
+    let versions = crate::artifacts::versions::latest_versions(app_handle, conversation_id)
+        .map_err(|e| format!("{e:#}"))?;
+    let items: Vec<serde_json::Value> = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            let latest = versions.get(&artifact.artifact_key);
+            serde_json::json!({
+                "artifact_key": artifact.artifact_key,
+                "title": artifact.title,
+                "status": artifact.status,
+                "preview_type": artifact.preview_type,
+                "entry_file": artifact.entry_file,
+                "latest_version": latest.map(|v| v.version),
+                "version_count": latest.map(|v| v.count).unwrap_or(0),
+                "multi_file": latest.is_some_and(|v| v.multi_file),
+                "updated_at": artifact.updated_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "artifacts": items }))
+}
+
+/// `unpublish_artifact` 工具：从侧栏撤下，文件与版本历史保留；再次 show_artifact 即恢复。
+pub fn unpublish_artifact(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+    artifact_key: &str,
+) -> Result<serde_json::Value, String> {
+    let context = ensure_workspace_context(app_handle, conversation_id)?;
+    let mut manifest = read_manifest(&context, conversation_id)?;
+    let key = normalize_path_string(&sanitize_relative_path(artifact_key, "artifact_key")?);
+    let entry = manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.artifact_key == key)
+        .ok_or_else(|| format!("没有 Artifact：{}", key))?;
+    entry.status = "unpublished".to_string();
+    entry.updated_at = Utc::now().to_rfc3339();
+    let event_payload = ArtifactManifestEvent {
+        conversation_id,
+        action: "unpublish".to_string(),
+        artifact: ArtifactManifestEventArtifact {
+            artifact_key: entry.artifact_key.clone(),
+            title: entry.title.clone(),
+            language: entry.language.clone(),
+            preview_type: entry.preview_type.clone(),
+            entry_file: entry.entry_file.clone(),
+            updated_at: entry.updated_at.clone(),
+            version: None,
+        },
+    };
+    write_manifest(&context, &manifest)?;
+    let _ = app_handle.emit(ARTIFACT_EVENT_NAME, &event_payload);
+    Ok(serde_json::json!({ "artifact_key": key, "status": "unpublished" }))
+}
+
 pub fn list_published_artifacts(
     app_handle: &AppHandle,
     conversation_id: i64,
 ) -> Result<Vec<ConversationArtifactItem>, String> {
     let context = ensure_workspace_context(app_handle, conversation_id)?;
     let manifest = read_manifest(&context, conversation_id)?;
+    let versions =
+        crate::artifacts::versions::latest_versions(app_handle, conversation_id).unwrap_or_else(|e| {
+            tracing::warn!(conversation_id, error = %e, "Failed to read artifact versions");
+            Default::default()
+        });
     let mut items = Vec::new();
 
     for artifact in manifest.artifacts.iter().filter(|artifact| artifact.status == "published") {
@@ -702,6 +811,9 @@ pub fn list_published_artifacts(
             updated_at: artifact.updated_at.clone(),
             db_id: artifact.db_id.clone(),
             assistant_id: artifact.assistant_id,
+            version: versions.get(&artifact.artifact_key).map(|v| v.version),
+            version_count: versions.get(&artifact.artifact_key).map(|v| v.count).unwrap_or(0),
+            multi_file: versions.get(&artifact.artifact_key).is_some_and(|v| v.multi_file),
         });
     }
 

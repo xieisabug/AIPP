@@ -48,6 +48,11 @@ export default function EmbeddedArtifactPreview({ className, onOpenInWindow }: E
                     conversationId !== undefined ? (report) => requestArtifactFix(conversationId, report) : undefined
                 }
                 onCodeChange={session.updateCode}
+                projectFiles={session.projectFiles}
+                entryFile={content?.data.entry_file}
+                versions={session.versions}
+                currentVersion={session.currentVersion}
+                onSelectVersion={session.selectVersion}
             />
             <EnvironmentInstallDialog {...session.environmentDialog} />
         </div>

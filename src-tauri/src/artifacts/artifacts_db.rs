@@ -15,6 +15,9 @@ pub struct ArtifactCollectionItem {
     pub use_count: i64,
     pub db_id: Option<String>,
     pub assistant_id: Option<i64>,
+    /// 本机来源（JSON：conversation_id / artifact_key / version），只在本设备有效，不参与同步。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -110,6 +113,8 @@ impl ArtifactsDatabase {
         let _ = self
             .conn
             .execute("ALTER TABLE artifacts_collection ADD COLUMN assistant_id INTEGER", []);
+        // 来源会话里的 Artifact 版本（本机 ID，不同步）
+        let _ = self.conn.execute("ALTER TABLE artifacts_collection ADD COLUMN source TEXT", []);
 
         Ok(())
     }
@@ -135,6 +140,12 @@ impl ArtifactsDatabase {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 记录收藏的本机来源（见 [`ArtifactCollectionItem::source`]）。
+    pub fn set_source(&self, id: i64, source: &str) -> Result<()> {
+        self.conn.execute("UPDATE artifacts_collection SET source=?1 WHERE id=?2", params![source, id])?;
+        Ok(())
+    }
+
     /// Get all artifacts with optional type filter
     pub fn get_artifacts(&self, artifact_type: Option<&str>) -> Result<Vec<ArtifactCollectionItem>> {
         self.list_metadata(artifact_type, None)
@@ -142,7 +153,7 @@ impl ArtifactsDatabase {
 
     fn list_metadata(&self, kind: Option<&str>, pattern: Option<&str>) -> Result<Vec<ArtifactCollectionItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,name,icon,description,artifact_type,tags,created_time,last_used_time,use_count,db_id,assistant_id
+            "SELECT id,name,icon,description,artifact_type,tags,created_time,last_used_time,use_count,db_id,assistant_id,source
              FROM artifacts_collection WHERE (?1 IS NULL OR artifact_type=?1)
              AND (?2 IS NULL OR LOWER(name) LIKE ?2 OR LOWER(description) LIKE ?2 OR LOWER(tags) LIKE ?2)
              ORDER BY use_count DESC, last_used_time DESC, created_time DESC"
@@ -151,6 +162,7 @@ impl ArtifactsDatabase {
             id: row.get(0)?, name: row.get(1)?, icon: row.get(2)?, description: row.get(3)?,
             artifact_type: row.get(4)?, tags: row.get(5)?, created_time: row.get(6)?,
             last_used_time: row.get(7)?, use_count: row.get(8)?, db_id: row.get(9)?, assistant_id: row.get(10)?,
+            source: row.get(11)?,
         }))?;
         rows.collect()
     }

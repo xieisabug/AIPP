@@ -15,6 +15,10 @@ export interface ConversationArtifactItem {
     updated_at: string;
     db_id?: string;
     assistant_id?: number;
+    /** 最新版本号；早于版本记录的 Artifact 为空。 */
+    version?: number | null;
+    version_count?: number;
+    multi_file?: boolean;
 }
 
 interface ArtifactManifestUpdatedEvent {
@@ -66,6 +70,8 @@ export function useExplicitArtifacts({
             dbId: item.db_id,
             assistantId: item.assistant_id,
             updatedAt: item.updated_at,
+            version: item.version ?? undefined,
+            versionCount: item.version_count,
         }));
         setArtifacts(mapped);
     }, []);

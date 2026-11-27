@@ -4,6 +4,19 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useArtifactEvents, type ArtifactData, type EnvironmentCheckData } from "@/hooks/useArtifactEvents";
 import { toPreviewType, type ArtifactPreviewType } from "@/components/artifact/artifactRuntime";
+import type { ProjectFiles } from "@/components/artifact/ProjectFrame";
+
+/** 后端 `list_artifact_versions` 的一项。 */
+export interface ArtifactVersionSummary {
+    version: number;
+    title: string;
+    language: string;
+    preview_type: string;
+    entry_file: string;
+    multi_file: boolean;
+    file_count: number;
+    created_at: string;
+}
 
 export interface ArtifactPreviewContent {
     type: ArtifactPreviewType;
@@ -152,6 +165,78 @@ export function useArtifactPreviewSession(options: UseArtifactPreviewSessionOpti
 
     // 同一会话的 Artifact 被重新发布：让后端按本窗口缓存重新推送
     const conversationId = typeof content?.data.conversation_id === "number" ? content.data.conversation_id : undefined;
+    const artifactKey = content?.data.artifact_key;
+    const currentVersion = content?.data.version;
+
+    // 版本列表：打开的是会话 Artifact 时读取，重新发布后刷新
+    const [versions, setVersions] = useState<ArtifactVersionSummary[]>([]);
+    const loadVersions = useCallback(() => {
+        if (conversationId === undefined || !artifactKey) {
+            setVersions([]);
+            return;
+        }
+        invoke<ArtifactVersionSummary[]>("list_artifact_versions", { conversationId, artifactKey })
+            .then(setVersions)
+            .catch((error) => {
+                console.warn("[ArtifactPreviewSession] failed to list versions", error);
+                setVersions([]);
+            });
+    }, [conversationId, artifactKey]);
+    useEffect(() => {
+        loadVersions();
+        if (conversationId === undefined || !artifactKey) return;
+        const subscription = listen<{ conversation_id: number }>("artifact-manifest-updated", (event) => {
+            if (event.payload.conversation_id === conversationId) loadVersions();
+        });
+        return () => {
+            void subscription.then((unlisten) => unlisten());
+        };
+    }, [loadVersions, conversationId, artifactKey]);
+
+    // 多文件版本：读取该版本的全部文件交给工程运行时
+    const [projectFiles, setProjectFiles] = useState<ProjectFiles | null>(null);
+    const isProject = content?.type === "project";
+    useEffect(() => {
+        setProjectFiles(null);
+        if (!isProject || conversationId === undefined || !artifactKey) return;
+        let active = true;
+        invoke<{ files: ProjectFiles } | null>("get_artifact_version", {
+            conversationId,
+            artifactKey,
+            version: currentVersion ?? null,
+        })
+            .then((detail) => {
+                if (!active) return;
+                if (detail) setProjectFiles(detail.files);
+                else addLog("error", "该版本已不存在");
+            })
+            .catch((error) => {
+                if (active) addLog("error", `读取工程文件失败：${error}`);
+            });
+        return () => {
+            active = false;
+        };
+    }, [isProject, conversationId, artifactKey, currentVersion, addLog]);
+
+    /** 切换到某个历史版本：后端按版本快照重新推送（React/Vue 会重启预览服务）。 */
+    const selectVersion = useCallback(
+        (version: number) => {
+            const data = contentRef.current?.data;
+            if (!data || conversationId === undefined || !artifactKey) return;
+            invoke("run_artifacts", {
+                lang: data.language ?? data.type,
+                inputStr: "",
+                sourceWindow,
+                conversationId,
+                dbId: data.db_id,
+                assistantId: data.assistant_id,
+                artifactKey,
+                entryFile: data.entry_file,
+                version,
+            }).catch((error) => addLog("error", `切换版本失败：${error}`));
+        },
+        [conversationId, artifactKey, sourceWindow, addLog],
+    );
     useEffect(() => {
         if (!followManifestUpdates || conversationId === undefined) return;
         const subscription = listen<{ conversation_id: number }>("artifact-manifest-updated", (event) => {
@@ -187,6 +272,11 @@ export function useArtifactPreviewSession(options: UseArtifactPreviewSessionOpti
         content,
         previewUrl,
         conversationId,
+        artifactKey,
+        currentVersion,
+        versions,
+        selectVersion,
+        projectFiles,
         logs: events.logs,
         addLog,
         hasReceivedData: events.hasReceivedData,

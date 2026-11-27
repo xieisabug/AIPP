@@ -146,7 +146,11 @@ pub fn is_review_exempt_tool(
             _ => false,
         },
         Some("aipp:operation") => tool_name == "get_bash_output",
-        Some("aipp:artifact") => matches!(tool_name, "get_artifact_workspace" | "show_artifact"),
+        // 只读查看与可随时恢复的撤下；截图会启动本机预览服务，仍需审核。
+        Some("aipp:artifact") => matches!(
+            tool_name,
+            "get_artifact_workspace" | "show_artifact" | "list_artifacts" | "get_artifact" | "unpublish_artifact"
+        ),
         Some("aipp:superadmin") => match tool_name {
             "superadmin_catalog" | "superadmin_inspect" | "superadmin_audit_query" => true,
             "superadmin_execute" => is_review_exempt_action(&args),

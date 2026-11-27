@@ -22,6 +22,12 @@ export interface ArtifactData {
     assistant_id?: number;
     conversation_id?: number;
     request_id?: string;
+    /** 会话 Artifact 的身份（由后端按版本快照附上）。 */
+    artifact_key?: string;
+    version?: number;
+    entry_file?: string;
+    multi_file?: boolean;
+    language?: string;
 }
 
 export interface EnvironmentCheckData {

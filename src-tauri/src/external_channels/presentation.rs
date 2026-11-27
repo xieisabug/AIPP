@@ -1968,6 +1968,15 @@ impl ToolPresenter for ArtifactToolPresenter {
                 Some(format!("🎨 展示 Artifact：{}", label))
             }
             "capture_artifact_screenshot" => Some("📸 截取 Artifact 预览".to_string()),
+            "list_artifacts" => Some("📦 查看 Artifact 列表".to_string()),
+            "get_artifact" => Some(format!(
+                "📄 读取 Artifact：{}",
+                value_string(&tool_call.parameters, "artifact_key").unwrap_or("Artifact")
+            )),
+            "unpublish_artifact" => Some(format!(
+                "🗂 撤下 Artifact：{}",
+                value_string(&tool_call.parameters, "artifact_key").unwrap_or("Artifact")
+            )),
             _ => None,
         }
     }

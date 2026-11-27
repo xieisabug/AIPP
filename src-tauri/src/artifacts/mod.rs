@@ -11,5 +11,6 @@ pub mod react_preview;
 pub mod react_runner;
 pub mod shared_components;
 pub mod vue_preview;
+pub mod versions;
 pub mod vue_runner;
 pub mod workspace;

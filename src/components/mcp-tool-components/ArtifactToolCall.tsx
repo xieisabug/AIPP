@@ -12,6 +12,8 @@ export interface ShowArtifactResult {
     language?: string;
     preview_type?: string;
     entry_file?: string;
+    /** 这次发布对应的版本；卡片打开的就是这个版本。 */
+    version?: number;
     /** 发布后的运行检查（show_artifact 默认执行）。 */
     diagnostics?: { status: "ok" | "errors" | "skipped"; errors?: string[] };
     /** 调用参数里的 check=false 表示跳过运行检查。 */
@@ -132,6 +134,7 @@ export default function ArtifactToolCall(props: McpToolComponentProps) {
                 assistantId: item.assistant_id ?? undefined,
                 artifactKey: item.artifact_key,
                 entryFile: item.entry_file,
+                version: result.version,
             });
         } catch (error) {
             toast.error(`打开 Artifact 失败：${error instanceof Error ? error.message : String(error)}`);
@@ -147,6 +150,7 @@ export default function ArtifactToolCall(props: McpToolComponentProps) {
                 <div className="truncate font-medium text-foreground">{title}</div>
                 <div className="truncate text-xs text-muted-foreground">
                     {artifactKindLabel(result.preview_type || result.language)}
+                    {result.version !== undefined && result.version > 1 && ` · v${result.version}`}
                     {runtimeErrors > 0 && (
                         <span className="text-destructive" title={result.diagnostics?.errors?.join("\n\n")}>
                             {` · 运行检查发现 ${runtimeErrors} 个错误`}

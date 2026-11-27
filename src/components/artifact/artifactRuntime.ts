@@ -10,7 +10,9 @@ export type ArtifactPreviewType =
     | "xml"
     | "markdown"
     | "md"
-    | "drawio";
+    | "drawio"
+    /** 多文件版本：按工程在浏览器内加载（见 ProjectFrame）。 */
+    | "project";
 
 const PREVIEW_TYPES: readonly ArtifactPreviewType[] = [
     "react",
@@ -22,6 +24,7 @@ const PREVIEW_TYPES: readonly ArtifactPreviewType[] = [
     "markdown",
     "md",
     "drawio",
+    "project",
 ];
 
 export function toPreviewType(value: string | undefined | null): ArtifactPreviewType | null {
@@ -76,6 +79,11 @@ export function compactScript(source: string): string {
 
 const INLINE_CONSOLE_SCRIPT = compactScript(consoleScript);
 
+/** 压成一行的诊断脚本，供需要自行拼装文档的预览（工程运行时）使用。 */
+export function inlineConsoleScript(): string {
+    return INLINE_CONSOLE_SCRIPT;
+}
+
 /**
  * 把诊断脚本内联到 HTML 最前面（`<head>` 之后，否则 `<html>` 之后，否则文首），
  * 先于页面自身脚本运行。规则与 Rust `shared_components::inject_console_script` 一致。
@@ -114,6 +122,27 @@ export function codeLanguageFor(type: ArtifactPreviewType | null): string {
     }
 }
 
+/** 按文件扩展名取代码高亮语言（多文件工程的代码视图）。 */
+export function codeLanguageForFile(name: string): string {
+    const ext = name.split(".").pop()?.toLowerCase() ?? "";
+    const map: Record<string, string> = {
+        ts: "typescript",
+        tsx: "tsx",
+        js: "javascript",
+        jsx: "jsx",
+        mjs: "javascript",
+        vue: "vue",
+        html: "html",
+        htm: "html",
+        css: "css",
+        json: "json",
+        md: "markdown",
+        svg: "xml",
+        xml: "xml",
+    };
+    return map[ext] ?? "text";
+}
+
 /** 「保存源文件」默认扩展名。 */
 export function sourceFileExtension(type: ArtifactPreviewType): string {
     switch (type) {
@@ -125,6 +154,8 @@ export function sourceFileExtension(type: ArtifactPreviewType): string {
             return "md";
         case "mermaid":
             return "mmd";
+        case "project":
+            return "txt";
         default:
             return type;
     }
@@ -140,6 +171,7 @@ const TYPE_LABELS: Record<ArtifactPreviewType, string> = {
     markdown: "Markdown",
     md: "Markdown",
     drawio: "Draw.io",
+    project: "多文件工程",
 };
 
 export function previewTypeLabel(type: ArtifactPreviewType): string {

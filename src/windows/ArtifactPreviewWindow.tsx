@@ -117,7 +117,13 @@ export default function ArtifactPreviewWindow() {
     };
 
     const choiceReference = content && content.type === "html" ? readPreviewReference(content.code) : null;
-    const canSave = content !== null && ["vue", "react", "html", "svg", "markdown", "md", "mermaid"].includes(content.type);
+    // 多文件版本按完整工程收藏（后端打包），其余按入口代码收藏
+    const canSave =
+        content !== null && ["vue", "react", "html", "svg", "markdown", "md", "mermaid", "project"].includes(content.type);
+    const saveSource =
+        content && conversationIdForConfig !== undefined && session.artifactKey && session.currentVersion !== undefined
+            ? { conversation_id: conversationIdForConfig, artifact_key: session.artifactKey, version: session.currentVersion }
+            : null;
     const conversationId = session.conversationId;
 
     const actions = content && (
@@ -210,6 +216,11 @@ export default function ArtifactPreviewWindow() {
                         conversationId !== undefined ? (report) => requestArtifactFix(conversationId, report) : undefined
                     }
                     onCodeChange={session.updateCode}
+                    projectFiles={session.projectFiles}
+                    entryFile={content?.data.entry_file}
+                    versions={session.versions}
+                    currentVersion={session.currentVersion}
+                    onSelectVersion={session.selectVersion}
                 />
             </div>
 
@@ -219,11 +230,12 @@ export default function ArtifactPreviewWindow() {
                 <SaveArtifactDialog
                     isOpen={showSaveDialog}
                     onClose={() => setShowSaveDialog(false)}
-                    artifactType={content.type === "md" ? "markdown" : content.type}
+                    artifactType={content.type === "md" ? "markdown" : content.type === "project" ? "html" : content.type}
                     code={content.code}
                     choiceReference={choiceReference}
                     initialDbId={runtimeConfig.db_id}
                     initialAssistantId={runtimeConfig.assistant_id}
+                    source={saveSource}
                 />
             )}
         </div>

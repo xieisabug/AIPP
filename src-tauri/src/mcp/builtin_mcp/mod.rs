@@ -1582,6 +1582,45 @@ pub async fn execute_aipp_builtin_tool(
                         }
                     }
                 }
+                "list_artifacts" | "get_artifact" | "unpublish_artifact" => {
+                    let resolved_conversation_id = resolve_artifact_tool_conversation_id(
+                        tool_name.as_str(),
+                        &args,
+                        conversation_id,
+                    )?;
+                    let key = args.get("artifact_key").and_then(|v| v.as_str());
+                    let require_key =
+                        || key.ok_or_else(|| "Missing required parameter: artifact_key".to_string());
+                    let result = match tool_name.as_str() {
+                        "list_artifacts" => crate::artifacts::workspace::list_artifacts_for_model(
+                            &app_handle,
+                            resolved_conversation_id,
+                        ),
+                        "get_artifact" => crate::artifacts::versions::describe_version_for_model(
+                            &app_handle,
+                            resolved_conversation_id,
+                            require_key()?,
+                            argument_i64(&args, "version"),
+                            args.get("file").and_then(|v| v.as_str()),
+                        )
+                        .map_err(|e| format!("{e:#}")),
+                        _ => crate::artifacts::workspace::unpublish_artifact(
+                            &app_handle,
+                            resolved_conversation_id,
+                            require_key()?,
+                        ),
+                    };
+                    match result {
+                        Ok(value) => serde_json::json!({
+                            "content": [{"type": "json", "json": value}],
+                            "isError": false
+                        }),
+                        Err(e) => serde_json::json!({
+                            "content": [{"type": "text", "text": e}],
+                            "isError": true
+                        }),
+                    }
+                }
                 _ => serde_json::json!({
                     "content": [{"type": "text", "text": format!("Unknown artifact tool: {}", tool_name)}],
                     "isError": true

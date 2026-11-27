@@ -25,6 +25,7 @@ struct LastArtifactCache {
     conversation_id: Option<i64>,
     artifact_key: Option<String>,
     entry_file: Option<String>,
+    version: Option<i64>,
     source_window: Option<String>,
 }
 
@@ -37,6 +38,7 @@ struct ResolvedArtifactPreviewInput {
     conversation_id: Option<i64>,
     artifact_key: Option<String>,
     entry_file: Option<String>,
+    version: Option<i64>,
     source_window: Option<String>,
 }
 
@@ -50,6 +52,7 @@ impl From<&LastArtifactCache> for ResolvedArtifactPreviewInput {
             conversation_id: cache.conversation_id,
             artifact_key: cache.artifact_key.clone(),
             entry_file: cache.entry_file.clone(),
+            version: cache.version,
             source_window: cache.source_window.clone(),
         }
     }
@@ -86,6 +89,16 @@ fn resolve_preview_language<'a>(lang: &'a str, input: &str) -> &'a str {
     } else {
         lang
     }
+}
+
+/// 会话 Artifact 的身份（key、版本、标题、入口）并入预览数据，查看器据此显示版本与加载多文件工程。
+fn with_identity(mut data: serde_json::Value, identity: &Option<serde_json::Value>) -> serde_json::Value {
+    if let (Some(target), Some(serde_json::Value::Object(fields))) = (data.as_object_mut(), identity) {
+        for (key, value) in fields {
+            target.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    data
 }
 
 fn preview_cache_key(source_window: Option<&str>) -> &'static str {
@@ -145,6 +158,8 @@ fn resolve_cached_artifact_input(
         resolved.conversation_id = Some(conversation_id);
         resolved.artifact_key = Some(item.artifact_key);
         resolved.entry_file = Some(item.entry_file);
+        // 重新发布后恢复显示最新版本
+        resolved.version = None;
     }
 
     Ok(resolved)
@@ -238,7 +253,36 @@ pub async fn run_artifacts(
     assistant_id: Option<i64>,
     artifact_key: Option<String>,
     entry_file: Option<String>,
+    version: Option<i64>,
 ) -> Result<String, AppError> {
+    // 会话 Artifact：按版本快照预览（未指定时取最新），多文件版本交给工程运行时。
+    let pinned = match (conversation_id, artifact_key.as_deref()) {
+        (Some(cid), Some(key)) => crate::artifacts::versions::get_version(&app_handle, cid, key, version)
+            .map_err(|e| AppError::RunCodeError(format!("读取 Artifact 版本失败：{e:#}")))?,
+        _ => None,
+    };
+    if version.is_some() && pinned.is_none() {
+        return Err(AppError::RunCodeError("该 Artifact 版本已不存在".into()));
+    }
+    let identity = pinned.as_ref().map(|detail| {
+        serde_json::json!({
+            "artifact_key": detail.artifact_key,
+            "version": detail.summary.version,
+            "name": detail.summary.title,
+            "entry_file": detail.summary.entry_file,
+            "multi_file": detail.summary.multi_file,
+        })
+    });
+    let pinned_code = match &pinned {
+        Some(detail) => Some(detail.entry_code().map_err(|e| AppError::RunCodeError(format!("{e:#}")))?),
+        None => None,
+    };
+    let pinned_lang = pinned.as_ref().map(|detail| detail.summary.language.clone());
+    let version = pinned.as_ref().map(|detail| detail.summary.version);
+    let is_project = pinned.as_ref().is_some_and(|detail| detail.summary.multi_file);
+    let input_str: &str = pinned_code.as_deref().unwrap_or(input_str);
+    let lang: &str = pinned_lang.as_deref().unwrap_or(lang);
+
     if let Some(raw) = input_str.strip_prefix("AIPP_CHOICE_PREVIEW_V1\n") {
         let reference: serde_json::Value = serde_json::from_str(raw).map_err(|e|AppError::ParseError(format!("候选预览引用无效：{e}")))?;
         if conversation_id.is_none() || reference["conversationId"].as_i64() != conversation_id {
@@ -284,6 +328,7 @@ pub async fn run_artifacts(
                 conversation_id,
                 artifact_key,
                 entry_file,
+                version,
                 source_window: source_window.clone(),
             },
         );
@@ -295,6 +340,28 @@ pub async fn run_artifacts(
             conversation_id,
             source_window
         );
+    }
+
+    // 多文件版本：前端按版本读取全部文件，在工程运行时里加载（不经单文件模板）
+    if is_project {
+        if let Some(window) = app_handle.get_webview_window(target_window) {
+            let _ = window.emit(
+                "artifact-preview-data",
+                with_identity(
+                    serde_json::json!({
+                        "type": "project",
+                        "original_code": input_str,
+                        "language": lang,
+                        "conversation_id": conversation_id,
+                        "db_id": db_id.clone(),
+                        "assistant_id": assistant_id,
+                        "request_id": request_id
+                    }),
+                    &identity,
+                ),
+            );
+        }
+        return Ok(String::new());
     }
 
     let preview_language = resolve_preview_language(lang, input_str);
@@ -361,14 +428,14 @@ pub async fn run_artifacts(
             if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({
+                    with_identity(serde_json::json!({
                         "type": "mermaid",
                         "original_code": input_str,
                         "conversation_id": conversation_id,
                         "db_id": db_id.clone(),
                         "assistant_id": assistant_id,
                         "request_id": request_id
-                    }),
+                    }), &identity),
                 );
                 let _ = window.emit(
                     "artifact-preview-log",
@@ -394,14 +461,14 @@ pub async fn run_artifacts(
                 );
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({
+                    with_identity(serde_json::json!({
                         "type": lang,
                         "original_code": input_str,
                         "conversation_id": conversation_id,
                         "db_id": db_id.clone(),
                         "assistant_id": assistant_id,
                         "request_id": request_id
-                    }),
+                    }), &identity),
                 );
                 let _ = window.emit(
                     "artifact-preview-log",
@@ -428,14 +495,14 @@ pub async fn run_artifacts(
                 );
                 let _ = window.emit(
                     "artifact-preview-data",
-                    serde_json::json!({
+                    with_identity(serde_json::json!({
                         "type": "drawio",
                         "original_code": input_str,
                         "conversation_id": conversation_id,
                         "db_id": db_id.clone(),
                         "assistant_id": assistant_id,
                         "request_id": request_id
-                    }),
+                    }), &identity),
                 );
                 let _ = window.emit(
                     "artifact-preview-success",
@@ -466,14 +533,14 @@ pub async fn run_artifacts(
                 if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({
+                        with_identity(serde_json::json!({
                             "type": "react",
                             "original_code": input_str,
                             "conversation_id": conversation_id,
                             "db_id": db_id.clone(),
                             "assistant_id": assistant_id,
                             "request_id": request_id
-                        }),
+                        }), &identity),
                     );
                 }
                 let preview_id = create_react_preview_for_artifact(
@@ -530,14 +597,14 @@ pub async fn run_artifacts(
                 if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({
+                        with_identity(serde_json::json!({
                             "type": "vue",
                             "original_code": input_str,
                             "conversation_id": conversation_id,
                             "db_id": db_id.clone(),
                             "assistant_id": assistant_id,
                             "request_id": request_id
-                        }),
+                        }), &identity),
                     );
                 }
                 let preview_id = create_vue_preview_for_artifact(
@@ -596,14 +663,14 @@ pub async fn run_artifacts(
                 if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({
+                        with_identity(serde_json::json!({
                             "type": "vue",
                             "original_code": input_str,
                             "conversation_id": conversation_id,
                             "db_id": db_id.clone(),
                             "assistant_id": assistant_id,
                             "request_id": request_id
-                        }),
+                        }), &identity),
                     );
                     let _ = window.emit(
                         "artifact-preview-log",
@@ -656,14 +723,14 @@ pub async fn run_artifacts(
                 if let Some(window) = app_handle.get_webview_window(target_window) {
                     let _ = window.emit(
                         "artifact-preview-data",
-                        serde_json::json!({
+                        with_identity(serde_json::json!({
                             "type": "react",
                             "original_code": input_str,
                             "conversation_id": conversation_id,
                             "db_id": db_id.clone(),
                             "assistant_id": assistant_id,
                             "request_id": request_id
-                        }),
+                        }), &identity),
                     );
                     let _ = window.emit(
                         "artifact-preview-log",
@@ -792,15 +859,16 @@ pub async fn retry_preview_after_install(
             .filter(|c| c.lang == lang && c.input_str == input_str)
             .cloned()
     };
-    let (conversation_id, db_id, assistant_id, artifact_key, entry_file) = match cached {
+    let (conversation_id, db_id, assistant_id, artifact_key, entry_file, version) = match cached {
         Some(c) => (
             conversation_id.or(c.conversation_id),
             db_id.or(c.db_id),
             assistant_id.or(c.assistant_id),
             c.artifact_key,
             c.entry_file,
+            c.version,
         ),
-        None => (conversation_id, db_id, assistant_id, None, None),
+        None => (conversation_id, db_id, assistant_id, None, None, None),
     };
     match run_artifacts(
         app_handle.clone(),
@@ -812,6 +880,7 @@ pub async fn retry_preview_after_install(
         assistant_id,
         artifact_key,
         entry_file,
+        version,
     )
     .await
     {
@@ -856,6 +925,7 @@ pub async fn restore_artifact_preview(
         resolved.assistant_id,
         resolved.artifact_key,
         resolved.entry_file,
+        resolved.version,
     )
     .await
     {

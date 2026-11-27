@@ -30,6 +30,8 @@ interface SaveArtifactDialogProps {
     choiceReference?: ChoiceRef | null;
     initialDbId?: string;
     initialAssistantId?: number;
+    /** 收藏的是会话 Artifact 的某个版本：后端按该版本保存（多文件保存完整工程）并记下来源。 */
+    source?: { conversation_id: number; artifact_key: string; version: number } | null;
 }
 
 export default function SaveArtifactDialog({
@@ -40,6 +42,7 @@ export default function SaveArtifactDialog({
     choiceReference,
     initialDbId,
     initialAssistantId,
+    source,
 }: SaveArtifactDialogProps) {
     const [isLoading, setIsLoading] = useState(false);
     const [isGeneratingMetadata, setIsGeneratingMetadata] = useState(false);
@@ -81,6 +84,7 @@ export default function SaveArtifactDialog({
                 artifact_type: artifactType,
                 code,
                 ...(choiceReference ? { save_choice_snapshot: true } : {}),
+                ...(source ? { source } : {}),
                 tags: data.tags.trim() || null,
                 db_id: data.db_id.trim() || null,
                 assistant_id: data.assistant_id && data.assistant_id !== "none" ? parseInt(data.assistant_id, 10) : null,

@@ -104,6 +104,47 @@ describe("ArtifactViewer", () => {
         expect(screen.queryByRole("button", { name: /让 AI 修复/ })).toBeNull();
     });
 
+    it("shows the version switcher only when there is history and marks old versions", () => {
+        const versions = [
+            { version: 3, created_at: "2026-11-27T10:00:00Z" },
+            { version: 2, created_at: "2026-11-27T09:00:00Z" },
+        ];
+        const { rerender } = render(
+            <ArtifactViewer type="html" code="<p>a</p>" contentKey={1} buildLogs={[]} versions={versions.slice(0, 1)} currentVersion={3} onSelectVersion={vi.fn()} />,
+        );
+        expect(screen.queryByRole("button", { name: "切换版本" })).toBeNull();
+
+        rerender(
+            <ArtifactViewer type="html" code="<p>a</p>" contentKey={1} buildLogs={[]} versions={versions} currentVersion={2} onSelectVersion={vi.fn()} />,
+        );
+        const trigger = screen.getByRole("button", { name: "切换版本" });
+        expect(trigger.textContent).toContain("v2");
+        expect(trigger.textContent).toContain("旧版");
+    });
+
+    it("waits for project files before rendering a multi-file version", () => {
+        const { container, rerender } = render(
+            <ArtifactViewer type="project" code="import B from './B'" contentKey={1} buildLogs={[]} entryFile="App.tsx" projectFiles={null} />,
+        );
+        expect(container.querySelector("iframe")).toBeNull();
+        expect(screen.getByText("正在启动预览…")).toBeTruthy();
+
+        const encode = (text: string) => btoa(text);
+        rerender(
+            <ArtifactViewer
+                type="project"
+                code="import B from './B'"
+                contentKey={1}
+                buildLogs={[]}
+                entryFile="App.tsx"
+                projectFiles={{ "App.tsx": encode("import B from './B'"), "B.tsx": encode("export default 1") }}
+            />,
+        );
+        const frame = container.querySelector("iframe");
+        expect(frame?.getAttribute("sandbox")).toBe("allow-scripts");
+        expect(frame?.getAttribute("srcdoc")).toContain("__aippConsoleInstalled");
+    });
+
     it("uses the override instead of the default preview", () => {
         render(
             <ArtifactViewer
