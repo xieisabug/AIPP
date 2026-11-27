@@ -26,6 +26,7 @@ function Transcript({ running, calls, messages = history, live = [liveReport], i
 }) {
     const rows = useButlerTranscript({ conversationId, compact: true, running, messages, calls, activities: observed, interactions });
     return rows.map(row => {
+        if (row.message_type === "user") return <div key={row.id}>{row.content}</div>;
         if (row.message_type === "butler_report") return <ReportBubble key={row.id} text={row.content} />;
         if (row.message_type === "butler_processing") return <div key={row.id} role="status">
             <LiveReportBubbles reports={live} published={row.butler_published_reports} />
@@ -35,6 +36,24 @@ function Transcript({ running, calls, messages = history, live = [liveReport], i
 }
 
 afterEach(() => vi.useRealTimers());
+
+it("should keep a peer turn's saved reports on either side of a user interjection during execution and after reopening", () => {
+    const trigger = { ...message(1, "user", "内部委托"), metadata_json: '{"origin":"butler_peer","audience":"peer"}' };
+    const messages = [trigger, message(2, "response", "内部回复"), message(5, "user", "请留意生产库")];
+    const live = [liveReport, { ...liveReport, request_id: "second", text: "已核对" }];
+    const interactions: InteractionRow[] = live.map((report, index) => ({
+        id: index + 1, kind: "report", anchor: 2, request_id: report.request_id,
+        occurred_ms: index === 0 ? 3 : 6, request: { text: report.text },
+    }));
+    const props = { messages, calls: new Map<number, MCPToolCallUpdateEvent>(), interactions };
+    const expected = [text, "请留意生产库", "已核对"];
+    const active = render(<Transcript {...props} running live={live} />);
+    expect(Array.from(active.container.children, row => row.textContent)).toEqual([...expected, ""]);
+    active.unmount();
+
+    const reopened = render(<Transcript {...props} running={false} live={[]} />);
+    expect(Array.from(reopened.container.children, row => row.textContent)).toEqual(expected);
+});
 
 it("should show one report when a sibling tool resumes after waiting for approval", () => {
     vi.useFakeTimers();

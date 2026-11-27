@@ -27,8 +27,10 @@ describe("saved Butler progress", () => {
         const saved = [12, 14].map(id => ({ id, kind:"report" as const, anchor:11, request_id:String(id),
             occurred_ms:start.getTime()+id, request:{ text:"进度", call_id:id } }));
         for (const legacy of [[], [native]]) {
-            const recorded = reportedProgressByMessage(1548, legacy, legacy.length ? calls.values() : [], saved).get(11)!;
-            expect(recorded.map(report => report.time)).toEqual(saved.map(r => r.occurred_ms));
+            const fallback = reportedProgressByMessage(1548, legacy, legacy.length ? calls.values() : [], saved);
+            const recorded = withPeerTimeline([user, owner], new Set(), [], 1548, saved, [], undefined, fallback)
+                .filter(row => row.message_type === "butler_report");
+            expect(recorded.map(row => row.created_time.getTime())).toEqual(saved.map(r => r.occurred_ms));
         }
     });
     it("should restore a successful Pi report when the completed reply has no body", () => {

@@ -72,6 +72,17 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         }
     }
     for (const row of interactions) {
+        // 开工提示有独立的上报时间。即使所属回复属于内部协作，也要按该时间展示。
+        if (row.kind === "report") {
+            otherRows.push({
+                id: -3_000_000_000_000 - row.id, conversation_id: conversationId, parent_id: row.anchor,
+                message_type: "butler_report", content: row.request.text, created_time: new Date(row.occurred_ms),
+                butler_report_request_id: row.request_id, butler_event_order: row.request.call_id ?? row.id,
+                llm_model_id: null, start_time: null, finish_time: null, token_count: 0,
+                input_token_count: 0, output_token_count: 0, regenerate: null,
+            });
+            continue;
+        }
         const callId = row.kind === "question" ? row.request.call_id : fileCalls.get(row.request_id)?.call_id;
         const live = byRequest.get(row.request_id) ?? (callId ? byCall.get(callId) : undefined);
         const content = interactionContent(row, live, conversationId);

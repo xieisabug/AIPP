@@ -2,7 +2,7 @@ import type { AgentActivityEvent, MCPToolCallUpdateEvent } from "@/data/Conversa
 import { parseDatabaseTime } from "@/utils/messageOrdering";
 import type { InteractionRow } from "./butlerInteractions";
 
-export interface ProgressReport { text: string; time?: number; order: number; request_id?: string }
+export interface ProgressReport { text: string; time?: number; order: number }
 
 export function reportedProgressByMessage(conversation: number, activities: Iterable<AgentActivityEvent>,
     calls: Iterable<MCPToolCallUpdateEvent>, saved: readonly InteractionRow[] = []): Map<number, ProgressReport[]> {
@@ -41,20 +41,14 @@ export function reportedProgressByMessage(conversation: number, activities: Iter
                 time: call.started_time ? parseDatabaseTime(call.started_time).getTime() : undefined });
         } catch { /* Incomplete historical parameters. */ }
     }
-    // Recent calls carry a tool-owned record even if the native driver omitted the activity.
-    // Replace one legacy observation per occurrence, keeping its siblings when text repeats.
-    const recorded = new Map<number, ProgressReport[]>();
+    // Saved reports have their own timeline rows. Remove one mirrored observation per occurrence.
     for (const row of saved) {
         if (row.kind !== "report" || row.anchor == null) continue;
         const text = row.request.text.trim();
         const legacy = result.get(row.anchor);
         const index = legacy?.findIndex(report => report.text === text) ?? -1;
         if (legacy && index >= 0) legacy.splice(index, 1);
-        const list = recorded.get(row.anchor) ?? [];
-        list.push({ text, time: row.occurred_ms, order: row.request.call_id ?? row.id, request_id: row.request_id });
-        recorded.set(row.anchor, list);
     }
-    for (const [owner, list] of recorded) result.set(owner, [...(result.get(owner) ?? []), ...list]);
     for (const reports of result.values()) reports.sort((a, b) => (a.time ?? 0) - (b.time ?? 0) || a.order - b.order);
     return result;
 }
