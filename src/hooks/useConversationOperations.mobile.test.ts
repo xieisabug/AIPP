@@ -17,7 +17,7 @@ function setup(assistantType: number) {
         conversation: null,
         selectedAssistant: 2,
         assistants: [{ id: 2, name: "Codex CLI", assistant_type: assistantType }],
-        setMessages: vi.fn(),
+        onMessageSaved: vi.fn(),
         inputText: "hello",
         setInputText: vi.fn(),
         fileInfoList: [],

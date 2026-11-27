@@ -616,6 +616,32 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // ============= 事件处理逻辑 =============
 
+        const refreshPersistedMessage = useCallback((id: number, persistedRow?: Message) => {
+            if (currentView.current !== conversationId) return;
+            const token = Symbol();
+            rowReads.current.set(id, token);
+            const apply = (row: Message | null) => {
+                if (currentView.current !== conversationId || rowReads.current.get(id) !== token) return;
+                rowReads.current.delete(id);
+                if (!row || row.id !== id || row.conversation_id !== Number(conversationId)) return;
+                const key = composerKey(row);
+                const request = key ? submitting.current.get(key) : undefined;
+                if (request) request.accepted = true;
+                if (snapshotInFlight.current) snapshotDeltas.current.set(id, row);
+                syncScrollPositionRef.current = null;
+                setPersistedSnapshot(previous => previous?.conversation.id === row.conversation_id
+                    ? { ...previous, messages: upsertPersistedRow(previous.messages, row) } : previous);
+                setMessages(previous => upsertPersistedRow(previous, row));
+            };
+            if (persistedRow) apply(persistedRow);
+            else void invoke<Message | null>("get_conversation_message", { conversationId: Number(conversationId), messageId: id })
+                .then(apply).catch(error => {
+                    if (rowReads.current.get(id) !== token) return;
+                    rowReads.current.delete(id);
+                    toast.error(`读取会话 ${conversationId} 的消息 #${id} 失败：${error}`);
+                });
+        }, [conversationId]);
+
         const handleMessageAdd = useCallback(
             (messageAddData: Partial<MessageAddEvent>, confirmedByCommand = false) => {
                 // 设置函数映射
@@ -626,28 +652,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                 const id = messageAddData.message_id;
                 if (id != null && (resultOnly || confirmedByCommand || (messageAddData.message && composerKey(messageAddData.message)))) {
-                    const token = Symbol();
-                    rowReads.current.set(id, token);
-                    const apply = (row: Message | null) => {
-                        if (currentView.current !== conversationId || rowReads.current.get(id) !== token) return;
-                        rowReads.current.delete(id);
-                        if (!row || row.id !== id || row.conversation_id !== Number(conversationId)) return;
-                        const key = composerKey(row);
-                        const request = key ? submitting.current.get(key) : undefined;
-                        if (request) request.accepted = true;
-                        if (snapshotInFlight.current) snapshotDeltas.current.set(id, row);
-                        syncScrollPositionRef.current = null;
-                        setPersistedSnapshot(previous => previous?.conversation.id === row.conversation_id
-                            ? { ...previous, messages: upsertPersistedRow(previous.messages, row) } : previous);
-                        setMessages(previous => upsertPersistedRow(previous, row));
-                    };
-                    if (messageAddData.message) apply(messageAddData.message);
-                    else void invoke<Message | null>("get_conversation_message", { conversationId: Number(conversationId), messageId: id })
-                        .then(apply).catch(error => {
-                            if (rowReads.current.get(id) !== token) return;
-                            rowReads.current.delete(id);
-                            toast.error(`读取会话 ${conversationId} 的消息 #${id} 失败：${error}`);
-                        });
+                    refreshPersistedMessage(id, messageAddData.message);
                     return;
                 }
                 const snapshotRevision = startSnapshot();
@@ -691,7 +696,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         setMessages((prevMessages) => [...prevMessages, newMessage]);
                     });
             },
-            [conversationId, resetReveal, setFunctionMapForMessage, acceptPersistedSnapshot, windowLabel, resultOnly, startSnapshot]
+            [conversationId, resetReveal, setFunctionMapForMessage, refreshPersistedMessage, acceptPersistedSnapshot, windowLabel, resultOnly, startSnapshot]
         );
 
         const finishComposerMessage = useCallback((key: string, { conversationId: id, messageId, error }: ComposerReceipt) => {
@@ -1438,7 +1443,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             conversation,
             selectedAssistant,
             assistants,
-            setMessages,
+            onMessageSaved: refreshPersistedMessage,
             inputText,
             setInputText,
             fileInfoList: fileInfoList || undefined,

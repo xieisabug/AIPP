@@ -15,7 +15,7 @@ function setup(aiIsResponsing: boolean, overrides: Record<string, unknown> = {})
         conversation: { id: 20, assistant_id: 2, conversation_kind: "butler_contact" },
         selectedAssistant: 2,
         assistants: [{ id: 2, name: "写作", assistant_type: 0 }],
-        setMessages: vi.fn(), inputText: "再改短一点", setInputText: vi.fn(), fileInfoList: [], clearFileInfoList: vi.fn(),
+        onMessageSaved: vi.fn(), inputText: "再改短一点", setInputText: vi.fn(), fileInfoList: [], clearFileInfoList: vi.fn(),
         aiIsResponsing, setAiIsResponsing: vi.fn(), onChangeConversationId: vi.fn(), setShiningMessageIds: vi.fn(),
         setManualShineMessage: vi.fn(), updateShiningMessages: vi.fn(), clearShiningMessages: vi.fn(),
         assistantTypePluginMap: new Map(), assistantRunApi: {},

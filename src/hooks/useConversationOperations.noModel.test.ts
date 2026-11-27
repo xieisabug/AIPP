@@ -19,7 +19,7 @@ function setup(quietRuntimeErrors = false, claudePermissionMode = "", overrides 
         conversation: null,
         selectedAssistant: 1,
         assistants: [{ id: 1, name: "快速使用助手", assistant_type: 0 }],
-        setMessages: vi.fn(),
+        onMessageSaved: vi.fn(),
         inputText: "你好",
         setInputText: vi.fn(),
         fileInfoList: [],

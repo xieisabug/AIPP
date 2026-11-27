@@ -22,7 +22,7 @@ export interface UseConversationOperationsProps {
     onComposerResult?: (key: string, receipt: ComposerReceipt) => boolean | void;
     selectedAssistant: number;
     assistants: AssistantListItem[];
-    setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+    onMessageSaved: (messageId: number) => void;
     inputText: string;
     setInputText: React.Dispatch<React.SetStateAction<string>>;
     fileInfoList?: FileInfo[];
@@ -81,7 +81,7 @@ export function useConversationOperations({
     viewConversationId, onComposerMessage, onComposerResult, onQueuedAccepted,
     selectedAssistant,
     assistants,
-    setMessages,
+    onMessageSaved,
     inputText,
     setInputText,
     fileInfoList,
@@ -219,64 +219,22 @@ export function useConversationOperations({
         setEditingMessage(null);
     }, []);
 
-    const handleEditSave = useCallback(
-        (edited: string) => {
+    const saveMessageEdit = useCallback(
+        async (edited: string, regenerate: boolean) => {
             if (!editingMessage) return;
             // 编辑框里只有用户原话；保存时把原来的本轮附加上下文接回去，模型回放时仍然看得到当时附带的内容。
             const content = withTurnContext(edited, splitTurnContext(editingMessage.content).block);
-
-            invoke("update_message_content", {
-                messageId: editingMessage.id,
-                content: content,
-            })
-                .then(() => {
-                    // 更新本地消息状态
-                    setMessages((prevMessages) =>
-                        prevMessages.map((msg) =>
-                            msg.id === editingMessage.id
-                                ? { ...msg, content: content }
-                                : msg,
-                        ),
-                    );
-                    toast.success("消息已更新");
-                })
-                .catch((error) => {
-                    toast.error("更新消息失败: " + error);
-                });
+            try {
+                await invoke("update_message_content", { messageId: editingMessage.id, content });
+            } catch (error) {
+                toast.error("更新消息失败: " + error);
+                return;
+            }
+            onMessageSaved(editingMessage.id);
+            if (regenerate) handleMessageRegenerate(editingMessage.id);
+            toast.success("消息已更新");
         },
-        [editingMessage, setMessages],
-    );
-
-    const handleEditSaveAndRegenerate = useCallback(
-        (edited: string) => {
-            if (!editingMessage) return;
-            const content = withTurnContext(edited, splitTurnContext(editingMessage.content).block);
-
-            // 先更新消息内容
-            invoke("update_message_content", {
-                messageId: editingMessage.id,
-                content: content,
-            })
-                .then(() => {
-                    // 更新本地消息状态
-                    setMessages((prevMessages) =>
-                        prevMessages.map((msg) =>
-                            msg.id === editingMessage.id
-                                ? { ...msg, content: content }
-                                : msg,
-                        ),
-                    );
-
-                    // 然后触发重新生成
-                    handleMessageRegenerate(editingMessage.id);
-
-                    toast.success("消息已更新");
-                })
-                .catch((error) => {
-                    toast.error("更新消息失败: " + error);
-                });
-        },
-        [editingMessage, handleMessageRegenerate, setMessages],
+        [editingMessage, handleMessageRegenerate, onMessageSaved],
     );
 
     // 代码运行处理
@@ -651,8 +609,8 @@ export function useConversationOperations({
         handleMessageRegenerate,
         handleMessageEdit,
         handleMessageFork,
-        handleEditSave,
-        handleEditSaveAndRegenerate,
+        handleEditSave: edited => saveMessageEdit(edited, false),
+        handleEditSaveAndRegenerate: edited => saveMessageEdit(edited, true),
         handleSend,
         sendAgentCommand,
         handleArtifact,
