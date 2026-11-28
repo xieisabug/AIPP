@@ -2657,8 +2657,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             permissionControl={isClaudeComposer && !isMobilePlatform ? (
                                 <Select disabled={claudePlan || Boolean(acpMutationKey)} value={claudeMode} onValueChange={value => chooseClaudeMode(value, claudePlan)}>
                                     <SelectTrigger className="input-area-plan-mode border-0 shadow-none [&_svg]:size-3" aria-label="Claude Code 权限模式"
-                                        title={claudePlan ? "关闭 Plan 模式后可选择权限" : "下一条消息使用的 Claude Code 权限模式"}>
-                                        <SelectValue />
+                                        title={claudePlan ? "关闭 Plan 模式后可选择权限" : "切换后，本会话后续工具调用使用所选权限模式"}>
+                                        {acpMutationKey === "config:permission_mode" ? "正在切换…" : <SelectValue />}
                                     </SelectTrigger>
                                     <SelectContent>
                                         {claudePermissionModes.map(choice => (

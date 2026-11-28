@@ -62,6 +62,7 @@ const TOOL_KEYS = new Set([
 
 const isPermissionKey = (key: string) =>
     key === "workspace_config" ||
+    key === "claude_permission_mode" ||
     key === "tool_review_mode" ||
     key === "tool_review_model_hint" ||
     key.startsWith("codex_") ||

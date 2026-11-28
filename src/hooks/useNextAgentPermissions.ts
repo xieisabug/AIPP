@@ -11,7 +11,7 @@ export function useNextAgentPermissions(state: AcpConversationSessionState | nul
     const [selection, setSelection] = useState<{scope: string; values: Record<string, string>} | null>(null);
 
     useEffect(() => {
-        if (!conversationId || !sessionId || !driver || driver === "codex_app_server") return;
+        if (!conversationId || !sessionId || !driver || driver === "codex_app_server" || driver === "claude_sdk") return;
         let closed = false;
         let revision = 0;
         const refresh = async () => {

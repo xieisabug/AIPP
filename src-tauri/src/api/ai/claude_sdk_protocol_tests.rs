@@ -36,7 +36,7 @@ done
     }
 
     async fn read(&mut self, commands: &mut mpsc::UnboundedReceiver<SessionCommand>) -> Result<ClaudePromptInput, String> {
-        read_claude_prompt_input(&mut self.stdin, &mut self.lines, commands).await
+        read_claude_prompt_input(&mut self.stdin, &mut self.lines, commands, &mut FuturesUnordered::new()).await
     }
 
     async fn ready(&mut self, commands: &mut mpsc::UnboundedReceiver<SessionCommand>) {

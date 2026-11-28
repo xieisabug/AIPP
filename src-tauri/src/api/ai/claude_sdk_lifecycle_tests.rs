@@ -98,6 +98,112 @@ fn handle_channel(run_id: &str) -> (ClaudeSessionHandle, mpsc::UnboundedReceiver
     (ClaudeSessionHandle { permissions: Default::default(), sender, cancel_signal: watch::channel(0).0, run_id: run_id.into() }, receiver)
 }
 
+#[test]
+fn test_claude_turn_usage_survives_error_interrupt_and_duplicate_frames() {
+    let mut stream = ClaudeStreamUsage::default();
+    let start = json!({"event":{"type":"message_start","message":{"id":"a","usage":{"input_tokens":12,"cache_read_input_tokens":6}}}});
+    assert_eq!(claude_usage_counts(&stream.observe(&start).unwrap()).input, 18);
+    assert!(stream.observe(&start).is_none());
+    let delta = json!({"event":{"type":"message_delta","usage":{"output_tokens":4}}});
+    assert_eq!(claude_usage_counts(&stream.observe(&delta).unwrap()).total, 22);
+    assert!(stream.observe(&delta).is_none());
+    let child = json!({"parent_tool_use_id":"child","event":{"type":"message_delta","usage":{"output_tokens":100}}});
+    assert!(stream.observe(&child).is_none());
+    let next = json!({"event":{"type":"message_start","message":{"id":"b","usage":{"input_tokens":5}}}});
+    let mut reply = ClaudeTurnOutput::new(9);
+    reply.usage = stream.observe(&next).unwrap();
+    assert_eq!(claude_usage_counts(&reply.usage).total, 27);
+    let error = json!({"is_error":true,"result":"failure","usage":{"input_tokens":35,"output_tokens":14}});
+    assert!(reply.apply_result(&error, None, false).is_err());
+    assert_eq!(claude_usage_counts(&reply.usage).total, 49);
+    let interrupted = json!({"is_error":true,"result":"interrupted","usage":{"input_tokens":0}});
+    assert!(reply.apply_result(&interrupted, None, true).unwrap().is_break());
+    assert_eq!(claude_usage_counts(&reply.usage).total, 49);
+}
+
+/// Real streaming CLI, one user prompt. No tools other than Write are exposed.
+#[tokio::test]
+#[ignore = "uses the installed Claude Code account and two temporary files"]
+async fn test_claude_live_switch_while_first_write_awaits_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
+    config.working_directory = dir.path().to_path_buf();
+    let program = Path::new(if cfg!(windows) { "claude.exe" } else { "claude" });
+    let mut child = build_claude_command(&config, None, program)
+        .args(["--tools", "Write", "--strict-mcp-config", "--setting-sources", "user", "--no-session-persistence"])
+        .stderr(Stdio::null()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    let prompt = format!("Use Write to create {} containing one. Wait for that result. Then use Write to create {} containing two. Make the calls sequentially. Finally say done.", first.display(), second.display());
+    let input = claude_user_input(prompt, vec![], None).await.unwrap();
+    stdin.write_all(format!("{input}\n").as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+    let (handle, mut commands) = handle_channel("live-test");
+    let mut deferred = VecDeque::new();
+    let mut approvals = 0;
+    let mut decisions = FuturesUnordered::new();
+    let mut session = None;
+    let mut steps = ClaudeStreamUsage::default();
+    let mut live_tokens = 0;
+    tokio::time::timeout(Duration::from_secs(150), async {
+        loop {
+            let frame = match deferred.pop_front() {
+                Some(frame) => frame,
+                None => match read_claude_prompt_input(&mut stdin, &mut lines, &mut commands, &mut decisions).await.unwrap() {
+                    ClaudePromptInput::Frame(frame) => frame,
+                    ClaudePromptInput::PermissionReply(reply) => {
+                        write_permission_reply(&mut stdin, reply).await.unwrap();
+                        continue;
+                    }
+                    _ => panic!("unexpected UI command"),
+                },
+            };
+            if let Some(id) = frame["session_id"].as_str() {
+                assert_eq!(session.get_or_insert_with(|| id.to_owned()), id);
+            }
+            if let Some(usage) = steps.observe(&frame) { live_tokens = claude_usage_counts(&usage).total; }
+            match frame["type"].as_str() {
+                Some("control_request") => {
+                    approvals += 1;
+                    assert_eq!(approvals, 1, "second Write unexpectedly requested manual approval");
+                    assert_eq!(frame["request"]["tool_name"], "Write");
+                    assert_eq!(Path::new(frame["request"]["input"]["file_path"].as_str().unwrap()), first);
+                    let (answer, decision) = oneshot::channel();
+                    decisions.push(async move { decision.await.map_err(|e| e.to_string()) }.boxed());
+                    let switch = async {
+                        let (mode, response) = loop {
+                            match read_claude_prompt_input(&mut stdin, &mut lines, &mut commands, &mut decisions).await.unwrap() {
+                                ClaudePromptInput::SetPermissionMode(mode, response) => break (mode, response),
+                                ClaudePromptInput::Frame(frame) => deferred.push_back(frame),
+                                _ => panic!("unexpected command while switching mode"),
+                            }
+                        };
+                        response.send(apply_claude_permission_mode(&mut config, &mode, &mut stdin, &mut lines, &mut deferred)
+                            .await.map_err(|error| error.to_string())).unwrap();
+                    };
+                    let (result, ()) = tokio::join!(handle.set_config_option("permission_mode".into(), "auto".into()), switch);
+                    result.unwrap();
+                    assert!(!first.exists());
+                    let allow = claude_control_permission_allow(frame["request_id"].as_str().unwrap(), frame["request"]["input"].clone());
+                    answer.send(allow).unwrap();
+                }
+                Some("result") => {
+                    assert_ne!(frame["is_error"], true, "CLI error: {}", frame["result"]);
+                    assert!(claude_usage_counts(&frame["usage"]).total > 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }).await.expect("Claude Code live switch timed out");
+    assert!(session.is_some() && live_tokens > 0);
+    assert_eq!(approvals, 1);
+    assert_eq!(std::fs::read_to_string(first).unwrap().trim(), "one");
+    assert_eq!(std::fs::read_to_string(second).unwrap().trim(), "two");
+}
+
 #[tokio::test]
 async fn test_queued_permissions_claude_overrides_enqueue_mode_only_after_matching_ack() {
     use crate::api::ai::agent_driver::{next_permissions, queued_permission_fixture::Queue};

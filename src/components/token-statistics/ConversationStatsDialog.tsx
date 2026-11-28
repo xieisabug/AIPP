@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
     Dialog,
     CompactDialogContent,
@@ -140,28 +141,44 @@ export function ConversationStatsDialog({
         let current = true;
         setLoading(true);
         setError(null);
-        const statsRequest = groupId !== undefined
-            ? tokenStatisticsService.getGroupTokenStats(groupId)
-            : tokenStatisticsService.getConversationTokenStats(conversationId!);
-        const acpRequest = isGroup
-            ? Promise.resolve(null)
-            : invoke<AcpConversationSessionState | null>("get_acp_session_state", {
-                conversationId: Number(conversationId),
-            }).catch(() => null);
-        Promise.all([statsRequest, acpRequest])
-            .then(([statsData, acpState]) => {
-                if (!current) return;
+        let revision = 0;
+        const refresh = async () => {
+            const request = ++revision;
+            try {
+                const [statsData, acpState] = await Promise.all([
+                    groupId !== undefined
+                        ? tokenStatisticsService.getGroupTokenStats(groupId)
+                        : tokenStatisticsService.getConversationTokenStats(conversationId!),
+                    isGroup ? null : invoke<AcpConversationSessionState | null>("get_acp_session_state", {
+                        conversationId: Number(conversationId),
+                    }).catch(() => null),
+                ]);
+                if (!current || revision !== request) return;
                 setStats(statsData);
+                setError(null);
                 setAcpSessionState(acpState);
                 setLoading(false);
-            })
-            .catch((err) => {
-                if (!current) return;
+            } catch (err) {
+                if (!current || revision !== request) return;
                 console.error("Failed to load conversation stats:", err);
                 setError(describeInvokeError(err, isGroup ? "加载群聊用量统计失败" : "加载对话用量统计失败"));
                 setLoading(false);
-            });
-        return () => { current = false; };
+            }
+        };
+        // A parent chat and a group can include usage from a different execution conversation.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const subscription = listen("agent-token-usage-updated", () => {
+            if (!current || timer !== undefined) return;
+            timer = setTimeout(() => { timer = undefined; void refresh(); }, 200);
+        });
+        void subscription.catch(error => console.error("监听用量更新失败", error)).then(() => {
+            if (current) void refresh();
+        });
+        return () => {
+            current = false;
+            clearTimeout(timer);
+            void subscription.then(remove => remove()).catch(() => {});
+        };
     }, [open, conversationId, groupId, isGroup]);
 
     const hasAcpSessionUsage =

@@ -4,7 +4,7 @@ export const ASSISTANT_ADVANCED_FIELD_KEYS = [
     "dynamic_mcp_loading_enabled", "use_native_toolcall", "tool_review_mode",
     "tool_review_model_hint", "workspace_config", "skills_config", "mcp_config",
     "acp_env_vars", "acp_additional_args", "codex_approval_policy", "codex_sandbox",
-    "codex_approvals_reviewer",
+    "codex_approvals_reviewer", "claude_permission_mode",
 ];
 
 const BUILTIN_FIELD_KEYS = new Set([

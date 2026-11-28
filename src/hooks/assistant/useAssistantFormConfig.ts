@@ -236,6 +236,9 @@ export const useAssistantFormConfig = ({
             );
             const agentProvider = agentProviders.find((provider) => provider.id.toString() === currentProviderId);
             const agentApiType = agentProvider?.api_type ?? "";
+            // Legacy ACP providers can launch the official CLI directly. The claude-code-acp adapter uses ACP permissions.
+            const usesClaudeCli = agentApiType === "acp" && (providerConfigMap.claude_cli_command?.trim() ||
+                /(?:^|[/\\])claude(?:\.(?:exe|com|cmd|bat|ps1))?$/i.test(providerConfigMap.acp_cli_command?.trim() || ""));
             const selectedAgentModel = agentModelOptions.find(option =>
                 option.code === `${currentAssistant.model[0]?.model_code}%%${currentProviderId}`
             ) ?? agentModelOptions.find(option => option.is_default);
@@ -250,7 +253,7 @@ export const useAssistantFormConfig = ({
                 || getConfigValue("conversation_summary", "default_decision_model").includes("%%")
             );
             const nativeAgentApprovalFields = buildNativeAgentApprovalFields(
-                agentApiType,
+                usesClaudeCli ? "claude_sdk" : agentApiType,
                 getAcpConfigValue,
                 handleConfigChange,
                 reviewModelConfigured,

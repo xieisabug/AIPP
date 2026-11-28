@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { emit } from "@tauri-apps/api/event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationStatsDialog } from "./ConversationStatsDialog";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
@@ -26,6 +27,15 @@ async function openDialog(props: Parameters<typeof ConversationStatsDialog>[0] =
 }
 
 describe("ConversationStatsDialog", () => {
+    it("refreshes reported tokens in the open dialog after a Claude step", async () => {
+        let total = 0;
+        mockInvokeHandler("get_acp_session_state", () => null);
+        mockInvokeHandler("get_conversation_token_stats", () => ({ ...baseStats, total_tokens: total, input_tokens: total }));
+        await openDialog();
+        total = 4567;
+        await emit("agent-token-usage-updated", 17);
+        await waitFor(() => expect(screen.getAllByText("4,567").length).toBeGreaterThan(0));
+    });
     afterEach(() => {
         clearAllMockHandlers();
         vi.clearAllMocks();

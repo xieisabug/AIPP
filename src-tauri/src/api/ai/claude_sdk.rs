@@ -2,6 +2,7 @@ use super::official_cli;
 #[path = "claude_background.rs"]
 mod background;
 use background::{BackgroundTasks, IdleEvent};
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use std::collections::VecDeque;
 use crate::api::ai::acp::{
     AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
@@ -763,35 +764,60 @@ pub(crate) fn claude_usage_counts(usage: &Value) -> ClaudeUsageCounts {
 }
 
 fn persist_usage(app: &tauri::AppHandle, id: i64, usage: &Value) {
-    let Ok(db) = ConversationDatabase::new(app) else { return };
-    let Ok(repo) = db.message_repo() else { return };
-    let Ok(Some(mut message)) = repo.read(id) else { return };
     let counts = claude_usage_counts(usage);
     let clamp = |value: i64| i32::try_from(value).unwrap_or(i32::MAX);
-    message.input_token_count = clamp(counts.input);
-    message.output_token_count = clamp(counts.output);
-    message.token_count = clamp(counts.total);
-    let mut metadata = message
-        .metadata_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    metadata.insert("usage_source".into(), json!("reported"));
-    if let Some(cache_read) = counts.cache_read {
-        metadata.insert("cached_input_tokens".into(), json!(cache_read));
-        metadata.insert("cached_read_tokens".into(), json!(cache_read));
+    let metadata = json!({
+        "usage_source":"reported", "claude_usage":usage,
+        "cached_input_tokens":counts.cache_read, "cached_read_tokens":counts.cache_read,
+        "cached_write_tokens":counts.cache_write, "cache_creation_tokens":counts.cache_write,
+    });
+    let result = ConversationDatabase::new(app).map_err(AppError::from).and_then(|db| Ok(db.message_repo()?.update_agent_usage(
+        id, clamp(counts.input), clamp(counts.output), &metadata,
+    )?));
+    match result {
+        Ok(()) => { let _ = tauri::Emitter::emit(app, "agent-token-usage-updated", id); }
+        Err(error) => tracing::warn!(message_id = id, %error, "Failed to save Claude token usage"),
     }
-    if let Some(cache_write) = counts.cache_write {
-        metadata.insert("cached_write_tokens".into(), json!(cache_write));
-        metadata.insert("cache_creation_tokens".into(), json!(cache_write));
-    }
-    // 原始 usage 保留下来，便于核对归一前的数字。
-    metadata.insert("claude_usage".into(), usage.clone());
-    message.metadata_json = Some(Value::Object(metadata).to_string());
-    let _ = repo.update(&message);
 }
 
+const TOKEN_FIELDS: [&str; 4] = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+
+/// message_start and message_delta report absolute counts for the same API request.
+/// An interrupted turn can end before the CLI reports its authoritative result.
+#[derive(Default)]
+struct ClaudeStreamUsage {
+    current: Option<String>,
+    requests: HashMap<String, Value>,
+    total: Value,
+}
+
+impl ClaudeStreamUsage {
+    fn observe(&mut self, frame: &Value) -> Option<Value> {
+        if !frame["parent_tool_use_id"].is_null() { return None; }
+        let event = &frame["event"];
+        let usage = match event["type"].as_str()? {
+            "message_start" => {
+                self.current = event["message"]["id"].as_str().map(str::to_owned);
+                &event["message"]["usage"]
+            }
+            "message_delta" => &event["usage"],
+            "message_stop" => { self.current = None; return None; }
+            _ => return None,
+        };
+        let request = self.requests.entry(self.current.as_ref()?.clone()).or_default();
+        let mut changed = false;
+        for key in TOKEN_FIELDS {
+            let Some(value) = usage[key].as_i64().filter(|n| *n >= 0) else { continue };
+            let previous = request[key].as_i64();
+            if previous == Some(value) { continue; }
+            let sum = self.total[key].as_i64().unwrap_or(0) - previous.unwrap_or(0);
+            self.total[key] = json!(sum.saturating_add(value));
+            request[key] = json!(value);
+            changed = true;
+        }
+        changed.then(|| self.total.clone())
+    }
+}
 /// 将 Claude Code AskUserQuestion 工具的 input 转成统一的 AskUserQuestion 请求。
 /// Claude Code 的 questions 结构与 Codex requestUserInput 类似，但没有 id/isSecret。
 fn claude_ask_user_question_payload(input: &Value) -> Result<AskUserQuestionRequest, String> {
@@ -899,10 +925,9 @@ async fn handle_ask_user_question(
     request_id: &str,
     instance_id: Option<i64>,
     run_id: &str,
-    stdin: &mut tokio::process::ChildStdin,
     cancellation: &mut watch::Receiver<u64>,
     cancel_generation: u64,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     let input = request.get("input").cloned().unwrap_or(Value::Null);
     let interaction_state = app.state::<InteractionState>();
     let result = match claude_ask_user_question_payload(&input) {
@@ -927,8 +952,7 @@ async fn handle_ask_user_question(
             claude_control_permission_deny(request_id, format!("用户未回答提问：{error}"))
         }
     };
-    stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|e| e.to_string())?;
-    stdin.flush().await.map_err(|e| e.to_string())
+    Ok(response)
 }
 
 async fn handle_permission(
@@ -940,10 +964,9 @@ async fn handle_permission(
     cwd: &std::path::Path,
     run_id: &str,
     instance_id: Option<i64>,
-    stdin: &mut tokio::process::ChildStdin,
     cancellation: &mut watch::Receiver<u64>,
     cancel_generation: u64,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     let request_id =
         frame.get("request_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
     let request = frame.get("request").cloned().unwrap_or(Value::Null);
@@ -953,7 +976,7 @@ async fn handle_permission(
     let tool_name = request["tool_name"].as_str().ok_or("Claude Code can_use_tool 缺少 tool_name")?;
     if tool_name == "AskUserQuestion" {
         return handle_ask_user_question(
-            app, conversation_id, &request, &request_id, instance_id, run_id, stdin, cancellation, cancel_generation,
+            app, conversation_id, &request, &request_id, instance_id, run_id, cancellation, cancel_generation,
         ).await;
     }
     let event = AcpPermissionRequestEvent {
@@ -1020,8 +1043,26 @@ async fn handle_permission(
             AcpPermissionDecision::Cancelled
         }}
     } else { decision };
-    let response = claude_permission_response(&request_id, &request, decision);
-    stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+    Ok(claude_permission_response(&request_id, &request, decision))
+}
+
+fn permission_reply<'a>(
+    app: &'a tauri::AppHandle, conversation: i64, frame: Value, message: i64,
+    config: &ClaudeSdkConfig, run: &'a str, mut cancellation: watch::Receiver<u64>, generation: u64,
+) -> BoxFuture<'a, Result<Value, String>> {
+    let scope = config.mcp_scope.clone();
+    let cwd = config.working_directory.clone();
+    let instance = config.instance_id;
+    async move {
+        crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message), handle_permission(
+            app, conversation, &frame, message, scope.as_ref(), &cwd, run, instance, &mut cancellation, generation,
+        )).await
+    }.boxed()
+}
+
+async fn write_permission_reply(stdin: &mut tokio::process::ChildStdin, reply: Result<Value, String>) -> Result<(), String> {
+    let frame = reply?;
+    stdin.write_all(format!("{frame}\n").as_bytes()).await.map_err(|e| e.to_string())?;
     stdin.flush().await.map_err(|e| e.to_string())
 }
 
@@ -1509,6 +1550,11 @@ impl ClaudeTurnOutput {
         if background::lifecycle_result(frame) {
             return Ok(Continue(()));
         }
+        let failed = was_cancelled || claude_result_error(frame).is_some();
+        if TOKEN_FIELDS.iter().any(|key| frame["usage"][*key].is_i64())
+            && !(failed && claude_usage_counts(&frame["usage"]).total < claude_usage_counts(&self.usage).total) {
+            self.usage = frame["usage"].clone();
+        }
         if was_cancelled && frame["is_error"] == true && frame.to_string().to_lowercase().contains("interrupt") {
             return Ok(Break(()));
         }
@@ -1519,7 +1565,6 @@ impl ClaudeTurnOutput {
             self.content = claude_result_fallback_content(frame, compact_boundary);
         }
         self.final_text = frame["result"].as_str().filter(|text| !text.is_empty()).map(str::to_owned);
-        self.usage = frame.get("usage").cloned().unwrap_or(Value::Null);
         Ok(Break(()))
     }
 }
@@ -1603,15 +1648,19 @@ enum ClaudePromptInput {
     Frame(Value),
     Interrupted,
     PendingPrompt(SessionCommand),
+    SetPermissionMode(String, oneshot::Sender<Result<(), String>>),
+    PermissionReply(Result<Value, String>),
 }
 
 async fn read_claude_prompt_input(
     stdin: &mut tokio::process::ChildStdin,
     lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    approvals: &mut FuturesUnordered<BoxFuture<'_, Result<Value, String>>>,
 ) -> Result<ClaudePromptInput, String> {
     loop {
         let line = tokio::select! {
+            Some(reply) = approvals.next(), if !approvals.is_empty() => return Ok(ClaudePromptInput::PermissionReply(reply)),
             next = lines.next_line() => match next {
                 Ok(Some(line)) => line,
                 Ok(None) => return Err("Claude Code 进程提前退出".into()),
@@ -1627,6 +1676,9 @@ async fn read_claude_prompt_input(
                     return Ok(ClaudePromptInput::Interrupted);
                 }
                 Some(prompt @ SessionCommand::Prompt { .. }) => return Ok(ClaudePromptInput::PendingPrompt(prompt)),
+                Some(SessionCommand::SetConfig { config_id, value, response }) if config_id == "permission_mode" => {
+                    return Ok(ClaudePromptInput::SetPermissionMode(value, response));
+                }
                 Some(SessionCommand::SetConfig { response, .. }) => {
                     let _ = response.send(Err("Claude Code 正在回复，当前无法执行即时配置请求".into()));
                     continue;
@@ -1649,7 +1701,7 @@ pub fn spawn_claude_session_task(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let run_id = uuid::Uuid::new_v4().to_string();
     let task_run_id = run_id.clone();
-    let (cancel_signal, mut cancellation) = watch::channel(0);
+    let (cancel_signal, cancellation) = watch::channel(0);
     let mut configured_permission_mode = config.permission_mode.clone();
     let permissions = ClaudeTurnPermissions { configured: configured_permission_mode.clone(), selected: config.turn_permission_mode.take() };
     if let Some(mode) = &permissions.selected { config.permission_mode = Some(mode.clone()); }
@@ -1725,13 +1777,24 @@ pub fn spawn_claude_session_task(
         let mut background_scope = None;
         let mut pending_prompts = VecDeque::new();
         let mut deferred_frames = VecDeque::new();
+        // Only the actor writes to the CLI. Pending approval cards never take ownership of stdin.
+        let mut approvals = FuturesUnordered::new();
         loop {
             let event = if last_turn.is_some() && !deferred_frames.is_empty() {
                 IdleEvent::Frame(deferred_frames.pop_front().unwrap())
             } else if let Some(prompt) = pending_prompts.pop_front() {
                 IdleEvent::Command(prompt)
             } else if last_turn.is_some() {
-                match background::read_idle_event(&mut lines, &mut rx).await {
+                let next = tokio::select! {
+                    Some(reply) = approvals.next(), if !approvals.is_empty() => {
+                        match write_permission_reply(&mut stdin, reply).await {
+                            Ok(()) => continue,
+                            Err(error) => Err(error),
+                        }
+                    }
+                    next = background::read_idle_event(&mut lines, &mut rx) => next,
+                };
+                match next {
                     Ok(Some(event)) => event,
                     Ok(None) => break,
                     Err(error) => {
@@ -1757,7 +1820,7 @@ pub fn spawn_claude_session_task(
                     break;
                 }
                 IdleEvent::Command(SessionCommand::SetConfig { config_id, value, response }) => {
-                    if background.pending() {
+                    if background.pending() && config_id != "permission_mode" {
                         let _ = response.send(Err("Claude Code 后台任务仍在运行，请在任务结束后更改配置".into()));
                         continue;
                     }
@@ -1862,13 +1925,8 @@ pub fn spawn_claude_session_task(
                         }
                     }
                     if frame["type"] == "control_request" {
-                        if let Err(error) = crate::api::butler_peer::TOOL_MESSAGE.scope(Some(*previous), handle_permission(
-                            &app, _conversation_id, &frame, *previous, config.mcp_scope.as_ref(), &config.working_directory,
-                            &task_run_id, config.instance_id, &mut stdin, &mut cancellation, *generation,
-                        )).await {
-                            tracing::error!(conversation_id = _conversation_id, %error, "Claude background permission failed");
-                            break;
-                        }
+                        approvals.push(permission_reply(&app, _conversation_id, frame, *previous, &config,
+                            &task_run_id, cancellation.clone(), *generation));
                         continue;
                     }
                     let id = match background::create_reply(&app, &event_identity, source) {
@@ -1955,12 +2013,43 @@ pub fn spawn_claude_session_task(
             let mut compact_boundary: Option<Option<u64>> = None;
             let mut stream_error: Option<String> = None;
             let mut stream_failure_stage = AgentFailureStage::Stream;
+            let mut stream_usage = ClaudeStreamUsage::default();
             loop {
                 let next = match first_frame.take().or_else(|| deferred_frames.pop_front()) {
                     Some(frame) => Ok(ClaudePromptInput::Frame(frame)),
-                    None => read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await,
+                    None => read_claude_prompt_input(&mut stdin, &mut lines, &mut rx, &mut approvals).await,
                 };
                 let frame = match next {
+                    Ok(ClaudePromptInput::SetPermissionMode(mode, response)) => {
+                        let result = apply_claude_permission_mode(&mut config, &mode, &mut stdin, &mut lines, &mut deferred_frames).await;
+                        match result {
+                            Ok(()) => {
+                                emit_snapshot(&event_identity, &app, _conversation_id, claude_session_snapshot(
+                                    _conversation_id, session_id.clone(), &config, true, restored_session_method.clone(),
+                                    connection_event_id.clone(), &current_plan,
+                                )).await;
+                                let _ = response.send(Ok(()));
+                            }
+                            Err(ClaudeModeError::Rejected(error)) => { let _ = response.send(Err(error)); }
+                            Err(ClaudeModeError::Transport(error)) => {
+                                // A lost acknowledgement can leave the CLI in either mode.
+                                let reason = format!("Claude Code 权限模式未确认，本轮已停止：{error}");
+                                let _ = response.send(Err(reason.clone()));
+                                stream_failure_stage = AgentFailureStage::Permission;
+                                stream_error = Some(reason);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    Ok(ClaudePromptInput::PermissionReply(reply)) => {
+                        if let Err(error) = write_permission_reply(&mut stdin, reply).await {
+                            stream_failure_stage = AgentFailureStage::Permission;
+                            stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
+                            break;
+                        }
+                        continue;
+                    }
                     Ok(ClaudePromptInput::PendingPrompt(command)) => {
                         pending_prompts.push_back(command);
                         continue;
@@ -2072,6 +2161,10 @@ pub fn spawn_claude_session_task(
                         .await;
                     }
                     "stream_event" => {
+                        if let Some(usage) = stream_usage.observe(&frame) {
+                            persist_usage(&app, message_id, &usage);
+                            reply.usage = usage;
+                        }
                         if let Some(delta) =
                             frame.pointer("/event/delta/text").and_then(Value::as_str)
                         {
@@ -2138,16 +2231,8 @@ pub fn spawn_claude_session_task(
                         }
                     }
                     "control_request" => {
-                        if let Err(error) =
-                            crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message_id), handle_permission(
-                                &app, _conversation_id, &frame, message_id, config.mcp_scope.as_ref(), &config.working_directory, &task_run_id, config.instance_id, &mut stdin,
-                                &mut cancellation, cancel_generation,
-                            )).await
-                        {
-                            stream_failure_stage = AgentFailureStage::Permission;
-                            stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
-                            break;
-                        }
+                        approvals.push(permission_reply(&app, _conversation_id, frame, message_id, &config,
+                            &task_run_id, cancellation.clone(), cancel_generation));
                     }
                     "result" => match reply.apply_result(&frame, compact_boundary, was_cancelled) {
                         Ok(std::ops::ControlFlow::Continue(())) => continue,
@@ -2159,6 +2244,9 @@ pub fn spawn_claude_session_task(
                     },
                     _ => {}
                 }
+            }
+            if !reply.usage.is_null() {
+                persist_usage(&app, message_id, &reply.usage);
             }
             let settled = activities.finish(was_cancelled, stream_error.as_deref());
             if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, settled) {
@@ -2185,10 +2273,7 @@ pub fn spawn_claude_session_task(
                 break;
             }
             reply.persist(&app, true, if was_cancelled { Some("") } else { reply.final_text.as_deref() });
-            let ClaudeTurnOutput { message_id, content, usage, .. } = reply;
-            if !usage.is_null() {
-                persist_usage(&app, message_id, &usage);
-            }
+            let ClaudeTurnOutput { message_id, content, .. } = reply;
             emit_update(&event_identity, &window, _conversation_id, message_id, &content, true);
             let _ = emit_to_window(
                 &window, event_identity.clone(),
@@ -2214,6 +2299,13 @@ pub fn spawn_claude_session_task(
             }
             if was_cancelled {
                 last_turn = None;
+                if !approvals.is_empty() {
+                    approvals.clear();
+                    let scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native(
+                        CLAUDE_SDK_API_TYPE, config.instance_id, _conversation_id, &task_run_id,
+                    );
+                    crate::api::ai::agent_driver::approval::cancel_app_requests_for_scope(&app, &scope).await;
+                }
                 if background.pending() {
                     // Native background tasks belong to this process. Stop must also stop their later wakes.
                     let _ = child.kill().await;

@@ -6118,9 +6118,15 @@ pub async fn set_acp_session_config_option(
         }
         let provider = session.binding.as_ref().ok_or("权限选择缺少提供商实例")?.provider_id;
         let native_id = native_id.ok_or("权限选择缺少原生会话编号")?;
-        ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?.with_write_connection(|conn|
+        let applied_live = kind == super::claude_sdk::CLAUDE_SDK_API_TYPE && config_id == "permission_mode";
+        if applied_live {
+            session.handle.set_config_option(config_id.clone(), value.clone()).await.map_err(|error| error.to_string())?;
+        }
+        ConversationDatabase::new(&app_handle).map_err(AppError::from).and_then(|db| db.with_write_connection(|conn|
             next_permissions::save(conn, conversation_id, kind, provider, native_id, &config_id, &value)
-        ).map_err(|e| e.to_string())?;
+        )).map_err(|e| if applied_live {
+            format!("当前 Claude Code 会话已切换，但保存后续消息的权限选择失败：{e}")
+        } else { e.to_string() })?;
         let _ = tauri::Emitter::emit(&app_handle, "agent-next-permissions-changed", conversation_id);
         return Ok(());
     }

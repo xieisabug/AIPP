@@ -1,5 +1,6 @@
 import React from "react";
 import type { AssistantFormConfig } from "@/types/forms";
+import { claudePermissionModes } from "@/data/claudePermissionModes";
 
 type ConfigGetter = (name: string, defaultValue: string) => string;
 type ConfigSetter = (key: string, value: string | boolean, valueType: string) => void;
@@ -43,6 +44,18 @@ export function buildNativeAgentApprovalFields(
         },
     });
     const native: AssistantFormConfig[] = {
+        claude_sdk: [{
+            key: "claude_permission_mode",
+            config: {
+                type: "select" as const,
+                label: "Claude Code 默认权限模式",
+                inheritedValue: "inherit",
+                value: get("claude_permission_mode", "") || "inherit",
+                options: [{ value: "inherit", label: "跟随提供商" }, ...claudePermissionModes],
+                tooltip: "启动 Claude Code 时使用。你可以在聊天输入框中为当前会话切换权限模式。",
+                onChange: (value: string | boolean) => set("claude_permission_mode", value === "inherit" ? "" : value, "string"),
+            },
+        }],
         pi: [select("pi_approval", "需要审批的操作", [
             { value: "all", label: "所有工具调用（默认）" },
             { value: "read_only", label: "只读工具（read / grep / find / ls）直接执行，其余审批" },
@@ -67,7 +80,7 @@ export function buildNativeAgentApprovalFields(
                 value: "默认使用本机 OpenCode 权限规则。可以在聊天中选择默认工具权限，工具专属规则仍然适用。",
             },
         }],
-    }[apiType] ?? [];
+    }[apiType === "anthropic" ? "claude_sdk" : apiType] ?? [];
 
     const defaultReviewMode = providerReviewMode ?? (reviewModelConfigured ? "auto_model" : "off");
     const reviewMode = get("tool_review_mode", "") || defaultReviewMode;
@@ -103,5 +116,5 @@ export function buildNativeAgentApprovalFields(
 
 /** Agent-assistant (type 4) settings persisted to assistant model_configs. Display-only notices are excluded. */
 export function isAgentAssistantField(key: string): boolean {
-    return key === "claude_effort" || ["acp_", "codex_", "pi_", "kiro_", "antigravity_"].some((prefix) => key.startsWith(prefix));
+    return key === "claude_effort" || key === "claude_permission_mode" || ["acp_", "codex_", "pi_", "kiro_", "antigravity_"].some((prefix) => key.startsWith(prefix));
 }

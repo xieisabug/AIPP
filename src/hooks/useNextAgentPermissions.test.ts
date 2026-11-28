@@ -7,9 +7,22 @@ const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
+it("shows the CLI-confirmed Claude mode even if an earlier selection is stored", () => {
+    invoke.mockReset().mockResolvedValue({ permission_mode: "auto" });
+    const snapshot: AcpConversationSessionState = {
+        conversation_id: 7, agent_kind: "claude_sdk", session_id: "live", has_active_prompt: true,
+        prompt_capabilities: { image: false, audio: false, embedded_context: false },
+        config_options: [{ id: "permission_mode", name: "权限", current_value: "default", options: [] }],
+        modes: [], plan: [], available_commands: [],
+    };
+    const { result } = renderHook(() => useNextAgentPermissions(snapshot));
+    expect(result.current).toBe(snapshot);
+    expect(invoke).not.toHaveBeenCalled();
+});
+
 it.each([
     ["kiro", "autopilot", "off", "on"],
-    ["claude_sdk", "permission_mode", "acceptEdits", "dontAsk"],
+    ["pi", "pi_approval", "all", "read_only"],
 ])("should show the latest %s selection during a reply and discard it when the native session changes", async (driver, key, initial, next) => {
     invoke.mockReset();
     let onChange: (event: { payload: number }) => void = () => {};

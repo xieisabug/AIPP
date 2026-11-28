@@ -55,9 +55,11 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 | Kiro | Autopilot | 关闭：逐项审批（默认）/ 开启：Kiro 自动执行 |
 | Antigravity | 原生执行模式与工具审批 | 可选默认、自动接受编辑、自动审核（`auto`）、规划（`plan`）或全部自动执行。全部自动执行沿用已保存的 `yolo` 设置，CLI 通过 `agy acp --dangerously-skip-permissions` 启动，独立 ACP 程序须公布 `yolo` 模式。会话缺少所选模式时会列出可用模式并停止。 |
 | OpenCode | 本机配置的 `permission` 规则 | 聊天中可选本机配置、默认询问（ask）、默认允许（allow）或默认拒绝（deny）。只覆盖本次服务的默认规则，工具专属规则仍然适用 |
-| Claude Code | 提供商可设默认权限，聊天输入框可选默认（default）、接受编辑（acceptEdits）、自动审核（auto）、跳过审核（bypassPermissions）、不问询（dontAsk），Plan 有独立开关 | 首次发送使用输入框的选择。会话中的选择保存到 AIPP，已排队的消息也在实际派发时读取最后一次选择。已启动的 CLI 通过 `set_permission_mode` 确认后再接收正文，同一进程继续运行。CLI 拒绝时本条消息报错。Claude Code 发给 AIPP 的 `can_use_tool` 请求再按 AIPP 的审批设置处理；`AskUserQuestion` 仍交给用户回答 |
+| Claude Code | 助手的「权限」页可设置默认权限模式，初始跟随提供商。聊天输入框可选默认、接受编辑、自动审核（auto）、跳过审核、不问询，Plan 有独立开关 | 首次发送使用输入框的选择。运行中切换由原 CLI 进程确认，同一轮后续工具调用立即使用新模式，已显示的审批卡仍按原请求作答。切换成功后会话和已排队的消息沿用选择。CLI 拒绝时界面显示原因。Claude Code 转交的审批请求由 AIPP 按助手设置处理，提问仍交给用户回答。 |
 | 通用 ACP | 原生 `session/request_permission` 请求 | 安全时只回传 Agent 提供的一次性允许选项；转人工时仍可通过已有飞书通道处理 |
 | Cursor | SDK 自带的自动审核（Auto-review） | 默认开启，可在聊天中关闭。关闭后工具可直接执行，SDK 不提供逐项人工审批 |
+
+打开顶部「对话信息」可以查看 Claude Code 本轮和历史轮次的 Token 用量。当前轮按主智能体已报告的模型请求更新，输入包含缓存读取与写入。结束时按 CLI 的本轮汇总校正。错误或停止时保留已收到的用量，CLI 未报告的历史用量无法补算。
 
 在会话配置里更改 Pi、Cursor、OpenCode、Kiro、Antigravity 或通用 ACP 公布的权限选项时，AIPP 先保存选择。当前回复继续使用原权限。下一条用户消息实际派发前，AIPP 应用最后一次选择，已经排队的消息也一样。Kiro、Antigravity 的普通模式和通用 ACP 直接更新原生会话。Pi、Cursor、OpenCode 以及 Antigravity CLI 进出跳过审核模式时，AIPP 以新配置恢复同一个原生会话。应用权限或恢复失败时，本条消息报错并停止发送。
 

@@ -346,6 +346,10 @@ describe("native agent model selection", () => {
             effort?.config.onChange?.("xhigh");
             expect(onConfigChange).toHaveBeenCalledWith("claude_effort", "xhigh", "string");
             const values = buildAssistantFormValues(assistant, [], {});
+            const automatic = buildAssistantSaveDetail(assistant, { ...values, claude_permission_mode: "auto" }, []);
+            expect(buildAssistantFormValues(automatic, [], {}).claude_permission_mode).toBe("auto");
+            const followProvider = buildAssistantSaveDetail(automatic, { ...values, claude_permission_mode: "inherit" }, []);
+            expect(followProvider.model_configs.find(item => item.name === "claude_permission_mode")?.value).toBe("");
             const saved = buildAssistantSaveDetail(assistant, { ...values, claude_effort: "xhigh" }, []);
             expect(buildAssistantFormValues(saved, [], {}).claude_effort).toBe("xhigh");
             const inherited = buildAssistantSaveDetail(saved, { ...values, claude_effort: "inherit" }, []);

@@ -216,7 +216,7 @@ export function buildAssistantSaveDetail(
             const config = currentAssistant.model_configs.find((config) => config.name === key);
             if (key === "use_native_toolcall" && !config && values[key] === false) return false;
             if (isAgent && key === "tool_review_mode" && !values[key]) return false;
-            if (key === "claude_effort" && values[key] === "inherit" && !config) return false;
+            if ((key === "claude_effort" || key === "claude_permission_mode") && values[key] === "inherit" && !config) return false;
             // ACP/Codex 助手专用字段（assistant_type === 4）
             if (isAgentAssistantField(key) && isAgent) return true;
             // 内置字段允许保存
@@ -252,7 +252,7 @@ export function buildAssistantSaveDetail(
 
             // Codex 字段的 "default" 表示跟随提供商配置，落库时归一化为空字符串
             const inheritsProvider = (key.startsWith("codex_") && value === "default")
-                || (key === "claude_effort" && value === "inherit");
+                || ((key === "claude_effort" || key === "claude_permission_mode") && value === "inherit");
             const normalizedValue = inheritsProvider ? "" : value;
 
             return {

@@ -14,11 +14,21 @@ describe("buildNativeAgentApprovalFields", () => {
 
     it.each(["claude_sdk", "anthropic", "acp"])("should persist AIPP approval mode for %s", (apiType) => {
         const set = vi.fn();
-        const [field] = buildNativeAgentApprovalFields(apiType, getter({}), set, true);
+        const field = buildNativeAgentApprovalFields(apiType, getter({}), set, true).find(f => f.key === "tool_review_mode")!;
         expect(field.key).toBe("tool_review_mode");
         expect(field.config.value).toBe("auto_model");
         field.config.onChange?.("auto_model");
         expect(set).toHaveBeenCalledWith("tool_review_mode", "auto_model", "string");
+    });
+
+    it("stores explicit Claude default separately from inheriting the provider", () => {
+        const set = vi.fn();
+        const [field] = buildNativeAgentApprovalFields("claude_sdk", getter({}), set, false);
+        expect(field.config.value).toBe("inherit");
+        for (const [choice, stored] of [["auto", "auto"], ["default", "default"], ["inherit", ""]]) {
+            field.config.onChange?.(choice);
+            expect(set).toHaveBeenLastCalledWith("claude_permission_mode", stored, "string");
+        }
     });
 
     it.each([
