@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "@/data/Conversation";
+import type { Message, MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { hasPublishedReply, withButlerProcessing, withPeerTimeline, type PeerPost } from "./butlerTimeline";
 
 const at = (minute: number) => new Date(Date.UTC(2026, 10, 4, 12, minute));
@@ -66,6 +66,43 @@ it("should keep the recovered answer at the original question across reload", ()
         expect(timeline.map(row => row.message_type)).toEqual(["user", "butler_interaction", "response", "response"]);
     }
     expect(withPeerTimeline(rows, new Set(), [], 20)).toContain(continuation);
+});
+
+it("should keep an internal collaboration question between peer posts through answer and reload", () => {
+    const messages = [raw(1, "user", "内部请求", '{"origin":"butler_peer","audience":"peer"}'),
+        raw(2, "response", "内部回复")];
+    const posts = [post(10, 1, false, 30, 1), post(11, 2, true, 30, 4)];
+    const question = { kind: "question" as const, id: 7, request_id: "q-7", anchor: 2, occurred_ms: at(3).getTime(),
+        request: { request_id: "q-7", questions: [] }, answers: null };
+    const live = { key: "live-q-7", requestId: "q-7", messageId: 2, content: "待回答" };
+    const answered = { ...question, answers: { format: "PDF" } };
+    const pending = withPeerTimeline(messages, new Set([2]), posts, 20, [question], [live]);
+    const submitted = withPeerTimeline(messages, new Set(), posts, 20, [answered], [live]);
+    const reopened = withPeerTimeline(messages, new Set(), posts, 20, [answered]);
+
+    for (const timeline of [pending, submitted, reopened]) {
+        expect(timeline.map(row => row.butler_posts?.map(p => p.id) ?? row.message_type))
+            .toEqual([[10], "butler_interaction", [11]]);
+        expect(timeline[1].created_time).toEqual(at(3));
+        expect(timeline[1].id).toBe(pending[1].id);
+    }
+    expect(pending[1].butler_interaction).toBe("待回答");
+    expect(pending[1].butler_live_item_key).toBe(live.key);
+    expect(submitted[1].butler_live_item_key).toBe(live.key);
+    for (const timeline of [submitted, reopened]) {
+        expect(timeline[1].butler_interaction).toMatchObject({ props: { viewMode: "summary", completedAnswers: answered.answers } });
+    }
+});
+
+it("should position an MCP question from a hidden peer reply by its tool start time", () => {
+    const messages = [raw(1, "user", "内部请求", '{"origin":"butler_peer","audience":"peer"}'), raw(2, "response", "内部回复")];
+    const call: MCPToolCallUpdateEvent = { conversation_id: 20, message_id: 2, call_id: 42, tool_name: "ask_user_question",
+        status: "success", started_time: at(3), finished_time: at(6) };
+    const posts = [post(10, 1, false, 30, 1), post(11, 2, true, 30, 4)];
+    const timeline = withPeerTimeline(messages, new Set(), posts, 20, [], [], new Map([[call.call_id, call]]));
+    expect(timeline.map(row => row.butler_posts?.map(p => p.id) ?? row.message_type)).toEqual([[10], "butler_interaction", [11]]);
+    expect(timeline[1].created_time).toEqual(at(3));
+    expect(timeline[1].butler_interaction).toMatchObject({ props: { callId: 42 } });
 });
 
 it("should keep two native previews before their final reply in invocation order", () => {

@@ -54,7 +54,8 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         const request = parsePreviewFileRequestId(call.result);
         if (request) fileCalls.set(request, call);
     }
-    function addCard(id: number, anchor: number | null, time: number, content: Message["butler_interaction"], order: number, live?: InlineInteractionItem) {
+    function addCard(id: number, anchor: number | null, time: number, content: Message["butler_interaction"],
+        order: number, isQuestion: boolean, live?: InlineInteractionItem) {
         const index = anchor == null ? undefined : positions.get(anchor);
         const owner = index == null ? undefined : messages[index];
         const card: Message = {
@@ -63,7 +64,8 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
             llm_model_id: null, start_time: null, finish_time: null, token_count: 0, input_token_count: 0, output_token_count: 0,
             regenerate: null, butler_interaction: content, butler_live_item_key: live?.key, butler_event_order: order,
         };
-        if (owner && (owner.message_type === "response" || owner.message_type === "assistant")) {
+        // 问答直接面向用户，即使所属回复是隐藏的内部协作，也要在提问时刻保留卡片。
+        if (!isQuestion && owner && (owner.message_type === "response" || owner.message_type === "assistant")) {
             const list = ownerRows.get(owner.id) ?? [];
             list.push(card);
             ownerRows.set(owner.id, list);
@@ -89,7 +91,8 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         if (!content) continue;
         if (callId) positionedCalls.add(callId);
         const kindIndex = row.kind === "file" ? 1 : row.kind === "task" ? 2 : row.kind === "code" ? 3 : 0;
-        addCard(-4_000_000_000_000 - 4 * row.id - kindIndex, row.anchor, row.occurred_ms, content, callId ?? row.id, live);
+        addCard(-4_000_000_000_000 - 4 * row.id - kindIndex, row.anchor, row.occurred_ms, content,
+            callId ?? row.id, row.kind === "question", live);
     }
     for (const call of uiCalls.sort((a, b) => a.call_id - b.call_id)) {
         if (positionedCalls.has(call.call_id) || !call.message_id || !positions.has(call.message_id)) continue;
@@ -97,7 +100,7 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         if (!live && call.status !== "success" && !((call.tool_name === "preview_code" || call.tool_name === "present_choices") && (call.status === "executing" || (call.tool_name === "present_choices" && call.status === "failed")))) continue;
         positionedCalls.add(call.call_id);
         addCard(-6_000_000_000_000 - call.call_id, call.message_id, call.started_time ? parseGroupTime(call.started_time).getTime() : NaN,
-            live?.content ?? storedCallContent(call), call.call_id, live);
+            live?.content ?? storedCallContent(call), call.call_id, call.tool_name === "ask_user_question", live);
     }
     const visible = butlerTranscript(messages, unpublished, questionIds, calls, reports, ownerRows, positionedCalls, toolOwners);
     // Replies become public when they finish. Tools and peer posts can occur anywhere between
