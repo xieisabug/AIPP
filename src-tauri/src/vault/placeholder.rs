@@ -3,7 +3,7 @@
 //! The single decision point for assistants using the vault. Every tool call passes through
 //! `execute_tool_by_transport`, which calls [`prepare`] before dispatch. It finds placeholders in the
 //! JSON arguments, works out where the call goes, applies the user's "always allow" list or asks
-//! them in the chat (one approval = one use), substitutes the values into a copy of the arguments,
+//! them in the chat unless a conversation grant covers the command, substitutes values into a copy of the arguments,
 //! and returns a redactor for everything the tool sends back. Shell commands receive values as
 //! environment variables (like `op run`), never as command text.
 use super::approval::{self, Decision, EntryLabel, VaultUseRequest};
@@ -106,7 +106,7 @@ fn action_arguments(action: &mut Value) -> impl Iterator<Item = &mut Value> {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Destination {
-    /// `site` (a network origin; "always allow" possible) or `local` (this machine; ask every time).
+    /// `site` (a network origin; "always allow" possible) or `local` (this machine).
     pub kind: &'static str,
     pub label: String,
     pub origin: Option<String>,
@@ -192,7 +192,8 @@ pub(crate) fn caller(app: &AppHandle, conversation_id: Option<i64>) -> Caller {
     let assistant_name = assistant_id.and_then(|id| crate::db::assistant_db::AssistantDatabase::new(app).ok()
         .and_then(|db| db.get_assistant(id).ok()).map(|a| a.name));
     // Scheduled runs (and calls without a conversation) have nobody to ask.
-    let attended = conversation.as_ref().is_some_and(|c| c.conversation_kind != crate::db::message_preview::SCHEDULED_RUN_KIND);
+    let attended = conversation.as_ref().is_some_and(|c| !matches!(c.conversation_kind.as_str(),
+        crate::db::message_preview::SCHEDULED_RUN_KIND | crate::proactive::tools::PROACTIVE_RUN_KIND));
     Caller { assistant_id, assistant_name, attended }
 }
 
@@ -215,6 +216,30 @@ fn take_once(conversation_id: Option<i64>, item_id: &str) -> bool {
     let Some(id) = conversation_id else { return false };
     ONCE.lock().map(|mut once| once.remove(&(id, item_id.to_owned()))
         .is_some_and(|granted| granted.elapsed() < ONCE_TTL)).unwrap_or(false)
+}
+
+// Process-local grants store only item IDs and modification times. Each use still goes through
+// confirm_use, which checks the entry again before passing its value to the command.
+static COMMAND_GRANTS: LazyLock<Mutex<HashMap<(i64, String), i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Copy)]
+struct CommandScope(i64);
+
+impl CommandScope {
+    fn for_call(conversation_id: Option<i64>, caller: &Caller, server: &MCPServer, tool_name: &str) -> Option<Self> {
+        conversation_id.filter(|_| caller.attended && matches!(server.transport_type.as_str(), "builtin" | "stdio")
+            && is_shell(server, tool_name)).map(Self)
+    }
+
+    fn allows(self, item_id: &str, updated_at: i64) -> bool {
+        COMMAND_GRANTS.lock().is_ok_and(|grants| grants.get(&(self.0, item_id.to_owned())) == Some(&updated_at))
+    }
+
+    fn grant(self, entries: impl Iterator<Item = (String, i64)>) -> Result<(), UseError> {
+        let mut grants = COMMAND_GRANTS.lock().map_err(|_| UseError::new("vault_error", "无法保存对话的保险箱授权"))?;
+        grants.extend(entries.map(|(id, updated_at)| ((self.0, id), updated_at)));
+        Ok(())
+    }
 }
 
 // ---------- shell commands ----------
@@ -458,12 +483,19 @@ pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, serve
 async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Caller, server: &MCPServer, tool_name: &str, args: &Value,
     entries: &BTreeMap<String, Resolved>, destination: &Destination, tool: &str) -> Result<BTreeMap<String, Resolved>, UseError> {
     let allowed = |entry: &Resolved| destination.origin.as_ref().is_some_and(|o| entry.meta.allowed_sites.contains(o));
-    let pending: Vec<&Resolved> = entries.values().filter(|e| !allowed(e) && !(caller.attended && take_once(conversation_id, &e.meta.id))).collect();
+    let command_scope = CommandScope::for_call(conversation_id, caller, server, tool_name);
+    let pending: Vec<&Resolved> = entries.values().filter(|entry| {
+        let approved = allowed(entry)
+            || (caller.attended && take_once(conversation_id, &entry.meta.id))
+            || command_scope.is_some_and(|scope| scope.allows(&entry.meta.id, entry.meta.updated_at));
+        !approved
+    }).collect();
     let mut always: Option<(Vec<String>, String)> = None;
+    let mut grant_scope = None;
     if !pending.is_empty() {
         let names = pending.iter().map(|e| format!("「{}」", e.meta.name)).collect::<Vec<_>>().join("");
         if !caller.attended {
-            let hint = if destination.is_site() { "请用户在凭据保险箱中把这个网站加入「自动允许的网站」" } else { "本机工具每次都需要用户确认" };
+            let hint = if destination.is_site() { "请用户在凭据保险箱中把这个网站加入「自动允许的网站」" } else { "无人值守任务不能在本机工具中使用保险箱凭据" };
             return Err(UseError::new("approval_required", format!("无人值守的任务不能询问用户：{names}没有被允许用于 {}。{hint}", destination.label)));
         }
         let (preview, preview_kind) = preview(server, tool_name, args);
@@ -478,12 +510,16 @@ async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Calle
             destination: destination.clone(),
             preview,
             preview_kind,
+            can_allow_conversation: command_scope.is_some(),
             can_always: destination.is_site(),
             created_at: chrono::Utc::now().timestamp_millis(),
         };
         match approval::ask(app, request).await.map_err(|(code, message)| UseError::new(code, message))? {
             Decision::Deny => return Err(UseError::new("user_denied", format!("用户拒绝了在 {} 中使用{names}", destination.label))),
             Decision::Once => {}
+            Decision::Conversation => {
+                grant_scope = Some(command_scope.ok_or_else(|| UseError::new("invalid_request", "当前调用不能使用对话授权"))?);
+            }
             Decision::Always => {
                 let Some(origin) = destination.origin.clone().filter(|_| destination.is_site()) else {
                     return Err(UseError::new("invalid_request", "本机工具不能设为总是允许"));
@@ -501,6 +537,9 @@ async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Calle
         .map_err(|e| UseError::new("vault_error", format!("复核保险箱失败: {e}")))?
         .map_err(|e| UseError::new(e.code, e.message))?;
     if changed_policy { crate::api::vault_api::notify_changed(app); }
+    if let Some(scope) = grant_scope {
+        scope.grant(pending.iter().map(|e| (e.meta.id.clone(), e.meta.updated_at)))?;
+    }
     Ok(current)
 }
 

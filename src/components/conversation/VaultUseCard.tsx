@@ -44,7 +44,7 @@ export function VaultPlaceholderText({ text, entries }: { text: string; entries:
 }
 
 /**
- * 助手要在一次工具调用里使用保险箱的值。每次使用都由用户在这里批准；
+ * 助手要在一次工具调用里使用尚未授权的保险箱条目。
  * 卡片写明谁在用、用哪些值、交给谁，并展示调用原文（只含占位符，不含值）。
  */
 export function VaultUseCard({ request, onRespond }: VaultUseCardProps) {
@@ -89,6 +89,11 @@ export function VaultUseCard({ request, onRespond }: VaultUseCardProps) {
                             本机程序能读到这个值。输出里的原值会被遮住，但程序改写后再输出的内容遮不住，不能保证助手拿不到它。
                         </p>
                     )}
+                    {request.canAllowConversation && (
+                        <p className="text-xs text-muted-foreground">
+                            选择“本对话期间允许”后，本对话的后续本机命令都可使用上述凭据。重启 AIPP 后需重新确认。
+                        </p>
+                    )}
                     <button
                         type="button"
                         className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
@@ -111,6 +116,9 @@ export function VaultUseCard({ request, onRespond }: VaultUseCardProps) {
             <div className="mt-3 flex flex-wrap justify-end gap-2">
                 <Button variant="ghost" size="sm" disabled={busy} onClick={() => void decide("deny")}>拒绝</Button>
                 <Button variant={request.canAlways ? "outline" : "default"} size="sm" disabled={busy} onClick={() => void decide("once")}>允许这一次</Button>
+                {request.canAllowConversation && (
+                    <Button variant="outline" size="sm" disabled={busy} onClick={() => void decide("conversation")}>本对话期间允许</Button>
+                )}
                 {request.canAlways && origin && (
                     <Button size="sm" disabled={busy} onClick={() => void decide("always")}>总是允许用于 {hostOf(origin)}</Button>
                 )}

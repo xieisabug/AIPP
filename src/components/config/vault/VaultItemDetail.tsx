@@ -166,7 +166,7 @@ export default function VaultItemDetail({ item, usage, takenKeys, syncReady, ref
                     </dl>
                 </Section>
 
-                <Section slot="vault-section-sites" title="自动允许的网站" description="助手把这个值发往这些网站时不再询问；定时任务等无人值守的运行只能发往这里列出的网站。本机命令和程序每次都会问你。">
+                <Section slot="vault-section-sites" title="自动允许的网站" description="助手把这个值发往这些网站时不再询问。定时任务等无人值守的运行只能发往这里列出的网站。">
                     <ul className="divide-y divide-border rounded-lg border border-border">
                         {item.allowedSites.length === 0 && !addingSite && (
                             <EmptyRow>还没有。审批时选「总是允许」，网站会自动加到这里。</EmptyRow>

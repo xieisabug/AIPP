@@ -437,7 +437,7 @@ describe("group Vault card placement", () => {
         const use = { requestId: "use-317", conversationId: 102, messageId: 9999, groupAnchor: { groupId: 7, seq: 2 },
             assistantName: "写作助手", entries: [{ id: "synthetic", key: "fake_key", name: "测试凭据" }], tool: "synthetic",
             destination: { kind: "local", label: "本机测试", origin: null, insecure: false }, preview: "<vault:fake_key>",
-            previewKind: "command", canAlways: false, createdAt: 1 };
+            previewKind: "command", canAlways: false, canAllowConversation: true, createdAt: 1 };
         const input = { requestId: "input-317", conversationId: 101, messageId: 9998, groupAnchor: { groupId: 7, seq: 3 },
             assistantName: "总管家", purpose: "合成测试", fields: [{ key: "other_key", name: "测试填写", description: "" }], createdAt: 2 };
         mockInvokeHandler("vault_list_use_requests", () => [use, use]);

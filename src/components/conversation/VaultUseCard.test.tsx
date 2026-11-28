@@ -16,7 +16,7 @@ const request: VaultUseRequest = {
     tool: "保险箱 · vault_http_request",
     destination: { kind: "site", label: "网页请求 GET https://api.github.com/user/repos", origin: "https://api.github.com", insecure: false },
     preview: JSON.stringify({ url: "https://api.github.com/user/repos", headers: { Authorization: "Bearer <vault:github_token>" } }, null, 2),
-    previewKind: "json", canAlways: true, createdAt: 1,
+    previewKind: "json", canAlways: true, canAllowConversation: false, createdAt: 1,
 };
 
 const shellRequest: VaultUseRequest = {
@@ -27,6 +27,7 @@ const shellRequest: VaultUseRequest = {
     preview: 'curl -H "Authorization: Bearer <vault:github_token>" https://api.github.com/user',
     previewKind: "command",
     canAlways: false,
+    canAllowConversation: true,
 };
 
 type Handler = (event: { payload: unknown }) => void;
@@ -55,7 +56,7 @@ describe("VaultUseCard", () => {
         expect(onRespond).toHaveBeenCalledWith("r1", "always");
     });
 
-    it("should offer only a one-time approval for local commands and show the command with chips", async () => {
+    it("should show the command with chips and allow a single use", async () => {
         const user = userEvent.setup();
         const onRespond = vi.fn(async () => {});
         render(<VaultUseCard request={shellRequest} onRespond={onRespond} />);
@@ -69,6 +70,19 @@ describe("VaultUseCard", () => {
         expect(screen.queryByText(/<vault:/)).not.toBeInTheDocument();
         await user.click(screen.getByRole("button", { name: "允许这一次" }));
         expect(onRespond).toHaveBeenCalledWith("r-shell", "once");
+    });
+
+    it("should send conversation approval when the shell request supports it", async () => {
+        const onRespond = vi.fn(async () => {});
+        render(<VaultUseCard request={shellRequest} onRespond={onRespond} />);
+        await userEvent.setup().click(screen.getByRole("button", { name: "本对话期间允许" }));
+        expect(onRespond).toHaveBeenCalledWith("r-shell", "conversation");
+    });
+
+    it("should omit conversation approval when the backend offers only single use", () => {
+        render(<VaultUseCard request={{ ...shellRequest, canAllowConversation: false }} onRespond={vi.fn()} />);
+        expect(screen.queryByRole("button", { name: "本对话期间允许" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "允许这一次" })).toBeInTheDocument();
     });
 
     it("should warn about plain http", () => {

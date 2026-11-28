@@ -148,6 +148,28 @@ fn test_shell_placeholders_become_environment_references() {
 }
 
 #[test]
+fn test_command_grant_only_covers_approved_entries_in_the_same_attended_shell_conversation() {
+    let mut caller = Caller { assistant_id: Some(1), assistant_name: None, attended: true };
+    let shell = server("stdio", Some(OPERATION), None);
+    let scope = CommandScope::for_call(Some(77), &caller, &shell, BASH_TOOL).unwrap();
+    let item = "command-scope-test";
+    scope.grant([(item.into(), 10)].into_iter()).unwrap();
+    assert!(scope.allows(item, 10));
+    assert!(scope.allows(item, 10), "later calls reuse the grant");
+    assert!(!scope.allows("another-entry", 10));
+    assert!(!scope.allows(item, 11));
+    assert!(!CommandScope::for_call(Some(78), &caller, &shell, BASH_TOOL).unwrap().allows(item, 10));
+    assert!(CommandScope::for_call(None, &caller, &shell, BASH_TOOL).is_none());
+    assert!(CommandScope::for_call(Some(77), &caller, &shell, "write_file").is_none());
+    let stdio = server("stdio", Some("custom-mcp"), None);
+    assert!(CommandScope::for_call(Some(77), &caller, &stdio, BASH_TOOL).is_none());
+    let http = server("http", Some(OPERATION), Some("https://example.org"));
+    assert!(CommandScope::for_call(Some(77), &caller, &http, BASH_TOOL).is_none());
+    caller.attended = false;
+    assert!(CommandScope::for_call(Some(77), &caller, &shell, BASH_TOOL).is_none());
+}
+
+#[test]
 fn test_value_typed_by_the_user_is_used_once_without_asking() {
     let item = "00000000-0000-4000-8000-0000000000aa";
     assert!(!take_once(Some(42), item));

@@ -1,8 +1,7 @@
 //! Pause-and-ask before a vault value is used in a tool call.
 //!
-//! `placeholder::prepare` awaits the user's decision; the chat UI shows an inline card. One approval
-//! covers exactly one tool call. Pending requests live in memory only: after a restart nothing is
-//! approved implicitly (the safe direction).
+//! `placeholder::prepare` awaits a decision from the inline card. The backend determines which
+//! scopes are available for each pending request.
 use super::placeholder::Destination;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,6 +37,8 @@ pub struct VaultUseRequest {
     /// commands, otherwise pretty JSON arguments. Never contains values.
     pub preview: String,
     pub preview_kind: &'static str,
+    /// Allow subsequent local shell commands in this conversation to use the listed entries.
+    pub can_allow_conversation: bool,
     /// "Always allow" is offered only for network destinations.
     pub can_always: bool,
     pub created_at: i64,
@@ -45,7 +46,7 @@ pub struct VaultUseRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Decision { Deny, Once, Always }
+pub enum Decision { Deny, Once, Conversation, Always }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +110,9 @@ pub async fn vault_list_use_requests(conversation_id: Option<i64>) -> Result<Vec
 pub async fn vault_respond_use_request(request_id: String, decision: Decision) -> Result<(), String> {
     let mut pending = PENDING.lock().map_err(|_| "确认队列锁已损坏")?;
     let entry = pending.get_mut(&request_id).ok_or("该确认请求已处理或已失效")?;
+    if decision == Decision::Conversation && !entry.request.can_allow_conversation {
+        return Err("只有当前对话的本机命令可以使用对话授权".into());
+    }
     if decision == Decision::Always && !entry.request.can_always {
         return Err("本机工具不能设为总是允许".into());
     }

@@ -69,7 +69,7 @@ export interface VaultEntryLabel {
     name: string;
 }
 
-/** 这次调用会把值交给谁。site 可以「总是允许」；local 每次都要确认。 */
+/** 这次调用会把值交给谁。只有 site 可以「总是允许」。 */
 export interface VaultDestination {
     kind: "site" | "local";
     label: string;
@@ -91,11 +91,12 @@ export interface VaultUseRequest {
     /** 助手写的调用原文（含占位符，不含值）：命令文本或 JSON 参数。 */
     preview: string;
     previewKind: "command" | "json";
+    canAllowConversation: boolean;
     canAlways: boolean;
     createdAt: number;
 }
 
-export type VaultUseDecision = "deny" | "once" | "always";
+export type VaultUseDecision = "deny" | "once" | "conversation" | "always";
 
 export interface VaultInputField {
     key: string;
