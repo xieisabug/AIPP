@@ -74,7 +74,7 @@ describe("AcpPermissionDialog", () => {
             tool_params_display: [{ name: "item_id", display_name: "货号", value: 0 }],
         } });
         render(<AcpPermissionDialog request={{ ...request, parameters, agent_kind: "codex_app_server" }} isOpen onDecision={vi.fn()} />);
-        for (const text of ["catalog / lookup", "货号", "0", "查找库存"]) expect(screen.getByText(text)).toBeVisible();
+        for (const text of ["lookup", "catalog", "货号", "0", "查找库存"]) expect(screen.getByText(text)).toBeVisible();
     });
 
     it("should not show a review note for requests that were never reviewed", () => {
@@ -90,7 +90,7 @@ describe("AcpPermissionDialog", () => {
             parameters: JSON.stringify({ bot_id: 43, query: "5b121932", toolSummary: "查找回归结果" }),
             options: [...request.options, { option_id: cancel, name: "拒绝", kind: "reject_once" }],
         }} />);
-        for (const label of ["搜索管家聊天记录（含归档会话）", "助手编号", "43", "搜索词", "5b121932", "调用摘要", "查找回归结果"]) {
+        for (const label of ["搜索管家聊天记录（含归档会话）", "助手编号", "43", "搜索词", "5b121932", "用途", "查找回归结果"]) {
             expect(screen.getByText(label)).toBeVisible();
         }
         expect(screen.getAllByRole("button")).toHaveLength(3);
@@ -105,5 +105,32 @@ describe("AcpPermissionDialog", () => {
         }} />);
         expect(screen.getByText("custom_tool")).toBeVisible();
         expect(screen.getByText("plain text")).toBeVisible();
+    });
+
+    it("should show the wrapped tool, purpose and readable command when Antigravity calls a dynamic MCP tool", () => {
+        const command = "uv.exe run python -c \"\nimport sqlite3\nprint('C:\\Users')\n\"";
+        render(<AcpPermissionDialog isOpen onDecision={vi.fn()} request={{
+            ...request, agent_kind: "antigravity", title: "Run mcp_aipp_aipp_t62_call_mcp_tool",
+            parameters: JSON.stringify({ server_name: "操作工具", tool_name: "execute_bash", toolSummary: "Inspect real DeepSeek call logs",
+                parameters: { command, description: "Inspect real DeepSeek LLM logs" } }),
+        }} />);
+        const rows = [...document.querySelectorAll("dt")].map(dt => dt.textContent);
+        expect(rows).toEqual(["工具", "用途", "命令", "说明"]);
+        expect(screen.getByText("运行命令")).toBeVisible();
+        expect(screen.getByText("操作工具 · execute_bash")).toBeVisible();
+        expect(screen.getByText("Inspect real DeepSeek call logs")).toBeVisible();
+        // The command keeps real line breaks and single backslashes instead of JSON escapes.
+        expect(screen.getByText((_, el) => el?.tagName === "PRE" && el.textContent === command)).toBeVisible();
+        expect(screen.queryByText("call_mcp_tool")).toBeNull();
+        expect(screen.getByText("请求详情").closest("details")).not.toHaveAttribute("open");
+    });
+
+    it("should show the Claude Code tool and its input instead of the raw control request", () => {
+        const parameters = JSON.stringify({ subtype: "can_use_tool", tool_name: "Bash", input: { command: "git status", description: "查看改动" } });
+        render(<AcpPermissionDialog isOpen onDecision={vi.fn()} request={{ ...request, agent_kind: "claude_sdk", title: "允许 Claude Code 使用 Bash", parameters }} />);
+        expect(screen.getByText("运行命令")).toBeVisible();
+        expect(screen.getByText("查看改动")).toBeVisible();
+        expect(screen.getByText("git status")).toBeVisible();
+        expect(screen.queryByText("can_use_tool")).toBeNull();
     });
 });

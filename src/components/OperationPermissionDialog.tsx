@@ -12,6 +12,8 @@ import { createPortal } from "react-dom";
 import { usePermissionHost } from "./conversation/ComposerPermissionSlot";
 import { Button } from "@/components/ui/button";
 import { Shield, ShieldAlert, ShieldCheck } from "lucide-react";
+import { RawRequestDetails, RawText, ToolCallDetails } from "./permission/ToolCallDetails";
+import { describeToolCall, isRecord, parseJson } from "./permission/toolCallView";
 
 // Re-export types from InlineInteractionCards for backward compatibility
 export type {
@@ -264,83 +266,47 @@ const acpOptionLabel = (option: AcpPermissionOption) => {
     }
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-const historySearchTitle = "搜索管家聊天记录（含归档会话）";
-const historyArgumentLabels = { bot_id: "助手编号", query: "搜索词", before_message_id: "早于消息编号" };
-
-function PermissionArguments({ args, labels }: { args: [string, unknown][]; labels: Map<string, string> }) {
-    if (!args.length) return null;
-    return <dl className="space-y-2">
-        {args.map(([key, value]) => <div key={key} className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-3">
-            <dt className="break-all text-muted-foreground">{labels.get(key) || key}</dt>
-            <dd className="min-w-0 whitespace-pre-wrap break-all text-foreground">{typeof value === "string" && value.length ? value : JSON.stringify(value, null, 2)}</dd>
-        </div>)}
-    </dl>;
-}
-
-function McpApprovalDetails({ server, meta }: { server: string; meta: Record<string, unknown> }) {
+function McpApprovalDetails({ server, meta, children }: { server: string; meta: Record<string, unknown>; children?: ReactNode }) {
     const name = typeof meta.tool_name === "string" ? meta.tool_name : "";
-    const historySearch = server === "aipp" && /^(?:aipp_t\d+_)?search_bot_history$/.test(name);
-    const labels = new Map(historySearch ? Object.entries(historyArgumentLabels) : []);
+    const labels = new Map<string, string>();
     const displayValues = new Map<string, unknown>();
     if (Array.isArray(meta.tool_params_display)) {
         for (const field of meta.tool_params_display) {
             if (!isRecord(field) || typeof field.name !== "string") continue;
-            if (!labels.has(field.name) && typeof field.display_name === "string") {
+            // 只采用真正翻译过的显示名；和参数名相同时让内置译名生效。
+            if (typeof field.display_name === "string" && field.display_name !== field.name) {
                 labels.set(field.name, field.display_name);
             }
             if ("value" in field) displayValues.set(field.name, field.value);
         }
     }
     // Use the actual invocation values even when a display hint abbreviates or omits them.
-    const args = isRecord(meta.tool_params) ? Object.entries(meta.tool_params) : [...displayValues];
-    return <>
-        <p className="break-words font-medium">{historySearch ? historySearchTitle : "调用 MCP 工具"}</p>
-        <p className="break-all text-xs text-muted-foreground">{server} / {name || "未提供工具名"}</p>
-        <PermissionArguments args={args} labels={labels} />
-        {typeof meta.tool_description === "string" && <details open={!historySearch}>
-            <summary className="cursor-pointer text-xs">工具说明</summary>
-            <p className="mt-1 whitespace-pre-wrap break-words">{meta.tool_description}</p>
-        </details>}
-    </>;
+    const input = isRecord(meta.tool_params) ? meta.tool_params : Object.fromEntries(displayValues);
+    const view = describeToolCall(name, input, server === "aipp" ? undefined : server);
+    return <ToolCallDetails view={view} labels={labels}>
+        {typeof meta.tool_description === "string" && <RawRequestDetails summary="工具说明" open={!view.label}>
+            <p className="whitespace-pre-wrap break-words">{meta.tool_description}</p>
+        </RawRequestDetails>}
+        {children}
+    </ToolCallDetails>;
 }
 
-const antigravityArgumentLabels = new Map(Object.entries({
-    ...historyArgumentLabels, assistant_id: "助手编号", message_id: "消息编号", group_id: "群编号",
-    action: "操作", command: "命令", path: "路径", toolSummary: "调用摘要",
-}));
-
-const antigravityToolLabels = new Map(Object.entries({
-    search_bot_history: historySearchTitle, search_own_history: "搜索自己的聊天记录",
-    read_bot_message_context: "读取消息前后文", read_group_history: "读取本群聊天记录",
-    read_work_context: "查看工作上下文", list_assistants: "查询助手列表",
-    get_assistant_details: "查看助手资料", get_assistant_exchange: "查看助手协作记录",
-    butler_memory: "管家长期记忆", superadmin_execute: "执行管家管理操作", superadmin_batch: "批量执行管家管理操作",
-}));
-
-function AntigravityPermissionDetails({ request }: { request: AcpPermissionRequest }) {
-    const title = request.title || "未提供工具名";
-    // Only format the displayed title. The native bridge verifies identity for review.
-    const registered = /^(?:Run )?mcp_aipp_aipp_t\d+_([\w-]+)$/.exec(title)?.[1];
-    const tool = registered || title.replace(/^Run (?=[\w.-]+$)/, "");
-    const label = registered && antigravityToolLabels.get(registered);
-    let parameters: unknown = request.parameters;
-    try { parameters = JSON.parse(request.parameters ?? "null"); } catch { /* Display the original text. */ }
-    return <div className={permissionDetailPanelClassName}>
-        <p className="break-all font-medium">{label || tool}</p>
-        {label && <p className="text-xs text-muted-foreground">{tool}</p>}
-        {isRecord(parameters)
-            ? <PermissionArguments args={Object.entries(parameters)} labels={antigravityArgumentLabels} />
-            : request.parameters && <pre className={permissionCodeBlockClassName}>{request.parameters}</pre>}
-        <details>
-            <summary className="cursor-pointer text-xs">请求详情</summary>
-            <p className="break-all">{title}</p>
-            <p>请求编号 {request.tool_call_id}</p>
-        </details>
-    </div>;
+/** Antigravity/Kiro/Pi 等原生通道：标题是工具名，参数是工具入参；Claude Code 的参数是整条 can_use_tool 请求。 */
+function NativeToolPermissionDetails({ request }: { request: AcpPermissionRequest }) {
+    const parsed = parseJson(request.parameters);
+    const claude = request.agent_kind === "claude_sdk" && isRecord(parsed) && typeof parsed.tool_name === "string";
+    const view = claude
+        ? describeToolCall(parsed.tool_name as string, parsed.input)
+        : describeToolCall(request.title || "", parsed);
+    // 参数不是对象（纯文本或其他 JSON）时整体作为一项参数展示。
+    if (!claude && !isRecord(parsed) && parsed != null && parsed !== "") view.args = [["parameters", parsed]];
+    return <ToolCallDetails view={view} labels={new Map([["parameters", "参数"]])}>
+        <RawRequestDetails>
+            {request.title && <p className="break-all">{request.title}</p>}
+            <p className="break-all">请求编号 {request.tool_call_id}</p>
+            {request.parameters && typeof parsed !== "string" && <RawText text={request.parameters} />}
+        </RawRequestDetails>
+    </ToolCallDetails>;
 }
 
 function PermissionReviewNotice({ review }: { review: NonNullable<AcpPermissionRequest["review"]> }) {
@@ -374,9 +340,10 @@ function CodexPermissionDetails({ request }: { request: AcpPermissionRequest }) 
         ["网络访问", params.networkApprovalContext],
         ["附加权限", params.additionalPermissions],
     ] as const;
+    const raw = request.parameters && <RawRequestDetails summary="原始请求"><RawText text={request.parameters} /></RawRequestDetails>;
+    if (meta) return <McpApprovalDetails server={typeof params.serverName === "string" ? params.serverName : "MCP"} meta={meta}>{raw}</McpApprovalDetails>;
     return (
         <div className={permissionDetailPanelClassName}>
-            {meta ? <McpApprovalDetails server={typeof params.serverName === "string" ? params.serverName : "MCP"} meta={meta} /> : <>
             <p className="break-words font-medium">{typeof reason === "string" ? reason : "Codex 请求授权"}</p>
             {fields.map(([label, value]) => value != null && (
                 <div key={label}>
@@ -384,11 +351,7 @@ function CodexPermissionDetails({ request }: { request: AcpPermissionRequest }) 
                     <pre className={permissionCodeBlockClassName}>{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</pre>
                 </div>
             ))}
-            </>}
-            {request.parameters && <details>
-                <summary className="cursor-pointer text-xs">原始请求</summary>
-                <pre className={permissionCodeBlockClassName}>{request.parameters}</pre>
-            </details>}
+            {raw}
         </div>
     );
 }
@@ -449,36 +412,10 @@ export function AcpPermissionDialog({
                 </div>
             }>
             <div className={permissionDialogBodyClassName}>
+                {request.agent_kind === "codex_app_server"
+                    ? <CodexPermissionDetails request={request} />
+                    : <NativeToolPermissionDetails request={request} />}
                 {request.review && request.review.verdict !== "manual" && <PermissionReviewNotice review={request.review} />}
-                {request.agent_kind === "codex_app_server" ? <CodexPermissionDetails request={request} />
-                    : request.agent_kind === "antigravity" ? <AntigravityPermissionDetails request={request} /> : <div className={permissionDetailPanelClassName}>
-                    <div className="flex items-start gap-2 text-sm">
-                        <span className="shrink-0 font-medium text-foreground">标题:</span>
-                        <span className="min-w-0 break-words text-muted-foreground">
-                            {request.title || "未命名"}
-                        </span>
-                    </div>
-                    <div className="flex items-start gap-2 text-sm">
-                        <span className="shrink-0 font-medium text-foreground">类型:</span>
-                        <span className="min-w-0 break-words text-muted-foreground">
-                            {request.kind || "未知"}
-                        </span>
-                    </div>
-                    <div className="flex items-start gap-2 text-sm">
-                        <span className="shrink-0 font-medium text-foreground">工具调用 ID:</span>
-                        <span className="min-w-0 break-all font-mono text-xs text-foreground">
-                            {request.tool_call_id}
-                        </span>
-                    </div>
-                    {request.parameters && (
-                        <div className="min-w-0 text-sm">
-                            <span className="font-medium text-foreground">参数:</span>
-                            <pre className={permissionCodeBlockClassName}>
-                                {request.parameters}
-                            </pre>
-                        </div>
-                    )}
-                </div>}
                 {errorMessage ? (
                     <p className="text-xs text-destructive">{errorMessage}</p>
                 ) : null}
