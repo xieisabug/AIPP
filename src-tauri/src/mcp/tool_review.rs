@@ -141,7 +141,7 @@ pub fn is_review_exempt_tool(
             "message_bot" => true,
             "search_own_history" | "search_bot_history" | "read_bot_message_context" | "read_group_history"
             | "read_work_context" | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" => true,
-            "butler_memory" => matches!(args["action"].as_str(), Some("recall" | "source")),
+            "butler_memory" => matches!(args["action"].as_str(), Some("remember" | "recall" | "update" | "forget" | "source")),
             "task_conversation_operation" => matches!(args["action"].as_str(), Some("read" | "reply_prompt")),
             // 只读查看、暂停，以及总管家对无人值守操作的裁决（裁决本身就是审核结论）。
             "schedule_task" => matches!(args["action"].as_str(), Some("list" | "get" | "runs" | "pause" | "decide")),

@@ -530,10 +530,13 @@ fn test_message_bot_review_exemption_requires_builtin_agent() {
 #[test]
 fn test_review_exempt_suboperations_fail_closed() {
     let agent = |tool: &str, args: &str| is_review_exempt_tool(true, Some("aipp:agent"), tool, args);
-    for action in ["recall", "source", "remember", "update", "forget", "unknown"] {
-        assert_eq!(agent("butler_memory", &serde_json::json!({"action": action}).to_string()),
-            matches!(action, "recall" | "source"), "{action}");
+    for action in ["remember", "recall", "update", "forget", "source"] {
+        let args = serde_json::json!({"action": action}).to_string();
+        assert!(agent("butler_memory", &args), "{action}");
+        assert!(!is_review_exempt_tool(false, Some("aipp:agent"), "butler_memory", &args));
+        assert!(!is_review_exempt_tool(true, Some("aipp:operation"), "butler_memory", &args));
     }
+    assert!(!agent("butler_memory", r#"{"action":"unknown"}"#));
     assert!(!agent("butler_memory", "{}"));
     assert!(agent("task_conversation_operation", r#"{"action":"read"}"#));
     assert!(agent("task_conversation_operation", r#"{"action":"reply_prompt"}"#));
