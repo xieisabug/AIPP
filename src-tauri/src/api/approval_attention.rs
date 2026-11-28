@@ -217,6 +217,11 @@ struct ConversationLabels {
     conversation: Option<String>,
 }
 
+/// 会话所属助手的名字（审批卡标明请求方用）。
+pub(crate) fn conversation_assistant_name(app: &AppHandle, conversation_id: i64) -> Option<String> {
+    conversation_labels(app, conversation_id).assistant
+}
+
 fn conversation_labels(app: &AppHandle, conversation_id: i64) -> ConversationLabels {
     let conversation = ConversationDatabase::new(app)
         .ok()

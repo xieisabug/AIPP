@@ -31,6 +31,8 @@ export interface OperationPermissionRequest {
     operation: string;
     path: string;
     conversation_id?: number;
+    /** 发起请求的助手（后端按会话附上）。 */
+    assistant_name?: string;
 }
 
 export interface AcpPermissionOption {
@@ -44,6 +46,8 @@ export interface AcpPermissionRequest {
     conversation_id?: number;
     agent_kind?: "acp" | "codex_app_server" | string;
     tool_call_id: string;
+    /** 发起请求的助手（后端按会话附上）。 */
+    assistant_name?: string;
     title?: string;
     kind?: string;
     parameters?: string;
@@ -88,6 +92,17 @@ const permissionCodeBlockClassName =
     "mt-2 max-h-56 w-full max-w-full overflow-auto rounded-md bg-background p-2 font-mono text-xs whitespace-pre-wrap break-all";
 const neutralActionClassName =
     "flex !h-auto min-h-9 w-full items-center !justify-start gap-2 !whitespace-normal !border-border !bg-background py-2 text-left !text-foreground hover:!bg-muted hover:!text-foreground";
+
+/** 标题前标明是哪个助手在请求，审批常来自用户没在看的其他助手。 */
+function PermissionTitle({ assistant, children }: { assistant?: string; children: ReactNode }) {
+    return <>
+        <Shield className="h-5 w-5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 break-words">
+            {assistant?.trim() && <>{assistant.trim()}<span className="px-1.5 text-muted-foreground">·</span></>}
+            {children}
+        </span>
+    </>;
+}
 
 function PermissionSurface({ conversationId, open, width, title, actions, children }: {
     conversationId?: number;
@@ -168,10 +183,7 @@ export function OperationPermissionDialog({
     return (
         <PermissionSurface key={request.request_id} conversationId={request.conversation_id} open={isOpen}
             width="!max-w-lg"
-            title={<>
-                <Shield className="h-5 w-5 text-muted-foreground" />
-                操作权限请求
-            </>}
+            title={<PermissionTitle assistant={request.assistant_name}>操作权限请求</PermissionTitle>}
             actions={
                 <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
                     <Button
@@ -224,7 +236,7 @@ export function OperationPermissionDialog({
                 </div>
             }>
             <div className={permissionDialogBodyClassName}>
-                <p>AI 助手请求执行以下操作：</p>
+                <p>{request.assistant_name?.trim() || "AI 助手"} 请求执行以下操作：</p>
                 <div className={permissionDetailPanelClassName}>
                     <div className="flex items-start gap-2 text-sm">
                         <span className="shrink-0 font-medium text-foreground">操作:</span>
@@ -376,12 +388,11 @@ export function AcpPermissionDialog({
     return (
         <PermissionSurface key={request.request_id} conversationId={request.conversation_id} open={isOpen}
             width="sm:!max-w-xl"
-            title={<>
-                <Shield className="h-5 w-5 text-muted-foreground" />
+            title={<PermissionTitle assistant={request.assistant_name}>
                 {request.agent_kind === "codex_app_server"
                     ? "Codex 执行权限请求"
                     : `${({ pi: "Pi", cursor: "Cursor", opencode: "OpenCode", kiro: "Kiro", antigravity: "Antigravity", claude_sdk: "Claude Code" } as Record<string, string>)[request.agent_kind ?? ""] ?? "ACP"} 工具权限请求`}
-            </>}
+            </PermissionTitle>}
             actions={
                 <div className={`grid min-w-0 w-full grid-cols-1 gap-2 ${nativeAcp && hasCancel && request.options.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                     {!hasCancel && <Button

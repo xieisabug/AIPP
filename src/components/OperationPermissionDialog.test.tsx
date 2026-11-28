@@ -133,4 +133,12 @@ describe("AcpPermissionDialog", () => {
         expect(screen.getByText("git status")).toBeVisible();
         expect(screen.queryByText("can_use_tool")).toBeNull();
     });
+
+    it("should name the assistant that asks for permission in the collapsed title", () => {
+        render(<>
+            <ComposerPermissionSlot conversationIds={[1]} placement="bottom" />
+            <AcpPermissionDialog request={{ ...request, agent_kind: "antigravity", assistant_name: "leader前端开发" }} isOpen onDecision={vi.fn()} />
+        </>);
+        expect(screen.getByText("Antigravity 工具权限请求", { exact: false }).closest("summary")).toHaveTextContent("leader前端开发·Antigravity 工具权限请求");
+    });
 });

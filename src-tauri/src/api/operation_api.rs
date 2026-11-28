@@ -29,19 +29,40 @@ pub async fn list_acp_elicitation_requests(
 
 #[tauri::command]
 pub async fn list_presented_agent_permissions(app_handle: AppHandle, conversation_ids: Vec<i64>) -> Vec<serde_json::Value> {
-    app_handle.state::<AcpPermissionState>().presented_permissions(&conversation_ids).await
+    let requests = app_handle.state::<AcpPermissionState>().presented_permissions(&conversation_ids).await;
+    requests.into_iter().map(|request| {
+        let conversation_id = request.get("conversation_id").and_then(serde_json::Value::as_i64);
+        with_assistant_name(&app_handle, conversation_id, request)
+    }).collect()
 }
 
 #[tauri::command]
 pub async fn list_pending_operation_permissions(app_handle: AppHandle, conversation_ids: Vec<i64>)
-    -> Vec<crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent>
+    -> Vec<serde_json::Value>
 {
     let state = app_handle.state::<OperationState>();
     let mut events = Vec::new();
     for id in conversation_ids {
-        events.extend(state.list_permission_requests_for_conversation(id).await.into_iter().map(|request| request.event));
+        for request in state.list_permission_requests_for_conversation(id).await {
+            match serde_json::to_value(&request.event) {
+                Ok(event) => events.push(with_assistant_name(&app_handle, Some(id), event)),
+                Err(error) => warn!(conversation_id = id, error = %error, "Failed to serialize pending operation permission"),
+            }
+        }
     }
     events
+}
+
+/// 审批多半来自用户没在看的其他助手：按会话附上助手名，供审批卡标明是谁在请求。
+fn with_assistant_name(app_handle: &AppHandle, conversation_id: Option<i64>, mut payload: serde_json::Value) -> serde_json::Value {
+    if let (Some(id), Some(fields)) = (conversation_id, payload.as_object_mut()) {
+        if !fields.contains_key("assistant_name") {
+            if let Some(name) = crate::api::approval_attention::conversation_assistant_name(app_handle, id) {
+                fields.insert("assistant_name".into(), name.into());
+            }
+        }
+    }
+    payload
 }
 
 const BUTLER_WINDOW_LABEL: &str = "butler_experiment";
@@ -100,10 +121,11 @@ pub(crate) fn emit_permission_request_event<T: Serialize>(
     conversation_id: Option<i64>,
     payload: &T,
 ) -> Result<(), String> {
-    emit_permission_request_to_windows(app_handle, event_name, conversation_id, payload)?;
+    let payload = serde_json::to_value(payload).map_err(|error| format!("权限请求序列化失败：{error}"))?;
+    let payload = with_assistant_name(app_handle, conversation_id, payload);
+    emit_permission_request_to_windows(app_handle, event_name, conversation_id, &payload)?;
     // 所有权限请求都经过这里：登记待审批（列表黄点/头像）并在用户没看到时发系统通知。
     if crate::api::approval_attention::is_permission_request_event(event_name) {
-        let payload = serde_json::to_value(payload).unwrap_or_default();
         crate::api::approval_attention::permission_requested(app_handle, event_name, conversation_id, &payload);
     }
     Ok(())
